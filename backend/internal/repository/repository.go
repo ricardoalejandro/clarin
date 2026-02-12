@@ -1,0 +1,2010 @@
+package repository
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/naperu/clarin/internal/domain"
+)
+
+type Repositories struct {
+	db                *pgxpool.Pool
+	User              *UserRepository
+	Device            *DeviceRepository
+	Chat              *ChatRepository
+	Message           *MessageRepository
+	Contact           *ContactRepository
+	ContactDeviceName *ContactDeviceNameRepository
+	Lead              *LeadRepository
+	Pipeline          *PipelineRepository
+	Tag               *TagRepository
+	Campaign          *CampaignRepository
+	Event             *EventRepository
+	Participant       *ParticipantRepository
+	Interaction       *InteractionRepository
+	SavedSticker      *SavedStickerRepository
+}
+
+func NewRepositories(db *pgxpool.Pool) *Repositories {
+	return &Repositories{
+		db:                db,
+		User:              &UserRepository{db: db},
+		Device:            &DeviceRepository{db: db},
+		Chat:              &ChatRepository{db: db},
+		Message:           &MessageRepository{db: db},
+		Contact:           &ContactRepository{db: db},
+		ContactDeviceName: &ContactDeviceNameRepository{db: db},
+		Lead:              &LeadRepository{db: db},
+		Pipeline:          &PipelineRepository{db: db},
+		Tag:               &TagRepository{db: db},
+		Campaign:          &CampaignRepository{db: db},
+		Event:             &EventRepository{db: db},
+		Participant:       &ParticipantRepository{db: db},
+		Interaction:       &InteractionRepository{db: db},
+		SavedSticker:      &SavedStickerRepository{db: db},
+	}
+}
+
+// UserRepository handles user data access
+type UserRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*domain.User, error) {
+	user := &domain.User{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, username, email, password_hash, display_name, is_admin, is_active, created_at, updated_at
+		FROM users WHERE username = $1 AND is_active = TRUE
+	`, username).Scan(
+		&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
+		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.CreatedAt, &user.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return user, err
+}
+
+func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
+	user := &domain.User{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, username, email, password_hash, display_name, is_admin, is_active, created_at, updated_at
+		FROM users WHERE id = $1
+	`, id).Scan(
+		&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
+		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.CreatedAt, &user.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return user, err
+}
+
+func (r *UserRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.User, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, username, email, password_hash, display_name, is_admin, is_active, created_at, updated_at
+		FROM users WHERE account_id = $1 ORDER BY created_at DESC
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []*domain.User
+	for rows.Next() {
+		user := &domain.User{}
+		if err := rows.Scan(
+			&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
+			&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.CreatedAt, &user.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, nil
+}
+
+// DeviceRepository handles device data access
+type DeviceRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *DeviceRepository) Create(ctx context.Context, device *domain.Device) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO devices (account_id, name, status)
+		VALUES ($1, $2, $3)
+		RETURNING id, created_at, updated_at
+	`, device.AccountID, device.Name, domain.DeviceStatusDisconnected).Scan(
+		&device.ID, &device.CreatedAt, &device.UpdatedAt,
+	)
+}
+
+func (r *DeviceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Device, error) {
+	device := &domain.Device{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, name, phone, jid, status, qr_code, last_seen_at, created_at, updated_at
+		FROM devices WHERE id = $1
+	`, id).Scan(
+		&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
+		&device.Status, &device.QRCode, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return device, err
+}
+
+func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Device, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, name, phone, jid, status, qr_code, last_seen_at, created_at, updated_at
+		FROM devices WHERE account_id = $1 ORDER BY created_at DESC
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var devices []*domain.Device
+	for rows.Next() {
+		device := &domain.Device{}
+		if err := rows.Scan(
+			&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
+			&device.Status, &device.QRCode, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		devices = append(devices, device)
+	}
+	return devices, nil
+}
+
+func (r *DeviceRepository) GetAll(ctx context.Context) ([]*domain.Device, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, name, phone, jid, status, qr_code, last_seen_at, created_at, updated_at
+		FROM devices ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var devices []*domain.Device
+	for rows.Next() {
+		device := &domain.Device{}
+		if err := rows.Scan(
+			&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
+			&device.Status, &device.QRCode, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		devices = append(devices, device)
+	}
+	return devices, nil
+}
+
+func (r *DeviceRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE devices SET status = $1, updated_at = NOW() WHERE id = $2
+	`, status, id)
+	return err
+}
+
+func (r *DeviceRepository) UpdateJID(ctx context.Context, id uuid.UUID, jid, phone string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE devices SET jid = $1, phone = $2, status = $3, last_seen_at = NOW(), updated_at = NOW() WHERE id = $4
+	`, jid, phone, domain.DeviceStatusConnected, id)
+	return err
+}
+
+func (r *DeviceRepository) UpdateQRCode(ctx context.Context, id uuid.UUID, qrCode string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE devices SET qr_code = $1, status = $2, updated_at = NOW() WHERE id = $3
+	`, qrCode, domain.DeviceStatusConnecting, id)
+	return err
+}
+
+func (r *DeviceRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM devices WHERE id = $1`, id)
+	return err
+}
+
+// ChatRepository handles chat data access
+type ChatRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uuid.UUID, jid, name string) (*domain.Chat, error) {
+	chat := &domain.Chat{}
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO chats (account_id, device_id, jid, name)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (account_id, jid) DO UPDATE SET 
+			device_id = EXCLUDED.device_id,
+			name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name IS NOT NULL THEN EXCLUDED.name ELSE chats.name END
+		RETURNING id, account_id, device_id, contact_id, jid, name, last_message, last_message_at, 
+		          unread_count, is_archived, is_pinned, created_at, updated_at
+	`, accountID, deviceID, jid, name).Scan(
+		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
+		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
+		&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
+	)
+	return chat, err
+}
+
+func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Chat, error) {
+	chat := &domain.Chat{}
+	err := r.db.QueryRow(ctx, `
+		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at, 
+		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
+		       d.name, d.phone,
+		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
+		FROM chats c
+		LEFT JOIN devices d ON c.device_id = d.id
+		LEFT JOIN contacts ctc ON ctc.account_id = c.account_id AND ctc.jid = c.jid
+		WHERE c.id = $1
+	`, id).Scan(
+		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
+		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
+		&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
+		&chat.DeviceName, &chat.DevicePhone,
+		&chat.ContactPhone, &chat.ContactAvatarURL, &chat.ContactCustomName, &chat.ContactName,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return chat, err
+}
+
+func (r *ChatRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Chat, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at, 
+		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
+		       d.name, d.phone,
+		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
+		FROM chats c
+		LEFT JOIN devices d ON c.device_id = d.id
+		LEFT JOIN contacts ctc ON ctc.account_id = c.account_id AND ctc.jid = c.jid
+		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast' AND c.jid NOT LIKE '%@lid'
+		ORDER BY c.is_pinned DESC, c.last_message_at DESC NULLS LAST
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chats []*domain.Chat
+	for rows.Next() {
+		chat := &domain.Chat{}
+		if err := rows.Scan(
+			&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
+			&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
+			&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
+			&chat.DeviceName, &chat.DevicePhone,
+			&chat.ContactPhone, &chat.ContactAvatarURL, &chat.ContactCustomName, &chat.ContactName,
+		); err != nil {
+			return nil, err
+		}
+		chats = append(chats, chat)
+	}
+	return chats, nil
+}
+
+func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountID uuid.UUID, filter domain.ChatFilter) ([]*domain.Chat, int, error) {
+	// Build dynamic query
+	baseQuery := `
+		FROM chats c
+		LEFT JOIN devices d ON c.device_id = d.id
+		LEFT JOIN contacts ctc ON ctc.account_id = c.account_id AND ctc.jid = c.jid
+		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast' AND c.jid NOT LIKE '%@lid'
+	`
+	args := []interface{}{accountID}
+	argNum := 2
+
+	// Device filter
+	if len(filter.DeviceIDs) > 0 {
+		baseQuery += fmt.Sprintf(" AND c.device_id = ANY($%d)", argNum)
+		args = append(args, filter.DeviceIDs)
+		argNum++
+	}
+
+	// Unread filter
+	if filter.UnreadOnly {
+		baseQuery += " AND c.unread_count > 0"
+	}
+
+	// Archived filter
+	if !filter.Archived {
+		baseQuery += " AND c.is_archived = FALSE"
+	}
+
+	// Search filter
+	if filter.Search != "" {
+		baseQuery += fmt.Sprintf(" AND (c.name ILIKE $%d OR c.jid ILIKE $%d OR ctc.custom_name ILIKE $%d OR ctc.name ILIKE $%d OR ctc.push_name ILIKE $%d OR ctc.phone ILIKE $%d)", argNum, argNum, argNum, argNum, argNum, argNum)
+		args = append(args, "%"+filter.Search+"%")
+		argNum++
+	}
+
+	// Count total
+	var total int
+	countQuery := "SELECT COUNT(*) " + baseQuery
+	if err := r.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// Get data
+	selectQuery := `
+		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at, 
+		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
+		       d.name, d.phone,
+		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
+	` + baseQuery + " ORDER BY c.is_pinned DESC, c.last_message_at DESC NULLS LAST"
+
+	// Apply pagination
+	if filter.Limit > 0 {
+		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		if filter.Offset > 0 {
+			selectQuery += fmt.Sprintf(" OFFSET %d", filter.Offset)
+		}
+	}
+
+	rows, err := r.db.Query(ctx, selectQuery, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var chats []*domain.Chat
+	for rows.Next() {
+		chat := &domain.Chat{}
+		if err := rows.Scan(
+			&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
+			&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
+			&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
+			&chat.DeviceName, &chat.DevicePhone,
+			&chat.ContactPhone, &chat.ContactAvatarURL, &chat.ContactCustomName, &chat.ContactName,
+		); err != nil {
+			return nil, 0, err
+		}
+		chats = append(chats, chat)
+	}
+
+	return chats, total, nil
+}
+
+func (r *ChatRepository) UpdateLastMessage(ctx context.Context, chatID uuid.UUID, message string, timestamp time.Time, incrementUnread bool) error {
+	query := `
+		UPDATE chats SET last_message = $1, last_message_at = $2, updated_at = NOW()
+	`
+	if incrementUnread {
+		query += `, unread_count = unread_count + 1`
+	}
+	query += ` WHERE id = $3`
+	_, err := r.db.Exec(ctx, query, message, timestamp, chatID)
+	return err
+}
+
+func (r *ChatRepository) MarkAsRead(ctx context.Context, chatID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE chats SET unread_count = 0, updated_at = NOW() WHERE id = $1`, chatID)
+	return err
+}
+
+func (r *ChatRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	// First delete all messages in the chat
+	_, err := r.db.Exec(ctx, `DELETE FROM messages WHERE chat_id = $1`, id)
+	if err != nil {
+		return err
+	}
+	// Then delete the chat
+	_, err = r.db.Exec(ctx, `DELETE FROM chats WHERE id = $1`, id)
+	return err
+}
+
+func (r *ChatRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
+	// First delete all messages in the chats
+	_, err := r.db.Exec(ctx, `DELETE FROM messages WHERE chat_id = ANY($1)`, ids)
+	if err != nil {
+		return err
+	}
+	// Then delete the chats
+	_, err = r.db.Exec(ctx, `DELETE FROM chats WHERE id = ANY($1)`, ids)
+	return err
+}
+
+func (r *ChatRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
+	// First delete all messages for the account
+	_, err := r.db.Exec(ctx, `DELETE FROM messages WHERE account_id = $1`, accountID)
+	if err != nil {
+		return err
+	}
+	// Then delete all chats
+	_, err = r.db.Exec(ctx, `DELETE FROM chats WHERE account_id = $1`, accountID)
+	return err
+}
+
+// MessageRepository handles message data access
+type MessageRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO messages (account_id, device_id, chat_id, message_id, from_jid, from_name, body, 
+		                      message_type, media_url, media_mimetype, media_filename, media_size,
+		                      is_from_me, is_read, status, timestamp,
+		                      quoted_message_id, quoted_body, quoted_sender)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		ON CONFLICT (account_id, device_id, message_id) DO NOTHING
+		RETURNING id, created_at
+	`, msg.AccountID, msg.DeviceID, msg.ChatID, msg.MessageID, msg.FromJID, msg.FromName, msg.Body,
+		msg.MessageType, msg.MediaURL, msg.MediaMimetype, msg.MediaFilename, msg.MediaSize,
+		msg.IsFromMe, msg.IsRead, msg.Status, msg.Timestamp,
+		msg.QuotedMessageID, msg.QuotedBody, msg.QuotedSender,
+	).Scan(&msg.ID, &msg.CreatedAt)
+}
+
+func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*domain.Message, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
+		       message_type, media_url, media_mimetype, media_filename, media_size,
+		       is_from_me, is_read, status, timestamp, created_at,
+		       quoted_message_id, quoted_body, quoted_sender
+		FROM messages WHERE chat_id = $1
+		ORDER BY timestamp DESC
+		LIMIT $2 OFFSET $3
+	`, chatID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []*domain.Message
+	for rows.Next() {
+		msg := &domain.Message{}
+		if err := rows.Scan(
+			&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
+			&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
+			&msg.MediaFilename, &msg.MediaSize, &msg.IsFromMe, &msg.IsRead, &msg.Status,
+			&msg.Timestamp, &msg.CreatedAt,
+			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender,
+		); err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+	return messages, nil
+}
+
+// GetByMessageID finds a message by its WhatsApp message_id within a chat
+func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID, messageID string) (*domain.Message, error) {
+	msg := &domain.Message{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
+		       message_type, media_url, media_mimetype, media_filename, media_size,
+		       is_from_me, is_read, status, timestamp, created_at,
+		       quoted_message_id, quoted_body, quoted_sender
+		FROM messages WHERE chat_id = $1 AND message_id = $2
+		LIMIT 1
+	`, chatID, messageID).Scan(
+		&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
+		&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
+		&msg.MediaFilename, &msg.MediaSize, &msg.IsFromMe, &msg.IsRead, &msg.Status,
+		&msg.Timestamp, &msg.CreatedAt,
+		&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+// ContactRepository handles contact data access
+type ContactRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *MessageRepository) GetRecentStickers(ctx context.Context, accountID uuid.UUID, limit int) ([]string, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT DISTINCT media_url FROM messages
+		WHERE account_id = $1 AND message_type = 'sticker' AND media_url IS NOT NULL AND media_url != ''
+		ORDER BY media_url DESC
+		LIMIT $2
+	`, accountID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var urls []string
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err != nil {
+			return nil, err
+		}
+		urls = append(urls, url)
+	}
+	return urls, nil
+}
+
+func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID, deviceID *uuid.UUID, jid, phone, name, pushName string, isGroup bool) (*domain.Contact, error) {
+	contact := &domain.Contact{}
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO contacts (account_id, device_id, jid, phone, name, push_name, is_group)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (account_id, jid) DO UPDATE SET 
+			name = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
+			push_name = COALESCE(NULLIF(EXCLUDED.push_name, ''), contacts.push_name),
+			phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
+			updated_at = NOW()
+		RETURNING id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		          email, company, age, tags, notes, source, is_group, created_at, updated_at
+	`, accountID, deviceID, jid, phone, name, pushName, isGroup).Scan(
+		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+	)
+	return contact, err
+}
+
+func (r *ContactRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Contact, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		FROM contacts WHERE account_id = $1 ORDER BY COALESCE(custom_name, name, push_name, phone) ASC
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var contacts []*domain.Contact
+	for rows.Next() {
+		contact := &domain.Contact{}
+		if err := rows.Scan(
+			&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+			&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		contacts = append(contacts, contact)
+	}
+	return contacts, nil
+}
+
+func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accountID uuid.UUID, filter domain.ContactFilter) ([]*domain.Contact, int, error) {
+	baseQuery := `
+		FROM contacts
+		WHERE account_id = $1 AND is_group = $2
+	`
+	args := []interface{}{accountID, filter.IsGroup}
+	argNum := 3
+
+	if filter.Search != "" {
+		baseQuery += fmt.Sprintf(` AND (
+			name ILIKE $%d OR last_name ILIKE $%d OR short_name ILIKE $%d OR custom_name ILIKE $%d OR push_name ILIKE $%d OR 
+			phone ILIKE $%d OR jid ILIKE $%d OR email ILIKE $%d OR company ILIKE $%d
+		)`, argNum, argNum, argNum, argNum, argNum, argNum, argNum, argNum, argNum)
+		args = append(args, "%"+filter.Search+"%")
+		argNum++
+	}
+
+	if filter.DeviceID != nil {
+		baseQuery += fmt.Sprintf(" AND device_id = $%d", argNum)
+		args = append(args, *filter.DeviceID)
+		argNum++
+	}
+
+	if filter.HasPhone {
+		baseQuery += " AND phone IS NOT NULL AND phone != ''"
+	}
+
+	if len(filter.Tags) > 0 {
+		baseQuery += fmt.Sprintf(" AND tags && $%d", argNum)
+		args = append(args, filter.Tags)
+		argNum++
+	}
+
+	// Count
+	var total int
+	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) "+baseQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// Select
+	selectQuery := `
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+	` + baseQuery + " ORDER BY COALESCE(custom_name, name, push_name, phone) ASC NULLS LAST"
+
+	if filter.Limit > 0 {
+		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		if filter.Offset > 0 {
+			selectQuery += fmt.Sprintf(" OFFSET %d", filter.Offset)
+		}
+	}
+
+	rows, err := r.db.Query(ctx, selectQuery, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var contacts []*domain.Contact
+	for rows.Next() {
+		contact := &domain.Contact{}
+		if err := rows.Scan(
+			&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+			&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		contacts = append(contacts, contact)
+	}
+	return contacts, total, nil
+}
+
+func (r *ContactRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Contact, error) {
+	contact := &domain.Contact{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		FROM contacts WHERE account_id = $1 AND jid = $2
+	`, accountID, jid).Scan(
+		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return contact, err
+}
+
+func (r *ContactRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Contact, error) {
+	contact := &domain.Contact{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		FROM contacts WHERE id = $1
+	`, id).Scan(
+		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return contact, err
+}
+
+func (r *ContactRepository) Update(ctx context.Context, contact *domain.Contact) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE contacts SET 
+			name = $1, last_name = $2, short_name = $3, custom_name = $4, push_name = $5, 
+			email = $6, company = $7, age = $8,
+			tags = $9, notes = $10, phone = $11, updated_at = NOW()
+		WHERE id = $12
+	`, contact.Name, contact.LastName, contact.ShortName, contact.CustomName, contact.PushName, contact.Email, contact.Company,
+		contact.Age, contact.Tags, contact.Notes, contact.Phone, contact.ID)
+	return err
+}
+
+// SyncToParticipants propagates shared contact fields to all linked event_participants
+func (r *ContactRepository) SyncToParticipants(ctx context.Context, contact *domain.Contact) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE event_participants SET
+			name = COALESCE($1, name), last_name = $2, short_name = $3, phone = $4, email = $5, age = $6, updated_at = NOW()
+		WHERE contact_id = $7
+	`, contact.Name, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Age, contact.ID)
+	return err
+}
+
+func (r *ContactRepository) UpdateAvatarURL(ctx context.Context, accountID uuid.UUID, jid, avatarURL string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE contacts SET avatar_url = $1, updated_at = NOW() 
+		WHERE account_id = $2 AND jid = $3
+	`, avatarURL, accountID, jid)
+	return err
+}
+
+func (r *ContactRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM contacts WHERE id = $1`, id)
+	return err
+}
+
+func (r *ContactRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM contacts WHERE id = ANY($1)`, ids)
+	return err
+}
+
+func (r *ContactRepository) FindDuplicates(ctx context.Context, accountID uuid.UUID) ([][]*domain.Contact, error) {
+	// Find contacts with the same phone number
+	rows, err := r.db.Query(ctx, `
+		SELECT c.id, c.account_id, c.device_id, c.jid, c.phone, c.name, c.last_name, c.short_name, c.custom_name, c.push_name, 
+		       c.avatar_url, c.email, c.company, c.age, c.tags, c.notes, c.source, c.is_group, c.created_at, c.updated_at
+		FROM contacts c
+		INNER JOIN (
+			SELECT phone FROM contacts 
+			WHERE account_id = $1 AND phone IS NOT NULL AND phone != '' AND is_group = FALSE
+			GROUP BY phone HAVING COUNT(*) > 1
+		) dup ON c.phone = dup.phone
+		WHERE c.account_id = $1 AND c.is_group = FALSE
+		ORDER BY c.phone, c.updated_at DESC
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	grouped := make(map[string][]*domain.Contact)
+	var order []string
+	for rows.Next() {
+		contact := &domain.Contact{}
+		if err := rows.Scan(
+			&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+			&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		phone := ""
+		if contact.Phone != nil {
+			phone = *contact.Phone
+		}
+		if _, exists := grouped[phone]; !exists {
+			order = append(order, phone)
+		}
+		grouped[phone] = append(grouped[phone], contact)
+	}
+
+	var result [][]*domain.Contact
+	for _, phone := range order {
+		result = append(result, grouped[phone])
+	}
+	return result, nil
+}
+
+func (r *ContactRepository) MergeContacts(ctx context.Context, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
+	// Update chats to point to the kept contact's JID
+	keepContact, err := r.GetByID(ctx, keepID)
+	if err != nil || keepContact == nil {
+		return fmt.Errorf("contact to keep not found")
+	}
+
+	for _, mergeID := range mergeIDs {
+		mergeContact, err := r.GetByID(ctx, mergeID)
+		if err != nil || mergeContact == nil {
+			continue
+		}
+		// Update chats JID references
+		_, _ = r.db.Exec(ctx, `
+			UPDATE chats SET jid = $1, updated_at = NOW()
+			WHERE account_id = $2 AND jid = $3
+		`, keepContact.JID, keepContact.AccountID, mergeContact.JID)
+
+		// Update leads JID references
+		_, _ = r.db.Exec(ctx, `
+			UPDATE leads SET jid = $1, updated_at = NOW()
+			WHERE account_id = $2 AND jid = $3
+		`, keepContact.JID, keepContact.AccountID, mergeContact.JID)
+
+		// Move device names to the kept contact
+		// First delete any rows that would conflict (same device already has a name for keepID)
+		_, _ = r.db.Exec(ctx, `
+			DELETE FROM contact_device_names WHERE contact_id = $1
+			AND device_id IN (SELECT device_id FROM contact_device_names WHERE contact_id = $2)
+		`, mergeID, keepID)
+		// Then move remaining device names
+		_, _ = r.db.Exec(ctx, `
+			UPDATE contact_device_names SET contact_id = $1 WHERE contact_id = $2
+		`, keepID, mergeID)
+
+		// Delete merged contact
+		_, _ = r.db.Exec(ctx, `DELETE FROM contacts WHERE id = $1`, mergeID)
+	}
+	return nil
+}
+
+// ContactDeviceNameRepository handles per-device contact names
+type ContactDeviceNameRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *ContactDeviceNameRepository) Upsert(ctx context.Context, cdn *domain.ContactDeviceName) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO contact_device_names (contact_id, device_id, name, push_name, business_name)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (contact_id, device_id) DO UPDATE SET
+			name = COALESCE(EXCLUDED.name, contact_device_names.name),
+			push_name = COALESCE(EXCLUDED.push_name, contact_device_names.push_name),
+			business_name = COALESCE(EXCLUDED.business_name, contact_device_names.business_name),
+			synced_at = NOW()
+		RETURNING id, synced_at
+	`, cdn.ContactID, cdn.DeviceID, cdn.Name, cdn.PushName, cdn.BusinessName).Scan(&cdn.ID, &cdn.SyncedAt)
+}
+
+func (r *ContactDeviceNameRepository) GetByContactID(ctx context.Context, contactID uuid.UUID) ([]domain.ContactDeviceName, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT cdn.id, cdn.contact_id, cdn.device_id, cdn.name, cdn.push_name, cdn.business_name, cdn.synced_at,
+		       d.name as device_name
+		FROM contact_device_names cdn
+		LEFT JOIN devices d ON d.id = cdn.device_id
+		WHERE cdn.contact_id = $1
+		ORDER BY cdn.synced_at DESC
+	`, contactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []domain.ContactDeviceName
+	for rows.Next() {
+		cdn := domain.ContactDeviceName{}
+		if err := rows.Scan(
+			&cdn.ID, &cdn.ContactID, &cdn.DeviceID, &cdn.Name, &cdn.PushName,
+			&cdn.BusinessName, &cdn.SyncedAt, &cdn.DeviceName,
+		); err != nil {
+			return nil, err
+		}
+		names = append(names, cdn)
+	}
+	return names, nil
+}
+
+// LeadRepository handles lead data access
+type LeadRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO leads (account_id, contact_id, jid, name, phone, email, status, source, notes)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (account_id, jid) DO UPDATE SET
+			name = COALESCE(EXCLUDED.name, leads.name),
+			phone = COALESCE(EXCLUDED.phone, leads.phone),
+			updated_at = NOW()
+		RETURNING id, created_at, updated_at
+	`, lead.AccountID, lead.ContactID, lead.JID, lead.Name, lead.Phone,
+		lead.Email, lead.Status, lead.Source, lead.Notes,
+	).Scan(&lead.ID, &lead.CreatedAt, &lead.UpdatedAt)
+}
+
+func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Lead, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, contact_id, jid, name, phone, email, status, source, notes, 
+		       tags, custom_fields, assigned_to, created_at, updated_at
+		FROM leads WHERE account_id = $1 ORDER BY created_at DESC
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leads []*domain.Lead
+	for rows.Next() {
+		lead := &domain.Lead{}
+		if err := rows.Scan(
+			&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.Phone,
+			&lead.Email, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+			&lead.CustomFields, &lead.AssignedTo, &lead.CreatedAt, &lead.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		leads = append(leads, lead)
+	}
+	return leads, nil
+}
+
+func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Lead, error) {
+	lead := &domain.Lead{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, contact_id, jid, name, phone, email, status, source, notes, 
+		       tags, custom_fields, assigned_to, created_at, updated_at
+		FROM leads WHERE account_id = $1 AND jid = $2
+	`, accountID, jid).Scan(
+		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.Phone,
+		&lead.Email, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+		&lead.CustomFields, &lead.AssignedTo, &lead.CreatedAt, &lead.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return lead, err
+}
+
+func (r *LeadRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
+	_, err := r.db.Exec(ctx, `UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2`, status, id)
+	return err
+}
+
+func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lead, error) {
+	lead := &domain.Lead{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, contact_id, jid, name, phone, email, status, source, notes, 
+		       tags, custom_fields, assigned_to, created_at, updated_at
+		FROM leads WHERE id = $1
+	`, id).Scan(
+		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.Phone,
+		&lead.Email, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+		&lead.CustomFields, &lead.AssignedTo, &lead.CreatedAt, &lead.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return lead, err
+}
+
+func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE leads SET 
+			name = $1, phone = $2, email = $3, status = $4, source = $5, 
+			notes = $6, tags = $7, custom_fields = $8, assigned_to = $9, updated_at = NOW()
+		WHERE id = $10
+	`, lead.Name, lead.Phone, lead.Email, lead.Status, lead.Source,
+		lead.Notes, lead.Tags, lead.CustomFields, lead.AssignedTo, lead.ID)
+	return err
+}
+
+func (r *LeadRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM leads WHERE id = $1`, id)
+	return err
+}
+
+func (r *LeadRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM leads WHERE id = ANY($1)`, ids)
+	return err
+}
+
+func (r *LeadRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM leads WHERE account_id = $1`, accountID)
+	return err
+}
+
+// PipelineRepository handles pipeline data access
+type PipelineRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *PipelineRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Pipeline, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT p.id, p.account_id, p.name, p.description, p.is_default, p.created_at, p.updated_at
+		FROM pipelines p WHERE p.account_id = $1 ORDER BY p.created_at
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pipelines []*domain.Pipeline
+	for rows.Next() {
+		pipeline := &domain.Pipeline{}
+		if err := rows.Scan(
+			&pipeline.ID, &pipeline.AccountID, &pipeline.Name, &pipeline.Description,
+			&pipeline.IsDefault, &pipeline.CreatedAt, &pipeline.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		// Get stages for this pipeline
+		stages, err := r.GetStages(ctx, pipeline.ID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get stages for pipeline %s: %w", pipeline.ID, err)
+		}
+		pipeline.Stages = stages
+
+		pipelines = append(pipelines, pipeline)
+	}
+	return pipelines, nil
+}
+
+func (r *PipelineRepository) GetStages(ctx context.Context, pipelineID uuid.UUID) ([]*domain.PipelineStage, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, pipeline_id, name, color, position, created_at
+		FROM pipeline_stages WHERE pipeline_id = $1 ORDER BY position
+	`, pipelineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var stages []*domain.PipelineStage
+	for rows.Next() {
+		stage := &domain.PipelineStage{}
+		if err := rows.Scan(
+			&stage.ID, &stage.PipelineID, &stage.Name, &stage.Color,
+			&stage.Position, &stage.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		stages = append(stages, stage)
+	}
+	return stages, nil
+}
+
+// TagRepository handles tag data access
+type TagRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *TagRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Tag, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, name, color, created_at, updated_at
+		FROM tags WHERE account_id = $1 ORDER BY name
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []*domain.Tag
+	for rows.Next() {
+		t := &domain.Tag{}
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.Name, &t.Color, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
+func (r *TagRepository) Create(ctx context.Context, tag *domain.Tag) error {
+	tag.ID = uuid.New()
+	now := time.Now()
+	tag.CreatedAt = now
+	tag.UpdatedAt = now
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO tags (id, account_id, name, color, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, tag.ID, tag.AccountID, tag.Name, tag.Color, tag.CreatedAt, tag.UpdatedAt)
+	return err
+}
+
+func (r *TagRepository) Update(ctx context.Context, tag *domain.Tag) error {
+	tag.UpdatedAt = time.Now()
+	_, err := r.db.Exec(ctx, `
+		UPDATE tags SET name = $1, color = $2, updated_at = $3 WHERE id = $4
+	`, tag.Name, tag.Color, tag.UpdatedAt, tag.ID)
+	return err
+}
+
+func (r *TagRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	// Delete associations first
+	r.db.Exec(ctx, `DELETE FROM contact_tags WHERE tag_id = $1`, id)
+	r.db.Exec(ctx, `DELETE FROM lead_tags WHERE tag_id = $1`, id)
+	r.db.Exec(ctx, `DELETE FROM chat_tags WHERE tag_id = $1`, id)
+	_, err := r.db.Exec(ctx, `DELETE FROM tags WHERE id = $1`, id)
+	return err
+}
+
+func (r *TagRepository) AssignToContact(ctx context.Context, contactID, tagID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+	`, contactID, tagID)
+	return err
+}
+
+func (r *TagRepository) RemoveFromContact(ctx context.Context, contactID, tagID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id = $1 AND tag_id = $2`, contactID, tagID)
+	return err
+}
+
+func (r *TagRepository) AssignToLead(ctx context.Context, leadID, tagID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO lead_tags (lead_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+	`, leadID, tagID)
+	return err
+}
+
+func (r *TagRepository) RemoveFromLead(ctx context.Context, leadID, tagID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM lead_tags WHERE lead_id = $1 AND tag_id = $2`, leadID, tagID)
+	return err
+}
+
+func (r *TagRepository) AssignToChat(ctx context.Context, chatID, tagID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO chat_tags (chat_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+	`, chatID, tagID)
+	return err
+}
+
+func (r *TagRepository) RemoveFromChat(ctx context.Context, chatID, tagID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM chat_tags WHERE chat_id = $1 AND tag_id = $2`, chatID, tagID)
+	return err
+}
+
+func (r *TagRepository) GetByContact(ctx context.Context, contactID uuid.UUID) ([]*domain.Tag, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT t.id, t.account_id, t.name, t.color, t.created_at, t.updated_at
+		FROM tags t JOIN contact_tags ct ON ct.tag_id = t.id
+		WHERE ct.contact_id = $1 ORDER BY t.name
+	`, contactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tags []*domain.Tag
+	for rows.Next() {
+		t := &domain.Tag{}
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.Name, &t.Color, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
+func (r *TagRepository) GetByLead(ctx context.Context, leadID uuid.UUID) ([]*domain.Tag, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT t.id, t.account_id, t.name, t.color, t.created_at, t.updated_at
+		FROM tags t JOIN lead_tags lt ON lt.tag_id = t.id
+		WHERE lt.lead_id = $1 ORDER BY t.name
+	`, leadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tags []*domain.Tag
+	for rows.Next() {
+		t := &domain.Tag{}
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.Name, &t.Color, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
+func (r *TagRepository) GetByChat(ctx context.Context, chatID uuid.UUID) ([]*domain.Tag, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT t.id, t.account_id, t.name, t.color, t.created_at, t.updated_at
+		FROM tags t JOIN chat_tags cht ON cht.tag_id = t.id
+		WHERE cht.chat_id = $1 ORDER BY t.name
+	`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tags []*domain.Tag
+	for rows.Next() {
+		t := &domain.Tag{}
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.Name, &t.Color, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
+func (r *TagRepository) AssignToParticipant(ctx context.Context, participantID, tagID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO participant_tags (participant_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+	`, participantID, tagID)
+	return err
+}
+
+func (r *TagRepository) RemoveFromParticipant(ctx context.Context, participantID, tagID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM participant_tags WHERE participant_id = $1 AND tag_id = $2`, participantID, tagID)
+	return err
+}
+
+func (r *TagRepository) GetByParticipant(ctx context.Context, participantID uuid.UUID) ([]*domain.Tag, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT t.id, t.account_id, t.name, t.color, t.created_at, t.updated_at
+		FROM tags t JOIN participant_tags pt ON pt.tag_id = t.id
+		WHERE pt.participant_id = $1 ORDER BY t.name
+	`, participantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tags []*domain.Tag
+	for rows.Next() {
+		t := &domain.Tag{}
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.Name, &t.Color, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
+// CampaignRepository handles campaign data access
+type CampaignRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *CampaignRepository) Create(ctx context.Context, c *domain.Campaign) error {
+	c.ID = uuid.New()
+	now := time.Now()
+	c.CreatedAt = now
+	c.UpdatedAt = now
+	if c.Status == "" {
+		c.Status = domain.CampaignStatusDraft
+	}
+	if c.Settings == nil {
+		c.Settings = domain.DefaultCampaignSettings()
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO campaigns (id, account_id, device_id, name, message_template, media_url, media_type, status, scheduled_at, settings, total_recipients, sent_count, failed_count, event_id, source, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+	`, c.ID, c.AccountID, c.DeviceID, c.Name, c.MessageTemplate, c.MediaURL, c.MediaType,
+		c.Status, c.ScheduledAt, c.Settings, c.TotalRecipients, c.SentCount, c.FailedCount, c.EventID, c.Source, c.CreatedAt, c.UpdatedAt)
+	return err
+}
+
+func (r *CampaignRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Campaign, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.id, c.account_id, c.device_id, c.name, c.message_template, c.media_url, c.media_type,
+			c.status, c.scheduled_at, c.started_at, c.completed_at, c.total_recipients, c.sent_count, c.failed_count,
+			c.settings, c.event_id, c.source, c.created_at, c.updated_at, d.name as device_name
+		FROM campaigns c
+		LEFT JOIN devices d ON d.id = c.device_id
+		WHERE c.account_id = $1
+		ORDER BY c.created_at DESC
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var campaigns []*domain.Campaign
+	for rows.Next() {
+		camp := &domain.Campaign{}
+		if err := rows.Scan(
+			&camp.ID, &camp.AccountID, &camp.DeviceID, &camp.Name, &camp.MessageTemplate,
+			&camp.MediaURL, &camp.MediaType, &camp.Status, &camp.ScheduledAt, &camp.StartedAt,
+			&camp.CompletedAt, &camp.TotalRecipients, &camp.SentCount, &camp.FailedCount,
+			&camp.Settings, &camp.EventID, &camp.Source, &camp.CreatedAt, &camp.UpdatedAt, &camp.DeviceName,
+		); err != nil {
+			return nil, err
+		}
+		campaigns = append(campaigns, camp)
+	}
+	return campaigns, nil
+}
+
+func (r *CampaignRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Campaign, error) {
+	camp := &domain.Campaign{}
+	err := r.db.QueryRow(ctx, `
+		SELECT c.id, c.account_id, c.device_id, c.name, c.message_template, c.media_url, c.media_type,
+			c.status, c.scheduled_at, c.started_at, c.completed_at, c.total_recipients, c.sent_count, c.failed_count,
+			c.settings, c.event_id, c.source, c.created_at, c.updated_at, d.name as device_name
+		FROM campaigns c
+		LEFT JOIN devices d ON d.id = c.device_id
+		WHERE c.id = $1
+	`, id).Scan(
+		&camp.ID, &camp.AccountID, &camp.DeviceID, &camp.Name, &camp.MessageTemplate,
+		&camp.MediaURL, &camp.MediaType, &camp.Status, &camp.ScheduledAt, &camp.StartedAt,
+		&camp.CompletedAt, &camp.TotalRecipients, &camp.SentCount, &camp.FailedCount,
+		&camp.Settings, &camp.EventID, &camp.Source, &camp.CreatedAt, &camp.UpdatedAt, &camp.DeviceName,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return camp, nil
+}
+
+func (r *CampaignRepository) Update(ctx context.Context, c *domain.Campaign) error {
+	c.UpdatedAt = time.Now()
+	_, err := r.db.Exec(ctx, `
+		UPDATE campaigns SET name=$1, message_template=$2, media_url=$3, media_type=$4, status=$5,
+			scheduled_at=$6, started_at=$7, completed_at=$8, total_recipients=$9, sent_count=$10,
+			failed_count=$11, settings=$12, device_id=$13, updated_at=$14
+		WHERE id=$15
+	`, c.Name, c.MessageTemplate, c.MediaURL, c.MediaType, c.Status,
+		c.ScheduledAt, c.StartedAt, c.CompletedAt, c.TotalRecipients, c.SentCount,
+		c.FailedCount, c.Settings, c.DeviceID, c.UpdatedAt, c.ID)
+	return err
+}
+
+func (r *CampaignRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	r.db.Exec(ctx, `DELETE FROM campaign_recipients WHERE campaign_id = $1`, id)
+	_, err := r.db.Exec(ctx, `DELETE FROM campaigns WHERE id = $1`, id)
+	return err
+}
+
+func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*domain.CampaignRecipient) error {
+	if len(recipients) == 0 {
+		return nil
+	}
+	for _, rec := range recipients {
+		rec.ID = uuid.New()
+		if rec.Status == "" {
+			rec.Status = "pending"
+		}
+		_, err := r.db.Exec(ctx, `
+			INSERT INTO campaign_recipients (id, campaign_id, contact_id, jid, name, phone, status)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)
+			ON CONFLICT DO NOTHING
+		`, rec.ID, rec.CampaignID, rec.ContactID, rec.JID, rec.Name, rec.Phone, rec.Status)
+		if err != nil {
+			return err
+		}
+	}
+	// Update total count
+	_, err := r.db.Exec(ctx, `
+		UPDATE campaigns SET total_recipients = (SELECT count(*) FROM campaign_recipients WHERE campaign_id = $1), updated_at = NOW()
+		WHERE id = $1
+	`, recipients[0].CampaignID)
+	return err
+}
+
+func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.UUID) ([]*domain.CampaignRecipient, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message
+		FROM campaign_recipients WHERE campaign_id = $1 ORDER BY status, name
+	`, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var recipients []*domain.CampaignRecipient
+	for rows.Next() {
+		rec := &domain.CampaignRecipient{}
+		if err := rows.Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage); err != nil {
+			return nil, err
+		}
+		recipients = append(recipients, rec)
+	}
+	return recipients, nil
+}
+
+func (r *CampaignRepository) GetNextPendingRecipient(ctx context.Context, campaignID uuid.UUID) (*domain.CampaignRecipient, error) {
+	rec := &domain.CampaignRecipient{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message
+		FROM campaign_recipients WHERE campaign_id = $1 AND status = 'pending'
+		ORDER BY id LIMIT 1
+	`, campaignID).Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+func (r *CampaignRepository) UpdateRecipientStatus(ctx context.Context, id uuid.UUID, status string, errMsg *string) error {
+	if status == "sent" {
+		now := time.Now()
+		_, err := r.db.Exec(ctx, `
+			UPDATE campaign_recipients SET status = $1, sent_at = $2, error_message = $3 WHERE id = $4
+		`, status, now, errMsg, id)
+		return err
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE campaign_recipients SET status = $1, error_message = $2 WHERE id = $3
+	`, status, errMsg, id)
+	return err
+}
+
+func (r *CampaignRepository) IncrementSentCount(ctx context.Context, campaignID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE campaigns SET sent_count = sent_count + 1, updated_at = NOW() WHERE id = $1`, campaignID)
+	return err
+}
+
+func (r *CampaignRepository) IncrementFailedCount(ctx context.Context, campaignID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE campaigns SET failed_count = failed_count + 1, updated_at = NOW() WHERE id = $1`, campaignID)
+	return err
+}
+
+func (r *CampaignRepository) GetRunningCampaigns(ctx context.Context) ([]*domain.Campaign, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT c.id, c.account_id, c.device_id, c.name, c.message_template, c.media_url, c.media_type,
+			c.status, c.scheduled_at, c.started_at, c.completed_at, c.total_recipients, c.sent_count, c.failed_count,
+			c.settings, c.created_at, c.updated_at
+		FROM campaigns c
+		WHERE c.status IN ('running', 'scheduled')
+		ORDER BY c.created_at
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var campaigns []*domain.Campaign
+	for rows.Next() {
+		camp := &domain.Campaign{}
+		var deviceName *string
+		if err := rows.Scan(
+			&camp.ID, &camp.AccountID, &camp.DeviceID, &camp.Name, &camp.MessageTemplate,
+			&camp.MediaURL, &camp.MediaType, &camp.Status, &camp.ScheduledAt, &camp.StartedAt,
+			&camp.CompletedAt, &camp.TotalRecipients, &camp.SentCount, &camp.FailedCount,
+			&camp.Settings, &camp.CreatedAt, &camp.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		camp.DeviceName = deviceName
+		campaigns = append(campaigns, camp)
+	}
+	return campaigns, nil
+}
+
+// ============================================================
+// EventRepository handles event data access
+// ============================================================
+
+type EventRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *EventRepository) Create(ctx context.Context, e *domain.Event) error {
+	e.ID = uuid.New()
+	now := time.Now()
+	e.CreatedAt = now
+	e.UpdatedAt = now
+	if e.Status == "" {
+		e.Status = domain.EventStatusActive
+	}
+	if e.Color == "" {
+		e.Color = "#3b82f6"
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO events (id, account_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	`, e.ID, e.AccountID, e.Name, e.Description, e.EventDate, e.EventEnd, e.Location, e.Status, e.Color, e.CreatedBy, e.CreatedAt, e.UpdatedAt)
+	return err
+}
+
+func (r *EventRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID, filter domain.EventFilter) ([]*domain.Event, int, error) {
+	baseQuery := ` FROM events WHERE account_id = $1`
+	args := []interface{}{accountID}
+	argNum := 2
+
+	if filter.Status != "" {
+		baseQuery += fmt.Sprintf(" AND status = $%d", argNum)
+		args = append(args, filter.Status)
+		argNum++
+	}
+	if filter.Search != "" {
+		baseQuery += fmt.Sprintf(" AND (name ILIKE $%d OR description ILIKE $%d OR location ILIKE $%d)", argNum, argNum, argNum)
+		args = append(args, "%"+filter.Search+"%")
+		argNum++
+	}
+	if filter.DateFrom != nil {
+		baseQuery += fmt.Sprintf(" AND event_date >= $%d", argNum)
+		args = append(args, *filter.DateFrom)
+		argNum++
+	}
+	if filter.DateTo != nil {
+		baseQuery += fmt.Sprintf(" AND event_date <= $%d", argNum)
+		args = append(args, *filter.DateTo)
+		argNum++
+	}
+
+	var total int
+	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) "+baseQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	selectQuery := `SELECT id, account_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at` + baseQuery + ` ORDER BY COALESCE(event_date, created_at) DESC`
+	if filter.Limit > 0 {
+		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		if filter.Offset > 0 {
+			selectQuery += fmt.Sprintf(" OFFSET %d", filter.Offset)
+		}
+	}
+
+	rows, err := r.db.Query(ctx, selectQuery, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var events []*domain.Event
+	for rows.Next() {
+		ev := &domain.Event{}
+		if err := rows.Scan(&ev.ID, &ev.AccountID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
+			return nil, 0, err
+		}
+		events = append(events, ev)
+	}
+
+	// Load participant counts for each event
+	for _, ev := range events {
+		counts, total, _ := r.GetParticipantCounts(ctx, ev.ID)
+		ev.ParticipantCounts = counts
+		ev.TotalParticipants = total
+	}
+
+	return events, total, nil
+}
+
+func (r *EventRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
+	ev := &domain.Event{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at
+		FROM events WHERE id = $1
+	`, id).Scan(&ev.ID, &ev.AccountID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	counts, total, _ := r.GetParticipantCounts(ctx, ev.ID)
+	ev.ParticipantCounts = counts
+	ev.TotalParticipants = total
+	return ev, nil
+}
+
+func (r *EventRepository) Update(ctx context.Context, e *domain.Event) error {
+	e.UpdatedAt = time.Now()
+	_, err := r.db.Exec(ctx, `
+		UPDATE events SET name=$1, description=$2, event_date=$3, event_end=$4, location=$5, status=$6, color=$7, updated_at=$8
+		WHERE id=$9
+	`, e.Name, e.Description, e.EventDate, e.EventEnd, e.Location, e.Status, e.Color, e.UpdatedAt, e.ID)
+	return err
+}
+
+func (r *EventRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	// Cascade deletes participants and interactions via FK
+	_, err := r.db.Exec(ctx, `DELETE FROM interactions WHERE event_id = $1`, id)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `DELETE FROM event_participants WHERE event_id = $1`, id)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `DELETE FROM events WHERE id = $1`, id)
+	return err
+}
+
+func (r *EventRepository) GetParticipantCounts(ctx context.Context, eventID uuid.UUID) (map[string]int, int, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT status, COUNT(*) FROM event_participants WHERE event_id = $1 GROUP BY status
+	`, eventID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	total := 0
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, 0, err
+		}
+		counts[status] = count
+		total += count
+	}
+	return counts, total, nil
+}
+
+func (r *EventRepository) GetByContactID(ctx context.Context, accountID, contactID uuid.UUID) ([]*domain.Event, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT DISTINCT e.id, e.account_id, e.name, e.description, e.event_date, e.event_end, e.location, e.status, e.color, e.created_by, e.created_at, e.updated_at
+		FROM events e
+		JOIN event_participants ep ON ep.event_id = e.id
+		WHERE e.account_id = $1 AND ep.contact_id = $2
+		ORDER BY COALESCE(e.event_date, e.created_at) DESC
+	`, accountID, contactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []*domain.Event
+	for rows.Next() {
+		ev := &domain.Event{}
+		if err := rows.Scan(&ev.ID, &ev.AccountID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
+			return nil, err
+		}
+		events = append(events, ev)
+	}
+	return events, nil
+}
+
+// ============================================================
+// ParticipantRepository handles event participant data access
+// ============================================================
+
+type ParticipantRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *ParticipantRepository) Add(ctx context.Context, p *domain.EventParticipant) error {
+	p.ID = uuid.New()
+	now := time.Now()
+	p.CreatedAt = now
+	p.UpdatedAt = now
+	if p.Status == "" {
+		p.Status = domain.ParticipantStatusInvited
+	}
+	p.InvitedAt = &now
+	return r.db.QueryRow(ctx, `
+		INSERT INTO event_participants (id, event_id, contact_id, name, last_name, short_name, phone, email, age, status, notes, next_action, next_action_date, invited_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+		RETURNING id
+	`, p.ID, p.EventID, p.ContactID, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Status, p.Notes, p.NextAction, p.NextActionDate, p.InvitedAt, p.CreatedAt, p.UpdatedAt).Scan(&p.ID)
+}
+
+func (r *ParticipantRepository) BulkAdd(ctx context.Context, eventID uuid.UUID, participants []*domain.EventParticipant) error {
+	for _, p := range participants {
+		p.EventID = eventID
+		if err := r.Add(ctx, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.UUID, search, statusFilter string, tagIDs []uuid.UUID, hasPhone *bool) ([]*domain.EventParticipant, error) {
+	useDistinct := len(tagIDs) > 0
+	selectClause := `SELECT p.id, p.event_id, p.contact_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at`
+	if useDistinct {
+		selectClause = `SELECT DISTINCT p.id, p.event_id, p.contact_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at`
+	}
+	query := selectClause + ` FROM event_participants p`
+	args := []interface{}{eventID}
+	argNum := 2
+
+	if useDistinct {
+		query += ` JOIN participant_tags pt ON pt.participant_id = p.id`
+	}
+	query += ` WHERE p.event_id = $1`
+
+	if statusFilter != "" {
+		query += fmt.Sprintf(" AND p.status = $%d", argNum)
+		args = append(args, statusFilter)
+		argNum++
+	}
+	if search != "" {
+		query += fmt.Sprintf(" AND (p.name ILIKE $%d OR p.last_name ILIKE $%d OR p.phone ILIKE $%d OR p.email ILIKE $%d)", argNum, argNum, argNum, argNum)
+		args = append(args, "%"+search+"%")
+		argNum++
+	}
+	if useDistinct {
+		placeholders := ""
+		for i, tid := range tagIDs {
+			if i > 0 {
+				placeholders += ","
+			}
+			placeholders += fmt.Sprintf("$%d", argNum)
+			args = append(args, tid)
+			argNum++
+		}
+		query += fmt.Sprintf(" AND pt.tag_id IN (%s)", placeholders)
+	}
+	if hasPhone != nil && *hasPhone {
+		query += " AND p.phone IS NOT NULL AND p.phone != ''"
+	}
+	query += " ORDER BY p.next_action_date ASC NULLS LAST, p.name ASC"
+
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var participants []*domain.EventParticipant
+	for rows.Next() {
+		p := &domain.EventParticipant{}
+		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		participants = append(participants, p)
+	}
+
+	// Load tags for each participant
+	for _, p := range participants {
+		tags, err := r.db.Query(ctx, `
+			SELECT t.id, t.account_id, t.name, t.color, t.created_at
+			FROM tags t
+			JOIN participant_tags pt ON pt.tag_id = t.id
+			WHERE pt.participant_id = $1
+		`, p.ID)
+		if err == nil {
+			defer tags.Close()
+			for tags.Next() {
+				tag := &domain.Tag{}
+				if err := tags.Scan(&tag.ID, &tag.AccountID, &tag.Name, &tag.Color, &tag.CreatedAt); err == nil {
+					p.Tags = append(p.Tags, tag)
+				}
+			}
+		}
+		if p.Tags == nil {
+			p.Tags = make([]*domain.Tag, 0)
+		}
+	}
+
+	return participants, nil
+}
+
+func (r *ParticipantRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.EventParticipant, error) {
+	p := &domain.EventParticipant{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, event_id, contact_id, name, last_name, short_name, phone, email, age, status, notes, next_action, next_action_date, invited_at, confirmed_at, attended_at, created_at, updated_at
+		FROM event_participants WHERE id = $1
+	`, id).Scan(&p.ID, &p.EventID, &p.ContactID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return p, err
+}
+
+func (r *ParticipantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
+	now := time.Now()
+	query := `UPDATE event_participants SET status = $1, updated_at = $2`
+	args := []interface{}{status, now}
+	argNum := 3
+
+	switch status {
+	case domain.ParticipantStatusConfirmed:
+		query += fmt.Sprintf(", confirmed_at = $%d", argNum)
+		args = append(args, now)
+		argNum++
+	case domain.ParticipantStatusAttended:
+		query += fmt.Sprintf(", attended_at = $%d", argNum)
+		args = append(args, now)
+		argNum++
+	}
+	query += fmt.Sprintf(" WHERE id = $%d", argNum)
+	args = append(args, id)
+
+	_, err := r.db.Exec(ctx, query, args...)
+	return err
+}
+
+func (r *ParticipantRepository) Update(ctx context.Context, p *domain.EventParticipant) error {
+	p.UpdatedAt = time.Now()
+	_, err := r.db.Exec(ctx, `
+		UPDATE event_participants SET name=$1, last_name=$2, short_name=$3, phone=$4, email=$5, age=$6, notes=$7, next_action=$8, next_action_date=$9, updated_at=$10
+		WHERE id=$11
+	`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Notes, p.NextAction, p.NextActionDate, p.UpdatedAt, p.ID)
+	return err
+}
+
+// SyncToContact propagates shared participant fields back to the linked contact
+func (r *ParticipantRepository) SyncToContact(ctx context.Context, p *domain.EventParticipant) error {
+	if p.ContactID == nil {
+		return nil
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE contacts SET
+			name = COALESCE($1, name), last_name = $2, short_name = $3, phone = COALESCE($4, phone), email = $5, age = $6, updated_at = NOW()
+		WHERE id = $7
+	`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, *p.ContactID)
+	return err
+}
+
+func (r *ParticipantRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, _ = r.db.Exec(ctx, `DELETE FROM interactions WHERE participant_id = $1`, id)
+	_, err := r.db.Exec(ctx, `DELETE FROM event_participants WHERE id = $1`, id)
+	return err
+}
+
+func (r *ParticipantRepository) GetUpcomingActions(ctx context.Context, accountID uuid.UUID, limit int) ([]*domain.EventParticipant, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT ep.id, ep.event_id, ep.contact_id, ep.name, ep.last_name, ep.short_name, ep.phone, ep.email, ep.age, ep.status, ep.notes, ep.next_action, ep.next_action_date, ep.invited_at, ep.confirmed_at, ep.attended_at, ep.created_at, ep.updated_at
+		FROM event_participants ep
+		JOIN events e ON e.id = ep.event_id
+		WHERE e.account_id = $1 AND ep.next_action_date IS NOT NULL AND ep.status NOT IN ('attended','no_show','declined')
+		ORDER BY ep.next_action_date ASC
+		LIMIT $2
+	`, accountID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var participants []*domain.EventParticipant
+	for rows.Next() {
+		p := &domain.EventParticipant{}
+		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		participants = append(participants, p)
+	}
+	return participants, nil
+}
+
+// ============================================================
+// InteractionRepository handles interaction data access
+// ============================================================
+
+type InteractionRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *InteractionRepository) Create(ctx context.Context, i *domain.Interaction) error {
+	i.ID = uuid.New()
+	i.CreatedAt = time.Now()
+	return r.db.QueryRow(ctx, `
+		INSERT INTO interactions (id, account_id, contact_id, lead_id, event_id, participant_id, type, direction, outcome, notes, next_action, next_action_date, created_by, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		RETURNING id
+	`, i.ID, i.AccountID, i.ContactID, i.LeadID, i.EventID, i.ParticipantID, i.Type, i.Direction, i.Outcome, i.Notes, i.NextAction, i.NextActionDate, i.CreatedBy, i.CreatedAt).Scan(&i.ID)
+}
+
+func (r *InteractionRepository) GetByParticipantID(ctx context.Context, participantID uuid.UUID) ([]*domain.Interaction, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id, i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date, i.created_by, i.created_at,
+		       u.display_name as created_by_name
+		FROM interactions i
+		LEFT JOIN users u ON u.id = i.created_by
+		WHERE i.participant_id = $1
+		ORDER BY i.created_at DESC
+	`, participantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var interactions []*domain.Interaction
+	for rows.Next() {
+		it := &domain.Interaction{}
+		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName); err != nil {
+			return nil, err
+		}
+		interactions = append(interactions, it)
+	}
+	return interactions, nil
+}
+
+func (r *InteractionRepository) GetByContactID(ctx context.Context, contactID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id, i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date, i.created_by, i.created_at,
+		       u.display_name as created_by_name, e.name as event_name
+		FROM interactions i
+		LEFT JOIN users u ON u.id = i.created_by
+		LEFT JOIN events e ON e.id = i.event_id
+		WHERE i.contact_id = $1
+		ORDER BY i.created_at DESC
+		LIMIT $2 OFFSET $3
+	`, contactID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var interactions []*domain.Interaction
+	for rows.Next() {
+		it := &domain.Interaction{}
+		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName, &it.EventName); err != nil {
+			return nil, err
+		}
+		interactions = append(interactions, it)
+	}
+	return interactions, nil
+}
+
+func (r *InteractionRepository) GetByEventID(ctx context.Context, eventID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id, i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date, i.created_by, i.created_at,
+		       u.display_name as created_by_name
+		FROM interactions i
+		LEFT JOIN users u ON u.id = i.created_by
+		WHERE i.event_id = $1
+		ORDER BY i.created_at DESC
+		LIMIT $2 OFFSET $3
+	`, eventID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var interactions []*domain.Interaction
+	for rows.Next() {
+		it := &domain.Interaction{}
+		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName); err != nil {
+			return nil, err
+		}
+		interactions = append(interactions, it)
+	}
+	return interactions, nil
+}
+
+func (r *InteractionRepository) GetLastByParticipantID(ctx context.Context, participantID uuid.UUID) (*domain.Interaction, error) {
+	it := &domain.Interaction{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, contact_id, lead_id, event_id, participant_id, type, direction, outcome, notes, next_action, next_action_date, created_by, created_at
+		FROM interactions WHERE participant_id = $1
+		ORDER BY created_at DESC LIMIT 1
+	`, participantID).Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return it, err
+}
+
+func (r *InteractionRepository) GetByLeadID(ctx context.Context, leadID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id, i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date, i.created_by, i.created_at,
+		       u.display_name as created_by_name
+		FROM interactions i
+		LEFT JOIN users u ON u.id = i.created_by
+		WHERE i.lead_id = $1
+		ORDER BY i.created_at DESC
+		LIMIT $2 OFFSET $3
+	`, leadID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var interactions []*domain.Interaction
+	for rows.Next() {
+		it := &domain.Interaction{}
+		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName); err != nil {
+			return nil, err
+		}
+		interactions = append(interactions, it)
+	}
+	return interactions, nil
+}
+
+func (r *InteractionRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM interactions WHERE id = $1`, id)
+	return err
+}
+
+// SavedStickerRepository handles saved sticker data access
+type SavedStickerRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *SavedStickerRepository) GetAll(ctx context.Context, accountID uuid.UUID) ([]string, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT media_url FROM saved_stickers
+		WHERE account_id = $1
+		ORDER BY created_at DESC
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var urls []string
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err != nil {
+			return nil, err
+		}
+		urls = append(urls, url)
+	}
+	return urls, nil
+}
+
+func (r *SavedStickerRepository) Save(ctx context.Context, accountID uuid.UUID, mediaURL string) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO saved_stickers (account_id, media_url)
+		VALUES ($1, $2)
+		ON CONFLICT (account_id, media_url) DO NOTHING
+	`, accountID, mediaURL)
+	return err
+}
+
+func (r *SavedStickerRepository) Delete(ctx context.Context, accountID uuid.UUID, mediaURL string) error {
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM saved_stickers
+		WHERE account_id = $1 AND media_url = $2
+	`, accountID, mediaURL)
+	return err
+}

@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://clarin.naperu.cloud/sitemap.xml
