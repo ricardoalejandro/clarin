@@ -10,10 +10,17 @@ import (
 type Account struct {
 	ID         uuid.UUID `json:"id"`
 	Name       string    `json:"name"`
+	Slug       string    `json:"slug"`
 	Plan       string    `json:"plan"`
 	MaxDevices int       `json:"max_devices"`
+	IsActive   bool      `json:"is_active"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+
+	// Populated on demand
+	UserCount   int `json:"user_count,omitempty"`
+	DeviceCount int `json:"device_count,omitempty"`
+	ChatCount   int `json:"chat_count,omitempty"`
 }
 
 // User represents a user in the system
@@ -24,11 +31,23 @@ type User struct {
 	Email        string    `json:"email"`
 	PasswordHash string    `json:"-"`
 	DisplayName  string    `json:"display_name"`
+	Role         string    `json:"role"` // super_admin, admin, agent
 	IsAdmin      bool      `json:"is_admin"`
+	IsSuperAdmin bool      `json:"is_super_admin"`
 	IsActive     bool      `json:"is_active"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// Populated on demand
+	AccountName string `json:"account_name,omitempty"`
 }
+
+// User role constants
+const (
+	RoleSuperAdmin = "super_admin"
+	RoleAdmin      = "admin"
+	RoleAgent      = "agent"
+)
 
 // Device represents a WhatsApp connection
 type Device struct {

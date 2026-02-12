@@ -19,7 +19,8 @@ import {
   PanelLeftOpen,
   Radio,
   Tags,
-  CalendarDays
+  CalendarDays,
+  Shield
 } from 'lucide-react'
 
 interface User {
@@ -27,6 +28,8 @@ interface User {
   username: string
   display_name: string
   is_admin: boolean
+  is_super_admin: boolean
+  role: string
 }
 
 export default function DashboardLayout({
@@ -103,6 +106,7 @@ export default function DashboardLayout({
     { href: '/dashboard/broadcasts', icon: Radio, label: 'Envíos Masivos' },
     { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas' },
     { href: '/dashboard/settings', icon: Settings, label: 'Configuración' },
+    ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Administración' }] : []),
   ]
 
   if (loading) {
@@ -215,7 +219,7 @@ export default function DashboardLayout({
                     {user.display_name || user.username}
                   </p>
                   <p className="text-sm text-gray-500 truncate">
-                    {user.is_admin ? 'Administrador' : 'Usuario'}
+                    {user.is_super_admin ? 'Super Admin' : user.is_admin ? 'Administrador' : 'Usuario'}
                   </p>
                 </div>
               </div>

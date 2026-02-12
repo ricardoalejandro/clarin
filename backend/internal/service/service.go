@@ -17,6 +17,7 @@ import (
 
 type Services struct {
 	Auth        *AuthService
+	Account     *AccountService
 	Device      *DeviceService
 	Chat        *ChatService
 	Contact     *ContactService
@@ -31,6 +32,7 @@ type Services struct {
 func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub *ws.Hub) *Services {
 	return &Services{
 		Auth:        &AuthService{repos: repos},
+		Account:     &AccountService{repos: repos},
 		Device:      &DeviceService{repos: repos, pool: pool, hub: hub},
 		Chat:        &ChatService{repos: repos, pool: pool},
 		Contact:     &ContactService{repos: repos, pool: pool},
@@ -49,10 +51,12 @@ type AuthService struct {
 }
 
 type JWTClaims struct {
-	UserID    uuid.UUID `json:"user_id"`
-	AccountID uuid.UUID `json:"account_id"`
-	Username  string    `json:"username"`
-	IsAdmin   bool      `json:"is_admin"`
+	UserID       uuid.UUID `json:"user_id"`
+	AccountID    uuid.UUID `json:"account_id"`
+	Username     string    `json:"username"`
+	IsAdmin      bool      `json:"is_admin"`
+	IsSuperAdmin bool      `json:"is_super_admin"`
+	Role         string    `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -71,10 +75,12 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 
 	// Generate JWT
 	claims := &JWTClaims{
-		UserID:    user.ID,
-		AccountID: user.AccountID,
-		Username:  user.Username,
-		IsAdmin:   user.IsAdmin,
+		UserID:       user.ID,
+		AccountID:    user.AccountID,
+		Username:     user.Username,
+		IsAdmin:      user.IsAdmin,
+		IsSuperAdmin: user.IsSuperAdmin,
+		Role:         user.Role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)), // 7 days
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -109,6 +115,71 @@ func (s *AuthService) ValidateToken(tokenString, jwtSecret string) (*JWTClaims, 
 
 func (s *AuthService) GetUser(ctx context.Context, userID uuid.UUID) (*domain.User, error) {
 	return s.repos.User.GetByID(ctx, userID)
+}
+
+// AccountService handles account management (super admin)
+type AccountService struct {
+	repos *repository.Repositories
+}
+
+func (s *AccountService) GetAll(ctx context.Context) ([]*domain.Account, error) {
+	return s.repos.Account.GetAll(ctx)
+}
+
+func (s *AccountService) GetByID(ctx context.Context, id uuid.UUID) (*domain.Account, error) {
+	return s.repos.Account.GetByID(ctx, id)
+}
+
+func (s *AccountService) Create(ctx context.Context, a *domain.Account) error {
+	return s.repos.Account.Create(ctx, a)
+}
+
+func (s *AccountService) Update(ctx context.Context, a *domain.Account) error {
+	return s.repos.Account.Update(ctx, a)
+}
+
+func (s *AccountService) ToggleActive(ctx context.Context, id uuid.UUID) error {
+	return s.repos.Account.ToggleActive(ctx, id)
+}
+
+func (s *AccountService) Delete(ctx context.Context, id uuid.UUID) error {
+	return s.repos.Account.Delete(ctx, id)
+}
+
+func (s *AccountService) GetUsers(ctx context.Context, accountID *uuid.UUID) ([]*domain.User, error) {
+	if accountID != nil {
+		return s.repos.User.GetByAccountID(ctx, *accountID)
+	}
+	return s.repos.User.GetAll(ctx)
+}
+
+func (s *AccountService) CreateUser(ctx context.Context, user *domain.User, password string) error {
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("failed to hash password: %w", err)
+	}
+	user.PasswordHash = string(hashedPassword)
+	return s.repos.User.Create(ctx, user)
+}
+
+func (s *AccountService) UpdateUser(ctx context.Context, user *domain.User) error {
+	return s.repos.User.Update(ctx, user)
+}
+
+func (s *AccountService) ResetPassword(ctx context.Context, userID uuid.UUID, password string) error {
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("failed to hash password: %w", err)
+	}
+	return s.repos.User.UpdatePassword(ctx, userID, string(hashedPassword))
+}
+
+func (s *AccountService) ToggleUserActive(ctx context.Context, userID uuid.UUID) error {
+	return s.repos.User.ToggleActive(ctx, userID)
+}
+
+func (s *AccountService) DeleteUser(ctx context.Context, userID uuid.UUID) error {
+	return s.repos.User.Delete(ctx, userID)
 }
 
 // DeviceService handles WhatsApp devices

@@ -14,6 +14,7 @@ import (
 type Repositories struct {
 	db                *pgxpool.Pool
 	User              *UserRepository
+	Account           *AccountRepository
 	Device            *DeviceRepository
 	Chat              *ChatRepository
 	Message           *MessageRepository
@@ -33,6 +34,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 	return &Repositories{
 		db:                db,
 		User:              &UserRepository{db: db},
+		Account:           &AccountRepository{db: db},
 		Device:            &DeviceRepository{db: db},
 		Chat:              &ChatRepository{db: db},
 		Message:           &MessageRepository{db: db},
@@ -57,11 +59,12 @@ type UserRepository struct {
 func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*domain.User, error) {
 	user := &domain.User{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, username, email, password_hash, display_name, is_admin, is_active, created_at, updated_at
-		FROM users WHERE username = $1 AND is_active = TRUE
+		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, u.created_at, u.updated_at, a.name
+		FROM users u JOIN accounts a ON a.id = u.account_id
+		WHERE u.username = $1 AND u.is_active = TRUE
 	`, username).Scan(
 		&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.CreatedAt, &user.UpdatedAt,
+		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -72,11 +75,12 @@ func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*d
 func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
 	user := &domain.User{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, username, email, password_hash, display_name, is_admin, is_active, created_at, updated_at
-		FROM users WHERE id = $1
+		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, u.created_at, u.updated_at, a.name
+		FROM users u JOIN accounts a ON a.id = u.account_id
+		WHERE u.id = $1
 	`, id).Scan(
 		&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.CreatedAt, &user.UpdatedAt,
+		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -86,8 +90,9 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Use
 
 func (r *UserRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.User, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, username, email, password_hash, display_name, is_admin, is_active, created_at, updated_at
-		FROM users WHERE account_id = $1 ORDER BY created_at DESC
+		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, u.created_at, u.updated_at, a.name
+		FROM users u JOIN accounts a ON a.id = u.account_id
+		WHERE u.account_id = $1 ORDER BY u.created_at DESC
 	`, accountID)
 	if err != nil {
 		return nil, err
@@ -99,13 +104,143 @@ func (r *UserRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 		user := &domain.User{}
 		if err := rows.Scan(
 			&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
-			&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.CreatedAt, &user.UpdatedAt,
+			&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
 		); err != nil {
 			return nil, err
 		}
 		users = append(users, user)
 	}
 	return users, nil
+}
+
+func (r *UserRepository) GetAll(ctx context.Context) ([]*domain.User, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, u.created_at, u.updated_at, a.name
+		FROM users u JOIN accounts a ON a.id = u.account_id
+		ORDER BY u.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []*domain.User
+	for rows.Next() {
+		user := &domain.User{}
+		if err := rows.Scan(
+			&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
+			&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
+		); err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, nil
+}
+
+func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO users (account_id, username, email, password_hash, display_name, is_admin, is_super_admin, role)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, is_active, created_at, updated_at
+	`, user.AccountID, user.Username, user.Email, user.PasswordHash, user.DisplayName, user.IsAdmin, user.IsSuperAdmin, user.Role).Scan(
+		&user.ID, &user.IsActive, &user.CreatedAt, &user.UpdatedAt,
+	)
+}
+
+func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE users SET username = $2, email = $3, display_name = $4, is_admin = $5, role = $6, updated_at = NOW()
+		WHERE id = $1
+	`, user.ID, user.Username, user.Email, user.DisplayName, user.IsAdmin, user.Role)
+	return err
+}
+
+func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
+	_, err := r.db.Exec(ctx, `UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1`, userID, passwordHash)
+	return err
+}
+
+func (r *UserRepository) ToggleActive(ctx context.Context, userID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE users SET is_active = NOT is_active, updated_at = NOW() WHERE id = $1`, userID)
+	return err
+}
+
+func (r *UserRepository) Delete(ctx context.Context, userID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	return err
+}
+
+// AccountRepository handles account data access
+type AccountRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), a.created_at, a.updated_at,
+			(SELECT COUNT(*) FROM users WHERE account_id = a.id) as user_count,
+			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
+			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
+		FROM accounts a ORDER BY a.created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []*domain.Account
+	for rows.Next() {
+		a := &domain.Account{}
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.CreatedAt, &a.UpdatedAt,
+			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, a)
+	}
+	return accounts, nil
+}
+
+func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Account, error) {
+	a := &domain.Account{}
+	err := r.db.QueryRow(ctx, `
+		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), a.created_at, a.updated_at,
+			(SELECT COUNT(*) FROM users WHERE account_id = a.id) as user_count,
+			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
+			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
+		FROM accounts a WHERE a.id = $1
+	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.CreatedAt, &a.UpdatedAt,
+		&a.UserCount, &a.DeviceCount, &a.ChatCount)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return a, err
+}
+
+func (r *AccountRepository) Create(ctx context.Context, a *domain.Account) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO accounts (name, slug, plan, max_devices, is_active)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, created_at, updated_at
+	`, a.Name, a.Slug, a.Plan, a.MaxDevices, a.IsActive).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
+}
+
+func (r *AccountRepository) Update(ctx context.Context, a *domain.Account) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, updated_at = NOW()
+		WHERE id = $1
+	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices)
+	return err
+}
+
+func (r *AccountRepository) ToggleActive(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE accounts SET is_active = NOT COALESCE(is_active, true), updated_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
+func (r *AccountRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM accounts WHERE id = $1`, id)
+	return err
 }
 
 // DeviceRepository handles device data access

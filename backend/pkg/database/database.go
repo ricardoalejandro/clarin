@@ -378,6 +378,13 @@ func Migrate(db *pgxpool.Pool) error {
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_stickers_unique ON saved_stickers(account_id, media_url)`,
+
+		// Multi-tenant management columns
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'admin'`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS slug VARCHAR(255)`,
+		`UPDATE users SET is_super_admin = TRUE, role = 'super_admin' WHERE is_admin = TRUE AND account_id = (SELECT id FROM accounts ORDER BY created_at LIMIT 1) AND is_super_admin = FALSE`,
 	}
 
 	for _, migration := range migrations {
@@ -425,11 +432,11 @@ func SeedAdmin(db *pgxpool.Pool, cfg *config.Config) error {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	// Create or update admin user
+	// Create or update admin user (super_admin)
 	_, err = db.Exec(ctx, `
-		INSERT INTO users (account_id, username, email, password_hash, display_name, is_admin)
-		VALUES ($1, $2, $3, $4, 'Administrador', TRUE)
-		ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, account_id = EXCLUDED.account_id
+		INSERT INTO users (account_id, username, email, password_hash, display_name, is_admin, is_super_admin, role)
+		VALUES ($1, $2, $3, $4, 'Administrador', TRUE, TRUE, 'super_admin')
+		ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, account_id = EXCLUDED.account_id, is_super_admin = TRUE, role = 'super_admin'
 	`, accountID, cfg.AdminUser, cfg.AdminEmail, string(hashedPassword))
 	if err != nil {
 		return fmt.Errorf("failed to create admin user: %w", err)

@@ -264,6 +264,27 @@ func (s *Server) setupRoutes() {
 
 	// Stats
 	protected.Get("/stats", s.handleGetStats)
+
+	// Super Admin routes
+	admin := protected.Group("/admin", s.superAdminMiddleware)
+	
+	// Account management
+	adminAccounts := admin.Group("/accounts")
+	adminAccounts.Get("/", s.handleAdminGetAccounts)
+	adminAccounts.Post("/", s.handleAdminCreateAccount)
+	adminAccounts.Get("/:id", s.handleAdminGetAccount)
+	adminAccounts.Put("/:id", s.handleAdminUpdateAccount)
+	adminAccounts.Patch("/:id/toggle", s.handleAdminToggleAccount)
+	adminAccounts.Delete("/:id", s.handleAdminDeleteAccount)
+
+	// User management
+	adminUsers := admin.Group("/users")
+	adminUsers.Get("/", s.handleAdminGetUsers)
+	adminUsers.Post("/", s.handleAdminCreateUser)
+	adminUsers.Put("/:id", s.handleAdminUpdateUser)
+	adminUsers.Patch("/:id/toggle", s.handleAdminToggleUser)
+	adminUsers.Patch("/:id/password", s.handleAdminResetPassword)
+	adminUsers.Delete("/:id", s.handleAdminDeleteUser)
 }
 
 // Auth middleware
@@ -293,6 +314,18 @@ func (s *Server) authMiddleware(c *fiber.Ctx) error {
 	c.Locals("claims", claims)
 	c.Locals("user_id", claims.UserID)
 	c.Locals("account_id", claims.AccountID)
+	return c.Next()
+}
+
+// Super admin middleware
+func (s *Server) superAdminMiddleware(c *fiber.Ctx) error {
+	claims := c.Locals("claims").(*service.JWTClaims)
+	if !claims.IsSuperAdmin {
+		return c.Status(403).JSON(fiber.Map{
+			"success": false,
+			"error":   "Forbidden: super admin access required",
+		})
+	}
 	return c.Next()
 }
 
@@ -346,11 +379,15 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		"success": true,
 		"token":   token,
 		"user": fiber.Map{
-			"id":           user.ID,
-			"username":     user.Username,
-			"email":        user.Email,
-			"display_name": user.DisplayName,
-			"is_admin":     user.IsAdmin,
+			"id":             user.ID,
+			"username":       user.Username,
+			"email":          user.Email,
+			"display_name":   user.DisplayName,
+			"is_admin":       user.IsAdmin,
+			"is_super_admin": user.IsSuperAdmin,
+			"role":           user.Role,
+			"account_id":     user.AccountID,
+			"account_name":   user.AccountName,
 		},
 	})
 }
@@ -374,12 +411,15 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"user": fiber.Map{
-			"id":           user.ID,
-			"username":     user.Username,
-			"email":        user.Email,
-			"display_name": user.DisplayName,
-			"is_admin":     user.IsAdmin,
-			"account_id":   user.AccountID,
+			"id":             user.ID,
+			"username":       user.Username,
+			"email":          user.Email,
+			"display_name":   user.DisplayName,
+			"is_admin":       user.IsAdmin,
+			"is_super_admin": user.IsSuperAdmin,
+			"role":           user.Role,
+			"account_id":     user.AccountID,
+			"account_name":   user.AccountName,
 		},
 	})
 }
@@ -2409,5 +2449,281 @@ func (s *Server) handleDeleteSavedSticker(c *fiber.Ctx) error {
 	if err := s.services.Chat.DeleteSavedSticker(c.Context(), accountID, req.MediaURL); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// --- Super Admin Handlers ---
+
+func (s *Server) handleAdminGetAccounts(c *fiber.Ctx) error {
+	accounts, err := s.services.Account.GetAll(c.Context())
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if accounts == nil {
+		accounts = []*domain.Account{}
+	}
+	return c.JSON(fiber.Map{"success": true, "accounts": accounts})
+}
+
+func (s *Server) handleAdminCreateAccount(c *fiber.Ctx) error {
+	var req struct {
+		Name       string `json:"name"`
+		Slug       string `json:"slug"`
+		Plan       string `json:"plan"`
+		MaxDevices int    `json:"max_devices"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	if req.Plan == "" {
+		req.Plan = "basic"
+	}
+	if req.MaxDevices <= 0 {
+		req.MaxDevices = 5
+	}
+
+	account := &domain.Account{
+		Name:       req.Name,
+		Slug:       req.Slug,
+		Plan:       req.Plan,
+		MaxDevices: req.MaxDevices,
+		IsActive:   true,
+	}
+
+	if err := s.services.Account.Create(c.Context(), account); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.Status(201).JSON(fiber.Map{"success": true, "account": account})
+}
+
+func (s *Server) handleAdminGetAccount(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	account, err := s.services.Account.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if account == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Account not found"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "account": account})
+}
+
+func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	var req struct {
+		Name       string `json:"name"`
+		Slug       string `json:"slug"`
+		Plan       string `json:"plan"`
+		MaxDevices int    `json:"max_devices"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	account := &domain.Account{
+		ID:         id,
+		Name:       req.Name,
+		Slug:       req.Slug,
+		Plan:       req.Plan,
+		MaxDevices: req.MaxDevices,
+	}
+
+	if err := s.services.Account.Update(c.Context(), account); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "account": account})
+}
+
+func (s *Server) handleAdminToggleAccount(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	if err := s.services.Account.ToggleActive(c.Context(), id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAdminDeleteAccount(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	if err := s.services.Account.Delete(c.Context(), id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAdminGetUsers(c *fiber.Ctx) error {
+	var accountID *uuid.UUID
+	if aid := c.Query("account_id"); aid != "" {
+		parsed, err := uuid.Parse(aid)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
+		}
+		accountID = &parsed
+	}
+
+	users, err := s.services.Account.GetUsers(c.Context(), accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if users == nil {
+		users = []*domain.User{}
+	}
+
+	return c.JSON(fiber.Map{"success": true, "users": users})
+}
+
+func (s *Server) handleAdminCreateUser(c *fiber.Ctx) error {
+	var req struct {
+		AccountID   string `json:"account_id"`
+		Username    string `json:"username"`
+		Email       string `json:"email"`
+		Password    string `json:"password"`
+		DisplayName string `json:"display_name"`
+		Role        string `json:"role"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	if req.Username == "" || req.Email == "" || req.Password == "" || req.AccountID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "username, email, password, and account_id are required"})
+	}
+
+	accountID, err := uuid.Parse(req.AccountID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
+	}
+
+	if req.Role == "" {
+		req.Role = domain.RoleAgent
+	}
+
+	user := &domain.User{
+		AccountID:   accountID,
+		Username:    req.Username,
+		Email:       req.Email,
+		DisplayName: req.DisplayName,
+		Role:        req.Role,
+		IsAdmin:     req.Role == domain.RoleAdmin || req.Role == domain.RoleSuperAdmin,
+	}
+
+	if err := s.services.Account.CreateUser(c.Context(), user, req.Password); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.Status(201).JSON(fiber.Map{"success": true, "user": fiber.Map{
+		"id":           user.ID,
+		"account_id":   user.AccountID,
+		"username":     user.Username,
+		"email":        user.Email,
+		"display_name": user.DisplayName,
+		"role":         user.Role,
+		"is_admin":     user.IsAdmin,
+		"is_active":    user.IsActive,
+		"created_at":   user.CreatedAt,
+	}})
+}
+
+func (s *Server) handleAdminUpdateUser(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	var req struct {
+		Username    string `json:"username"`
+		Email       string `json:"email"`
+		DisplayName string `json:"display_name"`
+		Role        string `json:"role"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	user := &domain.User{
+		ID:          id,
+		Username:    req.Username,
+		Email:       req.Email,
+		DisplayName: req.DisplayName,
+		Role:        req.Role,
+		IsAdmin:     req.Role == domain.RoleAdmin || req.Role == domain.RoleSuperAdmin,
+	}
+
+	if err := s.services.Account.UpdateUser(c.Context(), user); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAdminToggleUser(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	if err := s.services.Account.ToggleUserActive(c.Context(), id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAdminResetPassword(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Password == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Password is required"})
+	}
+
+	if err := s.services.Account.ResetPassword(c.Context(), id, req.Password); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAdminDeleteUser(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	if err := s.services.Account.DeleteUser(c.Context(), id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
 	return c.JSON(fiber.Map{"success": true})
 }
