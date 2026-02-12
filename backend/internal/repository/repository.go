@@ -1572,8 +1572,8 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 
 func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.UUID) ([]*domain.CampaignRecipient, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message
-		FROM campaign_recipients WHERE campaign_id = $1 ORDER BY status, name
+		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message, wait_time_ms
+		FROM campaign_recipients WHERE campaign_id = $1 ORDER BY sent_at ASC NULLS LAST, id
 	`, campaignID)
 	if err != nil {
 		return nil, err
@@ -1583,7 +1583,7 @@ func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.
 	var recipients []*domain.CampaignRecipient
 	for rows.Next() {
 		rec := &domain.CampaignRecipient{}
-		if err := rows.Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage, &rec.WaitTimeMs); err != nil {
 			return nil, err
 		}
 		recipients = append(recipients, rec)
@@ -1594,27 +1594,27 @@ func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.
 func (r *CampaignRepository) GetNextPendingRecipient(ctx context.Context, campaignID uuid.UUID) (*domain.CampaignRecipient, error) {
 	rec := &domain.CampaignRecipient{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message
+		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message, wait_time_ms
 		FROM campaign_recipients WHERE campaign_id = $1 AND status = 'pending'
 		ORDER BY id LIMIT 1
-	`, campaignID).Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage)
+	`, campaignID).Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage, &rec.WaitTimeMs)
 	if err != nil {
 		return nil, err
 	}
 	return rec, nil
 }
 
-func (r *CampaignRepository) UpdateRecipientStatus(ctx context.Context, id uuid.UUID, status string, errMsg *string) error {
+func (r *CampaignRepository) UpdateRecipientStatus(ctx context.Context, id uuid.UUID, status string, errMsg *string, waitTimeMs *int) error {
 	if status == "sent" {
 		now := time.Now()
 		_, err := r.db.Exec(ctx, `
-			UPDATE campaign_recipients SET status = $1, sent_at = $2, error_message = $3 WHERE id = $4
-		`, status, now, errMsg, id)
+			UPDATE campaign_recipients SET status = $1, sent_at = $2, error_message = $3, wait_time_ms = $4 WHERE id = $5
+		`, status, now, errMsg, waitTimeMs, id)
 		return err
 	}
 	_, err := r.db.Exec(ctx, `
-		UPDATE campaign_recipients SET status = $1, error_message = $2 WHERE id = $3
-	`, status, errMsg, id)
+		UPDATE campaign_recipients SET status = $1, error_message = $2, wait_time_ms = $3 WHERE id = $4
+	`, status, errMsg, waitTimeMs, id)
 	return err
 }
 

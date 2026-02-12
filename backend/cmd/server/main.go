@@ -106,41 +106,54 @@ func main() {
 				}
 				for _, c := range campaigns {
 					settings := c.Settings
-					minDelay := 30
-					maxDelay := 60
-					batchSize := 10
-					batchPauseMin := 15
-					if v, ok := settings["min_delay_seconds"]; ok {
-						if f, ok := v.(float64); ok {
-							minDelay = int(f)
+					minDelay := 8
+					maxDelay := 15
+					batchSize := 25
+					batchPauseMin := 2
+
+					// Helper to read int from settings (handles both key variants)
+					readInt := func(keys []string, def int) int {
+						for _, key := range keys {
+							if v, ok := settings[key]; ok {
+								if f, ok := v.(float64); ok {
+									return int(f)
+								}
+							}
 						}
+						return def
 					}
-					if v, ok := settings["max_delay_seconds"]; ok {
-						if f, ok := v.(float64); ok {
-							maxDelay = int(f)
-						}
-					}
-					if v, ok := settings["batch_size"]; ok {
-						if f, ok := v.(float64); ok {
-							batchSize = int(f)
-						}
-					}
-					if v, ok := settings["batch_pause_minutes"]; ok {
-						if f, ok := v.(float64); ok {
-							batchPauseMin = int(f)
-						}
+
+					minDelay = readInt([]string{"min_delay_seconds", "min_delay"}, minDelay)
+					maxDelay = readInt([]string{"max_delay_seconds", "max_delay"}, maxDelay)
+					batchSize = readInt([]string{"batch_size"}, batchSize)
+					batchPauseMin = readInt([]string{"batch_pause_minutes", "batch_pause"}, batchPauseMin)
+
+					if minDelay > maxDelay {
+						minDelay = maxDelay
 					}
 
 					// Process one batch for this campaign
 					sentInBatch := 0
+					var lastSendTime time.Time
 					for i := 0; i < batchSize; i++ {
-						hasMore, err := services.Campaign.ProcessNextRecipient(context.Background(), c.ID)
+						var waitTimeMs *int
+						if !lastSendTime.IsZero() {
+							w := int(time.Since(lastSendTime).Milliseconds())
+							waitTimeMs = &w
+						}
+						hasMore, err := services.Campaign.ProcessNextRecipient(context.Background(), c.ID, waitTimeMs)
 						if err != nil || !hasMore {
 							break
 						}
+						lastSendTime = time.Now()
 						sentInBatch++
 						// Random delay between messages
-						delay := time.Duration(minDelay+rand.Intn(maxDelay-minDelay+1)) * time.Second
+						delayRange := maxDelay - minDelay
+						if delayRange < 0 {
+							delayRange = 0
+						}
+						delay := time.Duration(minDelay+rand.Intn(delayRange+1)) * time.Second
+						log.Printf("[Campaign %s] Sent msg %d, waiting %v", c.ID, sentInBatch, delay)
 						time.Sleep(delay)
 					}
 					// Pause between batches to avoid detection

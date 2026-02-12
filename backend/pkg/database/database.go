@@ -402,6 +402,9 @@ func Migrate(db *pgxpool.Pool) error {
 		`INSERT INTO user_accounts (user_id, account_id, role, is_default)
 		 SELECT id, account_id, role, TRUE FROM users
 		 ON CONFLICT (user_id, account_id) DO NOTHING`,
+
+		// Campaign recipient timing tracking
+		`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS wait_time_ms INT`,
 	}
 
 	for _, migration := range migrations {

@@ -342,6 +342,7 @@ type CampaignRecipient struct {
 	Status       string     `json:"status"` // pending, sent, delivered, failed, skipped
 	SentAt       *time.Time `json:"sent_at,omitempty"`
 	ErrorMessage *string    `json:"error_message,omitempty"`
+	WaitTimeMs   *int       `json:"wait_time_ms,omitempty"`
 }
 
 // Campaign status constants

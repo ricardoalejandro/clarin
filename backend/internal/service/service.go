@@ -739,7 +739,58 @@ func (s *CampaignService) GetRunningCampaigns(ctx context.Context) ([]*domain.Ca
 	return s.repos.Campaign.GetRunningCampaigns(ctx)
 }
 
-func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID uuid.UUID) (bool, error) {
+func (s *CampaignService) Duplicate(ctx context.Context, campaignID uuid.UUID, newMessage *string) (*domain.Campaign, error) {
+	original, err := s.repos.Campaign.GetByID(ctx, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("campaign not found: %w", err)
+	}
+
+	newCampaign := &domain.Campaign{
+		AccountID:       original.AccountID,
+		DeviceID:        original.DeviceID,
+		Name:            original.Name + " (copia)",
+		MessageTemplate: original.MessageTemplate,
+		MediaURL:        original.MediaURL,
+		MediaType:       original.MediaType,
+		Settings:        original.Settings,
+		EventID:         original.EventID,
+		Source:          original.Source,
+	}
+	if newMessage != nil && *newMessage != "" {
+		newCampaign.MessageTemplate = *newMessage
+	}
+
+	if err := s.repos.Campaign.Create(ctx, newCampaign); err != nil {
+		return nil, err
+	}
+
+	// Copy recipients with pending status
+	origRecipients, err := s.repos.Campaign.GetRecipients(ctx, campaignID)
+	if err != nil {
+		return newCampaign, nil // campaign created but recipients failed to copy
+	}
+
+	var newRecipients []*domain.CampaignRecipient
+	for _, r := range origRecipients {
+		newRecipients = append(newRecipients, &domain.CampaignRecipient{
+			CampaignID: newCampaign.ID,
+			ContactID:  r.ContactID,
+			JID:        r.JID,
+			Name:       r.Name,
+			Phone:      r.Phone,
+			Status:     "pending",
+		})
+	}
+	if len(newRecipients) > 0 {
+		s.repos.Campaign.AddRecipients(ctx, newRecipients)
+	}
+
+	// Re-fetch to get updated total_recipients
+	newCampaign, _ = s.repos.Campaign.GetByID(ctx, newCampaign.ID)
+	return newCampaign, nil
+}
+
+func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID uuid.UUID, waitTimeMs *int) (bool, error) {
 	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
 	if err != nil {
 		return false, err
@@ -779,10 +830,10 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 
 	if sendErr != nil {
 		errMsg := sendErr.Error()
-		s.repos.Campaign.UpdateRecipientStatus(ctx, rec.ID, "failed", &errMsg)
+		s.repos.Campaign.UpdateRecipientStatus(ctx, rec.ID, "failed", &errMsg, waitTimeMs)
 		s.repos.Campaign.IncrementFailedCount(ctx, campaignID)
 	} else {
-		s.repos.Campaign.UpdateRecipientStatus(ctx, rec.ID, "sent", nil)
+		s.repos.Campaign.UpdateRecipientStatus(ctx, rec.ID, "sent", nil, waitTimeMs)
 		s.repos.Campaign.IncrementSentCount(ctx, campaignID)
 	}
 

@@ -4,7 +4,8 @@ import { useEffect, useState, useCallback } from 'react'
 import {
   Radio, Plus, Play, Pause, Trash2, Edit, Users, Send, Clock,
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
-  Settings2, FileText, Image, Video, AudioLines, File, Eye
+  Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
+  BarChart3
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -47,6 +48,7 @@ interface Recipient {
   status: string
   sent_at: string | null
   error_message: string | null
+  wait_time_ms: number | null
 }
 
 interface Contact {
@@ -95,6 +97,10 @@ export default function BroadcastsPage() {
   const [recipients, setRecipients] = useState<Recipient[]>([])
   const [searchContacts, setSearchContacts] = useState('')
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set())
+  const [detailTab, setDetailTab] = useState<'recipients' | 'chart'>('recipients')
+  const [showDuplicateModal, setShowDuplicateModal] = useState(false)
+  const [duplicateMessage, setDuplicateMessage] = useState('')
+  const [duplicateCampaign, setDuplicateCampaign] = useState<Campaign | null>(null)
 
   const [formData, setFormData] = useState({
     name: '',
@@ -284,6 +290,7 @@ export default function BroadcastsPage() {
 
   const handleViewRecipients = async (campaign: Campaign) => {
     setSelectedCampaign(campaign)
+    setDetailTab('recipients')
     try {
       const res = await fetch(`/api/campaigns/${campaign.id}/recipients`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -295,6 +302,47 @@ export default function BroadcastsPage() {
     }
     setShowDetailModal(true)
   }
+
+  const handleDuplicate = async () => {
+    if (!duplicateCampaign) return
+    try {
+      const res = await fetch(`/api/campaigns/${duplicateCampaign.id}/duplicate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ message_template: duplicateMessage || null }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowDuplicateModal(false)
+        setDuplicateMessage('')
+        setDuplicateCampaign(null)
+        fetchCampaigns()
+      } else {
+        alert(data.error || 'Error al duplicar')
+      }
+    } catch (err) {
+      alert('Error al duplicar campaña')
+    }
+  }
+
+  // Auto-refresh detail modal when campaign is running
+  useEffect(() => {
+    if (!showDetailModal || !selectedCampaign) return
+    if (selectedCampaign.status !== 'running') return
+    const interval = setInterval(async () => {
+      try {
+        const [campRes, recRes] = await Promise.all([
+          fetch(`/api/campaigns/${selectedCampaign.id}`, { headers: { Authorization: `Bearer ${token}` } }),
+          fetch(`/api/campaigns/${selectedCampaign.id}/recipients`, { headers: { Authorization: `Bearer ${token}` } }),
+        ])
+        const campData = await campRes.json()
+        const recData = await recRes.json()
+        if (campData.success) setSelectedCampaign(campData.campaign)
+        if (recData.success) setRecipients(recData.recipients || [])
+      } catch {}
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [showDetailModal, selectedCampaign?.id, selectedCampaign?.status, token])
 
   const resetForm = () => {
     setFormData({
@@ -449,6 +497,17 @@ export default function BroadcastsPage() {
                       title="Ver detalles"
                     >
                       <Eye className="w-5 h-5" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setDuplicateCampaign(campaign)
+                        setDuplicateMessage(campaign.message_template)
+                        setShowDuplicateModal(true)
+                      }}
+                      className="p-2 text-purple-600 hover:bg-purple-50 rounded-lg transition"
+                      title="Duplicar campaña"
+                    >
+                      <Copy className="w-5 h-5" />
                     </button>
                     {(campaign.status === 'draft' || campaign.status === 'completed' || campaign.status === 'failed') && (
                       <button
@@ -768,7 +827,7 @@ export default function BroadcastsPage() {
       {/* Campaign Detail Modal */}
       {showDetailModal && selectedCampaign && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[90vh] flex flex-col">
+          <div className="bg-white rounded-xl p-6 w-full max-w-2xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-gray-900">{selectedCampaign.name}</h2>
               <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[selectedCampaign.status]}`}>
@@ -799,36 +858,174 @@ export default function BroadcastsPage() {
               </div>
             </div>
 
-            {/* Recipients list */}
-            <h3 className="text-sm font-medium text-gray-700 mt-4 mb-2">
-              Destinatarios ({recipients.length})
-            </h3>
-            <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0 max-h-60">
-              {recipients.map(rec => (
-                <div key={rec.id} className="flex items-center justify-between p-2.5 text-sm">
-                  <div className="min-w-0">
-                    <p className="font-medium text-gray-900 truncate">{rec.name || rec.jid.replace('@s.whatsapp.net', '')}</p>
-                    <p className="text-xs text-gray-400">{rec.phone || rec.jid.replace('@s.whatsapp.net', '')}</p>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                    {rec.status === 'sent' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
-                    {rec.status === 'failed' && (
-                      <span title={rec.error_message || ''}>
-                        <XCircle className="w-4 h-4 text-red-500" />
-                      </span>
-                    )}
-                    {rec.status === 'pending' && <Clock className="w-4 h-4 text-gray-400" />}
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${
-                      rec.status === 'sent' ? 'bg-green-100 text-green-700' :
-                      rec.status === 'failed' ? 'bg-red-100 text-red-700' :
-                      'bg-gray-100 text-gray-600'
-                    }`}>
-                      {rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente'}
-                    </span>
-                  </div>
-                </div>
-              ))}
+            {/* Tabs */}
+            <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit mt-4 mb-3">
+              <button
+                onClick={() => setDetailTab('recipients')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  detailTab === 'recipients' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" /> Destinatarios ({recipients.length})
+              </button>
+              <button
+                onClick={() => setDetailTab('chart')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  detailTab === 'chart' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" /> Tiempos de Espera
+              </button>
             </div>
+
+            {detailTab === 'recipients' ? (
+              <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0 max-h-72">
+                {recipients.map((rec, idx) => (
+                  <div key={rec.id} className="flex items-center justify-between p-2.5 text-sm">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-300 w-5 text-right shrink-0">{idx + 1}</span>
+                        <div className="min-w-0">
+                          <p className="font-medium text-gray-900 truncate">{rec.name || rec.jid.replace('@s.whatsapp.net', '')}</p>
+                          <div className="flex items-center gap-2 text-xs text-gray-400">
+                            <span>{rec.phone || rec.jid.replace('@s.whatsapp.net', '')}</span>
+                            {rec.sent_at && (
+                              <span className="text-green-600">
+                                {format(new Date(rec.sent_at), 'HH:mm:ss', { locale: es })}
+                              </span>
+                            )}
+                            {rec.wait_time_ms != null && rec.wait_time_ms > 0 && (
+                              <span className="text-blue-500">
+                                espera: {(rec.wait_time_ms / 1000).toFixed(1)}s
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                      {rec.status === 'sent' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
+                      {rec.status === 'failed' && (
+                        <span title={rec.error_message || ''}>
+                          <XCircle className="w-4 h-4 text-red-500" />
+                        </span>
+                      )}
+                      {rec.status === 'pending' && <Clock className="w-4 h-4 text-gray-400" />}
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${
+                        rec.status === 'sent' ? 'bg-green-100 text-green-700' :
+                        rec.status === 'failed' ? 'bg-red-100 text-red-700' :
+                        'bg-gray-100 text-gray-600'
+                      }`}>
+                        {rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex-1 min-h-0 max-h-72 overflow-hidden">
+                {(() => {
+                  const sentRecipients = recipients.filter(r => r.wait_time_ms != null && r.wait_time_ms > 0)
+                  if (sentRecipients.length < 2) {
+                    return (
+                      <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
+                        Se necesitan al menos 2 mensajes enviados para mostrar el gráfico
+                      </div>
+                    )
+                  }
+                  const waitTimes = sentRecipients.map(r => r.wait_time_ms! / 1000)
+                  const maxWait = Math.max(...waitTimes)
+                  const minWait = Math.min(...waitTimes)
+                  const avgWait = waitTimes.reduce((a, b) => a + b, 0) / waitTimes.length
+                  const configMin = selectedCampaign.settings?.min_delay_seconds || 8
+                  const configMax = selectedCampaign.settings?.max_delay_seconds || 15
+
+                  const chartW = 600
+                  const chartH = 200
+                  const padL = 45
+                  const padR = 15
+                  const padT = 20
+                  const padB = 30
+                  const plotW = chartW - padL - padR
+                  const plotH = chartH - padT - padB
+                  const yMax = Math.max(maxWait, configMax) * 1.15
+                  const yMin = 0
+
+                  const points = waitTimes.map((v, i) => ({
+                    x: padL + (i / (waitTimes.length - 1)) * plotW,
+                    y: padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH,
+                  }))
+                  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
+
+                  const configMinY = padT + plotH - ((configMin - yMin) / (yMax - yMin)) * plotH
+                  const configMaxY = padT + plotH - ((configMax - yMin) / (yMax - yMin)) * plotH
+                  const avgY = padT + plotH - ((avgWait - yMin) / (yMax - yMin)) * plotH
+
+                  // Y-axis ticks
+                  const yTicks = 5
+                  const yTickValues = Array.from({ length: yTicks + 1 }, (_, i) => yMin + (yMax - yMin) * (i / yTicks))
+
+                  return (
+                    <div>
+                      <div className="flex flex-wrap gap-4 mb-3 text-xs">
+                        <span className="flex items-center gap-1">
+                          <span className="w-3 h-0.5 bg-green-500 inline-block" /> Tiempo real
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="w-3 h-0.5 bg-blue-400 inline-block border-dashed" style={{borderTop:'1px dashed'}} /> Config mín ({configMin}s)
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="w-3 h-0.5 bg-red-400 inline-block" style={{borderTop:'1px dashed'}} /> Config máx ({configMax}s)
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="w-3 h-0.5 bg-amber-500 inline-block" style={{borderTop:'1px dashed'}} /> Promedio ({avgWait.toFixed(1)}s)
+                        </span>
+                        <span>Mín: {minWait.toFixed(1)}s · Máx: {maxWait.toFixed(1)}s</span>
+                      </div>
+                      <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full" style={{ maxHeight: '220px' }}>
+                        {/* Grid lines */}
+                        {yTickValues.map((v, i) => {
+                          const y = padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH
+                          return (
+                            <g key={i}>
+                              <line x1={padL} y1={y} x2={chartW - padR} y2={y} stroke="#e5e7eb" strokeWidth="0.5" />
+                              <text x={padL - 5} y={y + 3} textAnchor="end" className="fill-gray-400" fontSize="9">{v.toFixed(0)}s</text>
+                            </g>
+                          )
+                        })}
+                        {/* Config min line */}
+                        <line x1={padL} y1={configMinY} x2={chartW - padR} y2={configMinY}
+                          stroke="#60a5fa" strokeWidth="1" strokeDasharray="4 3" />
+                        {/* Config max line */}
+                        <line x1={padL} y1={configMaxY} x2={chartW - padR} y2={configMaxY}
+                          stroke="#f87171" strokeWidth="1" strokeDasharray="4 3" />
+                        {/* Average line */}
+                        <line x1={padL} y1={avgY} x2={chartW - padR} y2={avgY}
+                          stroke="#f59e0b" strokeWidth="1" strokeDasharray="3 3" />
+                        {/* Data line */}
+                        <path d={pathD} fill="none" stroke="#22c55e" strokeWidth="2" strokeLinejoin="round" />
+                        {/* Data points */}
+                        {points.map((p, i) => (
+                          <circle key={i} cx={p.x} cy={p.y} r="3" fill="#22c55e" stroke="white" strokeWidth="1" />
+                        ))}
+                        {/* X axis */}
+                        <line x1={padL} y1={padT + plotH} x2={chartW - padR} y2={padT + plotH} stroke="#d1d5db" strokeWidth="1" />
+                        <text x={chartW / 2} y={chartH - 5} textAnchor="middle" className="fill-gray-400" fontSize="9">
+                          Mensaje # (1 a {waitTimes.length})
+                        </text>
+                      </svg>
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
+
+            {selectedCampaign.status === 'running' && (
+              <div className="mt-2 flex items-center gap-2 text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2">
+                <div className="animate-spin rounded-full h-3 w-3 border-b border-amber-600" />
+                Actualizando en tiempo real cada 5 segundos...
+              </div>
+            )}
 
             <button
               onClick={() => { setShowDetailModal(false); setRecipients([]) }}
@@ -836,6 +1033,45 @@ export default function BroadcastsPage() {
             >
               Cerrar
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Duplicate Campaign Modal */}
+      {showDuplicateModal && duplicateCampaign && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-lg">
+            <h2 className="text-xl font-bold text-gray-900 mb-1">Duplicar Campaña</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              Se creará una copia de &quot;{duplicateCampaign.name}&quot; con los mismos destinatarios y configuración.
+            </p>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Mensaje (puedes editarlo)</label>
+              <textarea
+                value={duplicateMessage}
+                onChange={e => setDuplicateMessage(e.target.value)}
+                rows={5}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900"
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Variables: {'{{nombre}}'}, {'{{telefono}}'} se reemplazan automáticamente
+              </p>
+            </div>
+            <div className="flex gap-3 mt-4">
+              <button
+                onClick={() => { setShowDuplicateModal(false); setDuplicateMessage(''); setDuplicateCampaign(null) }}
+                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleDuplicate}
+                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
+              >
+                <Copy className="w-4 h-4 inline mr-2" />
+                Duplicar
+              </button>
+            </div>
           </div>
         </div>
       )}

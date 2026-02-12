@@ -219,6 +219,7 @@ func (s *Server) setupRoutes() {
 	campaigns.Get("/:id/recipients", s.handleGetCampaignRecipients)
 	campaigns.Post("/:id/start", s.handleStartCampaign)
 	campaigns.Post("/:id/pause", s.handlePauseCampaign)
+	campaigns.Post("/:id/duplicate", s.handleDuplicateCampaign)
 
 	// Contact routes
 	contacts := protected.Group("/contacts")
@@ -1747,6 +1748,22 @@ func (s *Server) handlePauseCampaign(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "Campaign paused"})
+}
+
+func (s *Server) handleDuplicateCampaign(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	var req struct {
+		MessageTemplate *string `json:"message_template"`
+	}
+	c.BodyParser(&req)
+	newCampaign, err := s.services.Campaign.Duplicate(c.Context(), id, req.MessageTemplate)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "campaign": newCampaign})
 }
 
 // --- Event Handlers ---
