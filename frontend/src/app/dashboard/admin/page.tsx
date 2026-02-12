@@ -136,8 +136,16 @@ export default function AdminPage() {
   }
 
   async function deleteAccount(id: string) {
-    if (!confirm('¿Eliminar esta cuenta y todos sus datos? Esta acción no se puede deshacer.')) return
-    await fetch(`/api/admin/accounts/${id}`, { method: 'DELETE', headers })
+    const account = accounts.find(a => a.id === id)
+    if (!account) return
+    if (account.device_count > 0 || account.chat_count > 0 || account.user_count > 0) {
+      alert('No se puede eliminar una cuenta que tiene dispositivos, chats o usuarios. Elimine primero esos recursos.')
+      return
+    }
+    if (!confirm(`¿Eliminar la cuenta "${account.name}"? Esta acción no se puede deshacer.`)) return
+    const res = await fetch(`/api/admin/accounts/${id}`, { method: 'DELETE', headers })
+    const data = await res.json()
+    if (!data.success) { alert(data.error || 'Error al eliminar'); return }
     fetchAccounts()
     fetchUsers()
   }
@@ -188,8 +196,16 @@ export default function AdminPage() {
   }
 
   async function deleteUser(id: string) {
-    if (!confirm('¿Eliminar este usuario? Esta acción no se puede deshacer.')) return
-    await fetch(`/api/admin/users/${id}`, { method: 'DELETE', headers })
+    const user = users.find(u => u.id === id)
+    if (!user) return
+    if (user.is_super_admin) {
+      alert('No se puede eliminar un super administrador')
+      return
+    }
+    if (!confirm(`¿Eliminar al usuario "${user.display_name || user.username}"? Esta acción no se puede deshacer.`)) return
+    const res = await fetch(`/api/admin/users/${id}`, { method: 'DELETE', headers })
+    const data = await res.json()
+    if (!data.success) { alert(data.error || 'Error al eliminar'); return }
     fetchUsers()
   }
 

@@ -2567,6 +2567,21 @@ func (s *Server) handleAdminDeleteAccount(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
 	}
 
+	// Safety: prevent deleting account that has devices, chats, or contacts
+	account, err := s.services.Account.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if account == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Account not found"})
+	}
+	if account.DeviceCount > 0 || account.ChatCount > 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se puede eliminar una cuenta que tiene dispositivos o chats. Elimine primero los dispositivos."})
+	}
+	if account.UserCount > 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se puede eliminar una cuenta que tiene usuarios. Elimine primero los usuarios."})
+	}
+
 	if err := s.services.Account.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -2719,6 +2734,21 @@ func (s *Server) handleAdminDeleteUser(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+
+	// Safety: cannot delete yourself
+	claims := c.Locals("claims").(*service.JWTClaims)
+	if claims.UserID == id {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No puedes eliminar tu propia cuenta de usuario"})
+	}
+
+	// Safety: cannot delete a super admin
+	user, err := s.services.Auth.GetUser(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if user != nil && user.IsSuperAdmin {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se puede eliminar un super administrador"})
 	}
 
 	if err := s.services.Account.DeleteUser(c.Context(), id); err != nil {
