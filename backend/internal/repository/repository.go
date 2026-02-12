@@ -14,6 +14,7 @@ import (
 type Repositories struct {
 	db                *pgxpool.Pool
 	User              *UserRepository
+	UserAccount       *UserAccountRepository
 	Account           *AccountRepository
 	Device            *DeviceRepository
 	Chat              *ChatRepository
@@ -34,6 +35,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 	return &Repositories{
 		db:                db,
 		User:              &UserRepository{db: db},
+		UserAccount:       &UserAccountRepository{db: db},
 		Account:           &AccountRepository{db: db},
 		Device:            &DeviceRepository{db: db},
 		Chat:              &ChatRepository{db: db},
@@ -168,6 +170,98 @@ func (r *UserRepository) ToggleActive(ctx context.Context, userID uuid.UUID) err
 
 func (r *UserRepository) Delete(ctx context.Context, userID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
+	return err
+}
+
+// UserAccountRepository handles user-account assignments (many-to-many)
+type UserAccountRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
+		       a.name, COALESCE(a.slug, '')
+		FROM user_accounts ua
+		JOIN accounts a ON a.id = ua.account_id
+		WHERE ua.user_id = $1
+		ORDER BY ua.is_default DESC, a.name ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []*domain.UserAccount
+	for rows.Next() {
+		ua := &domain.UserAccount{}
+		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
+			&ua.AccountName, &ua.AccountSlug); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, ua)
+	}
+	return accounts, nil
+}
+
+func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.UserAccount, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
+		       a.name, COALESCE(a.slug, '')
+		FROM user_accounts ua
+		JOIN accounts a ON a.id = ua.account_id
+		WHERE ua.account_id = $1
+		ORDER BY ua.created_at ASC
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []*domain.UserAccount
+	for rows.Next() {
+		ua := &domain.UserAccount{}
+		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
+			&ua.AccountName, &ua.AccountSlug); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, ua)
+	}
+	return accounts, nil
+}
+
+func (r *UserAccountRepository) Exists(ctx context.Context, userID, accountID uuid.UUID) (bool, error) {
+	var count int
+	err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM user_accounts WHERE user_id = $1 AND account_id = $2`, userID, accountID).Scan(&count)
+	return count > 0, err
+}
+
+func (r *UserAccountRepository) Assign(ctx context.Context, ua *domain.UserAccount) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO user_accounts (user_id, account_id, role, is_default)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, account_id) DO UPDATE SET role = EXCLUDED.role
+		RETURNING id, created_at
+	`, ua.UserID, ua.AccountID, ua.Role, ua.IsDefault).Scan(&ua.ID, &ua.CreatedAt)
+}
+
+func (r *UserAccountRepository) UpdateRole(ctx context.Context, userID, accountID uuid.UUID, role string) error {
+	_, err := r.db.Exec(ctx, `UPDATE user_accounts SET role = $3 WHERE user_id = $1 AND account_id = $2`, userID, accountID, role)
+	return err
+}
+
+func (r *UserAccountRepository) Remove(ctx context.Context, userID, accountID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM user_accounts WHERE user_id = $1 AND account_id = $2`, userID, accountID)
+	return err
+}
+
+func (r *UserAccountRepository) SetDefault(ctx context.Context, userID, accountID uuid.UUID) error {
+	// Unset all defaults for this user, then set the new one
+	_, err := r.db.Exec(ctx, `UPDATE user_accounts SET is_default = FALSE WHERE user_id = $1`, userID)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `UPDATE user_accounts SET is_default = TRUE WHERE user_id = $1 AND account_id = $2`, userID, accountID)
 	return err
 }
 

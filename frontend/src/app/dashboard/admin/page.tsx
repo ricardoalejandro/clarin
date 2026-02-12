@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { 
   Building2, Users, Plus, Pencil, Trash2, Power, KeyRound, 
-  Search, X, Shield, ChevronDown 
+  Search, X, Shield, ChevronDown, Link2 
 } from 'lucide-react'
 
 interface Account {
@@ -33,6 +33,14 @@ interface User {
   created_at: string
 }
 
+interface UserAccountAssignment {
+  account_id: string
+  account_name: string
+  account_slug: string
+  role: string
+  is_default: boolean
+}
+
 type Tab = 'accounts' | 'users'
 
 export default function AdminPage() {
@@ -51,6 +59,14 @@ export default function AdminPage() {
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [passwordUserId, setPasswordUserId] = useState('')
   const [newPassword, setNewPassword] = useState('')
+
+  // Account assignments modal
+  const [showAssignModal, setShowAssignModal] = useState(false)
+  const [assignUserId, setAssignUserId] = useState('')
+  const [assignUserName, setAssignUserName] = useState('')
+  const [userAssignments, setUserAssignments] = useState<UserAccountAssignment[]>([])
+  const [assignAccountId, setAssignAccountId] = useState('')
+  const [assignRole, setAssignRole] = useState('agent')
 
   // Account form
   const [accountForm, setAccountForm] = useState({
@@ -221,6 +237,55 @@ export default function AdminPage() {
       alert('Contraseña actualizada')
     } else {
       alert(data.error || 'Error')
+    }
+  }
+
+  // Account assignments
+  async function openAssignModal(u: User) {
+    setAssignUserId(u.id)
+    setAssignUserName(u.display_name || u.username)
+    setAssignAccountId('')
+    setAssignRole('agent')
+    setShowAssignModal(true)
+    await fetchUserAssignments(u.id)
+  }
+
+  async function fetchUserAssignments(userId: string) {
+    try {
+      const res = await fetch(`/api/admin/users/${userId}/accounts`, { headers })
+      const data = await res.json()
+      if (data.success) setUserAssignments(data.accounts || [])
+    } catch (e) {
+      console.error('Failed to fetch user accounts:', e)
+    }
+  }
+
+  async function assignAccount() {
+    if (!assignAccountId) return
+    const res = await fetch(`/api/admin/users/${assignUserId}/accounts`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ account_id: assignAccountId, role: assignRole })
+    })
+    const data = await res.json()
+    if (data.success) {
+      setAssignAccountId('')
+      setAssignRole('agent')
+      await fetchUserAssignments(assignUserId)
+    } else {
+      alert(data.error || 'Error al asignar')
+    }
+  }
+
+  async function removeAssignment(accountId: string) {
+    if (!confirm('¿Quitar esta cuenta del usuario?')) return
+    const res = await fetch(`/api/admin/users/${assignUserId}/accounts/${accountId}`, {
+      method: 'DELETE', headers
+    })
+    const data = await res.json()
+    if (data.success) {
+      await fetchUserAssignments(assignUserId)
+    } else {
+      alert(data.error || 'Error al quitar')
     }
   }
 
@@ -428,6 +493,9 @@ export default function AdminPage() {
                       <button onClick={() => openEditUser(u)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded" title="Editar">
                         <Pencil className="w-4 h-4" />
                       </button>
+                      <button onClick={() => openAssignModal(u)} className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded" title="Gestionar cuentas">
+                        <Link2 className="w-4 h-4" />
+                      </button>
                       <button onClick={() => { setPasswordUserId(u.id); setNewPassword(''); setShowPasswordModal(true) }} className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded" title="Cambiar contraseña">
                         <KeyRound className="w-4 h-4" />
                       </button>
@@ -628,6 +696,93 @@ export default function AdminPage() {
               </button>
               <button onClick={resetPassword} className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
                 Cambiar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Account Assignments Modal */}
+      {showAssignModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg">
+            <div className="p-6 border-b border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-900">
+                Cuentas de {assignUserName}
+              </h2>
+              <p className="text-sm text-gray-500 mt-1">Gestiona las cuentas asignadas a este usuario</p>
+            </div>
+            <div className="p-6 space-y-4">
+              {/* Current assignments */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Cuentas asignadas</label>
+                {userAssignments.length === 0 ? (
+                  <p className="text-sm text-gray-400 py-2">Sin cuentas asignadas</p>
+                ) : (
+                  <div className="space-y-2">
+                    {userAssignments.map(ua => (
+                      <div key={ua.account_id} className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
+                        <div className="flex items-center gap-2">
+                          <Building2 className="w-4 h-4 text-gray-400" />
+                          <span className="text-sm font-medium text-gray-900">{ua.account_name}</span>
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${roleColors[ua.role] || 'bg-gray-100 text-gray-700'}`}>
+                            {roleLabels[ua.role] || ua.role}
+                          </span>
+                          {ua.is_default && (
+                            <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
+                              Principal
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => removeAssignment(ua.account_id)}
+                          className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"
+                          title="Quitar cuenta"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Add new assignment */}
+              <div className="border-t border-gray-200 pt-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Agregar cuenta</label>
+                <div className="flex gap-2">
+                  <select
+                    value={assignAccountId}
+                    onChange={e => setAssignAccountId(e.target.value)}
+                    className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  >
+                    <option value="">Seleccionar cuenta...</option>
+                    {accounts.filter(a => a.is_active && !userAssignments.some(ua => ua.account_id === a.id)).map(a => (
+                      <option key={a.id} value={a.id}>{a.name}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={assignRole}
+                    onChange={e => setAssignRole(e.target.value)}
+                    className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  >
+                    <option value="agent">Agente</option>
+                    <option value="admin">Admin</option>
+                    <option value="super_admin">Super Admin</option>
+                  </select>
+                  <button
+                    onClick={assignAccount}
+                    disabled={!assignAccountId}
+                    className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="p-6 border-t border-gray-200 flex justify-end">
+              <button onClick={() => setShowAssignModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
+                Cerrar
               </button>
             </div>
           </div>

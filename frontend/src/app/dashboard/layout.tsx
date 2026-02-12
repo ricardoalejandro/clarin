@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { 
@@ -20,7 +20,9 @@ import {
   Radio,
   Tags,
   CalendarDays,
-  Shield
+  Shield,
+  ChevronsUpDown,
+  Building2
 } from 'lucide-react'
 
 interface User {
@@ -30,6 +32,16 @@ interface User {
   is_admin: boolean
   is_super_admin: boolean
   role: string
+  account_id: string
+  account_name: string
+}
+
+interface UserAccount {
+  account_id: string
+  account_name: string
+  account_slug: string
+  role: string
+  is_default: boolean
 }
 
 export default function DashboardLayout({
@@ -40,9 +52,22 @@ export default function DashboardLayout({
   const router = useRouter()
   const pathname = usePathname()
   const [user, setUser] = useState<User | null>(null)
+  const [accounts, setAccounts] = useState<UserAccount[]>([])
   const [loading, setLoading] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [showAccountSwitcher, setShowAccountSwitcher] = useState(false)
+  const accountSwitcherRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (accountSwitcherRef.current && !accountSwitcherRef.current.contains(e.target as Node)) {
+        setShowAccountSwitcher(false)
+      }
+    }
+    if (showAccountSwitcher) document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showAccountSwitcher])
 
   useEffect(() => {
     const saved = localStorage.getItem('sidebar_collapsed')
@@ -77,6 +102,7 @@ export default function DashboardLayout({
         const data = await res.json()
         if (data.success) {
           setUser(data.user)
+          if (data.accounts) setAccounts(data.accounts)
         } else {
           router.push('/')
         }
@@ -94,6 +120,28 @@ export default function DashboardLayout({
     localStorage.removeItem('token')
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
     router.push('/')
+  }
+
+  const handleSwitchAccount = async (accountId: string) => {
+    const token = localStorage.getItem('token')
+    if (!token) return
+    try {
+      const res = await fetch('/api/auth/switch-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ account_id: accountId }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        localStorage.setItem('token', data.token)
+        setUser(data.user)
+        setShowAccountSwitcher(false)
+        // Reload the page to refresh all data with new account context
+        window.location.href = '/dashboard'
+      }
+    } catch (e) {
+      console.error('Failed to switch account:', e)
+    }
   }
 
   const navItems = [
@@ -188,6 +236,43 @@ export default function DashboardLayout({
             )
           })}
         </nav>
+
+        {/* Account switcher */}
+        {accounts.length > 1 && (
+          <div ref={accountSwitcherRef} className={`shrink-0 border-t border-gray-200 ${sidebarCollapsed ? 'p-2' : 'p-3'} relative`}>
+            <button
+              onClick={() => setShowAccountSwitcher(!showAccountSwitcher)}
+              title={sidebarCollapsed ? (user.account_name || 'Cambiar cuenta') : undefined}
+              className={`w-full flex items-center ${sidebarCollapsed ? 'justify-center p-2' : 'gap-2 px-3 py-2'} rounded-lg hover:bg-gray-100 transition-colors text-gray-700`}
+            >
+              <Building2 className="w-4 h-4 shrink-0" />
+              {!sidebarCollapsed && (
+                <>
+                  <span className="flex-1 text-left text-sm truncate">{user.account_name || 'Cuenta'}</span>
+                  <ChevronsUpDown className="w-4 h-4 shrink-0 text-gray-400" />
+                </>
+              )}
+            </button>
+            {showAccountSwitcher && (
+              <div className={`absolute ${sidebarCollapsed ? 'left-full ml-2 bottom-0' : 'left-3 right-3 bottom-full mb-1'} bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1`}>
+                <div className="px-3 py-1.5 text-xs font-medium text-gray-400 uppercase">Cambiar cuenta</div>
+                {accounts.map((acc) => (
+                  <button
+                    key={acc.account_id}
+                    onClick={() => handleSwitchAccount(acc.account_id)}
+                    className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 ${
+                      acc.account_id === user.account_id ? 'text-green-700 bg-green-50 font-medium' : 'text-gray-700'
+                    }`}
+                  >
+                    <Building2 className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">{acc.account_name}</span>
+                    {acc.account_id === user.account_id && <span className="ml-auto text-xs text-green-600">●</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* User section */}
         <div className="shrink-0 p-4 border-t border-gray-200">

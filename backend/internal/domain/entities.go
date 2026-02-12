@@ -49,6 +49,20 @@ const (
 	RoleAgent      = "agent"
 )
 
+// UserAccount represents a user's assignment to an account (many-to-many)
+type UserAccount struct {
+	ID          uuid.UUID `json:"id"`
+	UserID      uuid.UUID `json:"user_id"`
+	AccountID   uuid.UUID `json:"account_id"`
+	Role        string    `json:"role"`
+	IsDefault   bool      `json:"is_default"`
+	CreatedAt   time.Time `json:"created_at"`
+
+	// Populated on demand
+	AccountName string `json:"account_name,omitempty"`
+	AccountSlug string `json:"account_slug,omitempty"`
+}
+
 // Device represents a WhatsApp connection
 type Device struct {
 	ID         uuid.UUID  `json:"id"`

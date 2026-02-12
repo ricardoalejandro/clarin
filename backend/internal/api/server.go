@@ -144,7 +144,9 @@ func (s *Server) setupRoutes() {
 
 	// User routes
 	protected.Get("/me", s.handleGetMe)
+	protected.Get("/me/accounts", s.handleGetMyAccounts)
 	protected.Post("/auth/logout", s.handleLogout)
+	protected.Post("/auth/switch-account", s.handleSwitchAccount)
 
 	// Device routes
 	devices := protected.Group("/devices")
@@ -285,6 +287,11 @@ func (s *Server) setupRoutes() {
 	adminUsers.Patch("/:id/toggle", s.handleAdminToggleUser)
 	adminUsers.Patch("/:id/password", s.handleAdminResetPassword)
 	adminUsers.Delete("/:id", s.handleAdminDeleteUser)
+
+	// User-Account assignments
+	adminUsers.Get("/:id/accounts", s.handleAdminGetUserAccounts)
+	adminUsers.Post("/:id/accounts", s.handleAdminAssignUserAccount)
+	adminUsers.Delete("/:id/accounts/:account_id", s.handleAdminRemoveUserAccount)
 }
 
 // Auth middleware
@@ -360,7 +367,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
-	token, user, err := s.services.Auth.Login(c.Context(), req.Username, req.Password, s.cfg.JWTSecret)
+	token, user, userAccounts, err := s.services.Auth.Login(c.Context(), req.Username, req.Password, s.cfg.JWTSecret)
 	if err != nil {
 		return c.Status(401).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -374,6 +381,18 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		Secure:   s.cfg.IsProduction(),
 		SameSite: "Lax",
 	})
+
+	// Build accounts list for response
+	accountsList := make([]fiber.Map, 0)
+	for _, ua := range userAccounts {
+		accountsList = append(accountsList, fiber.Map{
+			"account_id":   ua.AccountID,
+			"account_name": ua.AccountName,
+			"account_slug": ua.AccountSlug,
+			"role":         ua.Role,
+			"is_default":   ua.IsDefault,
+		})
+	}
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -389,6 +408,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 			"account_id":     user.AccountID,
 			"account_name":   user.AccountName,
 		},
+		"accounts": accountsList,
 	})
 }
 
@@ -403,9 +423,27 @@ func (s *Server) handleLogout(c *fiber.Ctx) error {
 
 func (s *Server) handleGetMe(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(uuid.UUID)
+	accountID := c.Locals("account_id").(uuid.UUID)
 	user, err := s.services.Auth.GetUser(c.Context(), userID)
 	if err != nil || user == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "User not found"})
+	}
+
+	// Get user's accounts
+	userAccounts, _ := s.services.Auth.GetUserAccounts(c.Context(), userID)
+	accountsList := make([]fiber.Map, 0)
+	activeAccountName := user.AccountName
+	for _, ua := range userAccounts {
+		accountsList = append(accountsList, fiber.Map{
+			"account_id":   ua.AccountID,
+			"account_name": ua.AccountName,
+			"account_slug": ua.AccountSlug,
+			"role":         ua.Role,
+			"is_default":   ua.IsDefault,
+		})
+		if ua.AccountID == accountID {
+			activeAccountName = ua.AccountName
+		}
 	}
 
 	return c.JSON(fiber.Map{
@@ -418,9 +456,10 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 			"is_admin":       user.IsAdmin,
 			"is_super_admin": user.IsSuperAdmin,
 			"role":           user.Role,
-			"account_id":     user.AccountID,
-			"account_name":   user.AccountName,
+			"account_id":     accountID,
+			"account_name":   activeAccountName,
 		},
+		"accounts": accountsList,
 	})
 }
 
@@ -2752,6 +2791,160 @@ func (s *Server) handleAdminDeleteUser(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Account.DeleteUser(c.Context(), id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// --- Switch Account Handler ---
+
+func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(uuid.UUID)
+
+	var req struct {
+		AccountID string `json:"account_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	targetAccountID, err := uuid.Parse(req.AccountID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
+	}
+
+	token, user, err := s.services.Auth.SwitchAccount(c.Context(), userID, targetAccountID, s.cfg.JWTSecret)
+	if err != nil {
+		return c.Status(403).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	// Set cookie
+	c.Cookie(&fiber.Cookie{
+		Name:     "auth-token",
+		Value:    token,
+		Expires:  time.Now().Add(24 * 7 * time.Hour),
+		HTTPOnly: true,
+		Secure:   s.cfg.IsProduction(),
+		SameSite: "Lax",
+	})
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"token":   token,
+		"user": fiber.Map{
+			"id":             user.ID,
+			"username":       user.Username,
+			"email":          user.Email,
+			"display_name":   user.DisplayName,
+			"is_admin":       user.IsAdmin,
+			"is_super_admin": user.IsSuperAdmin,
+			"role":           user.Role,
+			"account_id":     user.AccountID,
+			"account_name":   user.AccountName,
+		},
+	})
+}
+
+func (s *Server) handleGetMyAccounts(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(uuid.UUID)
+
+	userAccounts, err := s.services.Auth.GetUserAccounts(c.Context(), userID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	accountsList := make([]fiber.Map, 0)
+	for _, ua := range userAccounts {
+		accountsList = append(accountsList, fiber.Map{
+			"account_id":   ua.AccountID,
+			"account_name": ua.AccountName,
+			"account_slug": ua.AccountSlug,
+			"role":         ua.Role,
+			"is_default":   ua.IsDefault,
+		})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "accounts": accountsList})
+}
+
+// --- Admin User-Account Assignment Handlers ---
+
+func (s *Server) handleAdminGetUserAccounts(c *fiber.Ctx) error {
+	userID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid user ID"})
+	}
+
+	userAccounts, err := s.services.Auth.GetUserAccounts(c.Context(), userID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	accountsList := make([]fiber.Map, 0)
+	for _, ua := range userAccounts {
+		accountsList = append(accountsList, fiber.Map{
+			"id":           ua.ID,
+			"account_id":   ua.AccountID,
+			"account_name": ua.AccountName,
+			"role":         ua.Role,
+			"is_default":   ua.IsDefault,
+		})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "accounts": accountsList})
+}
+
+func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
+	userID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid user ID"})
+	}
+
+	var req struct {
+		AccountID string `json:"account_id"`
+		Role      string `json:"role"`
+		IsDefault bool   `json:"is_default"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	accountID, err := uuid.Parse(req.AccountID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
+	}
+
+	if req.Role == "" {
+		req.Role = domain.RoleAgent
+	}
+
+	ua := &domain.UserAccount{
+		UserID:    userID,
+		AccountID: accountID,
+		Role:      req.Role,
+		IsDefault: req.IsDefault,
+	}
+
+	if err := s.services.Account.AssignUserAccount(c.Context(), ua); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAdminRemoveUserAccount(c *fiber.Ctx) error {
+	userID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid user ID"})
+	}
+
+	accountID, err := uuid.Parse(c.Params("account_id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
+	}
+
+	if err := s.services.Account.RemoveUserAccount(c.Context(), userID, accountID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 

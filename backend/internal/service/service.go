@@ -60,29 +60,107 @@ type JWTClaims struct {
 	jwt.RegisteredClaims
 }
 
-func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, *domain.User, error) {
+func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, *domain.User, []*domain.UserAccount, error) {
 	user, err := s.repos.User.GetByUsername(ctx, username)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to get user: %w", err)
+		return "", nil, nil, fmt.Errorf("failed to get user: %w", err)
 	}
 	if user == nil {
-		return "", nil, fmt.Errorf("invalid credentials")
+		return "", nil, nil, fmt.Errorf("invalid credentials")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return "", nil, fmt.Errorf("invalid credentials")
+		return "", nil, nil, fmt.Errorf("invalid credentials")
 	}
 
-	// Generate JWT
+	// Get user's account assignments
+	userAccounts, _ := s.repos.UserAccount.GetByUserID(ctx, user.ID)
+
+	// Determine first/default account
+	activeAccountID := user.AccountID
+	activeRole := user.Role
+	if len(userAccounts) > 0 {
+		for _, ua := range userAccounts {
+			if ua.IsDefault {
+				activeAccountID = ua.AccountID
+				activeRole = ua.Role
+				break
+			}
+		}
+	}
+
+	// Generate JWT with default account
 	claims := &JWTClaims{
 		UserID:       user.ID,
-		AccountID:    user.AccountID,
+		AccountID:    activeAccountID,
 		Username:     user.Username,
 		IsAdmin:      user.IsAdmin,
 		IsSuperAdmin: user.IsSuperAdmin,
-		Role:         user.Role,
+		Role:         activeRole,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)), // 7 days
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "clarin",
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString([]byte(jwtSecret))
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	// Update user fields to match active account
+	user.AccountID = activeAccountID
+	user.Role = activeRole
+	for _, ua := range userAccounts {
+		if ua.AccountID == activeAccountID {
+			user.AccountName = ua.AccountName
+			break
+		}
+	}
+
+	return tokenString, user, userAccounts, nil
+}
+
+func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID uuid.UUID, jwtSecret string) (string, *domain.User, error) {
+	// Verify user exists
+	user, err := s.repos.User.GetByID(ctx, userID)
+	if err != nil || user == nil {
+		return "", nil, fmt.Errorf("user not found")
+	}
+
+	// Verify user has access to the target account
+	exists, err := s.repos.UserAccount.Exists(ctx, userID, targetAccountID)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to check access: %w", err)
+	}
+	if !exists {
+		return "", nil, fmt.Errorf("no tiene acceso a esta cuenta")
+	}
+
+	// Get the role for this specific account
+	userAccounts, _ := s.repos.UserAccount.GetByUserID(ctx, userID)
+	accountRole := user.Role
+	accountName := ""
+	for _, ua := range userAccounts {
+		if ua.AccountID == targetAccountID {
+			accountRole = ua.Role
+			accountName = ua.AccountName
+			break
+		}
+	}
+
+	// Generate new JWT for the target account
+	claims := &JWTClaims{
+		UserID:       user.ID,
+		AccountID:    targetAccountID,
+		Username:     user.Username,
+		IsAdmin:      user.IsAdmin,
+		IsSuperAdmin: user.IsSuperAdmin,
+		Role:         accountRole,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "clarin",
 		},
@@ -94,7 +172,16 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 		return "", nil, fmt.Errorf("failed to sign token: %w", err)
 	}
 
+	// Update user object to reflect active account
+	user.AccountID = targetAccountID
+	user.Role = accountRole
+	user.AccountName = accountName
+
 	return tokenString, user, nil
+}
+
+func (s *AuthService) GetUserAccounts(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
+	return s.repos.UserAccount.GetByUserID(ctx, userID)
 }
 
 func (s *AuthService) ValidateToken(tokenString, jwtSecret string) (*JWTClaims, error) {
@@ -159,7 +246,17 @@ func (s *AccountService) CreateUser(ctx context.Context, user *domain.User, pass
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 	user.PasswordHash = string(hashedPassword)
-	return s.repos.User.Create(ctx, user)
+	if err := s.repos.User.Create(ctx, user); err != nil {
+		return err
+	}
+	// Auto-assign user to their primary account in user_accounts
+	ua := &domain.UserAccount{
+		UserID:    user.ID,
+		AccountID: user.AccountID,
+		Role:      user.Role,
+		IsDefault: true,
+	}
+	return s.repos.UserAccount.Assign(ctx, ua)
 }
 
 func (s *AccountService) UpdateUser(ctx context.Context, user *domain.User) error {
@@ -180,6 +277,18 @@ func (s *AccountService) ToggleUserActive(ctx context.Context, userID uuid.UUID)
 
 func (s *AccountService) DeleteUser(ctx context.Context, userID uuid.UUID) error {
 	return s.repos.User.Delete(ctx, userID)
+}
+
+func (s *AccountService) AssignUserAccount(ctx context.Context, ua *domain.UserAccount) error {
+	return s.repos.UserAccount.Assign(ctx, ua)
+}
+
+func (s *AccountService) RemoveUserAccount(ctx context.Context, userID, accountID uuid.UUID) error {
+	return s.repos.UserAccount.Remove(ctx, userID, accountID)
+}
+
+func (s *AccountService) GetUserAccountAssignments(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
+	return s.repos.UserAccount.GetByUserID(ctx, userID)
 }
 
 // DeviceService handles WhatsApp devices

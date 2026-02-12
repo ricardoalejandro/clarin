@@ -385,6 +385,23 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS slug VARCHAR(255)`,
 		`UPDATE users SET is_super_admin = TRUE, role = 'super_admin' WHERE is_admin = TRUE AND account_id = (SELECT id FROM accounts ORDER BY created_at LIMIT 1) AND is_super_admin = FALSE`,
+
+		// Multi-account user assignments (user can belong to many accounts)
+		`CREATE TABLE IF NOT EXISTS user_accounts (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			role VARCHAR(50) DEFAULT 'agent',
+			is_default BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_accounts_unique ON user_accounts(user_id, account_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_accounts_user ON user_accounts(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_accounts_account ON user_accounts(account_id)`,
+		// Seed existing user-account relationships into junction table
+		`INSERT INTO user_accounts (user_id, account_id, role, is_default)
+		 SELECT id, account_id, role, TRUE FROM users
+		 ON CONFLICT (user_id, account_id) DO NOTHING`,
 	}
 
 	for _, migration := range migrations {
