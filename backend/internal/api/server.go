@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/storage"
 	"github.com/naperu/clarin/internal/whatsapp"
@@ -33,12 +35,13 @@ type Server struct {
 	app      *fiber.App
 	cfg      *config.Config
 	services *service.Services
+	repos    *repository.Repositories
 	hub      *ws.Hub
 	pool     *whatsapp.DevicePool
 	storage  *storage.Storage
 }
 
-func NewServer(cfg *config.Config, services *service.Services, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage) *Server {
+func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:               "Clarin CRM",
 		BodyLimit:             32 * 1024 * 1024, // 32MB max upload
@@ -112,6 +115,7 @@ func NewServer(cfg *config.Config, services *service.Services, hub *ws.Hub, pool
 		app:      app,
 		cfg:      cfg,
 		services: services,
+		repos:    repos,
 		hub:      hub,
 		pool:     pool,
 		storage:  store,
@@ -224,6 +228,7 @@ func (s *Server) setupRoutes() {
 	campaigns.Post("/:id/start", s.handleStartCampaign)
 	campaigns.Post("/:id/pause", s.handlePauseCampaign)
 	campaigns.Post("/:id/duplicate", s.handleDuplicateCampaign)
+	campaigns.Put("/:id/attachments", s.handleUpdateCampaignAttachments)
 
 	// Import CSV route
 	protected.Post("/import/csv", s.handleImportCSV)
@@ -1848,6 +1853,11 @@ func (s *Server) handleGetCampaigns(c *fiber.Ctx) error {
 	if campaigns == nil {
 		campaigns = make([]*domain.Campaign, 0)
 	}
+	// Load attachments for each campaign
+	for _, camp := range campaigns {
+		attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), camp.ID)
+		camp.Attachments = attachments
+	}
 	return c.JSON(fiber.Map{"success": true, "campaigns": campaigns})
 }
 
@@ -1863,12 +1873,24 @@ func (s *Server) handleCreateCampaign(c *fiber.Ctx) error {
 		Settings        map[string]interface{} `json:"settings"`
 		EventID         *string                `json:"event_id"`
 		Source          *string                `json:"source"`
+		Attachments     []struct {
+			MediaURL  string `json:"media_url"`
+			MediaType string `json:"media_type"`
+			Caption   string `json:"caption"`
+			FileName  string `json:"file_name"`
+			FileSize  int64  `json:"file_size"`
+			Position  int    `json:"position"`
+		} `json:"attachments"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	if req.Name == "" || req.DeviceID == "" || req.MessageTemplate == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "name, device_id and message_template are required"})
+	if req.Name == "" || req.DeviceID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "name and device_id are required"})
+	}
+	// At least message or attachments required
+	if req.MessageTemplate == "" && len(req.Attachments) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "message_template or attachments required"})
 	}
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
@@ -1896,6 +1918,26 @@ func (s *Server) handleCreateCampaign(c *fiber.Ctx) error {
 	if err := s.services.Campaign.Create(c.Context(), campaign); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+
+	// Save attachments if provided
+	if len(req.Attachments) > 0 {
+		var attachments []*domain.CampaignAttachment
+		for _, a := range req.Attachments {
+			attachments = append(attachments, &domain.CampaignAttachment{
+				MediaURL:  a.MediaURL,
+				MediaType: a.MediaType,
+				Caption:   a.Caption,
+				FileName:  a.FileName,
+				FileSize:  a.FileSize,
+				Position:  a.Position,
+			})
+		}
+		if err := s.repos.CampaignAttachment.CreateBatch(c.Context(), campaign.ID, attachments); err != nil {
+			log.Printf("[Campaign] Failed to save attachments: %v", err)
+		}
+		campaign.Attachments = attachments
+	}
+
 	return c.Status(201).JSON(fiber.Map{"success": true, "campaign": campaign})
 }
 
@@ -1908,6 +1950,9 @@ func (s *Server) handleGetCampaign(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	// Load attachments
+	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), id)
+	campaign.Attachments = attachments
 	return c.JSON(fiber.Map{"success": true, "campaign": campaign})
 }
 
@@ -1962,6 +2007,9 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 	if err := s.services.Campaign.Update(c.Context(), campaign); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	// Load attachments for response
+	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), campaign.ID)
+	campaign.Attachments = attachments
 	return c.JSON(fiber.Map{"success": true, "campaign": campaign})
 }
 
@@ -2064,6 +2112,46 @@ func (s *Server) handleDuplicateCampaign(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "campaign": newCampaign})
+}
+
+func (s *Server) handleUpdateCampaignAttachments(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	var req struct {
+		Attachments []struct {
+			MediaURL  string `json:"media_url"`
+			MediaType string `json:"media_type"`
+			Caption   string `json:"caption"`
+			FileName  string `json:"file_name"`
+			FileSize  int64  `json:"file_size"`
+			Position  int    `json:"position"`
+		} `json:"attachments"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	// Delete existing and re-create
+	s.repos.CampaignAttachment.DeleteByCampaignID(c.Context(), id)
+	if len(req.Attachments) > 0 {
+		var attachments []*domain.CampaignAttachment
+		for _, a := range req.Attachments {
+			attachments = append(attachments, &domain.CampaignAttachment{
+				MediaURL:  a.MediaURL,
+				MediaType: a.MediaType,
+				Caption:   a.Caption,
+				FileName:  a.FileName,
+				FileSize:  a.FileSize,
+				Position:  a.Position,
+			})
+		}
+		if err := s.repos.CampaignAttachment.CreateBatch(c.Context(), id, attachments); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+	}
+	result, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), id)
+	return c.JSON(fiber.Map{"success": true, "attachments": result})
 }
 
 // --- Event Handlers ---

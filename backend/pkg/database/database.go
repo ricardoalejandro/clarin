@@ -446,6 +446,20 @@ func Migrate(db *pgxpool.Pool) error {
 		// Poll metadata on messages
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS poll_question TEXT`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS poll_max_selections INT DEFAULT 1`,
+
+		// Campaign attachments (multi-file support)
+		`CREATE TABLE IF NOT EXISTS campaign_attachments (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+			media_url TEXT NOT NULL,
+			media_type VARCHAR(50) NOT NULL,
+			caption TEXT DEFAULT '',
+			file_name VARCHAR(255) DEFAULT '',
+			file_size BIGINT DEFAULT 0,
+			position INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_campaign_attachments_campaign ON campaign_attachments(campaign_id)`,
 	}
 
 	for _, migration := range migrations {

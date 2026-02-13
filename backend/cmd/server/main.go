@@ -86,7 +86,7 @@ func main() {
 	services := service.NewServices(repos, devicePool, hub)
 
 	// Initialize API server
-	server := api.NewServer(cfg, services, hub, devicePool, store)
+	server := api.NewServer(cfg, services, repos, hub, devicePool, store)
 
 	// Start campaign worker
 	campaignDone := make(chan struct{})

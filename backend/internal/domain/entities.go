@@ -370,7 +370,21 @@ type Campaign struct {
 	UpdatedAt       time.Time              `json:"updated_at"`
 
 	// Populated on demand
-	DeviceName *string `json:"device_name,omitempty"`
+	DeviceName  *string               `json:"device_name,omitempty"`
+	Attachments []*CampaignAttachment `json:"attachments,omitempty"`
+}
+
+// CampaignAttachment represents a media file attached to a campaign
+type CampaignAttachment struct {
+	ID         uuid.UUID `json:"id"`
+	CampaignID uuid.UUID `json:"campaign_id"`
+	MediaURL   string    `json:"media_url"`
+	MediaType  string    `json:"media_type"` // image, video, audio, document
+	Caption    string    `json:"caption"`
+	FileName   string    `json:"file_name"`
+	FileSize   int64     `json:"file_size"`
+	Position   int       `json:"position"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // CampaignRecipient represents a single recipient in a campaign

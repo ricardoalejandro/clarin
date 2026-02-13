@@ -813,6 +813,23 @@ func (s *CampaignService) Duplicate(ctx context.Context, campaignID uuid.UUID, n
 		s.repos.Campaign.AddRecipients(ctx, newRecipients)
 	}
 
+	// Copy attachments
+	origAttachments, _ := s.repos.CampaignAttachment.GetByCampaignID(ctx, campaignID)
+	if len(origAttachments) > 0 {
+		var newAttachments []*domain.CampaignAttachment
+		for _, a := range origAttachments {
+			newAttachments = append(newAttachments, &domain.CampaignAttachment{
+				MediaURL:  a.MediaURL,
+				MediaType: a.MediaType,
+				Caption:   a.Caption,
+				FileName:  a.FileName,
+				FileSize:  a.FileSize,
+				Position:  a.Position,
+			})
+		}
+		s.repos.CampaignAttachment.CreateBatch(ctx, newCampaign.ID, newAttachments)
+	}
+
 	// Re-fetch to get updated total_recipients
 	newCampaign, _ = s.repos.Campaign.GetByID(ctx, newCampaign.ID)
 	return newCampaign, nil
@@ -881,7 +898,114 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 
 	// Send message
 	var sendErr error
-	if campaign.MediaURL != nil && *campaign.MediaURL != "" && campaign.MediaType != nil {
+
+	// Load attachments for this campaign
+	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(ctx, campaignID)
+
+	if len(attachments) > 0 {
+		// Multi-attachment flow: send text first (if any), then each attachment
+		if msg != "" {
+			// Check if there's a single attachment — in that case the text is the caption
+			if len(attachments) == 1 && attachments[0].Caption == "" {
+				// Single attachment with no specific caption: use message_template as caption
+				_, sendErr = s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, attachments[0].MediaURL, attachments[0].MediaType)
+			} else {
+				// Multiple attachments or attachment has its own caption: send text first
+				_, sendErr = s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)
+				if sendErr == nil {
+					for _, att := range attachments {
+						time.Sleep(1500 * time.Millisecond) // Small delay between messages
+						caption := att.Caption
+						// Personalize caption
+						if rec.Name != nil && *rec.Name != "" {
+							caption = strings.Replace(caption, "{{nombre}}", *rec.Name, -1)
+							caption = strings.Replace(caption, "{{name}}", *rec.Name, -1)
+						}
+						if rec.Phone != nil {
+							caption = strings.Replace(caption, "{{telefono}}", *rec.Phone, -1)
+							caption = strings.Replace(caption, "{{phone}}", *rec.Phone, -1)
+							caption = strings.Replace(caption, "{{celular}}", *rec.Phone, -1)
+						}
+						if contact != nil {
+							fullName := ""
+							if contact.CustomName != nil && *contact.CustomName != "" {
+								fullName = *contact.CustomName
+							} else {
+								parts := []string{}
+								if contact.Name != nil && *contact.Name != "" {
+									parts = append(parts, *contact.Name)
+								}
+								if contact.LastName != nil && *contact.LastName != "" {
+									parts = append(parts, *contact.LastName)
+								}
+								if len(parts) > 0 {
+									fullName = strings.Join(parts, " ")
+								}
+							}
+							if fullName != "" {
+								caption = strings.Replace(caption, "{{nombre_completo}}", fullName, -1)
+							}
+							if contact.ShortName != nil && *contact.ShortName != "" {
+								caption = strings.Replace(caption, "{{nombre_corto}}", *contact.ShortName, -1)
+							}
+						}
+						_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
+						if err != nil {
+							sendErr = err
+							break
+						}
+					}
+				}
+			}
+		} else {
+			// No text, just attachments with their captions
+			for i, att := range attachments {
+				if i > 0 {
+					time.Sleep(1500 * time.Millisecond)
+				}
+				caption := att.Caption
+				// Personalize caption
+				if rec.Name != nil && *rec.Name != "" {
+					caption = strings.Replace(caption, "{{nombre}}", *rec.Name, -1)
+					caption = strings.Replace(caption, "{{name}}", *rec.Name, -1)
+				}
+				if rec.Phone != nil {
+					caption = strings.Replace(caption, "{{telefono}}", *rec.Phone, -1)
+					caption = strings.Replace(caption, "{{phone}}", *rec.Phone, -1)
+					caption = strings.Replace(caption, "{{celular}}", *rec.Phone, -1)
+				}
+				if contact != nil {
+					fullName := ""
+					if contact.CustomName != nil && *contact.CustomName != "" {
+						fullName = *contact.CustomName
+					} else {
+						parts := []string{}
+						if contact.Name != nil && *contact.Name != "" {
+							parts = append(parts, *contact.Name)
+						}
+						if contact.LastName != nil && *contact.LastName != "" {
+							parts = append(parts, *contact.LastName)
+						}
+						if len(parts) > 0 {
+							fullName = strings.Join(parts, " ")
+						}
+					}
+					if fullName != "" {
+						caption = strings.Replace(caption, "{{nombre_completo}}", fullName, -1)
+					}
+					if contact.ShortName != nil && *contact.ShortName != "" {
+						caption = strings.Replace(caption, "{{nombre_corto}}", *contact.ShortName, -1)
+					}
+				}
+				_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
+				if err != nil {
+					sendErr = err
+					break
+				}
+			}
+		}
+	} else if campaign.MediaURL != nil && *campaign.MediaURL != "" && campaign.MediaType != nil {
+		// Legacy single-media flow (backward compat)
 		_, sendErr = s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, *campaign.MediaURL, *campaign.MediaType)
 	} else {
 		_, sendErr = s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)

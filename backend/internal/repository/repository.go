@@ -31,6 +31,7 @@ type Repositories struct {
 	SavedSticker      *SavedStickerRepository
 	Reaction          *ReactionRepository
 	Poll              *PollRepository
+	CampaignAttachment *CampaignAttachmentRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -54,6 +55,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		SavedSticker:      &SavedStickerRepository{db: db},
 		Reaction:          &ReactionRepository{db: db},
 		Poll:              &PollRepository{db: db},
+		CampaignAttachment: &CampaignAttachmentRepository{db: db},
 	}
 }
 
@@ -2384,4 +2386,57 @@ func (r *PollRepository) GetVotes(ctx context.Context, messageID uuid.UUID) ([]*
 		votes = append(votes, v)
 	}
 	return votes, nil
+}
+
+// CampaignAttachmentRepository handles campaign attachment operations
+type CampaignAttachmentRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *CampaignAttachmentRepository) CreateBatch(ctx context.Context, campaignID uuid.UUID, attachments []*domain.CampaignAttachment) error {
+	if len(attachments) == 0 {
+		return nil
+	}
+	for i, a := range attachments {
+		a.ID = uuid.New()
+		a.CampaignID = campaignID
+		if a.Position == 0 {
+			a.Position = i
+		}
+		a.CreatedAt = time.Now()
+		_, err := r.db.Exec(ctx, `
+			INSERT INTO campaign_attachments (id, campaign_id, media_url, media_type, caption, file_name, file_size, position, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		`, a.ID, a.CampaignID, a.MediaURL, a.MediaType, a.Caption, a.FileName, a.FileSize, a.Position, a.CreatedAt)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *CampaignAttachmentRepository) GetByCampaignID(ctx context.Context, campaignID uuid.UUID) ([]*domain.CampaignAttachment, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, campaign_id, media_url, media_type, caption, file_name, file_size, position, created_at
+		FROM campaign_attachments WHERE campaign_id = $1 ORDER BY position
+	`, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attachments []*domain.CampaignAttachment
+	for rows.Next() {
+		a := &domain.CampaignAttachment{}
+		if err := rows.Scan(&a.ID, &a.CampaignID, &a.MediaURL, &a.MediaType, &a.Caption, &a.FileName, &a.FileSize, &a.Position, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, a)
+	}
+	return attachments, nil
+}
+
+func (r *CampaignAttachmentRepository) DeleteByCampaignID(ctx context.Context, campaignID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM campaign_attachments WHERE campaign_id = $1`, campaignID)
+	return err
 }

@@ -5,7 +5,8 @@ import {
   Radio, Plus, Play, Pause, Trash2, Edit, Users, Send, Clock,
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
-  BarChart3, ZoomIn, ZoomOut, CalendarClock
+  BarChart3, ZoomIn, ZoomOut, CalendarClock, Paperclip, X, GripVertical,
+  FileAudio, Upload
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -16,6 +17,19 @@ interface Device {
   name: string
   phone_number: string
   status: string
+}
+
+interface CampaignAttachment {
+  id?: string
+  media_url: string
+  media_type: string
+  caption: string
+  file_name: string
+  file_size: number
+  position: number
+  // local-only fields for UI
+  _localPreview?: string
+  _uploading?: boolean
 }
 
 interface Campaign {
@@ -37,6 +51,7 @@ interface Campaign {
   created_at: string
   updated_at: string
   device_name: string | null
+  attachments?: CampaignAttachment[]
 }
 
 interface Recipient {
@@ -108,8 +123,6 @@ export default function BroadcastsPage() {
     name: '',
     device_id: '',
     message_template: '',
-    media_url: '',
-    media_type: '',
     min_delay: 8,
     max_delay: 15,
     batch_size: 25,
@@ -121,10 +134,110 @@ export default function BroadcastsPage() {
     scheduled_date: '',
     scheduled_time: '',
   })
+  const [attachments, setAttachments] = useState<CampaignAttachment[]>([])
+  const [showAttachMenu, setShowAttachMenu] = useState(false)
+  const attachMenuRef = useRef<HTMLDivElement>(null)
+  const attachInputRef = useRef<HTMLInputElement>(null)
   const [showPreview, setShowPreview] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+
+  // Close attach menu on click outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
+        setShowAttachMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const ACCEPTED_TYPES: Record<string, string[]> = {
+    image: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+    video: ['video/mp4', 'video/3gpp', 'video/quicktime'],
+    audio: ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/opus', 'audio/aac'],
+    document: ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  }
+
+  const getMediaType = (mimeType: string): string => {
+    if (ACCEPTED_TYPES.image.includes(mimeType)) return 'image'
+    if (ACCEPTED_TYPES.video.includes(mimeType)) return 'video'
+    if (ACCEPTED_TYPES.audio.includes(mimeType)) return 'audio'
+    return 'document'
+  }
+
+  const handleAttachFile = async (file: File, mediaType: string) => {
+    if (attachments.length >= 10) {
+      alert('Máximo 10 adjuntos por campaña')
+      return
+    }
+    if (file.size > 32 * 1024 * 1024) {
+      alert('El archivo es demasiado grande. Máximo 32MB.')
+      return
+    }
+    const localPreview = (mediaType === 'image' || mediaType === 'video') ? URL.createObjectURL(file) : undefined
+    const tempAttachment: CampaignAttachment = {
+      media_url: '',
+      media_type: mediaType,
+      caption: '',
+      file_name: file.name,
+      file_size: file.size,
+      position: attachments.length,
+      _localPreview: localPreview,
+      _uploading: true,
+    }
+    setAttachments(prev => [...prev, tempAttachment])
+    const idx = attachments.length
+
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      fd.append('folder', 'uploads')
+      const uploadRes = await fetch('/api/media/upload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      })
+      const uploadData = await uploadRes.json()
+      if (!uploadData.success) throw new Error(uploadData.error || 'Error al subir archivo')
+      const url = uploadData.proxy_url || uploadData.public_url
+      setAttachments(prev => prev.map((a, i) => i === idx ? { ...a, media_url: url, _uploading: false } : a))
+    } catch (err) {
+      alert('Error al subir archivo: ' + (err instanceof Error ? err.message : 'desconocido'))
+      setAttachments(prev => prev.filter((_, i) => i !== idx))
+      if (localPreview) URL.revokeObjectURL(localPreview)
+    }
+  }
+
+  const handleAttachSelect = (accept: string) => {
+    setShowAttachMenu(false)
+    if (attachInputRef.current) {
+      attachInputRef.current.accept = accept
+      attachInputRef.current.click()
+    }
+  }
+
+  const handleAttachInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const mediaType = getMediaType(file.type)
+    handleAttachFile(file, mediaType)
+    if (attachInputRef.current) attachInputRef.current.value = ''
+  }
+
+  const removeAttachment = (index: number) => {
+    setAttachments(prev => {
+      const a = prev[index]
+      if (a._localPreview) URL.revokeObjectURL(a._localPreview)
+      return prev.filter((_, i) => i !== index).map((att, i) => ({ ...att, position: i }))
+    })
+  }
+
+  const updateAttachmentCaption = (index: number, caption: string) => {
+    setAttachments(prev => prev.map((a, i) => i === index ? { ...a, caption } : a))
+  }
 
   const fetchCampaigns = useCallback(async () => {
     try {
@@ -202,8 +315,14 @@ export default function BroadcastsPage() {
           name: formData.name,
           device_id: formData.device_id,
           message_template: formData.message_template,
-          media_url: formData.media_url || null,
-          media_type: formData.media_type || null,
+          attachments: attachments.filter(a => a.media_url).map(a => ({
+            media_url: a.media_url,
+            media_type: a.media_type,
+            caption: a.caption,
+            file_name: a.file_name,
+            file_size: a.file_size,
+            position: a.position,
+          })),
           scheduled_at: scheduledAt ? scheduledAt : undefined,
           settings: {
             min_delay_seconds: formData.min_delay,
@@ -378,11 +497,13 @@ export default function BroadcastsPage() {
 
   const resetForm = () => {
     setFormData({
-      name: '', device_id: '', message_template: '', media_url: '', media_type: '',
+      name: '', device_id: '', message_template: '',
       min_delay: 8, max_delay: 15, batch_size: 25, batch_pause: 2,
       daily_limit: 1000, active_hours_start: '07:00', active_hours_end: '22:00',
       simulate_typing: true, scheduled_date: '', scheduled_time: '',
     })
+    attachments.forEach(a => { if (a._localPreview) URL.revokeObjectURL(a._localPreview) })
+    setAttachments([])
     setShowPreview(false)
   }
 
@@ -451,6 +572,7 @@ export default function BroadcastsPage() {
               ? Math.round(((campaign.sent_count + campaign.failed_count) / campaign.total_recipients) * 100)
               : 0
             const MediaIcon = campaign.media_type ? MEDIA_ICONS[campaign.media_type] || FileText : null
+            const attachCount = campaign.attachments?.length || 0
 
             return (
               <div key={campaign.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition">
@@ -462,6 +584,11 @@ export default function BroadcastsPage() {
                         {STATUS_LABELS[campaign.status] || campaign.status}
                       </span>
                       {MediaIcon && <MediaIcon className="w-4 h-4 text-gray-400" />}
+                      {attachCount > 0 && (
+                        <span className="flex items-center gap-1 text-xs text-gray-400">
+                          <Paperclip className="w-3 h-3" />{attachCount}
+                        </span>
+                      )}
                     </div>
                     <p className="text-sm text-gray-500 mt-1 line-clamp-1">
                       {campaign.message_template}
@@ -622,7 +749,9 @@ export default function BroadcastsPage() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Mensaje *</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Mensaje {attachments.length > 0 ? '(opcional)' : '*'}
+                </label>
                 {/* Variable insertion buttons */}
                 <div className="flex flex-wrap gap-1 mb-2">
                   {[
@@ -679,57 +808,190 @@ export default function BroadcastsPage() {
                 </div>
 
                 {/* Message preview using MessageBubble */}
-                {showPreview && formData.message_template && (
-                  <div className="mt-2 p-3 bg-[#e5ddd5] rounded-lg max-w-sm">
-                    <MessageBubble
-                      message={{
-                        id: 'preview',
-                        message_id: 'preview',
-                        body: formData.message_template
-                          .replace(/\{\{nombre\}\}/g, 'Juan')
-                          .replace(/\{\{nombre_completo\}\}/g, 'Juan Pérez López')
-                          .replace(/\{\{nombre_corto\}\}/g, 'Juanito')
-                          .replace(/\{\{celular\}\}/g, '+51999888777')
-                          .replace(/\{\{name\}\}/g, 'Juan')
-                          .replace(/\{\{telefono\}\}/g, '+51999888777')
-                          .replace(/\{\{phone\}\}/g, '+51999888777'),
-                        message_type: formData.media_type || 'text',
-                        media_url: formData.media_url || undefined,
-                        is_from_me: true,
-                        is_read: false,
-                        status: 'sent',
-                        timestamp: new Date().toISOString(),
-                      }}
-                    />
+                {showPreview && (formData.message_template || attachments.length > 0) && (
+                  <div className="mt-2 p-3 bg-[#e5ddd5] rounded-lg max-w-sm space-y-1">
+                    {(() => {
+                      const personalizeText = (text: string) => text
+                        .replace(/\{\{nombre\}\}/g, 'Juan')
+                        .replace(/\{\{nombre_completo\}\}/g, 'Juan Pérez López')
+                        .replace(/\{\{nombre_corto\}\}/g, 'Juanito')
+                        .replace(/\{\{celular\}\}/g, '+51999888777')
+                        .replace(/\{\{name\}\}/g, 'Juan')
+                        .replace(/\{\{telefono\}\}/g, '+51999888777')
+                        .replace(/\{\{phone\}\}/g, '+51999888777')
+                      const readyAttachments = attachments.filter(a => a.media_url)
+                      const singleAttachNoCaption = readyAttachments.length === 1 && !readyAttachments[0].caption
+                      // Single attachment + no caption → message as caption on media
+                      if (singleAttachNoCaption && formData.message_template) {
+                        return (
+                          <MessageBubble
+                            message={{
+                              id: 'preview-0', message_id: 'preview-0',
+                              body: personalizeText(formData.message_template),
+                              message_type: readyAttachments[0].media_type,
+                              media_url: readyAttachments[0]._localPreview || readyAttachments[0].media_url,
+                              is_from_me: true, is_read: false, status: 'sent',
+                              timestamp: new Date().toISOString(),
+                            }}
+                          />
+                        )
+                      }
+                      return (
+                        <>
+                          {formData.message_template && (
+                            <MessageBubble
+                              message={{
+                                id: 'preview-text', message_id: 'preview-text',
+                                body: personalizeText(formData.message_template),
+                                message_type: 'text',
+                                is_from_me: true, is_read: false, status: 'sent',
+                                timestamp: new Date().toISOString(),
+                              }}
+                            />
+                          )}
+                          {readyAttachments.map((att, i) => (
+                            <MessageBubble
+                              key={`preview-att-${i}`}
+                              message={{
+                                id: `preview-att-${i}`, message_id: `preview-att-${i}`,
+                                body: att.caption ? personalizeText(att.caption) : undefined,
+                                message_type: att.media_type,
+                                media_url: att._localPreview || att.media_url,
+                                media_filename: att.file_name,
+                                is_from_me: true, is_read: false, status: 'sent',
+                                timestamp: new Date().toISOString(),
+                              }}
+                            />
+                          ))}
+                        </>
+                      )
+                    })()}
                   </div>
                 )}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Tipo de Media</label>
-                  <select
-                    value={formData.media_type}
-                    onChange={e => setFormData({ ...formData, media_type: e.target.value })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900"
-                  >
-                    <option value="">Solo texto</option>
-                    <option value="image">Imagen</option>
-                    <option value="video">Video</option>
-                    <option value="audio">Audio</option>
-                    <option value="document">Documento</option>
-                  </select>
-                </div>
-                {formData.media_type && (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">URL del Media</label>
-                    <input
-                      type="text"
-                      value={formData.media_url}
-                      onChange={e => setFormData({ ...formData, media_url: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900"
-                      placeholder="https://..."
-                    />
+              {/* Attachments section */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Adjuntos ({attachments.length}/10)</label>
+                <input type="file" ref={attachInputRef} onChange={handleAttachInputChange} className="hidden" />
+
+                {/* Attachment cards */}
+                {attachments.length > 0 && (
+                  <div className="space-y-2 mb-3">
+                    {attachments.map((att, i) => {
+                      const TypeIcon = att.media_type === 'image' ? Image : att.media_type === 'video' ? Video : att.media_type === 'audio' ? AudioLines : File
+                      const typeColors: Record<string, string> = { image: 'bg-purple-100 text-purple-600', video: 'bg-red-100 text-red-600', audio: 'bg-orange-100 text-orange-600', document: 'bg-blue-100 text-blue-600' }
+                      return (
+                        <div key={i} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                          <div className="flex items-center gap-3">
+                            {/* Thumbnail or icon */}
+                            <div className="shrink-0">
+                              {att._localPreview && att.media_type === 'image' ? (
+                                <img src={att._localPreview} alt="" className="w-12 h-12 rounded-lg object-cover" />
+                              ) : att._localPreview && att.media_type === 'video' ? (
+                                <video src={att._localPreview} className="w-12 h-12 rounded-lg object-cover" />
+                              ) : (
+                                <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${typeColors[att.media_type] || typeColors.document}`}>
+                                  <TypeIcon className="w-5 h-5" />
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-gray-900 truncate">{att.file_name}</p>
+                              <div className="flex items-center gap-2 text-xs text-gray-400">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${typeColors[att.media_type] || typeColors.document}`}>
+                                  {att.media_type === 'image' ? 'Imagen' : att.media_type === 'video' ? 'Video' : att.media_type === 'audio' ? 'Audio' : 'Documento'}
+                                </span>
+                                <span>{(att.file_size / 1024 / 1024).toFixed(2)} MB</span>
+                                {att._uploading && <span className="text-amber-500 animate-pulse">Subiendo...</span>}
+                              </div>
+                            </div>
+                            <button onClick={() => removeAttachment(i)} className="p-1 hover:bg-red-50 rounded text-red-400 hover:text-red-600 transition">
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                          {/* Caption toggle + input */}
+                          {att.media_type !== 'audio' && (
+                            <div className="mt-2">
+                              {att.caption !== undefined && (
+                                <div>
+                                  <div className="flex items-center justify-between mb-1">
+                                    <label className="flex items-center gap-1.5 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={att.caption !== ''}
+                                        onChange={e => updateAttachmentCaption(i, e.target.checked ? ' ' : '')}
+                                        className="rounded border-gray-300 text-green-600 focus:ring-green-500 w-3.5 h-3.5"
+                                      />
+                                      <span className="text-[11px] text-gray-500">Pie de foto</span>
+                                    </label>
+                                    {att.caption && (
+                                      <div className="flex gap-1">
+                                        {[{ label: 'Nombre', value: '{{nombre}}' }, { label: 'Celular', value: '{{celular}}' }].map(v => (
+                                          <button
+                                            key={v.value}
+                                            type="button"
+                                            onClick={() => updateAttachmentCaption(i, (att.caption || '') + v.value)}
+                                            className="px-1.5 py-0.5 text-[10px] bg-green-50 text-green-700 border border-green-200 rounded hover:bg-green-100 transition"
+                                          >
+                                            + {v.label}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                  {att.caption && (
+                                    <textarea
+                                      value={att.caption.trim() === '' ? '' : att.caption}
+                                      onChange={e => updateAttachmentCaption(i, e.target.value || ' ')}
+                                      rows={2}
+                                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 text-gray-900"
+                                      placeholder="Texto del pie de foto..."
+                                    />
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {/* Add attachment button with popup */}
+                {attachments.length < 10 && (
+                  <div ref={attachMenuRef} className="relative inline-block">
+                    <button
+                      type="button"
+                      onClick={() => setShowAttachMenu(!showAttachMenu)}
+                      className="inline-flex items-center gap-2 px-3 py-2 border border-dashed border-gray-300 rounded-lg text-sm text-gray-600 hover:border-green-400 hover:text-green-600 hover:bg-green-50 transition"
+                    >
+                      <Paperclip className="w-4 h-4" />
+                      Adjuntar archivo
+                    </button>
+                    {showAttachMenu && (
+                      <div className="absolute bottom-full mb-2 left-0 bg-white rounded-xl shadow-xl border border-gray-200 p-2 z-50 min-w-48">
+                        <div className="space-y-1">
+                          <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.image.join(','))} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-purple-50 rounded-lg text-left">
+                            <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center"><Image className="w-4 h-4 text-purple-600" /></div>
+                            <span className="text-sm font-semibold text-gray-800">Imagen</span>
+                          </button>
+                          <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.video.join(','))} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-red-50 rounded-lg text-left">
+                            <div className="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center"><Video className="w-4 h-4 text-red-600" /></div>
+                            <span className="text-sm font-semibold text-gray-800">Video</span>
+                          </button>
+                          <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.audio.join(','))} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-orange-50 rounded-lg text-left">
+                            <div className="w-8 h-8 bg-orange-100 rounded-lg flex items-center justify-center"><FileAudio className="w-4 h-4 text-orange-600" /></div>
+                            <span className="text-sm font-semibold text-gray-800">Audio</span>
+                          </button>
+                          <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.document.join(','))} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-blue-50 rounded-lg text-left">
+                            <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center"><FileText className="w-4 h-4 text-blue-600" /></div>
+                            <span className="text-sm font-semibold text-gray-800">Documento</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -891,7 +1153,7 @@ export default function BroadcastsPage() {
               </button>
               <button
                 onClick={handleCreateCampaign}
-                disabled={!formData.name || !formData.device_id || !formData.message_template}
+                disabled={!formData.name || !formData.device_id || (!formData.message_template && attachments.filter(a => a.media_url).length === 0) || attachments.some(a => a._uploading)}
                 className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
               >
                 {formData.scheduled_date && formData.scheduled_time ? 'Programar Campaña' : 'Crear Campaña'}
