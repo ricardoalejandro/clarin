@@ -226,6 +226,7 @@ func (s *Server) setupRoutes() {
 	campaigns.Delete("/:id", s.handleDeleteCampaign)
 	campaigns.Post("/:id/recipients", s.handleAddCampaignRecipients)
 	campaigns.Get("/:id/recipients", s.handleGetCampaignRecipients)
+	campaigns.Delete("/:id/recipients/:rid", s.handleDeleteCampaignRecipient)
 	campaigns.Post("/:id/start", s.handleStartCampaign)
 	campaigns.Post("/:id/pause", s.handlePauseCampaign)
 	campaigns.Post("/:id/duplicate", s.handleDuplicateCampaign)
@@ -2051,13 +2052,17 @@ func (s *Server) handleAddCampaignRecipients(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
 	}
+	accountID := c.Locals("account_id").(string)
+	acctUUID, _ := uuid.Parse(accountID)
 	var req struct {
 		Recipients []struct {
-			ContactID *string `json:"contact_id"`
-			JID       string  `json:"jid"`
-			Name      *string `json:"name"`
-			Phone     *string `json:"phone"`
+			ContactID *string                `json:"contact_id"`
+			JID       string                 `json:"jid"`
+			Name      *string                `json:"name"`
+			Phone     *string                `json:"phone"`
+			Metadata  map[string]interface{} `json:"metadata"`
 		} `json:"recipients"`
+		SaveAsContacts bool `json:"save_as_contacts"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -2069,10 +2074,24 @@ func (s *Server) handleAddCampaignRecipients(c *fiber.Ctx) error {
 			JID:        r.JID,
 			Name:       r.Name,
 			Phone:      r.Phone,
+			Metadata:   r.Metadata,
 		}
 		if r.ContactID != nil {
 			if cid, err := uuid.Parse(*r.ContactID); err == nil {
 				rec.ContactID = &cid
+			}
+		}
+		// Optionally create/link as contacts
+		if req.SaveAsContacts && rec.ContactID == nil && r.Phone != nil && *r.Phone != "" {
+			jid := r.JID
+			phone := *r.Phone
+			name := ""
+			if r.Name != nil {
+				name = *r.Name
+			}
+			contact, err := s.services.Contact.GetOrCreate(c.Context(), acctUUID, nil, jid, phone, name, "", false)
+			if err == nil && contact != nil {
+				rec.ContactID = &contact.ID
 			}
 		}
 		recipients = append(recipients, rec)
@@ -2096,6 +2115,21 @@ func (s *Server) handleGetCampaignRecipients(c *fiber.Ctx) error {
 		recipients = make([]*domain.CampaignRecipient, 0)
 	}
 	return c.JSON(fiber.Map{"success": true, "recipients": recipients})
+}
+
+func (s *Server) handleDeleteCampaignRecipient(c *fiber.Ctx) error {
+	campaignID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	recipientID, err := uuid.Parse(c.Params("rid"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid recipient ID"})
+	}
+	if err := s.services.Campaign.DeleteRecipient(c.Context(), campaignID, recipientID); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
 }
 
 func (s *Server) handleStartCampaign(c *fiber.Ctx) error {

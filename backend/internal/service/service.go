@@ -737,6 +737,17 @@ func (s *CampaignService) GetRecipients(ctx context.Context, campaignID uuid.UUI
 	return s.repos.Campaign.GetRecipients(ctx, campaignID)
 }
 
+func (s *CampaignService) DeleteRecipient(ctx context.Context, campaignID, recipientID uuid.UUID) error {
+	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
+	if err != nil {
+		return fmt.Errorf("campaign not found")
+	}
+	if campaign.Status != domain.CampaignStatusDraft && campaign.Status != domain.CampaignStatusScheduled {
+		return fmt.Errorf("can only remove recipients from draft or scheduled campaigns")
+	}
+	return s.repos.Campaign.DeleteRecipient(ctx, campaignID, recipientID)
+}
+
 func (s *CampaignService) Start(ctx context.Context, campaignID uuid.UUID) error {
 	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
 	if err != nil {
@@ -807,6 +818,7 @@ func (s *CampaignService) Duplicate(ctx context.Context, campaignID uuid.UUID, n
 			Name:       r.Name,
 			Phone:      r.Phone,
 			Status:     "pending",
+			Metadata:   r.Metadata,
 		})
 	}
 	if len(newRecipients) > 0 {
@@ -835,6 +847,53 @@ func (s *CampaignService) Duplicate(ctx context.Context, campaignID uuid.UUID, n
 	return newCampaign, nil
 }
 
+func personalizeText(text string, rec *domain.CampaignRecipient, contact *domain.Contact) string {
+	if text == "" {
+		return text
+	}
+	if rec.Name != nil && *rec.Name != "" {
+		text = strings.Replace(text, "{{nombre}}", *rec.Name, -1)
+		text = strings.Replace(text, "{{name}}", *rec.Name, -1)
+	}
+	if rec.Phone != nil {
+		text = strings.Replace(text, "{{telefono}}", *rec.Phone, -1)
+		text = strings.Replace(text, "{{phone}}", *rec.Phone, -1)
+		text = strings.Replace(text, "{{celular}}", *rec.Phone, -1)
+	}
+	if contact != nil {
+		fullName := ""
+		if contact.CustomName != nil && *contact.CustomName != "" {
+			fullName = *contact.CustomName
+		} else {
+			parts := []string{}
+			if contact.Name != nil && *contact.Name != "" {
+				parts = append(parts, *contact.Name)
+			}
+			if contact.LastName != nil && *contact.LastName != "" {
+				parts = append(parts, *contact.LastName)
+			}
+			if len(parts) > 0 {
+				fullName = strings.Join(parts, " ")
+			}
+		}
+		if fullName != "" {
+			text = strings.Replace(text, "{{nombre_completo}}", fullName, -1)
+		}
+		if contact.ShortName != nil && *contact.ShortName != "" {
+			text = strings.Replace(text, "{{nombre_corto}}", *contact.ShortName, -1)
+		}
+	}
+	// Resolve custom metadata variables (e.g. {{empresa}}, {{ciudad}})
+	if rec.Metadata != nil {
+		for key, val := range rec.Metadata {
+			if str, ok := val.(string); ok && str != "" {
+				text = strings.Replace(text, "{{"+key+"}}", str, -1)
+			}
+		}
+	}
+	return text
+}
+
 func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID uuid.UUID, waitTimeMs *int) (bool, error) {
 	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
 	if err != nil {
@@ -861,40 +920,7 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 	}
 
 	// Personalize message
-	msg := campaign.MessageTemplate
-	if rec.Name != nil && *rec.Name != "" {
-		msg = strings.Replace(msg, "{{nombre}}", *rec.Name, -1)
-		msg = strings.Replace(msg, "{{name}}", *rec.Name, -1)
-	}
-	if rec.Phone != nil {
-		msg = strings.Replace(msg, "{{telefono}}", *rec.Phone, -1)
-		msg = strings.Replace(msg, "{{phone}}", *rec.Phone, -1)
-		msg = strings.Replace(msg, "{{celular}}", *rec.Phone, -1)
-	}
-	// Full name: custom_name or name + last_name
-	if contact != nil {
-		fullName := ""
-		if contact.CustomName != nil && *contact.CustomName != "" {
-			fullName = *contact.CustomName
-		} else {
-			parts := []string{}
-			if contact.Name != nil && *contact.Name != "" {
-				parts = append(parts, *contact.Name)
-			}
-			if contact.LastName != nil && *contact.LastName != "" {
-				parts = append(parts, *contact.LastName)
-			}
-			if len(parts) > 0 {
-				fullName = strings.Join(parts, " ")
-			}
-		}
-		if fullName != "" {
-			msg = strings.Replace(msg, "{{nombre_completo}}", fullName, -1)
-		}
-		if contact.ShortName != nil && *contact.ShortName != "" {
-			msg = strings.Replace(msg, "{{nombre_corto}}", *contact.ShortName, -1)
-		}
-	}
+	msg := personalizeText(campaign.MessageTemplate, rec, contact)
 
 	// Send message
 	var sendErr error
@@ -903,52 +929,15 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(ctx, campaignID)
 
 	if len(attachments) > 0 {
-		// Multi-attachment flow: send text first (if any), then each attachment
 		if msg != "" {
-			// Check if there's a single attachment — in that case the text is the caption
 			if len(attachments) == 1 && attachments[0].Caption == "" {
-				// Single attachment with no specific caption: use message_template as caption
 				_, sendErr = s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, attachments[0].MediaURL, attachments[0].MediaType)
 			} else {
-				// Multiple attachments or attachment has its own caption: send text first
 				_, sendErr = s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)
 				if sendErr == nil {
 					for _, att := range attachments {
-						time.Sleep(1500 * time.Millisecond) // Small delay between messages
-						caption := att.Caption
-						// Personalize caption
-						if rec.Name != nil && *rec.Name != "" {
-							caption = strings.Replace(caption, "{{nombre}}", *rec.Name, -1)
-							caption = strings.Replace(caption, "{{name}}", *rec.Name, -1)
-						}
-						if rec.Phone != nil {
-							caption = strings.Replace(caption, "{{telefono}}", *rec.Phone, -1)
-							caption = strings.Replace(caption, "{{phone}}", *rec.Phone, -1)
-							caption = strings.Replace(caption, "{{celular}}", *rec.Phone, -1)
-						}
-						if contact != nil {
-							fullName := ""
-							if contact.CustomName != nil && *contact.CustomName != "" {
-								fullName = *contact.CustomName
-							} else {
-								parts := []string{}
-								if contact.Name != nil && *contact.Name != "" {
-									parts = append(parts, *contact.Name)
-								}
-								if contact.LastName != nil && *contact.LastName != "" {
-									parts = append(parts, *contact.LastName)
-								}
-								if len(parts) > 0 {
-									fullName = strings.Join(parts, " ")
-								}
-							}
-							if fullName != "" {
-								caption = strings.Replace(caption, "{{nombre_completo}}", fullName, -1)
-							}
-							if contact.ShortName != nil && *contact.ShortName != "" {
-								caption = strings.Replace(caption, "{{nombre_corto}}", *contact.ShortName, -1)
-							}
-						}
+						time.Sleep(1500 * time.Millisecond)
+						caption := personalizeText(att.Caption, rec, contact)
 						_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
 						if err != nil {
 							sendErr = err
@@ -958,45 +947,11 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 				}
 			}
 		} else {
-			// No text, just attachments with their captions
 			for i, att := range attachments {
 				if i > 0 {
 					time.Sleep(1500 * time.Millisecond)
 				}
-				caption := att.Caption
-				// Personalize caption
-				if rec.Name != nil && *rec.Name != "" {
-					caption = strings.Replace(caption, "{{nombre}}", *rec.Name, -1)
-					caption = strings.Replace(caption, "{{name}}", *rec.Name, -1)
-				}
-				if rec.Phone != nil {
-					caption = strings.Replace(caption, "{{telefono}}", *rec.Phone, -1)
-					caption = strings.Replace(caption, "{{phone}}", *rec.Phone, -1)
-					caption = strings.Replace(caption, "{{celular}}", *rec.Phone, -1)
-				}
-				if contact != nil {
-					fullName := ""
-					if contact.CustomName != nil && *contact.CustomName != "" {
-						fullName = *contact.CustomName
-					} else {
-						parts := []string{}
-						if contact.Name != nil && *contact.Name != "" {
-							parts = append(parts, *contact.Name)
-						}
-						if contact.LastName != nil && *contact.LastName != "" {
-							parts = append(parts, *contact.LastName)
-						}
-						if len(parts) > 0 {
-							fullName = strings.Join(parts, " ")
-						}
-					}
-					if fullName != "" {
-						caption = strings.Replace(caption, "{{nombre_completo}}", fullName, -1)
-					}
-					if contact.ShortName != nil && *contact.ShortName != "" {
-						caption = strings.Replace(caption, "{{nombre_corto}}", *contact.ShortName, -1)
-					}
-				}
+				caption := personalizeText(att.Caption, rec, contact)
 				_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
 				if err != nil {
 					sendErr = err
@@ -1005,7 +960,6 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 			}
 		}
 	} else if campaign.MediaURL != nil && *campaign.MediaURL != "" && campaign.MediaType != nil {
-		// Legacy single-media flow (backward compat)
 		_, sendErr = s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, *campaign.MediaURL, *campaign.MediaType)
 	} else {
 		_, sendErr = s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)

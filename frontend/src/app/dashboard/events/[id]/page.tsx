@@ -99,6 +99,7 @@ export default function EventDetailPage() {
   const [showCampaignModal, setShowCampaignModal] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
   const [creatingCampaign, setCreatingCampaign] = useState(false)
+  const [campaignInitialName, setCampaignInitialName] = useState('')
 
   // Add participant form
   const [addTab, setAddTab] = useState<'search' | 'manual'>('search')
@@ -554,7 +555,19 @@ export default function EventDetailPage() {
           </div>
 
           <button
-            onClick={() => { setShowCampaignModal(true); fetchDevices() }}
+            onClick={async () => {
+              fetchDevices()
+              try {
+                const res = await fetch('/api/campaigns', { headers: { Authorization: `Bearer ${token()}` } })
+                const data = await res.json()
+                const prefix = `Envío - ${event?.name || ''}`
+                const count = (data.campaigns || []).filter((c: any) => c.name.startsWith(prefix)).length
+                setCampaignInitialName(`${prefix} #${(count + 1).toString().padStart(3, '0')}`)
+              } catch {
+                setCampaignInitialName(`Envío - ${event?.name || ''}`)
+              }
+              setShowCampaignModal(true)
+            }}
             className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium shadow-sm"
           >
             <Send className="w-4 h-4" />
@@ -1215,7 +1228,7 @@ export default function EventDetailPage() {
         accentColor="purple"
         submitLabel={creatingCampaign ? 'Creando...' : `Crear campaña (${participantsWithPhone.length})`}
         submitting={creatingCampaign || participantsWithPhone.length === 0}
-        initialName={`Envío - ${event.name}`}
+        initialName={campaignInitialName || `Envío - ${event?.name || ''}`}
         infoPanel={
           <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
             <div className="flex items-center gap-2 mb-2">

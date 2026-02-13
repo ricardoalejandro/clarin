@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -1566,11 +1567,17 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 		if rec.Status == "" {
 			rec.Status = "pending"
 		}
+		metaJSON := []byte("{}")
+		if rec.Metadata != nil {
+			if b, err := json.Marshal(rec.Metadata); err == nil {
+				metaJSON = b
+			}
+		}
 		_, err := r.db.Exec(ctx, `
-			INSERT INTO campaign_recipients (id, campaign_id, contact_id, jid, name, phone, status)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)
+			INSERT INTO campaign_recipients (id, campaign_id, contact_id, jid, name, phone, status, metadata)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			ON CONFLICT DO NOTHING
-		`, rec.ID, rec.CampaignID, rec.ContactID, rec.JID, rec.Name, rec.Phone, rec.Status)
+		`, rec.ID, rec.CampaignID, rec.ContactID, rec.JID, rec.Name, rec.Phone, rec.Status, metaJSON)
 		if err != nil {
 			return err
 		}
@@ -1585,7 +1592,7 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 
 func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.UUID) ([]*domain.CampaignRecipient, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message, wait_time_ms
+		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message, wait_time_ms, COALESCE(metadata, '{}')
 		FROM campaign_recipients WHERE campaign_id = $1 ORDER BY sent_at ASC NULLS LAST, id
 	`, campaignID)
 	if err != nil {
@@ -1596,8 +1603,12 @@ func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.
 	var recipients []*domain.CampaignRecipient
 	for rows.Next() {
 		rec := &domain.CampaignRecipient{}
-		if err := rows.Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage, &rec.WaitTimeMs); err != nil {
+		var metaJSON []byte
+		if err := rows.Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage, &rec.WaitTimeMs, &metaJSON); err != nil {
 			return nil, err
+		}
+		if len(metaJSON) > 2 {
+			json.Unmarshal(metaJSON, &rec.Metadata)
 		}
 		recipients = append(recipients, rec)
 	}
@@ -1606,13 +1617,17 @@ func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.
 
 func (r *CampaignRepository) GetNextPendingRecipient(ctx context.Context, campaignID uuid.UUID) (*domain.CampaignRecipient, error) {
 	rec := &domain.CampaignRecipient{}
+	var metaJSON []byte
 	err := r.db.QueryRow(ctx, `
-		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message, wait_time_ms
+		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message, wait_time_ms, COALESCE(metadata, '{}')
 		FROM campaign_recipients WHERE campaign_id = $1 AND status = 'pending'
 		ORDER BY id LIMIT 1
-	`, campaignID).Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage, &rec.WaitTimeMs)
+	`, campaignID).Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage, &rec.WaitTimeMs, &metaJSON)
 	if err != nil {
 		return nil, err
+	}
+	if len(metaJSON) > 2 {
+		json.Unmarshal(metaJSON, &rec.Metadata)
 	}
 	return rec, nil
 }
@@ -1638,6 +1653,23 @@ func (r *CampaignRepository) IncrementSentCount(ctx context.Context, campaignID 
 
 func (r *CampaignRepository) IncrementFailedCount(ctx context.Context, campaignID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `UPDATE campaigns SET failed_count = failed_count + 1, updated_at = NOW() WHERE id = $1`, campaignID)
+	return err
+}
+
+func (r *CampaignRepository) DeleteRecipient(ctx context.Context, campaignID, recipientID uuid.UUID) error {
+	result, err := r.db.Exec(ctx, `
+		DELETE FROM campaign_recipients WHERE id = $1 AND campaign_id = $2 AND status = 'pending'
+	`, recipientID, campaignID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("recipient not found or already processed")
+	}
+	_, err = r.db.Exec(ctx, `
+		UPDATE campaigns SET total_recipients = (SELECT count(*) FROM campaign_recipients WHERE campaign_id = $1), updated_at = NOW()
+		WHERE id = $1
+	`, campaignID)
 	return err
 }
 

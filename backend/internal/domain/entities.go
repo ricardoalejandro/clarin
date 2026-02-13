@@ -389,16 +389,17 @@ type CampaignAttachment struct {
 
 // CampaignRecipient represents a single recipient in a campaign
 type CampaignRecipient struct {
-	ID           uuid.UUID  `json:"id"`
-	CampaignID   uuid.UUID  `json:"campaign_id"`
-	ContactID    *uuid.UUID `json:"contact_id,omitempty"`
-	JID          string     `json:"jid"`
-	Name         *string    `json:"name,omitempty"`
-	Phone        *string    `json:"phone,omitempty"`
-	Status       string     `json:"status"` // pending, sent, delivered, failed, skipped
-	SentAt       *time.Time `json:"sent_at,omitempty"`
-	ErrorMessage *string    `json:"error_message,omitempty"`
-	WaitTimeMs   *int       `json:"wait_time_ms,omitempty"`
+	ID           uuid.UUID              `json:"id"`
+	CampaignID   uuid.UUID              `json:"campaign_id"`
+	ContactID    *uuid.UUID             `json:"contact_id,omitempty"`
+	JID          string                 `json:"jid"`
+	Name         *string                `json:"name,omitempty"`
+	Phone        *string                `json:"phone,omitempty"`
+	Status       string                 `json:"status"` // pending, sent, delivered, failed, skipped
+	SentAt       *time.Time             `json:"sent_at,omitempty"`
+	ErrorMessage *string                `json:"error_message,omitempty"`
+	WaitTimeMs   *int                   `json:"wait_time_ms,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Campaign status constants

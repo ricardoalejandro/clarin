@@ -447,6 +447,9 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS poll_question TEXT`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS poll_max_selections INT DEFAULT 1`,
 
+		// Campaign recipient metadata for custom variables
+		`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'`,
+
 		// Campaign attachments (multi-file support)
 		`CREATE TABLE IF NOT EXISTS campaign_attachments (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -5,7 +5,8 @@ import {
   Radio, Plus, Play, Pause, Trash2, Edit, Users, Send, Clock,
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
-  BarChart3, ZoomIn, ZoomOut, CalendarClock, X, Paperclip
+  BarChart3, ZoomIn, ZoomOut, CalendarClock, X, Paperclip,
+  MessageSquare, Upload, UserPlus
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -53,6 +54,13 @@ interface Recipient {
   sent_at: string | null
   error_message: string | null
   wait_time_ms: number | null
+  metadata?: Record<string, any>
+}
+
+interface ManualRecipient {
+  phone: string
+  name: string
+  metadata: Record<string, string>
 }
 
 interface Contact {
@@ -101,13 +109,23 @@ export default function BroadcastsPage() {
   const [recipients, setRecipients] = useState<Recipient[]>([])
   const [searchContacts, setSearchContacts] = useState('')
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set())
-  const [detailTab, setDetailTab] = useState<'recipients' | 'chart'>('recipients')
+  const [detailTab, setDetailTab] = useState<'message' | 'recipients' | 'chart'>('message')
   const [chartZoom, setChartZoom] = useState(1)
   const [showDuplicateModal, setShowDuplicateModal] = useState(false)
   const [duplicateMessage, setDuplicateMessage] = useState('')
   const [duplicateCampaign, setDuplicateCampaign] = useState<Campaign | null>(null)
   const [showEditModal, setShowEditModal] = useState(false)
   const [editCampaign, setEditCampaign] = useState<Campaign | null>(null)
+  const [recipientTab, setRecipientTab] = useState<'contacts' | 'manual' | 'csv'>('contacts')
+  const [manualEntries, setManualEntries] = useState<ManualRecipient[]>([])
+  const [manualPhone, setManualPhone] = useState('')
+  const [manualName, setManualName] = useState('')
+  const [manualMeta, setManualMeta] = useState<{key:string,value:string}[]>([])
+  const [csvData, setCsvData] = useState<Record<string,string>[]>([])
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([])
+  const [csvPhoneCol, setCsvPhoneCol] = useState('')
+  const [csvNameCol, setCsvNameCol] = useState('')
+  const [csvSaveAsContacts, setCsvSaveAsContacts] = useState(false)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -229,6 +247,128 @@ export default function BroadcastsPage() {
     }
   }
 
+  const handleAddManualRecipients = async () => {
+    if (!selectedCampaign || manualEntries.length === 0) return
+    const recipientsList = manualEntries.map(e => {
+      const cleanPhone = e.phone.replace(/[^0-9]/g, '')
+      return {
+        jid: cleanPhone + '@s.whatsapp.net',
+        name: e.name || null,
+        phone: cleanPhone,
+        metadata: Object.keys(e.metadata).length > 0 ? e.metadata : undefined,
+      }
+    })
+    try {
+      const res = await fetch(`/api/campaigns/${selectedCampaign.id}/recipients`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ recipients: recipientsList }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowRecipientsModal(false)
+        setManualEntries([])
+        setManualPhone('')
+        setManualName('')
+        setManualMeta([])
+        fetchCampaigns()
+      } else {
+        alert(data.error || 'Error al agregar destinatarios')
+      }
+    } catch (err) {
+      alert('Error al agregar destinatarios')
+    }
+  }
+
+  const handleAddCsvRecipients = async () => {
+    if (!selectedCampaign || csvData.length === 0 || !csvPhoneCol) return
+    const recipientsList = csvData.map(row => {
+      const phone = (row[csvPhoneCol] || '').replace(/[^0-9]/g, '')
+      const meta: Record<string, string> = {}
+      csvHeaders.forEach(h => {
+        if (h !== csvPhoneCol && h !== csvNameCol && row[h]) {
+          meta[h] = row[h]
+        }
+      })
+      return {
+        jid: phone + '@s.whatsapp.net',
+        name: csvNameCol ? row[csvNameCol] || null : null,
+        phone,
+        metadata: Object.keys(meta).length > 0 ? meta : undefined,
+      }
+    }).filter(r => r.phone.length >= 7)
+    try {
+      const res = await fetch(`/api/campaigns/${selectedCampaign.id}/recipients`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ recipients: recipientsList, save_as_contacts: csvSaveAsContacts }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowRecipientsModal(false)
+        setCsvData([])
+        setCsvHeaders([])
+        setCsvPhoneCol('')
+        setCsvNameCol('')
+        setCsvSaveAsContacts(false)
+        fetchCampaigns()
+      } else {
+        alert(data.error || 'Error al agregar destinatarios')
+      }
+    } catch (err) {
+      alert('Error al agregar destinatarios')
+    }
+  }
+
+  const handleCsvFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string
+      const lines = text.split(/\r?\n/).filter(l => l.trim())
+      if (lines.length < 2) return
+      const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''))
+      setCsvHeaders(headers)
+      // Auto-detect phone and name columns
+      const phoneCandidates = ['phone', 'telefono', 'teléfono', 'celular', 'numero', 'número', 'whatsapp']
+      const nameCandidates = ['name', 'nombre', 'nombre_completo']
+      const phoneH = headers.find(h => phoneCandidates.includes(h.toLowerCase())) || ''
+      const nameH = headers.find(h => nameCandidates.includes(h.toLowerCase())) || ''
+      setCsvPhoneCol(phoneH)
+      setCsvNameCol(nameH)
+
+      const rows: Record<string, string>[] = []
+      for (let i = 1; i < lines.length; i++) {
+        const vals = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''))
+        const row: Record<string, string> = {}
+        headers.forEach((h, j) => { row[h] = vals[j] || '' })
+        rows.push(row)
+      }
+      setCsvData(rows)
+    }
+    reader.readAsText(file)
+  }
+
+  const handleDeleteRecipient = async (recipientId: string) => {
+    if (!selectedCampaign) return
+    try {
+      const res = await fetch(`/api/campaigns/${selectedCampaign.id}/recipients/${recipientId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setRecipients(prev => prev.filter(r => r.id !== recipientId))
+        fetchCampaigns()
+      } else {
+        alert(data.error || 'Error al eliminar destinatario')
+      }
+    } catch (err) {
+      alert('Error al eliminar destinatario')
+    }
+  }
+
   const handleStartCampaign = async (id: string) => {
     if (!confirm('¿Iniciar el envío masivo? Los mensajes se enviarán según la configuración anti-ban.')) return
     try {
@@ -275,7 +415,7 @@ export default function BroadcastsPage() {
 
   const handleViewRecipients = async (campaign: Campaign) => {
     setSelectedCampaign(campaign)
-    setDetailTab('recipients')
+    setDetailTab('message')
     try {
       const res = await fetch(`/api/campaigns/${campaign.id}/recipients`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -602,72 +742,333 @@ export default function BroadcastsPage() {
             <h2 className="text-xl font-bold text-gray-900 mb-1">Agregar Destinatarios</h2>
             <p className="text-sm text-gray-500 mb-4">Campaña: {selectedCampaign.name}</p>
 
-            <div className="relative mb-3">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                type="text"
-                value={searchContacts}
-                onChange={e => setSearchContacts(e.target.value)}
-                placeholder="Buscar contacto..."
-                className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
-              />
-            </div>
-
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-gray-500">{selectedContactIds.size} seleccionado(s)</span>
+            {/* Tabs */}
+            <div className="flex gap-1 bg-gray-100 p-1 rounded-lg mb-4">
               <button
-                onClick={() => setSelectedContactIds(new Set(filteredContacts.map(c => c.id)))}
-                className="text-xs text-green-600 hover:underline"
+                onClick={() => setRecipientTab('contacts')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  recipientTab === 'contacts' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
               >
-                Seleccionar todos
+                <Users className="w-3.5 h-3.5" /> Contactos
+              </button>
+              <button
+                onClick={() => setRecipientTab('manual')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  recipientTab === 'manual' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <UserPlus className="w-3.5 h-3.5" /> Manual
+              </button>
+              <button
+                onClick={() => setRecipientTab('csv')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  recipientTab === 'csv' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Upload className="w-3.5 h-3.5" /> CSV
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0">
-              {filteredContacts.length === 0 ? (
-                <div className="p-8 text-center text-gray-400 text-sm">
-                  No se encontraron contactos
+            {/* Contacts tab */}
+            {recipientTab === 'contacts' && (
+              <>
+                <div className="relative mb-3">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <input
+                    type="text"
+                    value={searchContacts}
+                    onChange={e => setSearchContacts(e.target.value)}
+                    placeholder="Buscar contacto..."
+                    className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+                  />
                 </div>
-              ) : (
-                filteredContacts.map(contact => (
-                  <label
-                    key={contact.id}
-                    className="flex items-center gap-3 p-3 hover:bg-gray-50 cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedContactIds.has(contact.id)}
-                      onChange={() => toggleContactSelection(contact.id)}
-                      className="rounded border-gray-300 text-green-600 focus:ring-green-500"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">
-                        {contact.custom_name || contact.name || contact.push_name || 'Sin nombre'}
-                      </p>
-                      <p className="text-xs text-gray-400 truncate">
-                        {contact.phone || contact.jid.replace('@s.whatsapp.net', '')}
-                      </p>
-                    </div>
-                  </label>
-                ))
-              )}
-            </div>
 
-            <div className="flex gap-3 mt-4">
-              <button
-                onClick={() => { setShowRecipientsModal(false); setSelectedContactIds(new Set()); setSearchContacts('') }}
-                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={handleAddRecipients}
-                disabled={selectedContactIds.size === 0}
-                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
-              >
-                Agregar {selectedContactIds.size} destinatario(s)
-              </button>
-            </div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-gray-500">{selectedContactIds.size} seleccionado(s)</span>
+                  <button
+                    onClick={() => setSelectedContactIds(new Set(filteredContacts.map(c => c.id)))}
+                    className="text-xs text-green-600 hover:underline"
+                  >
+                    Seleccionar todos
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0">
+                  {filteredContacts.length === 0 ? (
+                    <div className="p-8 text-center text-gray-400 text-sm">
+                      No se encontraron contactos
+                    </div>
+                  ) : (
+                    filteredContacts.map(contact => (
+                      <label
+                        key={contact.id}
+                        className="flex items-center gap-3 p-3 hover:bg-gray-50 cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedContactIds.has(contact.id)}
+                          onChange={() => toggleContactSelection(contact.id)}
+                          className="rounded border-gray-300 text-green-600 focus:ring-green-500"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">
+                            {contact.custom_name || contact.name || contact.push_name || 'Sin nombre'}
+                          </p>
+                          <p className="text-xs text-gray-400 truncate">
+                            {contact.phone || contact.jid.replace('@s.whatsapp.net', '')}
+                          </p>
+                        </div>
+                      </label>
+                    ))
+                  )}
+                </div>
+
+                <div className="flex gap-3 mt-4">
+                  <button
+                    onClick={() => { setShowRecipientsModal(false); setSelectedContactIds(new Set()); setSearchContacts('') }}
+                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleAddRecipients}
+                    disabled={selectedContactIds.size === 0}
+                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                  >
+                    Agregar {selectedContactIds.size}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Manual tab */}
+            {recipientTab === 'manual' && (
+              <>
+                <div className="space-y-3 mb-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={manualPhone}
+                      onChange={e => setManualPhone(e.target.value)}
+                      placeholder="Teléfono (ej: 51999888777)"
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+                    />
+                    <input
+                      type="text"
+                      value={manualName}
+                      onChange={e => setManualName(e.target.value)}
+                      placeholder="Nombre (opcional)"
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+                    />
+                  </div>
+                  {manualMeta.map((m, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={m.key}
+                        onChange={e => {
+                          const updated = [...manualMeta]
+                          updated[i] = { ...updated[i], key: e.target.value }
+                          setManualMeta(updated)
+                        }}
+                        placeholder="Variable (ej: empresa)"
+                        className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-900"
+                      />
+                      <input
+                        type="text"
+                        value={m.value}
+                        onChange={e => {
+                          const updated = [...manualMeta]
+                          updated[i] = { ...updated[i], value: e.target.value }
+                          setManualMeta(updated)
+                        }}
+                        placeholder="Valor"
+                        className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-900"
+                      />
+                      <button
+                        onClick={() => setManualMeta(prev => prev.filter((_, j) => j !== i))}
+                        className="p-1 text-red-500 hover:bg-red-50 rounded"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setManualMeta(prev => [...prev, { key: '', value: '' }])}
+                      className="text-xs text-blue-600 hover:underline"
+                    >
+                      + Agregar variable personalizada
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!manualPhone.replace(/[^0-9]/g, '')) return
+                        const meta: Record<string, string> = {}
+                        manualMeta.forEach(m => { if (m.key && m.value) meta[m.key] = m.value })
+                        setManualEntries(prev => [...prev, { phone: manualPhone, name: manualName, metadata: meta }])
+                        setManualPhone('')
+                        setManualName('')
+                        setManualMeta([])
+                      }}
+                      disabled={!manualPhone.replace(/[^0-9]/g, '')}
+                      className="ml-auto px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      Añadir a la lista
+                    </button>
+                  </div>
+                </div>
+
+                {manualEntries.length > 0 && (
+                  <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0 mb-3">
+                    {manualEntries.map((entry, i) => (
+                      <div key={i} className="flex items-center justify-between p-2.5 text-sm">
+                        <div className="min-w-0">
+                          <p className="font-medium text-gray-900">{entry.name || entry.phone}</p>
+                          <p className="text-xs text-gray-400">{entry.phone}
+                            {Object.keys(entry.metadata).length > 0 && (
+                              <span className="ml-2 text-blue-500">
+                                {Object.entries(entry.metadata).map(([k, v]) => `${k}=${v}`).join(', ')}
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setManualEntries(prev => prev.filter((_, j) => j !== i))}
+                          className="p-1 text-red-500 hover:bg-red-50 rounded"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex gap-3 mt-auto">
+                  <button
+                    onClick={() => { setShowRecipientsModal(false); setManualEntries([]); setManualPhone(''); setManualName(''); setManualMeta([]) }}
+                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleAddManualRecipients}
+                    disabled={manualEntries.length === 0}
+                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                  >
+                    Agregar {manualEntries.length}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* CSV tab */}
+            {recipientTab === 'csv' && (
+              <>
+                {csvData.length === 0 ? (
+                  <div className="flex-1 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-lg p-8">
+                    <Upload className="w-8 h-8 text-gray-400 mb-3" />
+                    <p className="text-sm text-gray-600 mb-2">Arrastra o selecciona un archivo CSV</p>
+                    <p className="text-xs text-gray-400 mb-4">Columnas sugeridas: telefono, nombre, empresa, ciudad...</p>
+                    <label className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm cursor-pointer hover:bg-blue-700">
+                      Seleccionar archivo
+                      <input type="file" accept=".csv" onChange={handleCsvFileUpload} className="hidden" />
+                    </label>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 gap-3 mb-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Columna teléfono *</label>
+                        <select
+                          value={csvPhoneCol}
+                          onChange={e => setCsvPhoneCol(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+                        >
+                          <option value="">Seleccionar...</option>
+                          {csvHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Columna nombre</label>
+                        <select
+                          value={csvNameCol}
+                          onChange={e => setCsvNameCol(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+                        >
+                          <option value="">Ninguna</option>
+                          {csvHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    <p className="text-xs text-gray-500 mb-2">
+                      Las demás columnas se guardarán como variables personalizadas (ej: {'{{empresa}}'}, {'{{ciudad}}'})
+                    </p>
+
+                    <div className="flex-1 overflow-auto border border-gray-200 rounded-lg min-h-0 mb-3">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-gray-50">
+                            {csvHeaders.map(h => (
+                              <th key={h} className={`px-2 py-1.5 text-left font-medium ${h === csvPhoneCol ? 'text-green-700 bg-green-50' : h === csvNameCol ? 'text-blue-700 bg-blue-50' : 'text-gray-600'}`}>
+                                {h}
+                                {h === csvPhoneCol && ' 📱'}
+                                {h === csvNameCol && ' 👤'}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {csvData.slice(0, 5).map((row, i) => (
+                            <tr key={i} className="border-t border-gray-100">
+                              {csvHeaders.map(h => (
+                                <td key={h} className="px-2 py-1.5 text-gray-700 truncate max-w-[120px]">{row[h]}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {csvData.length > 5 && (
+                        <p className="text-xs text-gray-400 px-2 py-1">...y {csvData.length - 5} filas más</p>
+                      )}
+                    </div>
+
+                    <label className="flex items-center gap-2 text-sm text-gray-700 mb-3">
+                      <input
+                        type="checkbox"
+                        checked={csvSaveAsContacts}
+                        onChange={e => setCsvSaveAsContacts(e.target.checked)}
+                        className="rounded border-gray-300 text-green-600 focus:ring-green-500"
+                      />
+                      Guardar también como contactos
+                    </label>
+                  </>
+                )}
+
+                <div className="flex gap-3 mt-auto">
+                  <button
+                    onClick={() => {
+                      if (csvData.length > 0) {
+                        setCsvData([]); setCsvHeaders([]); setCsvPhoneCol(''); setCsvNameCol(''); setCsvSaveAsContacts(false)
+                      } else {
+                        setShowRecipientsModal(false)
+                      }
+                    }}
+                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                  >
+                    {csvData.length > 0 ? 'Limpiar' : 'Cancelar'}
+                  </button>
+                  <button
+                    onClick={handleAddCsvRecipients}
+                    disabled={csvData.length === 0 || !csvPhoneCol}
+                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                  >
+                    Agregar {csvData.filter(r => (r[csvPhoneCol] || '').replace(/[^0-9]/g, '').length >= 7).length}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -683,10 +1084,63 @@ export default function BroadcastsPage() {
               </span>
             </div>
 
-            <div className="space-y-3 text-sm">
-              <div>
-                <span className="text-gray-500">Mensaje:</span>
-                <div className="mt-2 p-3 bg-[#e5ddd5] rounded-lg max-w-sm">
+            {selectedCampaign.scheduled_at && (
+              <div className="flex items-center gap-2 text-blue-600 bg-blue-50 rounded-lg px-3 py-2 mb-3">
+                <CalendarClock className="w-4 h-4" />
+                <span className="text-sm">
+                  Programada: {format(new Date(selectedCampaign.scheduled_at), "EEEE d 'de' MMMM 'a las' HH:mm", { locale: es })}
+                </span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+              <div className="bg-green-50 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-green-700">{selectedCampaign.sent_count}</p>
+                <p className="text-xs text-green-600">Enviados</p>
+              </div>
+              <div className="bg-red-50 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-red-700">{selectedCampaign.failed_count}</p>
+                <p className="text-xs text-red-600">Fallidos</p>
+              </div>
+              <div className="bg-blue-50 rounded-lg p-3 text-center">
+                <p className="text-2xl font-bold text-blue-700">
+                  {selectedCampaign.total_recipients - selectedCampaign.sent_count - selectedCampaign.failed_count}
+                </p>
+                <p className="text-xs text-blue-600">Pendientes</p>
+              </div>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit mb-3">
+              <button
+                onClick={() => setDetailTab('message')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  detailTab === 'message' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <MessageSquare className="w-3.5 h-3.5" /> Mensaje
+              </button>
+              <button
+                onClick={() => setDetailTab('recipients')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  detailTab === 'recipients' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" /> Destinatarios ({recipients.length})
+              </button>
+              <button
+                onClick={() => setDetailTab('chart')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  detailTab === 'chart' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" /> Tiempos
+              </button>
+            </div>
+
+            {detailTab === 'message' ? (
+              <div className="flex-1 overflow-y-auto min-h-0 max-h-72">
+                <div className="p-3 bg-[#e5ddd5] rounded-lg max-w-sm">
                   {selectedCampaign.attachments && selectedCampaign.attachments.length > 0 ? (
                     <div className="space-y-1">
                       {selectedCampaign.message_template && !selectedCampaign.attachments.some(a => !a.caption) && (
@@ -730,53 +1184,7 @@ export default function BroadcastsPage() {
                   )}
                 </div>
               </div>
-              {selectedCampaign.scheduled_at && (
-                <div className="flex items-center gap-2 text-blue-600 bg-blue-50 rounded-lg px-3 py-2">
-                  <CalendarClock className="w-4 h-4" />
-                  <span className="text-sm">
-                    Programada: {format(new Date(selectedCampaign.scheduled_at), "EEEE d 'de' MMMM 'a las' HH:mm", { locale: es })}
-                  </span>
-                </div>
-              )}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="bg-green-50 rounded-lg p-3 text-center">
-                  <p className="text-2xl font-bold text-green-700">{selectedCampaign.sent_count}</p>
-                  <p className="text-xs text-green-600">Enviados</p>
-                </div>
-                <div className="bg-red-50 rounded-lg p-3 text-center">
-                  <p className="text-2xl font-bold text-red-700">{selectedCampaign.failed_count}</p>
-                  <p className="text-xs text-red-600">Fallidos</p>
-                </div>
-                <div className="bg-blue-50 rounded-lg p-3 text-center">
-                  <p className="text-2xl font-bold text-blue-700">
-                    {selectedCampaign.total_recipients - selectedCampaign.sent_count - selectedCampaign.failed_count}
-                  </p>
-                  <p className="text-xs text-blue-600">Pendientes</p>
-                </div>
-              </div>
-            </div>
-
-            {/* Tabs */}
-            <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit mt-4 mb-3">
-              <button
-                onClick={() => setDetailTab('recipients')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  detailTab === 'recipients' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <Users className="w-3.5 h-3.5" /> Destinatarios ({recipients.length})
-              </button>
-              <button
-                onClick={() => setDetailTab('chart')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  detailTab === 'chart' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <BarChart3 className="w-3.5 h-3.5" /> Tiempos de Espera
-              </button>
-            </div>
-
-            {detailTab === 'recipients' ? (
+            ) : detailTab === 'recipients' ? (
               <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0 max-h-72">
                 {recipients.map((rec, idx) => (
                   <div key={rec.id} className="flex items-center justify-between p-2.5 text-sm">
@@ -795,6 +1203,11 @@ export default function BroadcastsPage() {
                             {rec.wait_time_ms != null && rec.wait_time_ms > 0 && (
                               <span className="text-blue-500">
                                 espera: {(rec.wait_time_ms / 1000).toFixed(1)}s
+                              </span>
+                            )}
+                            {rec.metadata && Object.keys(rec.metadata).length > 0 && (
+                              <span className="text-purple-500">
+                                {Object.entries(rec.metadata).map(([k, v]) => `${k}=${v}`).join(', ')}
                               </span>
                             )}
                           </div>
@@ -816,6 +1229,15 @@ export default function BroadcastsPage() {
                       }`}>
                         {rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente'}
                       </span>
+                      {rec.status === 'pending' && (selectedCampaign.status === 'draft' || selectedCampaign.status === 'scheduled') && (
+                        <button
+                          onClick={() => handleDeleteRecipient(rec.id)}
+                          className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition"
+                          title="Eliminar destinatario"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
