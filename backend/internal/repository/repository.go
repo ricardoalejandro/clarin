@@ -1496,6 +1496,7 @@ func (r *CampaignRepository) GetByAccountID(ctx context.Context, accountID uuid.
 		LEFT JOIN devices d ON d.id = c.device_id
 		WHERE c.account_id = $1
 		ORDER BY c.created_at DESC
+		LIMIT 100
 	`, accountID)
 	if err != nil {
 		return nil, err

@@ -6,13 +6,14 @@ import {
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
   BarChart3, ZoomIn, ZoomOut, CalendarClock, X, Paperclip,
-  MessageSquare, Upload, UserPlus
+  MessageSquare, Upload, UserPlus, Download, CheckSquare, Square
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import MessageBubble from '@/components/chat/MessageBubble'
 import CreateCampaignModal, { CampaignFormResult, CampaignAttachment } from '@/components/CreateCampaignModal'
 import { renderFormattedText } from '@/lib/whatsappFormat'
+import * as XLSX from 'xlsx'
 
 interface Device {
   id: string
@@ -126,6 +127,8 @@ export default function BroadcastsPage() {
   const [csvPhoneCol, setCsvPhoneCol] = useState('')
   const [csvNameCol, setCsvNameCol] = useState('')
   const [csvSaveAsContacts, setCsvSaveAsContacts] = useState(false)
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<string>>(new Set())
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -320,36 +323,6 @@ export default function BroadcastsPage() {
     }
   }
 
-  const handleCsvFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = (ev) => {
-      const text = ev.target?.result as string
-      const lines = text.split(/\r?\n/).filter(l => l.trim())
-      if (lines.length < 2) return
-      const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''))
-      setCsvHeaders(headers)
-      // Auto-detect phone and name columns
-      const phoneCandidates = ['phone', 'telefono', 'teléfono', 'celular', 'numero', 'número', 'whatsapp']
-      const nameCandidates = ['name', 'nombre', 'nombre_completo']
-      const phoneH = headers.find(h => phoneCandidates.includes(h.toLowerCase())) || ''
-      const nameH = headers.find(h => nameCandidates.includes(h.toLowerCase())) || ''
-      setCsvPhoneCol(phoneH)
-      setCsvNameCol(nameH)
-
-      const rows: Record<string, string>[] = []
-      for (let i = 1; i < lines.length; i++) {
-        const vals = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''))
-        const row: Record<string, string> = {}
-        headers.forEach((h, j) => { row[h] = vals[j] || '' })
-        rows.push(row)
-      }
-      setCsvData(rows)
-    }
-    reader.readAsText(file)
-  }
-
   const handleDeleteRecipient = async (recipientId: string) => {
     if (!selectedCampaign) return
     try {
@@ -367,6 +340,73 @@ export default function BroadcastsPage() {
     } catch (err) {
       alert('Error al eliminar destinatario')
     }
+  }
+
+  const handleBatchDelete = async () => {
+    if (selectedCampaignIds.size === 0) return
+    if (!confirm(`¿Eliminar ${selectedCampaignIds.size} campaña(s)? Esta acción no se puede deshacer.`)) return
+    try {
+      const res = await fetch('/api/campaigns/batch-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ ids: Array.from(selectedCampaignIds) }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setSelectedCampaignIds(new Set())
+        setSelectionMode(false)
+        fetchCampaigns()
+      } else {
+        alert(data.error || 'Error al eliminar')
+      }
+    } catch (err) {
+      alert('Error al eliminar campañas')
+    }
+  }
+
+  const toggleCampaignSelection = (id: string) => {
+    const newSet = new Set(selectedCampaignIds)
+    if (newSet.has(id)) newSet.delete(id)
+    else newSet.add(id)
+    setSelectedCampaignIds(newSet)
+  }
+
+  const downloadExcelTemplate = () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['telefono', 'nombre', 'empresa', 'ciudad'],
+      ['51999888777', 'Juan Pérez', 'Mi Empresa', 'Lima'],
+      ['51998877666', 'María García', 'Otra Empresa', 'Cusco'],
+    ])
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Destinatarios')
+    XLSX.writeFile(wb, 'plantilla_destinatarios.xlsx')
+  }
+
+  const handleExcelFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const data = new Uint8Array(ev.target?.result as ArrayBuffer)
+      const workbook = XLSX.read(data, { type: 'array' })
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
+      const jsonData = XLSX.utils.sheet_to_json<Record<string, string>>(firstSheet, { defval: '' })
+      if (jsonData.length === 0) return
+      const headers = Object.keys(jsonData[0])
+      setCsvHeaders(headers)
+      const phoneCandidates = ['phone', 'telefono', 'teléfono', 'celular', 'numero', 'número', 'whatsapp']
+      const nameCandidates = ['name', 'nombre', 'nombre_completo']
+      setCsvPhoneCol(headers.find(h => phoneCandidates.includes(h.toLowerCase())) || '')
+      setCsvNameCol(headers.find(h => nameCandidates.includes(h.toLowerCase())) || '')
+      // Convert all values to string
+      const rows = jsonData.map(row => {
+        const r: Record<string, string> = {}
+        headers.forEach(h => { r[h] = String(row[h] ?? '') })
+        return r
+      })
+      setCsvData(rows)
+    }
+    reader.readAsArrayBuffer(file)
   }
 
   const handleStartCampaign = async (id: string) => {
@@ -540,13 +580,35 @@ export default function BroadcastsPage() {
           <h1 className="text-2xl font-bold text-gray-900">Envíos Masivos</h1>
           <p className="text-gray-600 mt-1">{campaigns.length} campañas</p>
         </div>
-        <button
-          onClick={() => setShowCreateModal(true)}
-          className="inline-flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition"
-        >
-          <Plus className="w-5 h-5" />
-          Nueva Campaña
-        </button>
+        <div className="flex items-center gap-2">
+          {campaigns.length > 0 && (
+            <button
+              onClick={() => { setSelectionMode(!selectionMode); setSelectedCampaignIds(new Set()) }}
+              className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg transition text-sm ${
+                selectionMode ? 'bg-blue-100 text-blue-700' : 'border border-gray-300 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <CheckSquare className="w-4 h-4" />
+              {selectionMode ? 'Cancelar' : 'Seleccionar'}
+            </button>
+          )}
+          {selectionMode && selectedCampaignIds.size > 0 && (
+            <button
+              onClick={handleBatchDelete}
+              className="inline-flex items-center gap-2 bg-red-600 text-white px-3 py-2 rounded-lg hover:bg-red-700 transition text-sm"
+            >
+              <Trash2 className="w-4 h-4" />
+              Eliminar ({selectedCampaignIds.size})
+            </button>
+          )}
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="inline-flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition"
+          >
+            <Plus className="w-5 h-5" />
+            Nueva Campaña
+          </button>
+        </div>
       </div>
 
       {/* Anti-ban info banner */}
@@ -567,6 +629,25 @@ export default function BroadcastsPage() {
         </div>
       ) : (
         <div className="grid gap-4">
+          {selectionMode && (
+            <div className="flex items-center gap-3 text-sm text-gray-600">
+              <button
+                onClick={() => setSelectedCampaignIds(new Set(campaigns.map(c => c.id)))}
+                className="text-blue-600 hover:underline text-xs"
+              >
+                Seleccionar todos
+              </button>
+              {selectedCampaignIds.size > 0 && (
+                <button
+                  onClick={() => setSelectedCampaignIds(new Set())}
+                  className="text-gray-500 hover:underline text-xs"
+                >
+                  Deseleccionar
+                </button>
+              )}
+              <span className="text-xs text-gray-400">{selectedCampaignIds.size} seleccionada(s)</span>
+            </div>
+          )}
           {campaigns.map(campaign => {
             const progress = campaign.total_recipients > 0
               ? Math.round(((campaign.sent_count + campaign.failed_count) / campaign.total_recipients) * 100)
@@ -577,7 +658,20 @@ export default function BroadcastsPage() {
             return (
               <div key={campaign.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition">
                 <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 min-w-0 flex items-start gap-3">
+                    {selectionMode && (
+                      <button
+                        onClick={() => toggleCampaignSelection(campaign.id)}
+                        className="mt-0.5 shrink-0"
+                      >
+                        {selectedCampaignIds.has(campaign.id) ? (
+                          <CheckSquare className="w-5 h-5 text-blue-600" />
+                        ) : (
+                          <Square className="w-5 h-5 text-gray-400" />
+                        )}
+                      </button>
+                    )}
+                    <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3">
                       <h3 className="font-semibold text-gray-900 truncate">{campaign.name}</h3>
                       <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[campaign.status] || STATUS_COLORS.draft}`}>
@@ -615,6 +709,7 @@ export default function BroadcastsPage() {
                         </span>
                       )}
                     </div>
+                  </div>
                   </div>
 
                   <div className="flex items-center gap-1 ml-4">
@@ -766,7 +861,7 @@ export default function BroadcastsPage() {
                   recipientTab === 'csv' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                <Upload className="w-3.5 h-3.5" /> CSV
+                <Upload className="w-3.5 h-3.5" /> Excel
               </button>
             </div>
 
@@ -968,12 +1063,21 @@ export default function BroadcastsPage() {
                 {csvData.length === 0 ? (
                   <div className="flex-1 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-lg p-8">
                     <Upload className="w-8 h-8 text-gray-400 mb-3" />
-                    <p className="text-sm text-gray-600 mb-2">Arrastra o selecciona un archivo CSV</p>
+                    <p className="text-sm text-gray-600 mb-2">Selecciona un archivo Excel (.xlsx)</p>
                     <p className="text-xs text-gray-400 mb-4">Columnas sugeridas: telefono, nombre, empresa, ciudad...</p>
-                    <label className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm cursor-pointer hover:bg-blue-700">
-                      Seleccionar archivo
-                      <input type="file" accept=".csv" onChange={handleCsvFileUpload} className="hidden" />
-                    </label>
+                    <div className="flex items-center gap-3">
+                      <label className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm cursor-pointer hover:bg-blue-700">
+                        Seleccionar archivo
+                        <input type="file" accept=".xlsx,.xls,.csv" onChange={handleExcelFileUpload} className="hidden" />
+                      </label>
+                      <button
+                        onClick={downloadExcelTemplate}
+                        className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
+                      >
+                        <Download className="w-4 h-4" />
+                        Descargar plantilla
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -1140,7 +1244,7 @@ export default function BroadcastsPage() {
 
             {detailTab === 'message' ? (
               <div className="flex-1 overflow-y-auto min-h-0 max-h-72">
-                <div className="p-3 bg-[#e5ddd5] rounded-lg max-w-sm">
+                <div className="p-4 bg-[#e5ddd5] rounded-lg flex flex-col items-center">
                   {selectedCampaign.attachments && selectedCampaign.attachments.length > 0 ? (
                     <div className="space-y-1">
                       {selectedCampaign.message_template && !selectedCampaign.attachments.some(a => !a.caption) && (
@@ -1243,7 +1347,7 @@ export default function BroadcastsPage() {
                 ))}
               </div>
             ) : (
-              <div className="flex-1 min-h-0">
+              <div className="flex-1 min-h-0 overflow-y-auto max-h-72">
                 {(() => {
                   const sentRecipients = recipients.filter(r => r.wait_time_ms != null && r.wait_time_ms > 0)
                   if (sentRecipients.length < 2) {

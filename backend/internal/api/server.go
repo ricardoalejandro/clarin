@@ -224,6 +224,7 @@ func (s *Server) setupRoutes() {
 	campaigns.Get("/:id", s.handleGetCampaign)
 	campaigns.Put("/:id", s.handleUpdateCampaign)
 	campaigns.Delete("/:id", s.handleDeleteCampaign)
+	campaigns.Post("/batch-delete", s.handleBatchDeleteCampaigns)
 	campaigns.Post("/:id/recipients", s.handleAddCampaignRecipients)
 	campaigns.Get("/:id/recipients", s.handleGetCampaignRecipients)
 	campaigns.Delete("/:id/recipients/:rid", s.handleDeleteCampaignRecipient)
@@ -2047,13 +2048,32 @@ func (s *Server) handleDeleteCampaign(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true})
 }
 
+func (s *Server) handleBatchDeleteCampaigns(c *fiber.Ctx) error {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	deleted := 0
+	for _, idStr := range req.IDs {
+		id, err := uuid.Parse(idStr)
+		if err != nil {
+			continue
+		}
+		if err := s.services.Campaign.Delete(c.Context(), id); err == nil {
+			deleted++
+		}
+	}
+	return c.JSON(fiber.Map{"success": true, "deleted": deleted})
+}
+
 func (s *Server) handleAddCampaignRecipients(c *fiber.Ctx) error {
 	campaignID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
 	}
-	accountID := c.Locals("account_id").(string)
-	acctUUID, _ := uuid.Parse(accountID)
+	acctUUID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		Recipients []struct {
 			ContactID *string                `json:"contact_id"`
