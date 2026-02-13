@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/csv"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"time"
@@ -220,6 +222,9 @@ func (s *Server) setupRoutes() {
 	campaigns.Post("/:id/start", s.handleStartCampaign)
 	campaigns.Post("/:id/pause", s.handlePauseCampaign)
 	campaigns.Post("/:id/duplicate", s.handleDuplicateCampaign)
+
+	// Import CSV route
+	protected.Post("/import/csv", s.handleImportCSV)
 
 	// Contact routes
 	contacts := protected.Group("/contacts")
@@ -1213,6 +1218,216 @@ func (s *Server) handleGetPipelines(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "pipelines": pipelines})
 }
 
+// --- Import CSV Handler ---
+
+func (s *Server) handleImportCSV(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	importType := c.FormValue("import_type") // "leads", "contacts", "both"
+	if importType == "" {
+		importType = "leads"
+	}
+	if importType != "leads" && importType != "contacts" && importType != "both" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "import_type must be 'leads', 'contacts', or 'both'"})
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "CSV file is required"})
+	}
+
+	f, err := file.Open()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Cannot read file"})
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(f)
+	reader.LazyQuotes = true
+	reader.TrimLeadingSpace = true
+
+	// Read header
+	headers, err := reader.Read()
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Cannot read CSV headers"})
+	}
+
+	// Map header columns (case-insensitive)
+	colMap := make(map[string]int)
+	for i, h := range headers {
+		colMap[strings.ToLower(strings.TrimSpace(h))] = i
+	}
+
+	// Check required columns
+	phoneCol := -1
+	for _, key := range []string{"phone", "telefono", "celular", "número", "numero"} {
+		if idx, ok := colMap[key]; ok {
+			phoneCol = idx
+			break
+		}
+	}
+	if phoneCol == -1 {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"error":   "CSV must have a phone/telefono/celular column",
+		})
+	}
+
+	nameCol := -1
+	for _, key := range []string{"name", "nombre", "nombre_completo"} {
+		if idx, ok := colMap[key]; ok {
+			nameCol = idx
+			break
+		}
+	}
+	emailCol := -1
+	if idx, ok := colMap["email"]; ok {
+		emailCol = idx
+	} else if idx, ok := colMap["correo"]; ok {
+		emailCol = idx
+	}
+	notesCol := -1
+	if idx, ok := colMap["notes"]; ok {
+		notesCol = idx
+	} else if idx, ok := colMap["notas"]; ok {
+		notesCol = idx
+	}
+	tagsCol := -1
+	if idx, ok := colMap["tags"]; ok {
+		tagsCol = idx
+	} else if idx, ok := colMap["etiquetas"]; ok {
+		tagsCol = idx
+	}
+	companyCol := -1
+	if idx, ok := colMap["company"]; ok {
+		companyCol = idx
+	} else if idx, ok := colMap["empresa"]; ok {
+		companyCol = idx
+	}
+	lastNameCol := -1
+	for _, key := range []string{"last_name", "apellido", "apellidos"} {
+		if idx, ok := colMap[key]; ok {
+			lastNameCol = idx
+			break
+		}
+	}
+
+	imported := 0
+	skipped := 0
+	var errors []string
+
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			skipped++
+			continue
+		}
+
+		phone := strings.TrimSpace(row[phoneCol])
+		if phone == "" {
+			skipped++
+			continue
+		}
+
+		// Normalize phone: remove spaces, dashes, ensure digits
+		phone = strings.ReplaceAll(phone, " ", "")
+		phone = strings.ReplaceAll(phone, "-", "")
+		phone = strings.ReplaceAll(phone, "(", "")
+		phone = strings.ReplaceAll(phone, ")", "")
+		phone = strings.TrimPrefix(phone, "+")
+
+		jid := phone + "@s.whatsapp.net"
+
+		name := ""
+		if nameCol >= 0 && nameCol < len(row) {
+			name = strings.TrimSpace(row[nameCol])
+		}
+		email := ""
+		if emailCol >= 0 && emailCol < len(row) {
+			email = strings.TrimSpace(row[emailCol])
+		}
+		notes := ""
+		if notesCol >= 0 && notesCol < len(row) {
+			notes = strings.TrimSpace(row[notesCol])
+		}
+		tags := ""
+		if tagsCol >= 0 && tagsCol < len(row) {
+			tags = strings.TrimSpace(row[tagsCol])
+		}
+		company := ""
+		if companyCol >= 0 && companyCol < len(row) {
+			company = strings.TrimSpace(row[companyCol])
+		}
+		lastName := ""
+		if lastNameCol >= 0 && lastNameCol < len(row) {
+			lastName = strings.TrimSpace(row[lastNameCol])
+		}
+
+		if importType == "contacts" || importType == "both" {
+			contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, name, "", false)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("row %d contact: %s", imported+skipped+1, err.Error()))
+			} else if contact != nil {
+				// Update extra fields if provided
+				needUpdate := false
+				if email != "" && (contact.Email == nil || *contact.Email == "") {
+					contact.Email = &email
+					needUpdate = true
+				}
+				if company != "" && (contact.Company == nil || *contact.Company == "") {
+					contact.Company = &company
+					needUpdate = true
+				}
+				if lastName != "" && (contact.LastName == nil || *contact.LastName == "") {
+					contact.LastName = &lastName
+					needUpdate = true
+				}
+				if notes != "" && (contact.Notes == nil || *contact.Notes == "") {
+					contact.Notes = &notes
+					needUpdate = true
+				}
+				if needUpdate {
+					s.services.Contact.Update(c.Context(), contact)
+				}
+			}
+		}
+		if importType == "leads" || importType == "both" {
+			lead := &domain.Lead{
+				AccountID: accountID,
+				JID:       jid,
+				Name:      strPtr(name),
+				Phone:     strPtr(phone),
+				Email:     strPtr(email),
+				Notes:     strPtr(notes),
+				Source:    strPtr("csv_import"),
+				Status:    strPtr(domain.LeadStatusNew),
+			}
+			if tags != "" {
+				tagList := strings.Split(tags, ",")
+				for i := range tagList {
+					tagList[i] = strings.TrimSpace(tagList[i])
+				}
+				lead.Tags = tagList
+			}
+			if err := s.services.Lead.Create(c.Context(), lead); err != nil {
+				errors = append(errors, fmt.Sprintf("row %d lead: %s", imported+skipped+1, err.Error()))
+			}
+		}
+
+		imported++
+	}
+
+	return c.JSON(fiber.Map{
+		"success":  true,
+		"imported": imported,
+		"skipped":  skipped,
+		"errors":   errors,
+	})
+}
+
 // --- Contact Handlers ---
 
 func (s *Server) handleGetContacts(c *fiber.Ctx) error {
@@ -1631,6 +1846,7 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 		MediaURL        *string                `json:"media_url"`
 		MediaType       *string                `json:"media_type"`
 		ScheduledAt     *time.Time             `json:"scheduled_at"`
+		Status          *string                `json:"status"`
 		Settings        map[string]interface{} `json:"settings"`
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -1655,6 +1871,9 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 	}
 	if req.ScheduledAt != nil {
 		campaign.ScheduledAt = req.ScheduledAt
+	}
+	if req.Status != nil && (*req.Status == domain.CampaignStatusScheduled || *req.Status == domain.CampaignStatusDraft) {
+		campaign.Status = *req.Status
 	}
 	if req.Settings != nil {
 		campaign.Settings = req.Settings

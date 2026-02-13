@@ -105,6 +105,18 @@ func main() {
 					continue
 				}
 				for _, c := range campaigns {
+					// Handle scheduled campaigns: auto-start when time arrives
+					if c.Status == "scheduled" {
+						if c.ScheduledAt != nil && time.Now().Before(*c.ScheduledAt) {
+							continue // Not yet time
+						}
+						if err := services.Campaign.Start(context.Background(), c.ID); err != nil {
+							log.Printf("[Campaign %s] Failed to auto-start scheduled: %v", c.ID, err)
+							continue
+						}
+						log.Printf("[Campaign %s] Auto-started scheduled campaign", c.ID)
+						c.Status = "running"
+					}
 					settings := c.Settings
 					minDelay := 8
 					maxDelay := 15

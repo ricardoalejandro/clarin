@@ -1,14 +1,15 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Radio, Plus, Play, Pause, Trash2, Edit, Users, Send, Clock,
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
-  BarChart3, ZoomIn, ZoomOut
+  BarChart3, ZoomIn, ZoomOut, CalendarClock
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import MessageBubble from '@/components/chat/MessageBubble'
 
 interface Device {
   id: string
@@ -117,7 +118,11 @@ export default function BroadcastsPage() {
     active_hours_start: '07:00',
     active_hours_end: '22:00',
     simulate_typing: true,
+    scheduled_date: '',
+    scheduled_time: '',
   })
+  const [showPreview, setShowPreview] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -172,6 +177,23 @@ export default function BroadcastsPage() {
   }, [fetchCampaigns, fetchDevices, fetchContacts])
 
   const handleCreateCampaign = async () => {
+    // Build scheduled_at if date and time set
+    let scheduledAt: string | null = null
+    if (formData.scheduled_date && formData.scheduled_time) {
+      const dt = new Date(`${formData.scheduled_date}T${formData.scheduled_time}:00`)
+      const now = new Date()
+      const maxDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+      if (dt <= now) {
+        alert('La fecha programada debe ser en el futuro')
+        return
+      }
+      if (dt > maxDate) {
+        alert('La fecha programada no puede ser mayor a 1 semana')
+        return
+      }
+      scheduledAt = dt.toISOString()
+    }
+
     try {
       const res = await fetch('/api/campaigns', {
         method: 'POST',
@@ -182,6 +204,7 @@ export default function BroadcastsPage() {
           message_template: formData.message_template,
           media_url: formData.media_url || null,
           media_type: formData.media_type || null,
+          scheduled_at: scheduledAt ? scheduledAt : undefined,
           settings: {
             min_delay_seconds: formData.min_delay,
             max_delay_seconds: formData.max_delay,
@@ -197,6 +220,14 @@ export default function BroadcastsPage() {
       })
       const data = await res.json()
       if (data.success) {
+        // If scheduled, set campaign status to scheduled
+        if (scheduledAt && data.campaign) {
+          await fetch(`/api/campaigns/${data.campaign.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ status: 'scheduled', scheduled_at: scheduledAt }),
+          })
+        }
         setShowCreateModal(false)
         resetForm()
         fetchCampaigns()
@@ -350,8 +381,9 @@ export default function BroadcastsPage() {
       name: '', device_id: '', message_template: '', media_url: '', media_type: '',
       min_delay: 8, max_delay: 15, batch_size: 25, batch_pause: 2,
       daily_limit: 1000, active_hours_start: '07:00', active_hours_end: '22:00',
-      simulate_typing: true,
+      simulate_typing: true, scheduled_date: '', scheduled_time: '',
     })
+    setShowPreview(false)
   }
 
   const toggleContactSelection = (contactId: string) => {
@@ -449,15 +481,21 @@ export default function BroadcastsPage() {
                         <Clock className="w-3 h-3" />
                         {formatDistanceToNow(new Date(campaign.created_at), { locale: es, addSuffix: true })}
                       </span>
+                      {campaign.scheduled_at && campaign.status === 'scheduled' && (
+                        <span className="flex items-center gap-1 text-blue-500">
+                          <CalendarClock className="w-3 h-3" />
+                          Programada: {format(new Date(campaign.scheduled_at), "d MMM HH:mm", { locale: es })}
+                        </span>
+                      )}
                     </div>
                   </div>
 
                   <div className="flex items-center gap-1 ml-4">
-                    {campaign.status === 'draft' && campaign.total_recipients > 0 && (
+                    {(campaign.status === 'draft' || campaign.status === 'scheduled') && campaign.total_recipients > 0 && (
                       <button
                         onClick={() => handleStartCampaign(campaign.id)}
                         className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition"
-                        title="Iniciar envío"
+                        title="Iniciar envío ahora"
                       >
                         <Play className="w-5 h-5" />
                       </button>
@@ -480,7 +518,7 @@ export default function BroadcastsPage() {
                         <Pause className="w-5 h-5" />
                       </button>
                     )}
-                    {campaign.status === 'draft' && (
+                    {(campaign.status === 'draft' || campaign.status === 'scheduled') && (
                       <button
                         onClick={() => {
                           setSelectedCampaign(campaign)
@@ -510,7 +548,7 @@ export default function BroadcastsPage() {
                     >
                       <Copy className="w-5 h-5" />
                     </button>
-                    {(campaign.status === 'draft' || campaign.status === 'completed' || campaign.status === 'failed') && (
+                    {(campaign.status === 'draft' || campaign.status === 'scheduled' || campaign.status === 'completed' || campaign.status === 'failed') && (
                       <button
                         onClick={() => handleDeleteCampaign(campaign.id)}
                         className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition"
@@ -585,16 +623,86 @@ export default function BroadcastsPage() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Mensaje *</label>
+                {/* Variable insertion buttons */}
+                <div className="flex flex-wrap gap-1 mb-2">
+                  {[
+                    { label: 'Nombre', value: '{{nombre}}' },
+                    { label: 'Nombre completo', value: '{{nombre_completo}}' },
+                    { label: 'Nombre corto', value: '{{nombre_corto}}' },
+                    { label: 'Celular', value: '{{celular}}' },
+                  ].map(v => (
+                    <button
+                      key={v.value}
+                      type="button"
+                      onClick={() => {
+                        const ta = textareaRef.current
+                        if (ta) {
+                          const start = ta.selectionStart
+                          const end = ta.selectionEnd
+                          const text = formData.message_template
+                          const newText = text.substring(0, start) + v.value + text.substring(end)
+                          setFormData({ ...formData, message_template: newText })
+                          setTimeout(() => {
+                            ta.focus()
+                            ta.selectionStart = ta.selectionEnd = start + v.value.length
+                          }, 0)
+                        } else {
+                          setFormData({ ...formData, message_template: formData.message_template + v.value })
+                        }
+                      }}
+                      className="px-2 py-1 text-xs bg-green-50 text-green-700 border border-green-200 rounded-md hover:bg-green-100 transition"
+                    >
+                      + {v.label}
+                    </button>
+                  ))}
+                </div>
                 <textarea
+                  ref={textareaRef}
                   value={formData.message_template}
                   onChange={e => setFormData({ ...formData, message_template: e.target.value })}
                   rows={4}
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900"
                   placeholder="Hola {{nombre}}, te escribimos para..."
                 />
-                <p className="text-xs text-gray-400 mt-1">
-                  Variables: {'{{nombre}}'}, {'{{telefono}}'} se reemplazan automáticamente
-                </p>
+                <div className="flex items-center justify-between mt-1">
+                  <p className="text-xs text-gray-400">
+                    Variables: {'{{nombre}}'}, {'{{nombre_completo}}'}, {'{{nombre_corto}}'}, {'{{celular}}'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowPreview(!showPreview)}
+                    className="text-xs text-green-600 hover:text-green-700 font-medium flex items-center gap-1"
+                  >
+                    <Eye className="w-3 h-3" />
+                    {showPreview ? 'Ocultar vista previa' : 'Vista previa'}
+                  </button>
+                </div>
+
+                {/* Message preview using MessageBubble */}
+                {showPreview && formData.message_template && (
+                  <div className="mt-2 p-3 bg-[#e5ddd5] rounded-lg max-w-sm">
+                    <MessageBubble
+                      message={{
+                        id: 'preview',
+                        message_id: 'preview',
+                        body: formData.message_template
+                          .replace(/\{\{nombre\}\}/g, 'Juan')
+                          .replace(/\{\{nombre_completo\}\}/g, 'Juan Pérez López')
+                          .replace(/\{\{nombre_corto\}\}/g, 'Juanito')
+                          .replace(/\{\{celular\}\}/g, '+51999888777')
+                          .replace(/\{\{name\}\}/g, 'Juan')
+                          .replace(/\{\{telefono\}\}/g, '+51999888777')
+                          .replace(/\{\{phone\}\}/g, '+51999888777'),
+                        message_type: formData.media_type || 'text',
+                        media_url: formData.media_url || undefined,
+                        is_from_me: true,
+                        is_read: false,
+                        status: 'sent',
+                        timestamp: new Date().toISOString(),
+                      }}
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -708,6 +816,51 @@ export default function BroadcastsPage() {
                 </label>
               </div>
 
+              {/* Schedule */}
+              <div className="border border-gray-200 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <CalendarClock className="w-4 h-4 text-gray-500" />
+                  <h3 className="text-sm font-medium text-gray-700">Programar envío (opcional)</h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Fecha</label>
+                    <input
+                      type="date"
+                      value={formData.scheduled_date}
+                      onChange={e => setFormData({ ...formData, scheduled_date: e.target.value })}
+                      min={new Date().toISOString().split('T')[0]}
+                      max={new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}
+                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Hora</label>
+                    <input
+                      type="time"
+                      value={formData.scheduled_time}
+                      onChange={e => setFormData({ ...formData, scheduled_time: e.target.value })}
+                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
+                    />
+                  </div>
+                </div>
+                {formData.scheduled_date && formData.scheduled_time && (
+                  <div className="mt-2 flex items-center justify-between">
+                    <p className="text-xs text-blue-600">
+                      Se enviará el {format(new Date(`${formData.scheduled_date}T${formData.scheduled_time}`), "d 'de' MMMM 'a las' HH:mm", { locale: es })}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, scheduled_date: '', scheduled_time: '' })}
+                      className="text-xs text-red-500 hover:text-red-700"
+                    >
+                      Quitar programación
+                    </button>
+                  </div>
+                )}
+                <p className="text-[10px] text-gray-400 mt-2">Máximo 1 semana en el futuro. Deja vacío para enviar manualmente.</p>
+              </div>
+
               {/* Speed estimator */}
               {formData.batch_size > 0 && formData.min_delay > 0 && formData.max_delay > 0 && (() => {
                 const avgDelay = (formData.min_delay + formData.max_delay) / 2
@@ -741,7 +894,7 @@ export default function BroadcastsPage() {
                 disabled={!formData.name || !formData.device_id || !formData.message_template}
                 className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
               >
-                Crear Campaña
+                {formData.scheduled_date && formData.scheduled_time ? 'Programar Campaña' : 'Crear Campaña'}
               </button>
             </div>
           </div>
@@ -1080,7 +1233,7 @@ export default function BroadcastsPage() {
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900"
               />
               <p className="text-xs text-gray-400 mt-1">
-                Variables: {'{{nombre}}'}, {'{{telefono}}'} se reemplazan automáticamente
+                Variables: {'{{nombre}}'}, {'{{nombre_completo}}'}, {'{{nombre_corto}}'}, {'{{celular}}'}
               </p>
             </div>
             <div className="flex gap-3 mt-4">

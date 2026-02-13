@@ -6,10 +6,11 @@ import {
   Search, Phone, Mail, Building2, Tag, Edit, Trash2, RefreshCw, 
   ChevronDown, CheckSquare, Square, XCircle, MoreVertical,
   Users, Merge, Eye, X, Smartphone, AlertTriangle, MessageSquare, Send,
-  Clock, Plus, FileText, Maximize2, CalendarDays
+  Clock, Plus, FileText, Maximize2, CalendarDays, Upload
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import ImportCSVModal from '@/components/ImportCSVModal'
 
 interface ContactDeviceName {
   id: string
@@ -117,6 +118,7 @@ export default function ContactsPage() {
 
   // Sync
   const [syncing, setSyncing] = useState(false)
+  const [showImportModal, setShowImportModal] = useState(false)
 
   // Send message
   const [showSendMessage, setShowSendMessage] = useState(false)
@@ -561,6 +563,13 @@ export default function ContactsPage() {
               >
                 <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
                 {syncing ? 'Sincronizando...' : 'Sincronizar'}
+              </button>
+              <button
+                onClick={() => setShowImportModal(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+              >
+                <Upload className="w-4 h-4" />
+                Importar CSV
               </button>
               <button
                 onClick={handleFindDuplicates}
@@ -1345,6 +1354,13 @@ export default function ContactsPage() {
           </div>
         </div>
       )}
+
+      <ImportCSVModal
+        open={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onSuccess={fetchContacts}
+        defaultType="contacts"
+      />
     </div>
   )
 }

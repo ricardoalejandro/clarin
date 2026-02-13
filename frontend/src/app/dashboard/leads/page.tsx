@@ -1,9 +1,10 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MessageCircle, Trash2, Edit, ChevronDown, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2 } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MessageCircle, Trash2, Edit, ChevronDown, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import ImportCSVModal from '@/components/ImportCSVModal'
 
 interface Lead {
   id: string
@@ -72,6 +73,7 @@ export default function LeadsPage() {
   const [savingObservation, setSavingObservation] = useState(false)
   const [obsDisplayCount, setObsDisplayCount] = useState(5)
   const [showHistoryModal, setShowHistoryModal] = useState(false)
+  const [showImportModal, setShowImportModal] = useState(false)
   const [historyFilterType, setHistoryFilterType] = useState('')
   const [historyFilterFrom, setHistoryFilterFrom] = useState('')
   const [historyFilterTo, setHistoryFilterTo] = useState('')
@@ -475,6 +477,13 @@ export default function LeadsPage() {
               >
                 <CheckSquare className="w-5 h-5" />
                 Seleccionar
+              </button>
+              <button
+                onClick={() => setShowImportModal(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+              >
+                <Upload className="w-5 h-5" />
+                Importar CSV
               </button>
               <button
                 onClick={() => setShowAddModal(true)}
@@ -1111,6 +1120,13 @@ export default function LeadsPage() {
           </div>
         </div>
       )}
+
+      <ImportCSVModal
+        open={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onSuccess={fetchLeads}
+        defaultType="leads"
+      />
     </div>
   )
 }

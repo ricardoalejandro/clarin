@@ -486,6 +486,10 @@ func (s *ContactService) GetByAccountID(ctx context.Context, accountID uuid.UUID
 	return s.repos.Contact.GetByAccountID(ctx, accountID)
 }
 
+func (s *ContactService) GetOrCreate(ctx context.Context, accountID uuid.UUID, deviceID *uuid.UUID, jid, phone, name, pushName string, isGroup bool) (*domain.Contact, error) {
+	return s.repos.Contact.GetOrCreate(ctx, accountID, deviceID, jid, phone, name, pushName, isGroup)
+}
+
 func (s *ContactService) GetByAccountIDWithFilters(ctx context.Context, accountID uuid.UUID, filter domain.ContactFilter) ([]*domain.Contact, int, error) {
 	return s.repos.Contact.GetByAccountIDWithFilters(ctx, accountID, filter)
 }
@@ -809,6 +813,12 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 		return false, nil
 	}
 
+	// Look up the full contact for more template variables
+	var contact *domain.Contact
+	if rec.ContactID != nil {
+		contact, _ = s.repos.Contact.GetByID(context.Background(), *rec.ContactID)
+	}
+
 	// Personalize message
 	msg := campaign.MessageTemplate
 	if rec.Name != nil && *rec.Name != "" {
@@ -818,6 +828,31 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 	if rec.Phone != nil {
 		msg = strings.Replace(msg, "{{telefono}}", *rec.Phone, -1)
 		msg = strings.Replace(msg, "{{phone}}", *rec.Phone, -1)
+		msg = strings.Replace(msg, "{{celular}}", *rec.Phone, -1)
+	}
+	// Full name: custom_name or name + last_name
+	if contact != nil {
+		fullName := ""
+		if contact.CustomName != nil && *contact.CustomName != "" {
+			fullName = *contact.CustomName
+		} else {
+			parts := []string{}
+			if contact.Name != nil && *contact.Name != "" {
+				parts = append(parts, *contact.Name)
+			}
+			if contact.LastName != nil && *contact.LastName != "" {
+				parts = append(parts, *contact.LastName)
+			}
+			if len(parts) > 0 {
+				fullName = strings.Join(parts, " ")
+			}
+		}
+		if fullName != "" {
+			msg = strings.Replace(msg, "{{nombre_completo}}", fullName, -1)
+		}
+		if contact.ShortName != nil && *contact.ShortName != "" {
+			msg = strings.Replace(msg, "{{nombre_corto}}", *contact.ShortName, -1)
+		}
 	}
 
 	// Send message
