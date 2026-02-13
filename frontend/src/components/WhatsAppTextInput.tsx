@@ -154,18 +154,22 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     const text = valueRef.current
     const { selStart, selEnd } = toolbar
     const selected = text.slice(selStart, selEnd)
-    // Check if already formatted, toggle off
-    const before = text.slice(0, selStart)
-    const after = text.slice(selEnd)
+    // Trim whitespace so markers wrap content tightly (WhatsApp requires no spaces next to markers)
+    const leadingWs = selected.match(/^\s*/)?.[0] || ''
+    const trailingWs = selected.match(/\s*$/)?.[0] || ''
+    const trimmed = selected.slice(leadingWs.length, selected.length - (trailingWs.length || 0))
+    if (!trimmed) return
+    const before = text.slice(0, selStart) + leadingWs
+    const after = trailingWs + text.slice(selEnd)
     let newText: string
     let newCaretEnd: number
     if (before.endsWith(prefix) && after.startsWith(suffix)) {
       // Remove wrapping format chars
-      newText = before.slice(0, -prefix.length) + selected + after.slice(suffix.length)
-      newCaretEnd = selStart - prefix.length + selected.length
+      newText = before.slice(0, -prefix.length) + trimmed + after.slice(suffix.length)
+      newCaretEnd = before.length - prefix.length + trimmed.length
     } else {
-      newText = before + prefix + selected + suffix + after
-      newCaretEnd = selStart + prefix.length + selected.length + suffix.length
+      newText = before + prefix + trimmed + suffix + after
+      newCaretEnd = before.length + prefix.length + trimmed.length + suffix.length
     }
     onChange(newText)
     setToolbar(null)

@@ -425,7 +425,7 @@ export default function BroadcastsPage() {
                         <Clock className="w-3 h-3" />
                         {formatDistanceToNow(new Date(campaign.created_at), { locale: es, addSuffix: true })}
                       </span>
-                      {campaign.scheduled_at && campaign.status === 'scheduled' && (
+                      {campaign.scheduled_at && (
                         <span className="flex items-center gap-1 text-blue-500">
                           <CalendarClock className="w-3 h-3" />
                           Programada: {format(new Date(campaign.scheduled_at), "d MMM HH:mm", { locale: es })}

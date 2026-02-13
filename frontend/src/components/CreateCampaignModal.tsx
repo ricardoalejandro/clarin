@@ -467,8 +467,8 @@ export default function CreateCampaignModal({
                                   <span className="text-[11px] text-gray-500">Pie de foto</span>
                                 </label>
                                 {att.caption && (
-                                  <div className="flex gap-1">
-                                    {[{ label: 'Nombre', value: '{{nombre}}' }, { label: 'Celular', value: '{{celular}}' }].map(v => (
+                                  <div className="flex flex-wrap gap-1">
+                                    {VARIABLES.map(v => (
                                       <button
                                         key={v.value}
                                         type="button"

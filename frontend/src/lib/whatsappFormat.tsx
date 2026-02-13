@@ -82,12 +82,12 @@ function tokenize(text: string): FormatToken[] {
 }
 
 function findClosing(text: string, start: number, char: string): number {
-  // Find closing char that isn't preceded by/followed by whitespace incorrectly
+  // WhatsApp requires: no whitespace right after opening marker, no whitespace right before closing marker
+  if (start + 1 >= text.length || /\s/.test(text[start + 1])) return -1
   for (let i = start + 1; i < text.length; i++) {
     if (text[i] === char) {
-      const inner = text.slice(start + 1, i)
-      // Must have content, not just whitespace
-      if (inner.trim().length > 0) {
+      // Character before closing marker must not be whitespace
+      if (i > start + 1 && !/\s/.test(text[i - 1])) {
         return i
       }
     }
