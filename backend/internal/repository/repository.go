@@ -29,6 +29,8 @@ type Repositories struct {
 	Participant       *ParticipantRepository
 	Interaction       *InteractionRepository
 	SavedSticker      *SavedStickerRepository
+	Reaction          *ReactionRepository
+	Poll              *PollRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -50,6 +52,8 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Participant:       &ParticipantRepository{db: db},
 		Interaction:       &InteractionRepository{db: db},
 		SavedSticker:      &SavedStickerRepository{db: db},
+		Reaction:          &ReactionRepository{db: db},
+		Poll:              &PollRepository{db: db},
 	}
 }
 
@@ -664,14 +668,16 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		INSERT INTO messages (account_id, device_id, chat_id, message_id, from_jid, from_name, body, 
 		                      message_type, media_url, media_mimetype, media_filename, media_size,
 		                      is_from_me, is_read, status, timestamp,
-		                      quoted_message_id, quoted_body, quoted_sender)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		                      quoted_message_id, quoted_body, quoted_sender,
+		                      poll_question, poll_max_selections)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 		ON CONFLICT (account_id, device_id, message_id) DO NOTHING
 		RETURNING id, created_at
 	`, msg.AccountID, msg.DeviceID, msg.ChatID, msg.MessageID, msg.FromJID, msg.FromName, msg.Body,
 		msg.MessageType, msg.MediaURL, msg.MediaMimetype, msg.MediaFilename, msg.MediaSize,
 		msg.IsFromMe, msg.IsRead, msg.Status, msg.Timestamp,
 		msg.QuotedMessageID, msg.QuotedBody, msg.QuotedSender,
+		msg.PollQuestion, msg.PollMaxSelections,
 	).Scan(&msg.ID, &msg.CreatedAt)
 }
 
@@ -2236,4 +2242,146 @@ func (r *SavedStickerRepository) Delete(ctx context.Context, accountID uuid.UUID
 		WHERE account_id = $1 AND media_url = $2
 	`, accountID, mediaURL)
 	return err
+}
+
+// ReactionRepository handles message reaction data access
+type ReactionRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *ReactionRepository) Upsert(ctx context.Context, reaction *domain.MessageReaction) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO message_reactions (account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (chat_id, target_message_id, sender_jid) DO UPDATE SET
+			emoji = EXCLUDED.emoji, sender_name = EXCLUDED.sender_name, timestamp = EXCLUDED.timestamp
+		RETURNING id, created_at
+	`, reaction.AccountID, reaction.ChatID, reaction.TargetMessageID, reaction.SenderJID, reaction.SenderName, reaction.Emoji, reaction.IsFromMe, reaction.Timestamp,
+	).Scan(&reaction.ID, &reaction.CreatedAt)
+}
+
+func (r *ReactionRepository) Delete(ctx context.Context, chatID uuid.UUID, targetMessageID, senderJID string) error {
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM message_reactions WHERE chat_id = $1 AND target_message_id = $2 AND sender_jid = $3
+	`, chatID, targetMessageID, senderJID)
+	return err
+}
+
+func (r *ReactionRepository) GetByChatID(ctx context.Context, chatID uuid.UUID) ([]*domain.MessageReaction, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp, created_at
+		FROM message_reactions WHERE chat_id = $1
+		ORDER BY timestamp ASC
+	`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reactions []*domain.MessageReaction
+	for rows.Next() {
+		r := &domain.MessageReaction{}
+		if err := rows.Scan(&r.ID, &r.AccountID, &r.ChatID, &r.TargetMessageID, &r.SenderJID, &r.SenderName, &r.Emoji, &r.IsFromMe, &r.Timestamp, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		reactions = append(reactions, r)
+	}
+	return reactions, nil
+}
+
+// PollRepository handles poll data access
+type PollRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *PollRepository) CreateOptions(ctx context.Context, messageID uuid.UUID, options []string) error {
+	for _, opt := range options {
+		_, err := r.db.Exec(ctx, `
+			INSERT INTO poll_options (message_id, name) VALUES ($1, $2)
+		`, messageID, opt)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PollRepository) GetOptions(ctx context.Context, messageID uuid.UUID) ([]*domain.PollOption, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, message_id, name, vote_count FROM poll_options WHERE message_id = $1 ORDER BY id
+	`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var options []*domain.PollOption
+	for rows.Next() {
+		o := &domain.PollOption{}
+		if err := rows.Scan(&o.ID, &o.MessageID, &o.Name, &o.VoteCount); err != nil {
+			return nil, err
+		}
+		options = append(options, o)
+	}
+	return options, nil
+}
+
+func (r *PollRepository) UpsertVote(ctx context.Context, vote *domain.PollVote) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO poll_votes (message_id, voter_jid, selected_names, timestamp)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (message_id, voter_jid) DO UPDATE SET
+			selected_names = EXCLUDED.selected_names, timestamp = EXCLUDED.timestamp
+		RETURNING id
+	`, vote.MessageID, vote.VoterJID, vote.SelectedNames, vote.Timestamp).Scan(&vote.ID)
+}
+
+func (r *PollRepository) RecalculateVoteCounts(ctx context.Context, messageID uuid.UUID) error {
+	// Reset all counts to 0, then recalculate from votes
+	_, err := r.db.Exec(ctx, `UPDATE poll_options SET vote_count = 0 WHERE message_id = $1`, messageID)
+	if err != nil {
+		return err
+	}
+
+	// For each vote, increment the count of selected options
+	rows, err := r.db.Query(ctx, `SELECT selected_names FROM poll_votes WHERE message_id = $1`, messageID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	countMap := make(map[string]int)
+	for rows.Next() {
+		var names []string
+		if err := rows.Scan(&names); err != nil {
+			return err
+		}
+		for _, n := range names {
+			countMap[n]++
+		}
+	}
+	for name, count := range countMap {
+		_, _ = r.db.Exec(ctx, `UPDATE poll_options SET vote_count = $1 WHERE message_id = $2 AND name = $3`, count, messageID, name)
+	}
+	return nil
+}
+
+func (r *PollRepository) GetVotes(ctx context.Context, messageID uuid.UUID) ([]*domain.PollVote, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, message_id, voter_jid, selected_names, timestamp FROM poll_votes WHERE message_id = $1 ORDER BY timestamp
+	`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var votes []*domain.PollVote
+	for rows.Next() {
+		v := &domain.PollVote{}
+		if err := rows.Scan(&v.ID, &v.MessageID, &v.VoterJID, &v.SelectedNames, &v.Timestamp); err != nil {
+			return nil, err
+		}
+		votes = append(votes, v)
+	}
+	return votes, nil
 }

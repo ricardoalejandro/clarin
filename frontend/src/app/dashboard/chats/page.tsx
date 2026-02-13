@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback, Fragment } from 'react'
-import { Search, Send, MoreVertical, ArrowLeft, Plus, User, X, Trash2, CheckSquare, Square, RefreshCw, Reply, Forward } from 'lucide-react'
+import { Search, Send, MoreVertical, ArrowLeft, Plus, User, X, Trash2, CheckSquare, Square, RefreshCw, Reply, Forward, BarChart3 } from 'lucide-react'
 import { formatDistanceToNow, format, isToday, isYesterday, differenceInCalendarDays } from 'date-fns'
 import { es } from 'date-fns/locale'
 import DeviceSelector from '@/components/chat/DeviceSelector'
@@ -86,6 +86,18 @@ interface Message {
   quoted_message_id?: string
   quoted_body?: string
   quoted_sender?: string
+  reactions?: Array<{
+    id: string
+    target_message_id: string
+    sender_jid: string
+    sender_name?: string
+    emoji: string
+    is_from_me: boolean
+  }>
+  poll_question?: string
+  poll_options?: Array<{ id: string; name: string; vote_count: number }>
+  poll_votes?: Array<{ id: string; voter_jid: string; selected_names: string[] }>
+  poll_max_selections?: number
 }
 
 // WhatsApp-style date label for message separators
@@ -111,6 +123,118 @@ interface Device {
   status: string
 }
 
+function PollModal({ onClose, onSend }: { onClose: () => void; onSend: (q: string, opts: string[], max: number) => void }) {
+  const [question, setQuestion] = useState('')
+  const [options, setOptions] = useState(['', ''])
+  const [maxSelections, setMaxSelections] = useState(1)
+
+  const addOption = () => {
+    if (options.length < 12) setOptions([...options, ''])
+  }
+
+  const removeOption = (idx: number) => {
+    if (options.length > 2) setOptions(options.filter((_, i) => i !== idx))
+  }
+
+  const valid = question.trim() && options.filter(o => o.trim()).length >= 2
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl w-full max-w-md shadow-2xl">
+        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <BarChart3 className="w-5 h-5 text-green-600" />
+            <h3 className="font-semibold text-gray-900">Crear encuesta</h3>
+          </div>
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-4 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Pregunta</label>
+            <input
+              type="text"
+              value={question}
+              onChange={e => setQuestion(e.target.value)}
+              placeholder="Escribe tu pregunta..."
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Opciones</label>
+            <div className="space-y-2">
+              {options.map((opt, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={opt}
+                    onChange={e => {
+                      const newOpts = [...options]
+                      newOpts[i] = e.target.value
+                      setOptions(newOpts)
+                    }}
+                    placeholder={`Opción ${i + 1}`}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-green-500 focus:border-transparent text-sm"
+                  />
+                  {options.length > 2 && (
+                    <button onClick={() => removeOption(i)} className="p-1 text-gray-400 hover:text-red-500">
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {options.length < 12 && (
+              <button
+                onClick={addOption}
+                className="mt-2 text-sm text-green-600 hover:text-green-700 font-medium"
+              >
+                + Agregar opción
+              </button>
+            )}
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Máx. selecciones permitidas
+            </label>
+            <select
+              value={maxSelections}
+              onChange={e => setMaxSelections(Number(e.target.value))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            >
+              {Array.from({ length: options.filter(o => o.trim()).length || 1 }, (_, i) => i + 1).map(n => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="p-4 border-t border-gray-200 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg text-sm"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={() => {
+              const validOpts = options.filter(o => o.trim()).map(o => o.trim())
+              if (question.trim() && validOpts.length >= 2) {
+                onSend(question.trim(), validOpts, Math.min(maxSelections, validOpts.length))
+              }
+            }}
+            disabled={!valid}
+            className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50"
+          >
+            Enviar encuesta
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ChatsPage() {
   const [chats, setChats] = useState<Chat[]>([])
   const [messages, setMessages] = useState<Message[]>([])
@@ -133,6 +257,7 @@ export default function ChatsPage() {
   const [forwardingMsg, setForwardingMsg] = useState<Message | null>(null)
   const [forwardSearch, setForwardSearch] = useState('')
   const [savedStickerUrls, setSavedStickerUrls] = useState<Set<string>>(new Set())
+  const [showPollModal, setShowPollModal] = useState(false)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLDivElement>(null)
   const optimisticIdRef = useRef(0)
@@ -374,6 +499,18 @@ export default function ChatsPage() {
           })
         }
         fetchChats() // Update chat list with latest message
+      } else if (data.event === 'message_reaction') {
+        // Update reactions on the target message in real time
+        const rd = data.data
+        if (selectedChat && rd?.chat_id === selectedChat.id) {
+          fetchMessages(selectedChat.id)
+        }
+      } else if (data.event === 'poll_update') {
+        // Refresh messages to get updated poll vote counts
+        const pd = data.data
+        if (selectedChat && pd?.chat_id === selectedChat.id) {
+          fetchMessages(selectedChat.id)
+        }
       }
     }
 
@@ -643,6 +780,53 @@ export default function ChatsPage() {
     }
 
     setActivePopup(null)
+  }
+
+  const handleReact = async (msg: Message, emoji: string) => {
+    if (!selectedChat || !selectedDevice) return
+    const token = localStorage.getItem('token')
+    try {
+      await fetch('/api/messages/react', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          device_id: selectedDevice,
+          to: selectedChat.jid,
+          target_message_id: msg.message_id,
+          emoji,
+        }),
+      })
+    } catch (err) {
+      console.error('Failed to react:', err)
+    }
+  }
+
+  const handleSendPoll = async (question: string, options: string[], maxSelections: number) => {
+    if (!selectedChat || !selectedDevice || !isChatDeviceConnected) return
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/messages/poll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          device_id: selectedDevice,
+          to: selectedChat.jid,
+          question,
+          options,
+          max_selections: maxSelections,
+        }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowPollModal(false)
+        fetchChats()
+      } else {
+        alert(data.error || 'Error al crear encuesta')
+      }
+    } catch (err) {
+      console.error('Failed to send poll:', err)
+      alert('Error al crear encuesta')
+    }
   }
 
   const handleEmojiSelect = (emoji: string) => {
@@ -1082,6 +1266,7 @@ export default function ChatsPage() {
                           onReply={(m) => { setReplyingTo(m as Message); inputRef.current?.focus() }}
                           onForward={(m) => { setForwardingMsg(m as Message); setForwardSearch('') }}
                           onSaveSticker={handleSaveSticker}
+                          onReact={(m, emoji) => handleReact(m as Message, emoji)}
                           savedStickerUrls={savedStickerUrls}
                           onMediaClick={(url, type) => {
                             if (type === 'image') {
@@ -1183,6 +1368,13 @@ export default function ChatsPage() {
                       isOpen={activePopup === 'sticker'}
                       onToggle={() => setActivePopup(activePopup === 'sticker' ? null : 'sticker')}
                     />
+                    <button
+                      onClick={() => setShowPollModal(true)}
+                      className="p-2.5 text-gray-500 hover:text-green-600 hover:bg-gray-100 rounded-lg transition-colors"
+                      title="Crear encuesta"
+                    >
+                      <BarChart3 className="w-5 h-5" />
+                    </button>
                     <div className="flex-1 relative">
                       {!messageText && (
                         <div className="absolute left-4 top-2.5 text-gray-400 pointer-events-none select-none">
@@ -1260,6 +1452,14 @@ export default function ChatsPage() {
         isOpen={!!viewerImage}
         onClose={() => setViewerImage(null)}
       />
+
+      {/* Poll creation modal */}
+      {showPollModal && (
+        <PollModal
+          onClose={() => setShowPollModal(false)}
+          onSend={handleSendPoll}
+        />
+      )}
 
       {/* Forward message modal */}
       {forwardingMsg && (

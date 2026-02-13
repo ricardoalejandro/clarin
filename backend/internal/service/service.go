@@ -436,6 +436,30 @@ func (s *ChatService) ForwardMessage(ctx context.Context, deviceID uuid.UUID, to
 	return s.pool.ForwardMessage(ctx, deviceID, to, originalMsg)
 }
 
+func (s *ChatService) SendReaction(ctx context.Context, deviceID uuid.UUID, to, targetMessageID, emoji string) error {
+	return s.pool.SendReaction(ctx, deviceID, to, targetMessageID, emoji)
+}
+
+func (s *ChatService) SendPoll(ctx context.Context, deviceID uuid.UUID, to, question string, options []string, maxSelections int) (*domain.Message, error) {
+	return s.pool.SendPoll(ctx, deviceID, to, question, options, maxSelections)
+}
+
+func (s *ChatService) GetReactions(ctx context.Context, chatID uuid.UUID) ([]*domain.MessageReaction, error) {
+	return s.repos.Reaction.GetByChatID(ctx, chatID)
+}
+
+func (s *ChatService) GetPollData(ctx context.Context, messageID uuid.UUID) ([]*domain.PollOption, []*domain.PollVote, error) {
+	options, err := s.repos.Poll.GetOptions(ctx, messageID)
+	if err != nil {
+		return nil, nil, err
+	}
+	votes, err := s.repos.Poll.GetVotes(ctx, messageID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return options, votes, nil
+}
+
 func (s *ChatService) GetMessageByID(ctx context.Context, chatID uuid.UUID, messageID string) (*domain.Message, error) {
 	return s.repos.Message.GetByMessageID(ctx, chatID, messageID)
 }

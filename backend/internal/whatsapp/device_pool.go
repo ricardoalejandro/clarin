@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver for whatsmeow sqlstore
@@ -20,6 +22,7 @@ import (
 	"github.com/naperu/clarin/pkg/config"
 	qrcode "github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -349,6 +352,24 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 
 	// Skip newsletter/channel messages
 	if evt.Info.Chat.Server == "newsletter" {
+		return
+	}
+
+	// Handle reactions separately — they are NOT regular messages
+	if reactionMsg := evt.Message.GetReactionMessage(); reactionMsg != nil {
+		p.handleReaction(ctx, instance, evt, reactionMsg)
+		return
+	}
+
+	// Handle poll creation messages
+	if pollMsg := evt.Message.GetPollCreationMessage(); pollMsg != nil {
+		p.handlePollCreation(ctx, instance, evt, pollMsg)
+		return
+	}
+
+	// Handle poll vote updates
+	if pollUpdate := evt.Message.GetPollUpdateMessage(); pollUpdate != nil {
+		p.handlePollUpdate(ctx, instance, evt, pollUpdate)
 		return
 	}
 
@@ -747,6 +768,240 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 	// TODO: Process historical messages
 }
 
+// handleReaction processes incoming reaction messages
+func (p *DevicePool) handleReaction(ctx context.Context, instance *DeviceInstance, evt *events.Message, reactionMsg *waE2E.ReactionMessage) {
+	key := reactionMsg.GetKey()
+	if key == nil {
+		return
+	}
+
+	targetMsgID := key.GetID()
+	emoji := reactionMsg.GetText()
+	senderJID := evt.Info.Sender.ToNonAD().String()
+	isFromMe := evt.Info.IsFromMe
+
+	// Resolve chat JID
+	chatJID := evt.Info.Chat.ToNonAD().String()
+	if evt.Info.Chat.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+			chatJID = pnJID.User + "@s.whatsapp.net"
+		}
+	}
+
+	// Get the chat
+	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, "")
+	if err != nil {
+		log.Printf("[Reaction] Failed to get chat: %v", err)
+		return
+	}
+
+	if emoji == "" {
+		// Remove reaction
+		_ = p.repos.Reaction.Delete(ctx, chat.ID, targetMsgID, senderJID)
+		log.Printf("[Reaction] %s removed reaction from %s", senderJID, targetMsgID)
+	} else {
+		// Upsert reaction
+		reaction := &domain.MessageReaction{
+			AccountID:       instance.AccountID,
+			ChatID:          chat.ID,
+			TargetMessageID: targetMsgID,
+			SenderJID:       senderJID,
+			SenderName:      strPtr(evt.Info.PushName),
+			Emoji:           emoji,
+			IsFromMe:        isFromMe,
+			Timestamp:       evt.Info.Timestamp,
+		}
+		if err := p.repos.Reaction.Upsert(ctx, reaction); err != nil {
+			log.Printf("[Reaction] Failed to save reaction: %v", err)
+			return
+		}
+		log.Printf("[Reaction] %s reacted %s to %s", senderJID, emoji, targetMsgID)
+	}
+
+	// Broadcast to frontend
+	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageReaction, map[string]interface{}{
+		"chat_id":           chat.ID.String(),
+		"target_message_id": targetMsgID,
+		"sender_jid":        senderJID,
+		"sender_name":       evt.Info.PushName,
+		"emoji":             emoji,
+		"is_from_me":        isFromMe,
+		"removed":           emoji == "",
+	})
+}
+
+// handlePollCreation processes incoming poll creation messages
+func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceInstance, evt *events.Message, pollMsg *waE2E.PollCreationMessage) {
+	chatJID := evt.Info.Chat.ToNonAD().String()
+	senderJID := evt.Info.Sender.ToNonAD().String()
+	isFromMe := evt.Info.IsFromMe
+	phone := evt.Info.Sender.ToNonAD().User
+
+	if evt.Info.Chat.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+			chatJID = pnJID.User + "@s.whatsapp.net"
+			phone = pnJID.User
+		}
+	}
+
+	chatName := ""
+	if !isFromMe {
+		chatName = evt.Info.PushName
+	}
+	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, chatName)
+	if err != nil {
+		log.Printf("[Poll] Failed to get/create chat: %v", err)
+		return
+	}
+
+	question := pollMsg.GetName()
+	var optionNames []string
+	for _, opt := range pollMsg.GetOptions() {
+		optionNames = append(optionNames, opt.GetOptionName())
+	}
+	maxSelections := int(pollMsg.GetSelectableOptionsCount())
+	if maxSelections <= 0 {
+		maxSelections = 1
+	}
+
+	// Build display body
+	body := "📊 " + question
+	for i, opt := range optionNames {
+		body += fmt.Sprintf("\n%d. %s", i+1, opt)
+	}
+
+	msg := &domain.Message{
+		AccountID:         instance.AccountID,
+		DeviceID:          &instance.ID,
+		ChatID:            chat.ID,
+		MessageID:         evt.Info.ID,
+		FromJID:           strPtr(senderJID),
+		FromName:          strPtr(evt.Info.PushName),
+		Body:              strPtr(body),
+		MessageType:       strPtr(domain.MessageTypePoll),
+		IsFromMe:          isFromMe,
+		Status:            strPtr("received"),
+		Timestamp:         evt.Info.Timestamp,
+		PollQuestion:      strPtr(question),
+		PollMaxSelections: maxSelections,
+	}
+
+	if err := p.repos.Message.Create(ctx, msg); err != nil {
+		log.Printf("[Poll] Failed to save message: %v", err)
+		return
+	}
+
+	// Create poll options
+	if err := p.repos.Poll.CreateOptions(ctx, msg.ID, optionNames); err != nil {
+		log.Printf("[Poll] Failed to save options: %v", err)
+	}
+
+	// Load options for response
+	msg.PollOptions, _ = p.repos.Poll.GetOptions(ctx, msg.ID)
+
+	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, "📊 "+question, evt.Info.Timestamp, !isFromMe)
+
+	contactJID := senderJID
+	if !isFromMe {
+		contactJID = chatJID
+	}
+	p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, contactJID, phone, evt.Info.PushName, evt.Info.PushName, false)
+
+	p.hub.BroadcastNewMessage(instance.AccountID, map[string]interface{}{
+		"chat_id":      chat.ID.String(),
+		"message":      msg,
+		"chat_jid":     chatJID,
+		"sender_name":  evt.Info.PushName,
+		"is_from_me":   isFromMe,
+		"unread_count": chat.UnreadCount + 1,
+	})
+
+	log.Printf("[Poll] %s created poll: %s (%d options)", senderJID, question, len(optionNames))
+}
+
+// handlePollUpdate processes incoming poll vote updates
+func (p *DevicePool) handlePollUpdate(ctx context.Context, instance *DeviceInstance, evt *events.Message, pollUpdate *waE2E.PollUpdateMessage) {
+	chatJID := evt.Info.Chat.ToNonAD().String()
+	if evt.Info.Chat.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+			chatJID = pnJID.User + "@s.whatsapp.net"
+		}
+	}
+
+	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, "")
+	if err != nil {
+		log.Printf("[PollVote] Failed to get chat: %v", err)
+		return
+	}
+
+	// Get the poll message stanza ID from the vote's key
+	pollKey := pollUpdate.GetPollCreationMessageKey()
+	if pollKey == nil {
+		log.Printf("[PollVote] No poll key in update")
+		return
+	}
+	pollStanzaID := pollKey.GetID()
+
+	// Decrypt poll vote
+	decrypted, err := instance.Client.DecryptPollVote(ctx, evt)
+	if err != nil {
+		log.Printf("[PollVote] Failed to decrypt vote: %v", err)
+		return
+	}
+
+	// Find the poll message in DB
+	pollMsg, err := p.repos.Message.GetByMessageID(ctx, chat.ID, pollStanzaID)
+	if err != nil || pollMsg == nil {
+		log.Printf("[PollVote] Poll message not found: %s", pollStanzaID)
+		return
+	}
+
+	// Match selected option hashes to option names
+	// decrypted.GetSelectedOptions() returns SHA256 hashes of option names
+	var selectedNames []string
+	pollOptions, _ := p.repos.Poll.GetOptions(ctx, pollMsg.ID)
+
+	for _, hashBytes := range decrypted.GetSelectedOptions() {
+		for _, opt := range pollOptions {
+			optHash := sha256.Sum256([]byte(opt.Name))
+			if string(hashBytes) == string(optHash[:]) {
+				selectedNames = append(selectedNames, opt.Name)
+				break
+			}
+		}
+	}
+
+	voterJID := evt.Info.Sender.ToNonAD().String()
+	vote := &domain.PollVote{
+		MessageID:     pollMsg.ID,
+		VoterJID:      voterJID,
+		SelectedNames: selectedNames,
+		Timestamp:     evt.Info.Timestamp,
+	}
+	if err := p.repos.Poll.UpsertVote(ctx, vote); err != nil {
+		log.Printf("[PollVote] Failed to save vote: %v", err)
+		return
+	}
+
+	// Recalculate vote counts
+	_ = p.repos.Poll.RecalculateVoteCounts(ctx, pollMsg.ID)
+
+	// Load updated data
+	updatedOptions, _ := p.repos.Poll.GetOptions(ctx, pollMsg.ID)
+	allVotes, _ := p.repos.Poll.GetVotes(ctx, pollMsg.ID)
+
+	// Broadcast to frontend
+	p.hub.BroadcastToAccount(instance.AccountID, ws.EventPollUpdate, map[string]interface{}{
+		"chat_id":    chat.ID.String(),
+		"message_id": pollMsg.MessageID,
+		"options":    updatedOptions,
+		"votes":      allVotes,
+		"voter_jid":  voterJID,
+	})
+
+	log.Printf("[PollVote] %s voted on poll %s: %v", voterJID, pollStanzaID, selectedNames)
+}
+
 // syncContacts syncs all contacts from a WhatsApp device
 func (p *DevicePool) syncContacts(ctx context.Context, instance *DeviceInstance) {
 	defer func() {
@@ -1029,6 +1284,185 @@ func (p *DevicePool) ForwardMessage(ctx context.Context, deviceID uuid.UUID, to 
 		body = *originalMsg.Body
 	}
 	return p.SendMessage(ctx, deviceID, to, body)
+}
+
+// SendReaction sends a reaction emoji to a message
+func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, targetMessageID, emoji string) error {
+	p.mu.RLock()
+	instance, exists := p.devices[deviceID]
+	p.mu.RUnlock()
+
+	if !exists || instance.Client == nil {
+		return fmt.Errorf("device not connected: %s", deviceID)
+	}
+
+	jid, err := types.ParseJID(to)
+	if err != nil {
+		if !strings.Contains(to, "@") {
+			jid = types.NewJID(to, types.DefaultUserServer)
+		} else {
+			return fmt.Errorf("invalid JID: %s", to)
+		}
+	}
+
+	msg := &waE2E.Message{
+		ReactionMessage: &waE2E.ReactionMessage{
+			Key: &waCommon.MessageKey{
+				RemoteJID: proto.String(jid.String()),
+				FromMe:    proto.Bool(false),
+				ID:        proto.String(targetMessageID),
+			},
+			Text:              proto.String(emoji),
+			SenderTimestampMS: proto.Int64(0),
+		},
+	}
+
+	_, err = instance.Client.SendMessage(ctx, jid, msg)
+	if err != nil {
+		return fmt.Errorf("failed to send reaction: %w", err)
+	}
+
+	// Get chat for storing reaction
+	normalizedJID := jid.ToNonAD().String()
+	if jid.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+			normalizedJID = pnJID.User + "@s.whatsapp.net"
+		}
+	}
+	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	if err != nil {
+		return err
+	}
+
+	senderJID := instance.JID
+	if emoji == "" {
+		_ = p.repos.Reaction.Delete(ctx, chat.ID, targetMessageID, senderJID)
+	} else {
+		reaction := &domain.MessageReaction{
+			AccountID:       instance.AccountID,
+			ChatID:          chat.ID,
+			TargetMessageID: targetMessageID,
+			SenderJID:       senderJID,
+			SenderName:      strPtr("Me"),
+			Emoji:           emoji,
+			IsFromMe:        true,
+			Timestamp:       time.Now(),
+		}
+		_ = p.repos.Reaction.Upsert(ctx, reaction)
+	}
+
+	// Broadcast
+	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageReaction, map[string]interface{}{
+		"chat_id":           chat.ID.String(),
+		"target_message_id": targetMessageID,
+		"sender_jid":        senderJID,
+		"sender_name":       "Me",
+		"emoji":             emoji,
+		"is_from_me":        true,
+		"removed":           emoji == "",
+	})
+
+	log.Printf("[Reaction] Sent %s to %s on %s", emoji, targetMessageID, to)
+	return nil
+}
+
+// SendPoll sends a poll creation message
+func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, question string, options []string, maxSelections int) (*domain.Message, error) {
+	p.mu.RLock()
+	instance, exists := p.devices[deviceID]
+	p.mu.RUnlock()
+
+	if !exists || instance.Client == nil {
+		return nil, fmt.Errorf("device not connected: %s", deviceID)
+	}
+
+	jid, err := types.ParseJID(to)
+	if err != nil {
+		if !strings.Contains(to, "@") {
+			jid = types.NewJID(to, types.DefaultUserServer)
+		} else {
+			return nil, fmt.Errorf("invalid JID: %s", to)
+		}
+	}
+
+	if maxSelections <= 0 {
+		maxSelections = 1
+	}
+
+	var pollOptions []*waE2E.PollCreationMessage_Option
+	for _, opt := range options {
+		pollOptions = append(pollOptions, &waE2E.PollCreationMessage_Option{
+			OptionName: proto.String(opt),
+		})
+	}
+
+	msg := &waE2E.Message{
+		PollCreationMessage: &waE2E.PollCreationMessage{
+			Name:                   proto.String(question),
+			Options:                pollOptions,
+			SelectableOptionsCount: proto.Uint32(uint32(maxSelections)),
+		},
+	}
+
+	resp, err := instance.Client.SendMessage(ctx, jid, msg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send poll: %w", err)
+	}
+
+	// Build display body
+	body := "📊 " + question
+	for i, opt := range options {
+		body += fmt.Sprintf("\n%d. %s", i+1, opt)
+	}
+
+	// Get or create chat
+	normalizedJID := jid.ToNonAD().String()
+	if jid.Server == types.HiddenUserServer {
+		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
+			normalizedJID = pnJID.User + "@s.whatsapp.net"
+		}
+	}
+	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get/create chat: %w", err)
+	}
+
+	message := &domain.Message{
+		AccountID:         instance.AccountID,
+		DeviceID:          &instance.ID,
+		ChatID:            chat.ID,
+		MessageID:         resp.ID,
+		FromJID:           strPtr(instance.JID),
+		FromName:          strPtr("Me"),
+		Body:              strPtr(body),
+		MessageType:       strPtr(domain.MessageTypePoll),
+		IsFromMe:          true,
+		Status:            strPtr("sent"),
+		Timestamp:         resp.Timestamp,
+		PollQuestion:      strPtr(question),
+		PollMaxSelections: maxSelections,
+	}
+
+	if err := p.repos.Message.Create(ctx, message); err != nil {
+		log.Printf("[SendPoll] Failed to save message: %v", err)
+	}
+
+	// Create poll options
+	_ = p.repos.Poll.CreateOptions(ctx, message.ID, options)
+
+	// Load options for response
+	message.PollOptions, _ = p.repos.Poll.GetOptions(ctx, message.ID)
+
+	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, "📊 "+question, resp.Timestamp, false)
+
+	// Broadcast
+	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
+		"chat_id": chat.ID.String(),
+		"message": message,
+	})
+
+	log.Printf("[SendPoll] Sent poll '%s' to %s", question, to)
+	return message, nil
 }
 
 // publicToProxyURL converts a MinIO public URL to a backend proxy URL

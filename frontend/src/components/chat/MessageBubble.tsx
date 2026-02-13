@@ -1,8 +1,29 @@
 'use client'
 
-import { useState } from 'react'
-import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3 } from 'lucide-react'
 import { renderFormattedText } from '@/lib/whatsappFormat'
+
+interface Reaction {
+  id: string
+  target_message_id: string
+  sender_jid: string
+  sender_name?: string
+  emoji: string
+  is_from_me: boolean
+}
+
+interface PollOption {
+  id: string
+  name: string
+  vote_count: number
+}
+
+interface PollVote {
+  id: string
+  voter_jid: string
+  selected_names: string[]
+}
 
 interface Message {
   id: string
@@ -22,6 +43,11 @@ interface Message {
   quoted_message_id?: string
   quoted_body?: string
   quoted_sender?: string
+  reactions?: Reaction[]
+  poll_question?: string
+  poll_options?: PollOption[]
+  poll_votes?: PollVote[]
+  poll_max_selections?: number
 }
 
 interface MessageBubbleProps {
@@ -32,6 +58,7 @@ interface MessageBubbleProps {
   onReply?: (message: Message) => void
   onForward?: (message: Message) => void
   onSaveSticker?: (mediaUrl: string) => void
+  onReact?: (message: Message, emoji: string) => void
   savedStickerUrls?: Set<string>
 }
 
@@ -58,9 +85,25 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
   return sender.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '')
 }
 
-export default function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onForward, onSaveSticker, savedStickerUrls }: MessageBubbleProps) {
+export default function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onForward, onSaveSticker, onReact, savedStickerUrls }: MessageBubbleProps) {
   const [imageLoaded, setImageLoaded] = useState(false)
   const [imageError, setImageError] = useState(false)
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+  const emojiPickerRef = useRef<HTMLDivElement>(null)
+
+  const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏']
+
+  // Close emoji picker on outside click
+  useEffect(() => {
+    if (!showEmojiPicker) return
+    const handleClick = (e: MouseEvent) => {
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+        setShowEmojiPicker(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [showEmojiPicker])
 
   // Use contactName (resolved by parent via getChatDisplayName) as the sender name for incoming messages
   const senderDisplayName = !message.is_from_me
@@ -223,6 +266,80 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     }
   }
 
+  const renderPoll = () => {
+    if (message.message_type !== 'poll' || !message.poll_question) return null
+
+    const options = message.poll_options || []
+    const totalVotes = options.reduce((sum, o) => sum + (o.vote_count || 0), 0)
+
+    return (
+      <div className="mb-1">
+        <div className="flex items-center gap-2 mb-2">
+          <BarChart3 className="w-4 h-4 text-green-600" />
+          <p className="font-medium text-gray-800">{message.poll_question}</p>
+        </div>
+        <div className="space-y-1.5">
+          {options.map((opt) => {
+            const pct = totalVotes > 0 ? Math.round((opt.vote_count / totalVotes) * 100) : 0
+            return (
+              <div key={opt.id} className="relative">
+                <div
+                  className="absolute inset-0 bg-green-100 rounded"
+                  style={{ width: `${pct}%` }}
+                />
+                <div className="relative flex items-center justify-between px-2 py-1.5 text-sm">
+                  <span className="text-gray-800">{opt.name}</span>
+                  <span className="text-xs text-gray-500 ml-2 whitespace-nowrap">
+                    {opt.vote_count} {opt.vote_count === 1 ? 'voto' : 'votos'}
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+        {totalVotes > 0 && (
+          <p className="text-xs text-gray-400 mt-1">{totalVotes} voto{totalVotes !== 1 ? 's' : ''} en total</p>
+        )}
+        {message.poll_max_selections && message.poll_max_selections > 1 && (
+          <p className="text-xs text-gray-400">Máx. {message.poll_max_selections} opciones</p>
+        )}
+      </div>
+    )
+  }
+
+  const renderReactions = () => {
+    if (!message.reactions || message.reactions.length === 0) return null
+
+    // Group reactions by emoji
+    const grouped: Record<string, { emoji: string; count: number; hasOwn: boolean }> = {}
+    for (const r of message.reactions) {
+      if (!grouped[r.emoji]) {
+        grouped[r.emoji] = { emoji: r.emoji, count: 0, hasOwn: false }
+      }
+      grouped[r.emoji].count++
+      if (r.is_from_me) grouped[r.emoji].hasOwn = true
+    }
+
+    return (
+      <div className={`flex flex-wrap gap-1 mt-1 ${message.is_from_me ? 'justify-end' : 'justify-start'}`}>
+        {Object.values(grouped).map((g) => (
+          <button
+            key={g.emoji}
+            onClick={() => onReact?.(message, g.emoji)}
+            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-xs border transition-colors ${
+              g.hasOwn
+                ? 'bg-green-100 border-green-300 hover:bg-green-200'
+                : 'bg-gray-100 border-gray-200 hover:bg-gray-200'
+            }`}
+          >
+            <span>{g.emoji}</span>
+            {g.count > 1 && <span className="text-gray-600">{g.count}</span>}
+          </button>
+        ))}
+      </div>
+    )
+  }
+
   const renderStatus = () => {
     if (!message.is_from_me) return null
 
@@ -266,11 +383,18 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
           >
             <Reply className="w-4 h-4" />
           </button>
+          <button
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
+            title="Reaccionar"
+          >
+            <SmilePlus className="w-4 h-4" />
+          </button>
         </div>
       )}
 
       <div
-        className={`max-w-[85%] sm:max-w-[70%] ${
+        className={`relative max-w-[85%] sm:max-w-[70%] ${
           message.message_type === 'sticker'
             ? 'p-1'
             : `px-3 py-2 rounded-lg shadow-sm ${
@@ -293,8 +417,11 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         {/* Media content */}
         {renderMedia()}
 
+        {/* Poll content */}
+        {renderPoll()}
+
         {/* Text body */}
-        {message.body && message.message_type !== 'sticker' && (
+        {message.body && message.message_type !== 'sticker' && message.message_type !== 'poll' && (
           <p className="text-gray-800 whitespace-pre-wrap break-words">
             {renderFormattedText(message.body)}
           </p>
@@ -312,11 +439,39 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
           </span>
           {renderStatus()}
         </div>
+
+        {/* Reactions display */}
+        {renderReactions()}
+
+        {/* Emoji picker popup */}
+        {showEmojiPicker && (
+          <div
+            ref={emojiPickerRef}
+            className={`absolute z-10 ${message.is_from_me ? 'right-0' : 'left-0'} -bottom-9 flex gap-0.5 bg-white rounded-full shadow-lg border border-gray-200 px-1.5 py-1`}
+          >
+            {QUICK_EMOJIS.map((e) => (
+              <button
+                key={e}
+                onClick={() => { onReact?.(message, e); setShowEmojiPicker(false) }}
+                className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-base transition-transform hover:scale-125"
+              >
+                {e}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Action buttons - visible on mobile, hover on desktop (for incoming: right side) */}
       {!message.is_from_me && !isOptimistic && (
         <div className="flex md:hidden md:group-hover:flex items-center gap-1 ml-1 self-center">
+          <button
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
+            title="Reaccionar"
+          >
+            <SmilePlus className="w-4 h-4" />
+          </button>
           <button
             onClick={() => onReply?.(message)}
             className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"

@@ -227,6 +227,15 @@ type Message struct {
 	QuotedMessageID *string `json:"quoted_message_id,omitempty"`
 	QuotedBody      *string `json:"quoted_body,omitempty"`
 	QuotedSender    *string `json:"quoted_sender,omitempty"`
+
+	// Reactions (populated on demand)
+	Reactions []*MessageReaction `json:"reactions,omitempty"`
+
+	// Poll data (populated when message_type = poll)
+	PollQuestion     *string       `json:"poll_question,omitempty"`
+	PollOptions      []*PollOption  `json:"poll_options,omitempty"`
+	PollVotes        []*PollVote    `json:"poll_votes,omitempty"`
+	PollMaxSelections int           `json:"poll_max_selections,omitempty"`
 }
 
 // MessageType constants
@@ -239,7 +248,40 @@ const (
 	MessageTypeSticker  = "sticker"
 	MessageTypeLocation = "location"
 	MessageTypeContact  = "contact"
+	MessageTypePoll     = "poll"
+	MessageTypeReaction = "reaction"
 )
+
+// MessageReaction represents an emoji reaction on a message
+type MessageReaction struct {
+	ID              uuid.UUID `json:"id"`
+	AccountID       uuid.UUID `json:"account_id"`
+	ChatID          uuid.UUID `json:"chat_id"`
+	TargetMessageID string    `json:"target_message_id"` // WhatsApp stanza ID of the reacted message
+	SenderJID       string    `json:"sender_jid"`
+	SenderName      *string   `json:"sender_name,omitempty"`
+	Emoji           string    `json:"emoji"`
+	IsFromMe        bool      `json:"is_from_me"`
+	Timestamp       time.Time `json:"timestamp"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// PollOption represents one option in a poll message
+type PollOption struct {
+	ID        uuid.UUID `json:"id"`
+	MessageID uuid.UUID `json:"message_id"` // DB ID of the poll message
+	Name      string    `json:"name"`
+	VoteCount int       `json:"vote_count"`
+}
+
+// PollVote represents a user's vote on a poll
+type PollVote struct {
+	ID            uuid.UUID `json:"id"`
+	MessageID     uuid.UUID `json:"message_id"` // DB ID of the poll message
+	VoterJID      string    `json:"voter_jid"`
+	SelectedNames []string  `json:"selected_names"` // Option names selected
+	Timestamp     time.Time `json:"timestamp"`
+}
 
 // Lead represents a potential customer
 type Lead struct {

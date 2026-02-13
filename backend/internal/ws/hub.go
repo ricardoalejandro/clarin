@@ -11,16 +11,18 @@ import (
 
 // Event types for WebSocket communication
 const (
-	EventNewMessage     = "new_message"
-	EventMessageSent    = "message_sent"
-	EventMessageStatus  = "message_status"
-	EventDeviceStatus   = "device_status"
-	EventQRCode         = "qr_code"
-	EventChatUpdate     = "chat_update"
-	EventPresence       = "presence"
-	EventTyping         = "typing"
-	EventLeadUpdate     = "lead_update"
-	EventNotification   = "notification"
+	EventNewMessage       = "new_message"
+	EventMessageSent      = "message_sent"
+	EventMessageStatus    = "message_status"
+	EventDeviceStatus     = "device_status"
+	EventQRCode           = "qr_code"
+	EventChatUpdate       = "chat_update"
+	EventPresence         = "presence"
+	EventTyping           = "typing"
+	EventLeadUpdate       = "lead_update"
+	EventNotification     = "notification"
+	EventMessageReaction  = "message_reaction"
+	EventPollUpdate       = "poll_update"
 )
 
 // Message represents a WebSocket message

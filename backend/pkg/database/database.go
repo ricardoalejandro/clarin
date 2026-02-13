@@ -405,6 +405,47 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Campaign recipient timing tracking
 		`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS wait_time_ms INT`,
+
+		// Message reactions table
+		`CREATE TABLE IF NOT EXISTS message_reactions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+			target_message_id VARCHAR(255) NOT NULL,
+			sender_jid VARCHAR(255) NOT NULL,
+			sender_name VARCHAR(255),
+			emoji VARCHAR(50) NOT NULL,
+			is_from_me BOOLEAN DEFAULT FALSE,
+			timestamp TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE(chat_id, target_message_id, sender_jid)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_message_reactions_chat ON message_reactions(chat_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_message_reactions_target ON message_reactions(target_message_id)`,
+
+		// Poll options table
+		`CREATE TABLE IF NOT EXISTS poll_options (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			vote_count INT DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_poll_options_message ON poll_options(message_id)`,
+
+		// Poll votes table
+		`CREATE TABLE IF NOT EXISTS poll_votes (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+			voter_jid VARCHAR(255) NOT NULL,
+			selected_names TEXT[] NOT NULL DEFAULT '{}',
+			timestamp TIMESTAMPTZ NOT NULL,
+			UNIQUE(message_id, voter_jid)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_poll_votes_message ON poll_votes(message_id)`,
+
+		// Poll metadata on messages
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS poll_question TEXT`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS poll_max_selections INT DEFAULT 1`,
 	}
 
 	for _, migration := range migrations {

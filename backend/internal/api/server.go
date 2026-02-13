@@ -173,6 +173,8 @@ func (s *Server) setupRoutes() {
 	messages := protected.Group("/messages")
 	messages.Post("/send", s.handleSendMessage)
 	messages.Post("/forward", s.handleForwardMessage)
+	messages.Post("/react", s.handleSendReaction)
+	messages.Post("/poll", s.handleSendPoll)
 
 	// Sticker routes
 	protected.Get("/stickers/recent", s.handleGetRecentStickers)
@@ -669,6 +671,25 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	// Load reactions for this chat
+	reactions, _ := s.services.Chat.GetReactions(c.Context(), chatID)
+	reactionsByMsg := make(map[string][]*domain.MessageReaction)
+	for _, r := range reactions {
+		reactionsByMsg[r.TargetMessageID] = append(reactionsByMsg[r.TargetMessageID], r)
+	}
+
+	// Attach reactions and poll data to messages
+	for _, msg := range messages {
+		if rxns, ok := reactionsByMsg[msg.MessageID]; ok {
+			msg.Reactions = rxns
+		}
+		if msg.MessageType != nil && *msg.MessageType == domain.MessageTypePoll {
+			options, votes, _ := s.services.Chat.GetPollData(c.Context(), msg.ID)
+			msg.PollOptions = options
+			msg.PollVotes = votes
+		}
+	}
+
 	return c.JSON(fiber.Map{"success": true, "messages": messages})
 }
 
@@ -808,6 +829,66 @@ func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
 
 	// Forward it
 	message, err := s.services.Chat.ForwardMessage(c.Context(), deviceID, req.To, originalMsg)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": message})
+}
+
+func (s *Server) handleSendReaction(c *fiber.Ctx) error {
+	var req struct {
+		DeviceID        string `json:"device_id"`
+		To              string `json:"to"`
+		TargetMessageID string `json:"target_message_id"`
+		Emoji           string `json:"emoji"` // empty to remove
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	deviceID, err := uuid.Parse(req.DeviceID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+
+	if req.TargetMessageID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "target_message_id is required"})
+	}
+
+	if err := s.services.Chat.SendReaction(c.Context(), deviceID, req.To, req.TargetMessageID, req.Emoji); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleSendPoll(c *fiber.Ctx) error {
+	var req struct {
+		DeviceID      string   `json:"device_id"`
+		To            string   `json:"to"`
+		Question      string   `json:"question"`
+		Options       []string `json:"options"`
+		MaxSelections int      `json:"max_selections"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	deviceID, err := uuid.Parse(req.DeviceID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+
+	if req.Question == "" || len(req.Options) < 2 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Question and at least 2 options are required"})
+	}
+
+	if len(req.Options) > 12 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Maximum 12 options allowed"})
+	}
+
+	message, err := s.services.Chat.SendPoll(c.Context(), deviceID, req.To, req.Question, req.Options, req.MaxSelections)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
