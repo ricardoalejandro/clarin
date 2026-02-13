@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
+import NotificationProvider from '@/components/NotificationProvider'
 import { 
   MessageSquare, 
   Smartphone, 
@@ -168,6 +169,7 @@ export default function DashboardLayout({
   if (!user) return null
 
   return (
+    <NotificationProvider accountId={user.account_id}>
     <div className="bg-gray-50 flex overflow-hidden" style={{ height: 'var(--app-height, 100vh)' }}>
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
@@ -341,5 +343,6 @@ export default function DashboardLayout({
         </main>
       </div>
     </div>
+    </NotificationProvider>
   )
 }

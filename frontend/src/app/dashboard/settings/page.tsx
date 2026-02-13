@@ -1,7 +1,16 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { User, Building, Bell, Shield, LogOut, Save, Loader2 } from 'lucide-react'
+import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play } from 'lucide-react'
+import {
+  getNotificationSettings,
+  saveNotificationSettings,
+  playNotificationSound,
+  requestNotificationPermission,
+  SOUND_OPTIONS,
+  type NotificationSettings,
+} from '@/lib/notificationSounds'
+import { useNotifications } from '@/components/NotificationProvider'
 
 interface Account {
   id: string
@@ -16,6 +25,7 @@ interface UserProfile {
   email: string
   name: string
   role: string
+  account_id?: string
 }
 
 export default function SettingsPage() {
@@ -33,24 +43,61 @@ export default function SettingsPage() {
     confirmPassword: '',
   })
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [notifSettings, setNotifSettings] = useState<NotificationSettings | null>(null)
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission>('default')
+  const { refreshSettings: refreshProviderSettings } = useNotifications()
 
   const fetchSettings = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/settings', {
+      // Fetch user info from /api/me (always works)
+      const meRes = await fetch('/api/me', {
         headers: { Authorization: `Bearer ${token}` },
       })
-      const data = await res.json()
-      if (data.success) {
-        setAccount(data.account)
-        setUser(data.user)
+      const meData = await meRes.json()
+      if (meData.success && meData.user) {
+        const u = meData.user
+        setUser({
+          id: u.id,
+          email: u.email,
+          name: u.display_name || u.username,
+          role: u.role,
+          account_id: u.account_id,
+        })
         setFormData(prev => ({
           ...prev,
-          userName: data.user?.name || '',
-          userEmail: data.user?.email || '',
-          accountName: data.account?.name || '',
+          userName: u.display_name || u.username || '',
+          userEmail: u.email || '',
+          accountName: u.account_name || '',
         }))
+        // Build account info from /api/me response
+        setAccount({
+          id: u.account_id,
+          name: u.account_name || '',
+          slug: '',
+          plan: '',
+          created_at: '',
+        })
       }
+      // Try to fetch richer settings (may not exist)
+      try {
+        const res = await fetch('/api/settings', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (data.success) {
+          if (data.account) setAccount(data.account)
+          if (data.user) {
+            setUser(prev => ({ ...prev!, ...data.user, account_id: prev?.account_id }))
+            setFormData(prev => ({
+              ...prev,
+              userName: data.user?.name || prev.userName,
+              userEmail: data.user?.email || prev.userEmail,
+              accountName: data.account?.name || prev.accountName,
+            }))
+          }
+        }
+      } catch { /* optional endpoint */ }
     } catch (err) {
       console.error('Failed to fetch settings:', err)
     } finally {
@@ -61,6 +108,37 @@ export default function SettingsPage() {
   useEffect(() => {
     fetchSettings()
   }, [fetchSettings])
+
+  // Load notification settings once we have the account ID
+  useEffect(() => {
+    if (user?.account_id) {
+      setNotifSettings(getNotificationSettings(user.account_id))
+    }
+    if ('Notification' in window) {
+      setNotifPermission(Notification.permission)
+    }
+  }, [user?.account_id])
+
+  const handleSaveNotifications = () => {
+    if (!user?.account_id || !notifSettings) return
+    saveNotificationSettings(user.account_id, notifSettings)
+    refreshProviderSettings()
+    showMessage('success', 'Preferencias de notificación guardadas')
+  }
+
+  const handleRequestPermission = async () => {
+    const perm = await requestNotificationPermission()
+    setNotifPermission(perm)
+    if (perm === 'granted') {
+      showMessage('success', 'Notificaciones del navegador activadas')
+    }
+  }
+
+  const handlePreviewSound = () => {
+    if (notifSettings) {
+      playNotificationSound(notifSettings.sound_type, notifSettings.sound_volume)
+    }
+  }
 
   const showMessage = (type: 'success' | 'error', text: string) => {
     setMessage({ type, text })
@@ -182,6 +260,7 @@ export default function SettingsPage() {
   const tabs = [
     { id: 'profile', label: 'Perfil', icon: User },
     { id: 'account', label: 'Cuenta', icon: Building },
+    { id: 'notifications', label: 'Notificaciones', icon: Bell },
     { id: 'security', label: 'Seguridad', icon: Shield },
   ]
 
@@ -315,6 +394,187 @@ export default function SettingsPage() {
                   Eliminar Cuenta
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Notifications Tab */}
+          {activeTab === 'notifications' && notifSettings && (
+            <div className="space-y-6">
+              {/* Sound Settings */}
+              <div>
+                <h3 className="font-medium text-gray-900 mb-1">Sonido de Notificación</h3>
+                <p className="text-sm text-gray-500 mb-4">Configura el sonido que se reproduce al recibir un mensaje nuevo en esta cuenta.</p>
+
+                {/* Enable toggle */}
+                <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg mb-4">
+                  <div className="flex items-center gap-3">
+                    {notifSettings.sound_enabled ? (
+                      <Volume2 className="w-5 h-5 text-green-600" />
+                    ) : (
+                      <VolumeX className="w-5 h-5 text-gray-400" />
+                    )}
+                    <div>
+                      <p className="font-medium text-gray-900">Sonido activado</p>
+                      <p className="text-sm text-gray-500">Reproduce un sonido al recibir mensaje</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setNotifSettings({ ...notifSettings, sound_enabled: !notifSettings.sound_enabled, sound_type: !notifSettings.sound_enabled && notifSettings.sound_type === 'none' ? 'whatsapp' : notifSettings.sound_type })}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${notifSettings.sound_enabled ? 'bg-green-600' : 'bg-gray-300'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${notifSettings.sound_enabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+
+                {/* Sound type selector */}
+                {notifSettings.sound_enabled && (
+                  <div className="space-y-3">
+                    <label className="block text-sm font-medium text-gray-700">Tipo de sonido</label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {SOUND_OPTIONS.filter(s => s.value !== 'none').map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => setNotifSettings({ ...notifSettings, sound_type: opt.value })}
+                          className={`flex items-center gap-3 p-3 rounded-lg border transition text-left ${
+                            notifSettings.sound_type === opt.value
+                              ? 'border-green-500 bg-green-50 ring-1 ring-green-500'
+                              : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                          }`}
+                        >
+                          <div className="flex-1">
+                            <p className={`font-medium text-sm ${notifSettings.sound_type === opt.value ? 'text-green-700' : 'text-gray-900'}`}>{opt.label}</p>
+                            <p className="text-xs text-gray-500">{opt.description}</p>
+                          </div>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); playNotificationSound(opt.value, notifSettings.sound_volume) }}
+                            className="p-1.5 rounded-full hover:bg-white/80 text-gray-500 hover:text-green-600 transition"
+                            title="Previsualizar"
+                          >
+                            <Play className="w-4 h-4" />
+                          </button>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Volume slider */}
+                    <div className="mt-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Volumen: {Math.round(notifSettings.sound_volume * 100)}%
+                      </label>
+                      <div className="flex items-center gap-3">
+                        <VolumeX className="w-4 h-4 text-gray-400 shrink-0" />
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={Math.round(notifSettings.sound_volume * 100)}
+                          onChange={(e) => setNotifSettings({ ...notifSettings, sound_volume: parseInt(e.target.value) / 100 })}
+                          className="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-green-600"
+                        />
+                        <Volume2 className="w-4 h-4 text-gray-400 shrink-0" />
+                      </div>
+                    </div>
+
+                    {/* Test button */}
+                    <button
+                      onClick={handlePreviewSound}
+                      className="inline-flex items-center gap-2 px-4 py-2 text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg hover:bg-green-100 transition"
+                    >
+                      <Play className="w-4 h-4" />
+                      Probar sonido
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Browser Notifications */}
+              <div className="pt-6 border-t border-gray-200">
+                <h3 className="font-medium text-gray-900 mb-1">Notificaciones del Navegador</h3>
+                <p className="text-sm text-gray-500 mb-4">Muestra una notificación emergente tipo WhatsApp Web cuando recibes un mensaje y la pestaña no está activa.</p>
+
+                {/* Permission status */}
+                {notifPermission === 'denied' && (
+                  <div className="p-3 bg-red-50 text-red-700 text-sm rounded-lg mb-4">
+                    Las notificaciones están bloqueadas por tu navegador. Para activarlas, haz clic en el icono de candado en la barra de direcciones y permite las notificaciones.
+                  </div>
+                )}
+
+                {notifPermission === 'default' && notifSettings.browser_notifications && (
+                  <div className="p-3 bg-yellow-50 text-yellow-700 text-sm rounded-lg mb-4 flex items-center justify-between">
+                    <span>Necesitas dar permiso al navegador para mostrar notificaciones.</span>
+                    <button
+                      onClick={handleRequestPermission}
+                      className="ml-3 px-3 py-1 bg-yellow-100 border border-yellow-300 rounded text-sm font-medium hover:bg-yellow-200 transition whitespace-nowrap"
+                    >
+                      Permitir
+                    </button>
+                  </div>
+                )}
+
+                {/* Enable toggle */}
+                <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg mb-4">
+                  <div className="flex items-center gap-3">
+                    {notifSettings.browser_notifications ? (
+                      <BellRing className="w-5 h-5 text-green-600" />
+                    ) : (
+                      <BellOff className="w-5 h-5 text-gray-400" />
+                    )}
+                    <div>
+                      <p className="font-medium text-gray-900">Notificaciones emergentes</p>
+                      <p className="text-sm text-gray-500">Muestra alerta visual cuando la pestaña está en segundo plano</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const enabling = !notifSettings.browser_notifications
+                      setNotifSettings({ ...notifSettings, browser_notifications: enabling })
+                      if (enabling && notifPermission === 'default') {
+                        handleRequestPermission()
+                      }
+                    }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${notifSettings.browser_notifications ? 'bg-green-600' : 'bg-gray-300'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${notifSettings.browser_notifications ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+
+                {/* Show preview toggle */}
+                {notifSettings.browser_notifications && (
+                  <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                    <div className="flex items-center gap-3">
+                      {notifSettings.show_preview ? (
+                        <Eye className="w-5 h-5 text-green-600" />
+                      ) : (
+                        <EyeOff className="w-5 h-5 text-gray-400" />
+                      )}
+                      <div>
+                        <p className="font-medium text-gray-900">Mostrar vista previa</p>
+                        <p className="text-sm text-gray-500">Muestra el contenido del mensaje en la notificación</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setNotifSettings({ ...notifSettings, show_preview: !notifSettings.show_preview })}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${notifSettings.show_preview ? 'bg-green-600' : 'bg-gray-300'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${notifSettings.show_preview ? 'translate-x-6' : 'translate-x-1'}`} />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Account context note */}
+              <div className="text-sm text-gray-500 bg-blue-50 border border-blue-100 rounded-lg p-3">
+                <strong>Nota:</strong> Esta configuración aplica solo a la cuenta <strong>{account?.name || 'actual'}</strong>. Al cambiar de cuenta, se aplicarán las preferencias guardadas para esa cuenta.
+              </div>
+
+              {/* Save button */}
+              <button
+                onClick={handleSaveNotifications}
+                className="inline-flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition"
+              >
+                <Save className="w-5 h-5" />
+                Guardar Preferencias
+              </button>
             </div>
           )}
 
