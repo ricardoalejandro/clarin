@@ -5,7 +5,7 @@ import {
   Radio, Plus, Play, Pause, Trash2, Edit, Users, Send, Clock,
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
-  BarChart3
+  BarChart3, ZoomIn, ZoomOut
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -98,6 +98,7 @@ export default function BroadcastsPage() {
   const [searchContacts, setSearchContacts] = useState('')
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set())
   const [detailTab, setDetailTab] = useState<'recipients' | 'chart'>('recipients')
+  const [chartZoom, setChartZoom] = useState(1)
   const [showDuplicateModal, setShowDuplicateModal] = useState(false)
   const [duplicateMessage, setDuplicateMessage] = useState('')
   const [duplicateCampaign, setDuplicateCampaign] = useState<Campaign | null>(null)
@@ -923,7 +924,7 @@ export default function BroadcastsPage() {
                 ))}
               </div>
             ) : (
-              <div className="flex-1 min-h-0 max-h-72 overflow-hidden">
+              <div className="flex-1 min-h-0">
                 {(() => {
                   const sentRecipients = recipients.filter(r => r.wait_time_ms != null && r.wait_time_ms > 0)
                   if (sentRecipients.length < 2) {
@@ -937,23 +938,26 @@ export default function BroadcastsPage() {
                   const maxWait = Math.max(...waitTimes)
                   const minWait = Math.min(...waitTimes)
                   const avgWait = waitTimes.reduce((a, b) => a + b, 0) / waitTimes.length
-                  const configMin = selectedCampaign.settings?.min_delay_seconds || 8
-                  const configMax = selectedCampaign.settings?.max_delay_seconds || 15
+                  const configMin = selectedCampaign.settings?.min_delay_seconds || selectedCampaign.settings?.min_delay || 8
+                  const configMax = selectedCampaign.settings?.max_delay_seconds || selectedCampaign.settings?.max_delay || 15
 
-                  const chartW = 600
-                  const chartH = 200
-                  const padL = 45
-                  const padR = 15
+                  const pointSpacing = 60 * chartZoom
+                  const padL = 50
+                  const padR = 25
                   const padT = 20
-                  const padB = 30
+                  const padB = 35
+                  const chartW = Math.max(400, padL + padR + (waitTimes.length - 1) * pointSpacing)
+                  const chartH = 240
                   const plotW = chartW - padL - padR
                   const plotH = chartH - padT - padB
                   const yMax = Math.max(maxWait, configMax) * 1.15
                   const yMin = 0
 
                   const points = waitTimes.map((v, i) => ({
-                    x: padL + (i / (waitTimes.length - 1)) * plotW,
+                    x: padL + (waitTimes.length === 1 ? plotW / 2 : (i / (waitTimes.length - 1)) * plotW),
                     y: padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH,
+                    value: v,
+                    idx: i,
                   }))
                   const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
 
@@ -961,13 +965,12 @@ export default function BroadcastsPage() {
                   const configMaxY = padT + plotH - ((configMax - yMin) / (yMax - yMin)) * plotH
                   const avgY = padT + plotH - ((avgWait - yMin) / (yMax - yMin)) * plotH
 
-                  // Y-axis ticks
                   const yTicks = 5
                   const yTickValues = Array.from({ length: yTicks + 1 }, (_, i) => yMin + (yMax - yMin) * (i / yTicks))
 
                   return (
                     <div>
-                      <div className="flex flex-wrap gap-4 mb-3 text-xs">
+                      <div className="flex flex-wrap items-center gap-4 mb-3 text-xs">
                         <span className="flex items-center gap-1">
                           <span className="w-3 h-0.5 bg-green-500 inline-block" /> Tiempo real
                         </span>
@@ -980,40 +983,63 @@ export default function BroadcastsPage() {
                         <span className="flex items-center gap-1">
                           <span className="w-3 h-0.5 bg-amber-500 inline-block" style={{borderTop:'1px dashed'}} /> Promedio ({avgWait.toFixed(1)}s)
                         </span>
-                        <span>Mín: {minWait.toFixed(1)}s · Máx: {maxWait.toFixed(1)}s</span>
+                        <span>Mín: {minWait.toFixed(1)}s · Máx: {maxWait.toFixed(1)}s · Puntos: {waitTimes.length}</span>
+                        <div className="ml-auto flex items-center gap-1">
+                          <button
+                            onClick={() => setChartZoom(z => Math.max(0.5, z - 0.25))}
+                            className="p-1 rounded hover:bg-gray-100 text-gray-500" title="Alejar">
+                            <ZoomOut className="w-4 h-4" />
+                          </button>
+                          <span className="text-gray-400 min-w-[3rem] text-center">{Math.round(chartZoom * 100)}%</span>
+                          <button
+                            onClick={() => setChartZoom(z => Math.min(4, z + 0.25))}
+                            className="p-1 rounded hover:bg-gray-100 text-gray-500" title="Acercar">
+                            <ZoomIn className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
-                      <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full" style={{ maxHeight: '220px' }}>
-                        {/* Grid lines */}
-                        {yTickValues.map((v, i) => {
-                          const y = padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH
-                          return (
+                      <div className="overflow-x-auto rounded-lg border border-gray-100" style={{ maxHeight: '300px' }}>
+                        <svg width={chartW} height={chartH} viewBox={`0 0 ${chartW} ${chartH}`} style={{ minWidth: `${chartW}px` }}>
+                          {/* Grid lines */}
+                          {yTickValues.map((v, i) => {
+                            const y = padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH
+                            return (
+                              <g key={i}>
+                                <line x1={padL} y1={y} x2={chartW - padR} y2={y} stroke="#e5e7eb" strokeWidth="0.5" />
+                                <text x={padL - 5} y={y + 3} textAnchor="end" className="fill-gray-400" fontSize="10">{v.toFixed(1)}s</text>
+                              </g>
+                            )
+                          })}
+                          {/* Config min line */}
+                          <line x1={padL} y1={configMinY} x2={chartW - padR} y2={configMinY}
+                            stroke="#60a5fa" strokeWidth="1" strokeDasharray="4 3" />
+                          {/* Config max line */}
+                          <line x1={padL} y1={configMaxY} x2={chartW - padR} y2={configMaxY}
+                            stroke="#f87171" strokeWidth="1" strokeDasharray="4 3" />
+                          {/* Average line */}
+                          <line x1={padL} y1={avgY} x2={chartW - padR} y2={avgY}
+                            stroke="#f59e0b" strokeWidth="1" strokeDasharray="3 3" />
+                          {/* Data line */}
+                          <path d={pathD} fill="none" stroke="#22c55e" strokeWidth="2" strokeLinejoin="round" />
+                          {/* Data points with labels */}
+                          {points.map((p, i) => (
                             <g key={i}>
-                              <line x1={padL} y1={y} x2={chartW - padR} y2={y} stroke="#e5e7eb" strokeWidth="0.5" />
-                              <text x={padL - 5} y={y + 3} textAnchor="end" className="fill-gray-400" fontSize="9">{v.toFixed(0)}s</text>
+                              <circle cx={p.x} cy={p.y} r="4" fill="#22c55e" stroke="white" strokeWidth="1.5" />
+                              <text x={p.x} y={p.y - 8} textAnchor="middle" className="fill-green-700" fontSize="9" fontWeight="600">
+                                {p.value.toFixed(1)}s
+                              </text>
+                              <text x={p.x} y={padT + plotH + 14} textAnchor="middle" className="fill-gray-500" fontSize="9">
+                                #{p.idx + 1}
+                              </text>
                             </g>
-                          )
-                        })}
-                        {/* Config min line */}
-                        <line x1={padL} y1={configMinY} x2={chartW - padR} y2={configMinY}
-                          stroke="#60a5fa" strokeWidth="1" strokeDasharray="4 3" />
-                        {/* Config max line */}
-                        <line x1={padL} y1={configMaxY} x2={chartW - padR} y2={configMaxY}
-                          stroke="#f87171" strokeWidth="1" strokeDasharray="4 3" />
-                        {/* Average line */}
-                        <line x1={padL} y1={avgY} x2={chartW - padR} y2={avgY}
-                          stroke="#f59e0b" strokeWidth="1" strokeDasharray="3 3" />
-                        {/* Data line */}
-                        <path d={pathD} fill="none" stroke="#22c55e" strokeWidth="2" strokeLinejoin="round" />
-                        {/* Data points */}
-                        {points.map((p, i) => (
-                          <circle key={i} cx={p.x} cy={p.y} r="3" fill="#22c55e" stroke="white" strokeWidth="1" />
-                        ))}
-                        {/* X axis */}
-                        <line x1={padL} y1={padT + plotH} x2={chartW - padR} y2={padT + plotH} stroke="#d1d5db" strokeWidth="1" />
-                        <text x={chartW / 2} y={chartH - 5} textAnchor="middle" className="fill-gray-400" fontSize="9">
-                          Mensaje # (1 a {waitTimes.length})
-                        </text>
-                      </svg>
+                          ))}
+                          {/* X axis */}
+                          <line x1={padL} y1={padT + plotH} x2={chartW - padR} y2={padT + plotH} stroke="#d1d5db" strokeWidth="1" />
+                          <text x={padL + plotW / 2} y={chartH - 3} textAnchor="middle" className="fill-gray-400" fontSize="9">
+                            Mensaje # (total: {waitTimes.length} de {recipients.filter(r => r.status === 'sent').length} enviados)
+                          </text>
+                        </svg>
+                      </div>
                     </div>
                   )
                 })()}
