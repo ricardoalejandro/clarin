@@ -6,11 +6,11 @@ import { formatDistanceToNow, format, isToday, isYesterday, differenceInCalendar
 import { es } from 'date-fns/locale'
 import DeviceSelector from '@/components/chat/DeviceSelector'
 import MessageBubble from '@/components/chat/MessageBubble'
-import { formatToHtmlPreview, getCaretOffset, setCaretOffset } from '@/lib/whatsappFormat'
 import ContactPanel from '@/components/chat/ContactPanel'
 import EmojiPicker from '@/components/chat/EmojiPicker'
 import FileUploader from '@/components/chat/FileUploader'
 import StickerPicker from '@/components/chat/StickerPicker'
+import WhatsAppTextInput, { WhatsAppTextInputHandle } from '@/components/WhatsAppTextInput'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ImageViewer from '@/components/chat/ImageViewer'
 
@@ -259,7 +259,7 @@ export default function ChatsPage() {
   const [savedStickerUrls, setSavedStickerUrls] = useState<Set<string>>(new Set())
   const [showPollModal, setShowPollModal] = useState(false)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<WhatsAppTextInputHandle>(null)
   const optimisticIdRef = useRef(0)
 
   // Resizable panels
@@ -525,7 +525,7 @@ export default function ChatsPage() {
     setMessageText('')
     setReplyingTo(null)
     if (inputRef.current) {
-      inputRef.current.innerHTML = ''
+      inputRef.current.clear()
       inputRef.current.focus()
     }
 
@@ -831,14 +831,7 @@ export default function ChatsPage() {
 
   const handleEmojiSelect = (emoji: string) => {
     if (inputRef.current) {
-      inputRef.current.focus()
-      const caretPos = getCaretOffset(inputRef.current)
-      const text = messageText
-      const newText = text.slice(0, caretPos) + emoji + text.slice(caretPos)
-      setMessageText(newText)
-      const html = formatToHtmlPreview(newText)
-      inputRef.current.innerHTML = html || ''
-      setCaretOffset(inputRef.current, caretPos + emoji.length)
+      inputRef.current.insertAtCaret(emoji)
     } else {
       setMessageText(prev => prev + emoji)
     }
@@ -1375,31 +1368,15 @@ export default function ChatsPage() {
                     >
                       <BarChart3 className="w-5 h-5" />
                     </button>
-                    <div className="flex-1 relative">
-                      {!messageText && (
-                        <div className="absolute left-4 top-2.5 text-gray-400 pointer-events-none select-none">
-                          Escribe un mensaje...
-                        </div>
-                      )}
-                      <div
+                    <div className="flex-1">
+                      <WhatsAppTextInput
                         ref={inputRef}
-                        contentEditable={!sendingMessage}
-                        onInput={() => {
-                          if (!inputRef.current) return
-                          const text = (inputRef.current.innerText || '').replace(/\u00a0/g, ' ')
-                          const caretPos = getCaretOffset(inputRef.current)
-                          setMessageText(text)
-                          const html = formatToHtmlPreview(text)
-                          inputRef.current.innerHTML = html || ''
-                          setCaretOffset(inputRef.current, caretPos)
-                        }}
+                        value={messageText}
+                        onChange={setMessageText}
+                        placeholder="Escribe un mensaje..."
                         onKeyDown={handleKeyDown}
-                        onPaste={(e) => {
-                          e.preventDefault()
-                          const text = e.clipboardData.getData('text/plain')
-                          document.execCommand('insertText', false, text)
-                        }}
-                        className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent message-input text-gray-900 min-h-[42px] max-h-32 overflow-y-auto whitespace-pre-wrap break-words outline-none"
+                        disabled={sendingMessage}
+                        singleLine
                       />
                     </div>
                     <button

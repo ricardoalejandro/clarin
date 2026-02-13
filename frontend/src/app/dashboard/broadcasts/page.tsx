@@ -1,35 +1,22 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import {
   Radio, Plus, Play, Pause, Trash2, Edit, Users, Send, Clock,
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
-  BarChart3, ZoomIn, ZoomOut, CalendarClock, Paperclip, X, GripVertical,
-  FileAudio, Upload
+  BarChart3, ZoomIn, ZoomOut, CalendarClock, X, Paperclip
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import MessageBubble from '@/components/chat/MessageBubble'
+import CreateCampaignModal, { CampaignFormResult, CampaignAttachment } from '@/components/CreateCampaignModal'
 
 interface Device {
   id: string
   name: string
-  phone_number: string
+  phone: string | null
   status: string
-}
-
-interface CampaignAttachment {
-  id?: string
-  media_url: string
-  media_type: string
-  caption: string
-  file_name: string
-  file_size: number
-  position: number
-  // local-only fields for UI
-  _localPreview?: string
-  _uploading?: boolean
 }
 
 interface Campaign {
@@ -119,125 +106,7 @@ export default function BroadcastsPage() {
   const [duplicateMessage, setDuplicateMessage] = useState('')
   const [duplicateCampaign, setDuplicateCampaign] = useState<Campaign | null>(null)
 
-  const [formData, setFormData] = useState({
-    name: '',
-    device_id: '',
-    message_template: '',
-    min_delay: 8,
-    max_delay: 15,
-    batch_size: 25,
-    batch_pause: 2,
-    daily_limit: 1000,
-    active_hours_start: '07:00',
-    active_hours_end: '22:00',
-    simulate_typing: true,
-    scheduled_date: '',
-    scheduled_time: '',
-  })
-  const [attachments, setAttachments] = useState<CampaignAttachment[]>([])
-  const [showAttachMenu, setShowAttachMenu] = useState(false)
-  const attachMenuRef = useRef<HTMLDivElement>(null)
-  const attachInputRef = useRef<HTMLInputElement>(null)
-  const [showPreview, setShowPreview] = useState(false)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
-
-  // Close attach menu on click outside
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
-        setShowAttachMenu(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  const ACCEPTED_TYPES: Record<string, string[]> = {
-    image: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
-    video: ['video/mp4', 'video/3gpp', 'video/quicktime'],
-    audio: ['audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/opus', 'audio/aac'],
-    document: ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
-  }
-
-  const getMediaType = (mimeType: string): string => {
-    if (ACCEPTED_TYPES.image.includes(mimeType)) return 'image'
-    if (ACCEPTED_TYPES.video.includes(mimeType)) return 'video'
-    if (ACCEPTED_TYPES.audio.includes(mimeType)) return 'audio'
-    return 'document'
-  }
-
-  const handleAttachFile = async (file: File, mediaType: string) => {
-    if (attachments.length >= 10) {
-      alert('Máximo 10 adjuntos por campaña')
-      return
-    }
-    if (file.size > 32 * 1024 * 1024) {
-      alert('El archivo es demasiado grande. Máximo 32MB.')
-      return
-    }
-    const localPreview = (mediaType === 'image' || mediaType === 'video') ? URL.createObjectURL(file) : undefined
-    const tempAttachment: CampaignAttachment = {
-      media_url: '',
-      media_type: mediaType,
-      caption: '',
-      file_name: file.name,
-      file_size: file.size,
-      position: attachments.length,
-      _localPreview: localPreview,
-      _uploading: true,
-    }
-    setAttachments(prev => [...prev, tempAttachment])
-    const idx = attachments.length
-
-    try {
-      const fd = new FormData()
-      fd.append('file', file)
-      fd.append('folder', 'uploads')
-      const uploadRes = await fetch('/api/media/upload', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: fd,
-      })
-      const uploadData = await uploadRes.json()
-      if (!uploadData.success) throw new Error(uploadData.error || 'Error al subir archivo')
-      const url = uploadData.proxy_url || uploadData.public_url
-      setAttachments(prev => prev.map((a, i) => i === idx ? { ...a, media_url: url, _uploading: false } : a))
-    } catch (err) {
-      alert('Error al subir archivo: ' + (err instanceof Error ? err.message : 'desconocido'))
-      setAttachments(prev => prev.filter((_, i) => i !== idx))
-      if (localPreview) URL.revokeObjectURL(localPreview)
-    }
-  }
-
-  const handleAttachSelect = (accept: string) => {
-    setShowAttachMenu(false)
-    if (attachInputRef.current) {
-      attachInputRef.current.accept = accept
-      attachInputRef.current.click()
-    }
-  }
-
-  const handleAttachInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const mediaType = getMediaType(file.type)
-    handleAttachFile(file, mediaType)
-    if (attachInputRef.current) attachInputRef.current.value = ''
-  }
-
-  const removeAttachment = (index: number) => {
-    setAttachments(prev => {
-      const a = prev[index]
-      if (a._localPreview) URL.revokeObjectURL(a._localPreview)
-      return prev.filter((_, i) => i !== index).map((att, i) => ({ ...att, position: i }))
-    })
-  }
-
-  const updateAttachmentCaption = (index: number, caption: string) => {
-    setAttachments(prev => prev.map((a, i) => i === index ? { ...a, caption } : a))
-  }
 
   const fetchCampaigns = useCallback(async () => {
     try {
@@ -289,69 +158,31 @@ export default function BroadcastsPage() {
     return () => clearInterval(interval)
   }, [fetchCampaigns, fetchDevices, fetchContacts])
 
-  const handleCreateCampaign = async () => {
-    // Build scheduled_at if date and time set
-    let scheduledAt: string | null = null
-    if (formData.scheduled_date && formData.scheduled_time) {
-      const dt = new Date(`${formData.scheduled_date}T${formData.scheduled_time}:00`)
-      const now = new Date()
-      const maxDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
-      if (dt <= now) {
-        alert('La fecha programada debe ser en el futuro')
-        return
-      }
-      if (dt > maxDate) {
-        alert('La fecha programada no puede ser mayor a 1 semana')
-        return
-      }
-      scheduledAt = dt.toISOString()
-    }
-
+  const handleCreateCampaign = async (formResult: CampaignFormResult) => {
     try {
       const res = await fetch('/api/campaigns', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          name: formData.name,
-          device_id: formData.device_id,
-          message_template: formData.message_template,
-          attachments: attachments.filter(a => a.media_url).map(a => ({
-            media_url: a.media_url,
-            media_type: a.media_type,
-            caption: a.caption,
-            file_name: a.file_name,
-            file_size: a.file_size,
-            position: a.position,
-          })),
-          scheduled_at: scheduledAt ? scheduledAt : undefined,
-          settings: {
-            min_delay_seconds: formData.min_delay,
-            max_delay_seconds: formData.max_delay,
-            batch_size: formData.batch_size,
-            batch_pause_minutes: formData.batch_pause,
-            daily_limit: formData.daily_limit,
-            active_hours_start: formData.active_hours_start,
-            active_hours_end: formData.active_hours_end,
-            simulate_typing: formData.simulate_typing,
-            randomize_message: true,
-          },
+          name: formResult.name,
+          device_id: formResult.device_id,
+          message_template: formResult.message_template,
+          attachments: formResult.attachments,
+          scheduled_at: formResult.scheduled_at || undefined,
+          settings: formResult.settings,
         }),
       })
       const data = await res.json()
       if (data.success) {
-        // If scheduled, set campaign status to scheduled
-        if (scheduledAt && data.campaign) {
+        if (formResult.scheduled_at && data.campaign) {
           await fetch(`/api/campaigns/${data.campaign.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ status: 'scheduled', scheduled_at: scheduledAt }),
+            body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
           })
         }
         setShowCreateModal(false)
-        resetForm()
         fetchCampaigns()
-
-        // Auto-open recipients modal for the new campaign
         if (data.campaign) {
           setSelectedCampaign(data.campaign)
           setShowRecipientsModal(true)
@@ -495,18 +326,6 @@ export default function BroadcastsPage() {
     return () => clearInterval(interval)
   }, [showDetailModal, selectedCampaign?.id, selectedCampaign?.status, token])
 
-  const resetForm = () => {
-    setFormData({
-      name: '', device_id: '', message_template: '',
-      min_delay: 8, max_delay: 15, batch_size: 25, batch_pause: 2,
-      daily_limit: 1000, active_hours_start: '07:00', active_hours_end: '22:00',
-      simulate_typing: true, scheduled_date: '', scheduled_time: '',
-    })
-    attachments.forEach(a => { if (a._localPreview) URL.revokeObjectURL(a._localPreview) })
-    setAttachments([])
-    setShowPreview(false)
-  }
-
   const toggleContactSelection = (contactId: string) => {
     const newSet = new Set(selectedContactIds)
     if (newSet.has(contactId)) newSet.delete(contactId)
@@ -521,8 +340,6 @@ export default function BroadcastsPage() {
       (c.phone || '').toLowerCase().includes(term) ||
       c.jid.toLowerCase().includes(term)
   })
-
-  const connectedDevices = devices.filter(d => d.status === 'connected')
 
   if (loading) {
     return (
@@ -541,7 +358,7 @@ export default function BroadcastsPage() {
           <p className="text-gray-600 mt-1">{campaigns.length} campañas</p>
         </div>
         <button
-          onClick={() => { resetForm(); setShowCreateModal(true) }}
+          onClick={() => setShowCreateModal(true)}
           className="inline-flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition"
         >
           <Plus className="w-5 h-5" />
@@ -715,453 +532,12 @@ export default function BroadcastsPage() {
       )}
 
       {/* Create Campaign Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold text-gray-900 mb-4">Nueva Campaña</h2>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre *</label>
-                <input
-                  type="text"
-                  value={formData.name}
-                  onChange={e => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900"
-                  placeholder="Ej: Promoción Navidad 2025"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Dispositivo *</label>
-                <select
-                  value={formData.device_id}
-                  onChange={e => setFormData({ ...formData, device_id: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900"
-                >
-                  <option value="">Seleccionar dispositivo...</option>
-                  {connectedDevices.map(d => (
-                    <option key={d.id} value={d.id}>{d.name} ({d.phone_number || 'Sin número'})</option>
-                  ))}
-                </select>
-                {connectedDevices.length === 0 && (
-                  <p className="text-xs text-red-500 mt-1">No hay dispositivos conectados. Conecta uno primero.</p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Mensaje {attachments.length > 0 ? '(opcional)' : '*'}
-                </label>
-                {/* Variable insertion buttons */}
-                <div className="flex flex-wrap gap-1 mb-2">
-                  {[
-                    { label: 'Nombre', value: '{{nombre}}' },
-                    { label: 'Nombre completo', value: '{{nombre_completo}}' },
-                    { label: 'Nombre corto', value: '{{nombre_corto}}' },
-                    { label: 'Celular', value: '{{celular}}' },
-                  ].map(v => (
-                    <button
-                      key={v.value}
-                      type="button"
-                      onClick={() => {
-                        const ta = textareaRef.current
-                        if (ta) {
-                          const start = ta.selectionStart
-                          const end = ta.selectionEnd
-                          const text = formData.message_template
-                          const newText = text.substring(0, start) + v.value + text.substring(end)
-                          setFormData({ ...formData, message_template: newText })
-                          setTimeout(() => {
-                            ta.focus()
-                            ta.selectionStart = ta.selectionEnd = start + v.value.length
-                          }, 0)
-                        } else {
-                          setFormData({ ...formData, message_template: formData.message_template + v.value })
-                        }
-                      }}
-                      className="px-2 py-1 text-xs bg-green-50 text-green-700 border border-green-200 rounded-md hover:bg-green-100 transition"
-                    >
-                      + {v.label}
-                    </button>
-                  ))}
-                </div>
-                <textarea
-                  ref={textareaRef}
-                  value={formData.message_template}
-                  onChange={e => setFormData({ ...formData, message_template: e.target.value })}
-                  rows={4}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900"
-                  placeholder="Hola {{nombre}}, te escribimos para..."
-                />
-                <div className="flex items-center justify-between mt-1">
-                  <p className="text-xs text-gray-400">
-                    Variables: {'{{nombre}}'}, {'{{nombre_completo}}'}, {'{{nombre_corto}}'}, {'{{celular}}'}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setShowPreview(!showPreview)}
-                    className="text-xs text-green-600 hover:text-green-700 font-medium flex items-center gap-1"
-                  >
-                    <Eye className="w-3 h-3" />
-                    {showPreview ? 'Ocultar vista previa' : 'Vista previa'}
-                  </button>
-                </div>
-
-                {/* Message preview using MessageBubble */}
-                {showPreview && (formData.message_template || attachments.length > 0) && (
-                  <div className="mt-2 p-3 bg-[#e5ddd5] rounded-lg max-w-sm space-y-1">
-                    {(() => {
-                      const personalizeText = (text: string) => text
-                        .replace(/\{\{nombre\}\}/g, 'Juan')
-                        .replace(/\{\{nombre_completo\}\}/g, 'Juan Pérez López')
-                        .replace(/\{\{nombre_corto\}\}/g, 'Juanito')
-                        .replace(/\{\{celular\}\}/g, '+51999888777')
-                        .replace(/\{\{name\}\}/g, 'Juan')
-                        .replace(/\{\{telefono\}\}/g, '+51999888777')
-                        .replace(/\{\{phone\}\}/g, '+51999888777')
-                      const readyAttachments = attachments.filter(a => a.media_url)
-                      const singleAttachNoCaption = readyAttachments.length === 1 && !readyAttachments[0].caption
-                      // Single attachment + no caption → message as caption on media
-                      if (singleAttachNoCaption && formData.message_template) {
-                        return (
-                          <MessageBubble
-                            message={{
-                              id: 'preview-0', message_id: 'preview-0',
-                              body: personalizeText(formData.message_template),
-                              message_type: readyAttachments[0].media_type,
-                              media_url: readyAttachments[0]._localPreview || readyAttachments[0].media_url,
-                              is_from_me: true, is_read: false, status: 'sent',
-                              timestamp: new Date().toISOString(),
-                            }}
-                          />
-                        )
-                      }
-                      return (
-                        <>
-                          {formData.message_template && (
-                            <MessageBubble
-                              message={{
-                                id: 'preview-text', message_id: 'preview-text',
-                                body: personalizeText(formData.message_template),
-                                message_type: 'text',
-                                is_from_me: true, is_read: false, status: 'sent',
-                                timestamp: new Date().toISOString(),
-                              }}
-                            />
-                          )}
-                          {readyAttachments.map((att, i) => (
-                            <MessageBubble
-                              key={`preview-att-${i}`}
-                              message={{
-                                id: `preview-att-${i}`, message_id: `preview-att-${i}`,
-                                body: att.caption ? personalizeText(att.caption) : undefined,
-                                message_type: att.media_type,
-                                media_url: att._localPreview || att.media_url,
-                                media_filename: att.file_name,
-                                is_from_me: true, is_read: false, status: 'sent',
-                                timestamp: new Date().toISOString(),
-                              }}
-                            />
-                          ))}
-                        </>
-                      )
-                    })()}
-                  </div>
-                )}
-              </div>
-
-              {/* Attachments section */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Adjuntos ({attachments.length}/10)</label>
-                <input type="file" ref={attachInputRef} onChange={handleAttachInputChange} className="hidden" />
-
-                {/* Attachment cards */}
-                {attachments.length > 0 && (
-                  <div className="space-y-2 mb-3">
-                    {attachments.map((att, i) => {
-                      const TypeIcon = att.media_type === 'image' ? Image : att.media_type === 'video' ? Video : att.media_type === 'audio' ? AudioLines : File
-                      const typeColors: Record<string, string> = { image: 'bg-purple-100 text-purple-600', video: 'bg-red-100 text-red-600', audio: 'bg-orange-100 text-orange-600', document: 'bg-blue-100 text-blue-600' }
-                      return (
-                        <div key={i} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
-                          <div className="flex items-center gap-3">
-                            {/* Thumbnail or icon */}
-                            <div className="shrink-0">
-                              {att._localPreview && att.media_type === 'image' ? (
-                                <img src={att._localPreview} alt="" className="w-12 h-12 rounded-lg object-cover" />
-                              ) : att._localPreview && att.media_type === 'video' ? (
-                                <video src={att._localPreview} className="w-12 h-12 rounded-lg object-cover" />
-                              ) : (
-                                <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${typeColors[att.media_type] || typeColors.document}`}>
-                                  <TypeIcon className="w-5 h-5" />
-                                </div>
-                              )}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium text-gray-900 truncate">{att.file_name}</p>
-                              <div className="flex items-center gap-2 text-xs text-gray-400">
-                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${typeColors[att.media_type] || typeColors.document}`}>
-                                  {att.media_type === 'image' ? 'Imagen' : att.media_type === 'video' ? 'Video' : att.media_type === 'audio' ? 'Audio' : 'Documento'}
-                                </span>
-                                <span>{(att.file_size / 1024 / 1024).toFixed(2)} MB</span>
-                                {att._uploading && <span className="text-amber-500 animate-pulse">Subiendo...</span>}
-                              </div>
-                            </div>
-                            <button onClick={() => removeAttachment(i)} className="p-1 hover:bg-red-50 rounded text-red-400 hover:text-red-600 transition">
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                          {/* Caption toggle + input */}
-                          {att.media_type !== 'audio' && (
-                            <div className="mt-2">
-                              {att.caption !== undefined && (
-                                <div>
-                                  <div className="flex items-center justify-between mb-1">
-                                    <label className="flex items-center gap-1.5 cursor-pointer">
-                                      <input
-                                        type="checkbox"
-                                        checked={att.caption !== ''}
-                                        onChange={e => updateAttachmentCaption(i, e.target.checked ? ' ' : '')}
-                                        className="rounded border-gray-300 text-green-600 focus:ring-green-500 w-3.5 h-3.5"
-                                      />
-                                      <span className="text-[11px] text-gray-500">Pie de foto</span>
-                                    </label>
-                                    {att.caption && (
-                                      <div className="flex gap-1">
-                                        {[{ label: 'Nombre', value: '{{nombre}}' }, { label: 'Celular', value: '{{celular}}' }].map(v => (
-                                          <button
-                                            key={v.value}
-                                            type="button"
-                                            onClick={() => updateAttachmentCaption(i, (att.caption || '') + v.value)}
-                                            className="px-1.5 py-0.5 text-[10px] bg-green-50 text-green-700 border border-green-200 rounded hover:bg-green-100 transition"
-                                          >
-                                            + {v.label}
-                                          </button>
-                                        ))}
-                                      </div>
-                                    )}
-                                  </div>
-                                  {att.caption && (
-                                    <textarea
-                                      value={att.caption.trim() === '' ? '' : att.caption}
-                                      onChange={e => updateAttachmentCaption(i, e.target.value || ' ')}
-                                      rows={2}
-                                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 text-gray-900"
-                                      placeholder="Texto del pie de foto..."
-                                    />
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-
-                {/* Add attachment button with popup */}
-                {attachments.length < 10 && (
-                  <div ref={attachMenuRef} className="relative inline-block">
-                    <button
-                      type="button"
-                      onClick={() => setShowAttachMenu(!showAttachMenu)}
-                      className="inline-flex items-center gap-2 px-3 py-2 border border-dashed border-gray-300 rounded-lg text-sm text-gray-600 hover:border-green-400 hover:text-green-600 hover:bg-green-50 transition"
-                    >
-                      <Paperclip className="w-4 h-4" />
-                      Adjuntar archivo
-                    </button>
-                    {showAttachMenu && (
-                      <div className="absolute bottom-full mb-2 left-0 bg-white rounded-xl shadow-xl border border-gray-200 p-2 z-50 min-w-48">
-                        <div className="space-y-1">
-                          <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.image.join(','))} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-purple-50 rounded-lg text-left">
-                            <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center"><Image className="w-4 h-4 text-purple-600" /></div>
-                            <span className="text-sm font-semibold text-gray-800">Imagen</span>
-                          </button>
-                          <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.video.join(','))} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-red-50 rounded-lg text-left">
-                            <div className="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center"><Video className="w-4 h-4 text-red-600" /></div>
-                            <span className="text-sm font-semibold text-gray-800">Video</span>
-                          </button>
-                          <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.audio.join(','))} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-orange-50 rounded-lg text-left">
-                            <div className="w-8 h-8 bg-orange-100 rounded-lg flex items-center justify-center"><FileAudio className="w-4 h-4 text-orange-600" /></div>
-                            <span className="text-sm font-semibold text-gray-800">Audio</span>
-                          </button>
-                          <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.document.join(','))} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-blue-50 rounded-lg text-left">
-                            <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center"><FileText className="w-4 h-4 text-blue-600" /></div>
-                            <span className="text-sm font-semibold text-gray-800">Documento</span>
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Anti-ban settings */}
-              <div className="border border-gray-200 rounded-lg p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <Settings2 className="w-4 h-4 text-gray-500" />
-                  <h3 className="text-sm font-medium text-gray-700">Configuración Anti-Ban</h3>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Delay mín (seg)</label>
-                    <input
-                      type="number"
-                      value={formData.min_delay}
-                      onChange={e => setFormData({ ...formData, min_delay: +e.target.value })}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Delay máx (seg)</label>
-                    <input
-                      type="number"
-                      value={formData.max_delay}
-                      onChange={e => setFormData({ ...formData, max_delay: +e.target.value })}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Tamaño del lote</label>
-                    <input
-                      type="number"
-                      value={formData.batch_size}
-                      onChange={e => setFormData({ ...formData, batch_size: +e.target.value })}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Pausa entre lotes (min)</label>
-                    <input
-                      type="number"
-                      value={formData.batch_pause}
-                      onChange={e => setFormData({ ...formData, batch_pause: +e.target.value })}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Límite diario</label>
-                    <input
-                      type="number"
-                      value={formData.daily_limit}
-                      onChange={e => setFormData({ ...formData, daily_limit: +e.target.value })}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Horas activas</label>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="time"
-                        value={formData.active_hours_start}
-                        onChange={e => setFormData({ ...formData, active_hours_start: e.target.value })}
-                        className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs text-gray-900"
-                      />
-                      <span className="text-xs text-gray-400">-</span>
-                      <input
-                        type="time"
-                        value={formData.active_hours_end}
-                        onChange={e => setFormData({ ...formData, active_hours_end: e.target.value })}
-                        className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs text-gray-900"
-                      />
-                    </div>
-                  </div>
-                </div>
-                <label className="flex items-center gap-2 mt-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={formData.simulate_typing}
-                    onChange={e => setFormData({ ...formData, simulate_typing: e.target.checked })}
-                    className="rounded border-gray-300 text-green-600 focus:ring-green-500"
-                  />
-                  <span className="text-xs text-gray-600">Simular escritura (typing indicator)</span>
-                </label>
-              </div>
-
-              {/* Schedule */}
-              <div className="border border-gray-200 rounded-lg p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <CalendarClock className="w-4 h-4 text-gray-500" />
-                  <h3 className="text-sm font-medium text-gray-700">Programar envío (opcional)</h3>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Fecha</label>
-                    <input
-                      type="date"
-                      value={formData.scheduled_date}
-                      onChange={e => setFormData({ ...formData, scheduled_date: e.target.value })}
-                      min={new Date().toISOString().split('T')[0]}
-                      max={new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Hora</label>
-                    <input
-                      type="time"
-                      value={formData.scheduled_time}
-                      onChange={e => setFormData({ ...formData, scheduled_time: e.target.value })}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
-                    />
-                  </div>
-                </div>
-                {formData.scheduled_date && formData.scheduled_time && (
-                  <div className="mt-2 flex items-center justify-between">
-                    <p className="text-xs text-blue-600">
-                      Se enviará el {format(new Date(`${formData.scheduled_date}T${formData.scheduled_time}`), "d 'de' MMMM 'a las' HH:mm", { locale: es })}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => setFormData({ ...formData, scheduled_date: '', scheduled_time: '' })}
-                      className="text-xs text-red-500 hover:text-red-700"
-                    >
-                      Quitar programación
-                    </button>
-                  </div>
-                )}
-                <p className="text-[10px] text-gray-400 mt-2">Máximo 1 semana en el futuro. Deja vacío para enviar manualmente.</p>
-              </div>
-
-              {/* Speed estimator */}
-              {formData.batch_size > 0 && formData.min_delay > 0 && formData.max_delay > 0 && (() => {
-                const avgDelay = (formData.min_delay + formData.max_delay) / 2
-                const batchTimeSec = avgDelay * formData.batch_size
-                const cycleTimeMin = batchTimeSec / 60 + formData.batch_pause
-                const msgsPerHour = cycleTimeMin > 0 ? Math.round(formData.batch_size / cycleTimeMin * 60) : 0
-                const hoursFor1000 = msgsPerHour > 0 ? (1000 / msgsPerHour).toFixed(1) : '?'
-                return (
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-800">
-                    <p className="font-medium mb-1">Velocidad estimada</p>
-                    <div className="flex flex-wrap gap-x-4 gap-y-1">
-                      <span>~{avgDelay.toFixed(0)}s promedio entre msgs</span>
-                      <span>~{cycleTimeMin.toFixed(1)} min por lote de {formData.batch_size}</span>
-                      <span className="font-semibold">~{msgsPerHour} msgs/hora</span>
-                      <span>1000 msgs en ~{hoursFor1000}h</span>
-                    </div>
-                  </div>
-                )
-              })()}
-            </div>
-
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={handleCreateCampaign}
-                disabled={!formData.name || !formData.device_id || (!formData.message_template && attachments.filter(a => a.media_url).length === 0) || attachments.some(a => a._uploading)}
-                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
-              >
-                {formData.scheduled_date && formData.scheduled_time ? 'Programar Campaña' : 'Crear Campaña'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <CreateCampaignModal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        onSubmit={handleCreateCampaign}
+        devices={devices}
+      />
 
       {/* Add Recipients Modal */}
       {showRecipientsModal && selectedCampaign && (
@@ -1468,12 +844,14 @@ export default function BroadcastsPage() {
               </div>
             )}
 
-            <button
-              onClick={() => { setShowDetailModal(false); setRecipients([]) }}
-              className="w-full mt-4 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-            >
-              Cerrar
-            </button>
+            <div className="shrink-0 pt-4">
+              <button
+                onClick={() => { setShowDetailModal(false); setRecipients([]) }}
+                className="w-full px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+              >
+                Cerrar
+              </button>
+            </div>
           </div>
         </div>
       )}

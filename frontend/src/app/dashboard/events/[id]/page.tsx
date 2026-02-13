@@ -6,11 +6,12 @@ import {
   ArrowLeft, Users, UserPlus, Search, Phone, MessageSquare, StickyNote, Mail,
   Handshake, CheckCircle2, XCircle, Voicemail, Clock, PhoneOff, CalendarClock,
   PhoneCall, GripVertical, List, LayoutGrid, X, Plus, Trash2,
-  Save, Tag, Filter, Send, Radio, Pencil, Maximize2,
+  Save, Tag, Filter, Send, Pencil, Maximize2,
   MapPin, CalendarDays
 } from 'lucide-react'
 import { format, formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
+import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 
 const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
 
@@ -97,10 +98,6 @@ export default function EventDetailPage() {
   // Mass messaging modal
   const [showCampaignModal, setShowCampaignModal] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
-  const [campaignForm, setCampaignForm] = useState({
-    name: '', device_id: '', message_template: '', media_url: '', media_type: '',
-    min_delay: 8, max_delay: 15, batch_size: 25, batch_pause: 120, daily_limit: 1000,
-  })
   const [creatingCampaign, setCreatingCampaign] = useState(false)
 
   // Add participant form
@@ -381,43 +378,28 @@ export default function EventDetailPage() {
   // Mass messaging
   const participantsWithPhone = useMemo(() => participants.filter(p => p.phone), [participants])
 
-  const handleCreateCampaign = async () => {
-    if (!campaignForm.name || !campaignForm.device_id || !campaignForm.message_template) return
+  const handleCreateCampaign = async (formResult: CampaignFormResult) => {
     setCreatingCampaign(true)
     try {
-      const body: Record<string, unknown> = {
-        name: campaignForm.name,
-        device_id: campaignForm.device_id,
-        message_template: campaignForm.message_template,
-        status: filterStatus || undefined,
-        tag_ids: filterTags.length > 0 ? filterTags : undefined,
-        has_phone: true,
-        settings: {
-          min_delay: campaignForm.min_delay,
-          max_delay: campaignForm.max_delay,
-          batch_size: campaignForm.batch_size,
-          batch_pause: campaignForm.batch_pause,
-          daily_limit: campaignForm.daily_limit,
-        },
-      }
-      if (campaignForm.media_url) {
-        body.media_url = campaignForm.media_url
-        body.media_type = campaignForm.media_type || 'image'
-      }
-
       const res = await fetch(`/api/events/${eventId}/campaign`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          name: formResult.name,
+          device_id: formResult.device_id,
+          message_template: formResult.message_template,
+          attachments: formResult.attachments,
+          scheduled_at: formResult.scheduled_at || undefined,
+          settings: formResult.settings,
+          status: filterStatus || undefined,
+          tag_ids: filterTags.length > 0 ? filterTags : undefined,
+          has_phone: true,
+        }),
       })
       const data = await res.json()
       if (data.success) {
         alert(`Campaña creada con ${data.recipients_count} destinatarios. Puedes verla y iniciarla en Envíos Masivos.`)
         setShowCampaignModal(false)
-        setCampaignForm({
-          name: '', device_id: '', message_template: '', media_url: '', media_type: '',
-          min_delay: 8, max_delay: 15, batch_size: 25, batch_pause: 120, daily_limit: 1000,
-        })
       } else {
         alert(data.error || 'Error al crear campaña')
       }
@@ -1216,195 +1198,45 @@ export default function EventDetailPage() {
       )}
 
       {/* Mass Messaging / Campaign Modal */}
-      {showCampaignModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                  <Radio className="w-5 h-5 text-purple-600" />
-                  Envío Masivo desde Evento
-                </h2>
-                <p className="text-sm text-gray-500 mt-0.5">
-                  Crea una campaña con los participantes filtrados que tengan teléfono
-                </p>
-              </div>
-              <button onClick={() => setShowCampaignModal(false)} className="p-1 text-gray-400 hover:text-gray-600 rounded">
-                <X className="w-5 h-5" />
-              </button>
+      <CreateCampaignModal
+        open={showCampaignModal}
+        onClose={() => setShowCampaignModal(false)}
+        onSubmit={handleCreateCampaign}
+        devices={devices}
+        title="Envío Masivo desde Evento"
+        subtitle="Crea una campaña con los participantes filtrados que tengan teléfono"
+        accentColor="purple"
+        submitLabel={creatingCampaign ? 'Creando...' : `Crear campaña (${participantsWithPhone.length})`}
+        submitting={creatingCampaign || participantsWithPhone.length === 0}
+        infoPanel={
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Users className="w-4 h-4 text-purple-600" />
+              <span className="text-sm font-semibold text-purple-800">
+                {participantsWithPhone.length} destinatarios con teléfono
+              </span>
             </div>
-
-            <div className="flex-1 overflow-y-auto p-6 space-y-5">
-              {/* Summary of current filters */}
-              <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <Users className="w-4 h-4 text-purple-600" />
-                  <span className="text-sm font-semibold text-purple-800">
-                    {participantsWithPhone.length} destinatarios con teléfono
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-2 text-xs">
-                  {filterStatus && (
-                    <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded-full">
-                      Estado: {STATUSES.find(s => s.key === filterStatus)?.label || filterStatus}
-                    </span>
-                  )}
-                  {filterTags.length > 0 && (
-                    <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded-full">
-                      {filterTags.length} etiqueta{filterTags.length > 1 ? 's' : ''} seleccionada{filterTags.length > 1 ? 's' : ''}
-                    </span>
-                  )}
-                  {!filterStatus && filterTags.length === 0 && (
-                    <span className="text-purple-600">Todos los participantes con teléfono</span>
-                  )}
-                </div>
-                <p className="text-xs text-purple-500 mt-2">
-                  Puedes ajustar los filtros arriba antes de crear la campaña
-                </p>
-              </div>
-
-              {/* Campaign name */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre de la campaña *</label>
-                <input
-                  value={campaignForm.name}
-                  onChange={e => setCampaignForm(f => ({ ...f, name: e.target.value }))}
-                  placeholder={`Envío - ${event.name}`}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-gray-900"
-                />
-              </div>
-
-              {/* Device selector */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Dispositivo *</label>
-                {devices.length === 0 ? (
-                  <p className="text-sm text-red-500">No hay dispositivos conectados</p>
-                ) : (
-                  <select
-                    value={campaignForm.device_id}
-                    onChange={e => setCampaignForm(f => ({ ...f, device_id: e.target.value }))}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-gray-900"
-                  >
-                    <option value="">Seleccionar dispositivo...</option>
-                    {devices.map(d => (
-                      <option key={d.id} value={d.id}>{d.name} ({d.phone_number})</option>
-                    ))}
-                  </select>
-                )}
-              </div>
-
-              {/* Message template */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Mensaje *</label>
-                <textarea
-                  value={campaignForm.message_template}
-                  onChange={e => setCampaignForm(f => ({ ...f, message_template: e.target.value }))}
-                  placeholder="Hola {{nombre}}, te invitamos a..."
-                  rows={4}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-gray-900"
-                />
-                <div className="flex gap-2 mt-1.5">
-                  <span className="text-[10px] text-gray-400">Variables disponibles:</span>
-                  {['{{nombre}}', '{{telefono}}'].map(v => (
-                    <button
-                      key={v}
-                      onClick={() => setCampaignForm(f => ({ ...f, message_template: f.message_template + v }))}
-                      className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded hover:bg-gray-200 font-mono"
-                    >
-                      {v}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Media (optional) */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Media (opcional)</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <input
-                    value={campaignForm.media_url}
-                    onChange={e => setCampaignForm(f => ({ ...f, media_url: e.target.value }))}
-                    placeholder="URL de la imagen/video"
-                    className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent text-gray-900"
-                  />
-                  <select
-                    value={campaignForm.media_type}
-                    onChange={e => setCampaignForm(f => ({ ...f, media_type: e.target.value }))}
-                    className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent text-gray-900"
-                  >
-                    <option value="">Tipo</option>
-                    <option value="image">Imagen</option>
-                    <option value="video">Video</option>
-                    <option value="document">Documento</option>
-                  </select>
-                </div>
-              </div>
-
-              {/* Anti-ban settings */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Configuración anti-ban</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-gray-500 mb-1 block">Delay mínimo (seg)</label>
-                    <input
-                      type="number" min={1}
-                      value={campaignForm.min_delay}
-                      onChange={e => setCampaignForm(f => ({ ...f, min_delay: parseInt(e.target.value) || 1 }))}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-500 mb-1 block">Delay máximo (seg)</label>
-                    <input
-                      type="number" min={1}
-                      value={campaignForm.max_delay}
-                      onChange={e => setCampaignForm(f => ({ ...f, max_delay: parseInt(e.target.value) || 1 }))}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-500 mb-1 block">Lote (mensajes)</label>
-                    <input
-                      type="number" min={1}
-                      value={campaignForm.batch_size}
-                      onChange={e => setCampaignForm(f => ({ ...f, batch_size: parseInt(e.target.value) || 1 }))}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-500 mb-1 block">Pausa entre lotes (seg)</label>
-                    <input
-                      type="number" min={1}
-                      value={campaignForm.batch_pause}
-                      onChange={e => setCampaignForm(f => ({ ...f, batch_pause: parseInt(e.target.value) || 1 }))}
-                      className="w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-900"
-                    />
-                  </div>
-                </div>
-              </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              {filterStatus && (
+                <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded-full">
+                  Estado: {STATUSES.find(s => s.key === filterStatus)?.label || filterStatus}
+                </span>
+              )}
+              {filterTags.length > 0 && (
+                <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded-full">
+                  {filterTags.length} etiqueta{filterTags.length > 1 ? 's' : ''} seleccionada{filterTags.length > 1 ? 's' : ''}
+                </span>
+              )}
+              {!filterStatus && filterTags.length === 0 && (
+                <span className="text-purple-600">Todos los participantes con teléfono</span>
+              )}
             </div>
-
-            <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
-              <p className="text-sm text-gray-500">
-                La campaña se creará en estado <span className="font-medium text-gray-700">Borrador</span>. Podrás iniciarla desde Envíos Masivos.
-              </p>
-              <div className="flex gap-3">
-                <button onClick={() => setShowCampaignModal(false)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">
-                  Cancelar
-                </button>
-                <button
-                  onClick={handleCreateCampaign}
-                  disabled={!campaignForm.name || !campaignForm.device_id || !campaignForm.message_template || participantsWithPhone.length === 0 || creatingCampaign}
-                  className="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 font-medium flex items-center gap-2"
-                >
-                  <Send className="w-4 h-4" />
-                  {creatingCampaign ? 'Creando...' : `Crear campaña (${participantsWithPhone.length})`}
-                </button>
-              </div>
-            </div>
+            <p className="text-xs text-purple-500 mt-2">
+              Puedes ajustar los filtros arriba antes de crear la campaña
+            </p>
           </div>
-        </div>
-      )}
+        }
+      />
 
       {/* Full Interaction History Modal */}
       {showIntHistoryModal && selectedParticipant && (

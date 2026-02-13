@@ -159,6 +159,7 @@ func (s *Server) setupRoutes() {
 	devices.Get("/", s.handleGetDevices)
 	devices.Post("/", s.handleCreateDevice)
 	devices.Get("/:id", s.handleGetDevice)
+	devices.Put("/:id", s.handleUpdateDevice)
 	devices.Post("/:id/connect", s.handleConnectDevice)
 	devices.Post("/:id/disconnect", s.handleDisconnectDevice)
 	devices.Delete("/:id", s.handleDeleteDevice)
@@ -558,6 +559,27 @@ func (s *Server) handleDeleteDevice(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Device deleted"})
+}
+
+func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
+	deviceID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	if err := s.repos.Device.UpdateName(c.Context(), deviceID, req.Name); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	device, _ := s.services.Device.GetByID(c.Context(), deviceID)
+	return c.JSON(fiber.Map{"success": true, "device": device})
 }
 
 // --- Chat Handlers ---
@@ -2520,6 +2542,14 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 		MediaType       *string                `json:"media_type"`
 		ScheduledAt     *time.Time             `json:"scheduled_at"`
 		Settings        map[string]interface{} `json:"settings"`
+		Attachments     []struct {
+			MediaURL  string `json:"media_url"`
+			MediaType string `json:"media_type"`
+			Caption   string `json:"caption"`
+			FileName  string `json:"file_name"`
+			FileSize  int64  `json:"file_size"`
+			Position  int    `json:"position"`
+		} `json:"attachments"`
 		// Filters to select participants
 		Status   string   `json:"status"`
 		TagIDs   []string `json:"tag_ids"`
@@ -2528,8 +2558,11 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	if req.Name == "" || req.DeviceID == "" || req.MessageTemplate == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "name, device_id and message_template are required"})
+	if req.Name == "" || req.DeviceID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "name and device_id are required"})
+	}
+	if req.MessageTemplate == "" && len(req.Attachments) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "message_template or attachments required"})
 	}
 
 	deviceID, err := uuid.Parse(req.DeviceID)
@@ -2573,6 +2606,25 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	}
 	if err := s.services.Campaign.Create(c.Context(), campaign); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	// Save attachments if provided
+	if len(req.Attachments) > 0 {
+		var attachments []*domain.CampaignAttachment
+		for _, a := range req.Attachments {
+			attachments = append(attachments, &domain.CampaignAttachment{
+				MediaURL:  a.MediaURL,
+				MediaType: a.MediaType,
+				Caption:   a.Caption,
+				FileName:  a.FileName,
+				FileSize:  a.FileSize,
+				Position:  a.Position,
+			})
+		}
+		if err := s.repos.CampaignAttachment.CreateBatch(c.Context(), campaign.ID, attachments); err != nil {
+			log.Printf("[Campaign] Failed to save event campaign attachments: %v", err)
+		}
+		campaign.Attachments = attachments
 	}
 
 	// Add participants as recipients

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { Smartphone, Plus, Wifi, WifiOff, Signal, Trash2, Power, RefreshCw, QrCode } from 'lucide-react'
+import { Smartphone, Plus, Wifi, WifiOff, Signal, Trash2, Power, RefreshCw, QrCode, Edit } from 'lucide-react'
 
 interface Device {
   id: string
@@ -20,6 +20,9 @@ export default function DevicesPage() {
   const [newDeviceName, setNewDeviceName] = useState('')
   const [creating, setCreating] = useState(false)
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null)
+  const [editingDevice, setEditingDevice] = useState<Device | null>(null)
+  const [editName, setEditName] = useState('')
+  const [saving, setSaving] = useState(false)
 
   const fetchDevices = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -158,6 +161,30 @@ export default function DevicesPage() {
     }
   }
 
+  const handleUpdateDevice = async () => {
+    if (!editingDevice || !editName.trim()) return
+    setSaving(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/devices/${editingDevice.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name: editName.trim() }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setEditingDevice(null)
+        fetchDevices()
+      } else {
+        alert(data.error || 'Error al actualizar dispositivo')
+      }
+    } catch (err) {
+      console.error('Failed to update device:', err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'connected':
@@ -270,6 +297,56 @@ export default function DevicesPage() {
         </div>
       )}
 
+      {/* Edit device modal */}
+      {editingDevice && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md mx-4">
+            <h2 className="text-xl font-semibold mb-4">Editar Dispositivo</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre</label>
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
+                <input
+                  type="text"
+                  value={editingDevice.phone || 'Sin número'}
+                  disabled
+                  className="w-full px-4 py-3 border border-gray-200 rounded-lg bg-gray-50 text-gray-500"
+                />
+                <p className="text-xs text-gray-400 mt-1">El teléfono se asigna automáticamente al conectar WhatsApp</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Estado</label>
+                <div className="px-4 py-3">{getStatusBadge(editingDevice.status)}</div>
+              </div>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => setEditingDevice(null)}
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleUpdateDevice}
+                disabled={saving || !editName.trim()}
+                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+              >
+                {saving ? 'Guardando...' : 'Guardar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Devices list */}
       <div className="bg-white rounded-xl border border-gray-200">
         {devices.length === 0 ? (
@@ -305,6 +382,14 @@ export default function DevicesPage() {
 
                 <div className="flex items-center gap-3">
                   {getStatusBadge(device.status)}
+
+                  <button
+                    onClick={() => { setEditingDevice(device); setEditName(device.name || '') }}
+                    className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    title="Editar"
+                  >
+                    <Edit className="w-5 h-5" />
+                  </button>
 
                   {device.status === 'connected' ? (
                     <button

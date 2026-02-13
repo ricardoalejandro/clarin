@@ -435,6 +435,11 @@ func (r *DeviceRepository) UpdateJID(ctx context.Context, id uuid.UUID, jid, pho
 	return err
 }
 
+func (r *DeviceRepository) UpdateName(ctx context.Context, id uuid.UUID, name string) error {
+	_, err := r.db.Exec(ctx, `UPDATE devices SET name = $1, updated_at = NOW() WHERE id = $2`, name, id)
+	return err
+}
+
 func (r *DeviceRepository) UpdateQRCode(ctx context.Context, id uuid.UUID, qrCode string) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE devices SET qr_code = $1, status = $2, updated_at = NOW() WHERE id = $3
