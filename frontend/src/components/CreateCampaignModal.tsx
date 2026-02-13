@@ -3,12 +3,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Radio, Settings2, Eye, Paperclip, X, CalendarClock,
-  Image, Video, AudioLines, File, FileText, FileAudio, Send
+  Image, Video, AudioLines, File, FileText, FileAudio, Send, Smile
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import MessageBubble from '@/components/chat/MessageBubble'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '@/components/WhatsAppTextInput'
+import EmojiPicker from '@/components/chat/EmojiPicker'
 
 interface Device {
   id: string
@@ -67,6 +68,14 @@ interface CreateCampaignModalProps {
   accentColor?: 'green' | 'purple'
   submitLabel?: string
   submitting?: boolean
+  initialName?: string
+  initialData?: {
+    device_id?: string
+    message_template?: string
+    attachments?: CampaignAttachment[]
+    settings?: Record<string, any>
+    scheduled_at?: string | null
+  }
 }
 
 const ACCEPTED_TYPES: Record<string, string[]> = {
@@ -94,6 +103,8 @@ export default function CreateCampaignModal({
   accentColor = 'green',
   submitLabel,
   submitting = false,
+  initialName = '',
+  initialData,
 }: CreateCampaignModalProps) {
   const [formData, setFormData] = useState({
     name: '',
@@ -119,17 +130,36 @@ export default function CreateCampaignModal({
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
+  const [showEmoji, setShowEmoji] = useState(false)
+
   // Reset form when modal opens
   useEffect(() => {
     if (open) {
+      const s = initialData?.settings || {}
+      let schedDate = ''
+      let schedTime = ''
+      if (initialData?.scheduled_at) {
+        const dt = new Date(initialData.scheduled_at)
+        schedDate = dt.toISOString().split('T')[0]
+        schedTime = dt.toTimeString().slice(0, 5)
+      }
       setFormData({
-        name: '', device_id: '', message_template: '',
-        min_delay: 8, max_delay: 15, batch_size: 25, batch_pause: 2,
-        daily_limit: 1000, active_hours_start: '07:00', active_hours_end: '22:00',
-        simulate_typing: true, scheduled_date: '', scheduled_time: '',
+        name: initialName,
+        device_id: initialData?.device_id || '',
+        message_template: initialData?.message_template || '',
+        min_delay: s.min_delay_seconds ?? 8,
+        max_delay: s.max_delay_seconds ?? 15,
+        batch_size: s.batch_size ?? 25,
+        batch_pause: s.batch_pause_minutes ?? 2,
+        daily_limit: s.daily_limit ?? 1000,
+        active_hours_start: s.active_hours_start || '07:00',
+        active_hours_end: s.active_hours_end || '22:00',
+        simulate_typing: s.simulate_typing ?? true,
+        scheduled_date: schedDate,
+        scheduled_time: schedTime,
       })
       attachments.forEach(a => { if (a._localPreview) URL.revokeObjectURL(a._localPreview) })
-      setAttachments([])
+      setAttachments(initialData?.attachments || [])
       setShowPreview(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -350,9 +380,26 @@ export default function CreateCampaignModal({
               placeholder="Hola {{nombre}}, te escribimos para..."
             />
             <div className="flex items-center justify-between mt-1">
-              <p className="text-xs text-gray-400">
-                Variables: {'{{nombre}}'}, {'{{nombre_completo}}'}, {'{{nombre_corto}}'}, {'{{celular}}'}
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-gray-400">
+                  Variables: {'{{nombre}}'}, {'{{nombre_completo}}'}, {'{{nombre_corto}}'}, {'{{celular}}'}
+                </p>
+                <div className="relative">
+                  <EmojiPicker
+                    onEmojiSelect={(emoji: string) => {
+                      if (textareaRef.current) {
+                        textareaRef.current.insertAtCaret(emoji)
+                      } else {
+                        setFormData(f => ({ ...f, message_template: f.message_template + emoji }))
+                      }
+                      setShowEmoji(false)
+                    }}
+                    isOpen={showEmoji}
+                    onToggle={() => setShowEmoji(!showEmoji)}
+                    buttonClassName="p-1 text-gray-400 hover:text-gray-600 rounded"
+                  />
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowPreview(!showPreview)}

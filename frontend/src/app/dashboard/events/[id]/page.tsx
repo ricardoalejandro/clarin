@@ -398,6 +398,13 @@ export default function EventDetailPage() {
       })
       const data = await res.json()
       if (data.success) {
+        if (formResult.scheduled_at && data.campaign) {
+          await fetch(`/api/campaigns/${data.campaign.id}`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
+          })
+        }
         alert(`Campaña creada con ${data.recipients_count} destinatarios. Puedes verla y iniciarla en Envíos Masivos.`)
         setShowCampaignModal(false)
       } else {
@@ -1208,6 +1215,7 @@ export default function EventDetailPage() {
         accentColor="purple"
         submitLabel={creatingCampaign ? 'Creando...' : `Crear campaña (${participantsWithPhone.length})`}
         submitting={creatingCampaign || participantsWithPhone.length === 0}
+        initialName={`Envío - ${event.name}`}
         infoPanel={
           <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
             <div className="flex items-center gap-2 mb-2">

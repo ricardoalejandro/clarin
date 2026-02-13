@@ -11,6 +11,7 @@ import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import MessageBubble from '@/components/chat/MessageBubble'
 import CreateCampaignModal, { CampaignFormResult, CampaignAttachment } from '@/components/CreateCampaignModal'
+import { renderFormattedText } from '@/lib/whatsappFormat'
 
 interface Device {
   id: string
@@ -105,6 +106,8 @@ export default function BroadcastsPage() {
   const [showDuplicateModal, setShowDuplicateModal] = useState(false)
   const [duplicateMessage, setDuplicateMessage] = useState('')
   const [duplicateCampaign, setDuplicateCampaign] = useState<Campaign | null>(null)
+  const [showEditModal, setShowEditModal] = useState(false)
+  const [editCampaign, setEditCampaign] = useState<Campaign | null>(null)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -307,6 +310,46 @@ export default function BroadcastsPage() {
     }
   }
 
+  const handleEditCampaign = async (formResult: CampaignFormResult) => {
+    if (!editCampaign) return
+    try {
+      // Update campaign fields
+      const res = await fetch(`/api/campaigns/${editCampaign.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          name: formResult.name,
+          device_id: formResult.device_id,
+          message_template: formResult.message_template,
+          settings: formResult.settings,
+          scheduled_at: formResult.scheduled_at || null,
+          status: formResult.scheduled_at ? 'scheduled' : 'draft',
+        }),
+      })
+      const data = await res.json()
+      if (!data.success) { alert(data.error || 'Error al actualizar'); return }
+
+      // Update attachments
+      await fetch(`/api/campaigns/${editCampaign.id}/attachments`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ attachments: formResult.attachments }),
+      })
+
+      setShowEditModal(false)
+      setEditCampaign(null)
+      fetchCampaigns()
+    } catch (err) {
+      alert('Error al actualizar campaña')
+    }
+  }
+
+  const generateCampaignName = () => {
+    const now = new Date()
+    const num = (campaigns.length + 1).toString().padStart(3, '0')
+    return `Campaña #${num} - ${format(now, 'd MMM', { locale: es })}`
+  }
+
   // Auto-refresh detail modal when campaign is running
   useEffect(() => {
     if (!showDetailModal || !selectedCampaign) return
@@ -474,6 +517,18 @@ export default function BroadcastsPage() {
                         <Users className="w-5 h-5" />
                       </button>
                     )}
+                    {(campaign.status === 'draft' || campaign.status === 'scheduled') && (
+                      <button
+                        onClick={() => {
+                          setEditCampaign(campaign)
+                          setShowEditModal(true)
+                        }}
+                        className="p-2 text-amber-600 hover:bg-amber-50 rounded-lg transition"
+                        title="Editar campaña"
+                      >
+                        <Edit className="w-5 h-5" />
+                      </button>
+                    )}
                     <button
                       onClick={() => handleViewRecipients(campaign)}
                       className="p-2 text-gray-600 hover:bg-gray-50 rounded-lg transition"
@@ -537,6 +592,7 @@ export default function BroadcastsPage() {
         onClose={() => setShowCreateModal(false)}
         onSubmit={handleCreateCampaign}
         devices={devices}
+        initialName={generateCampaignName()}
       />
 
       {/* Add Recipients Modal */}
@@ -630,8 +686,58 @@ export default function BroadcastsPage() {
             <div className="space-y-3 text-sm">
               <div>
                 <span className="text-gray-500">Mensaje:</span>
-                <p className="text-gray-900 mt-1 bg-gray-50 p-3 rounded-lg whitespace-pre-wrap">{selectedCampaign.message_template}</p>
+                <div className="mt-2 p-3 bg-[#e5ddd5] rounded-lg max-w-sm">
+                  {selectedCampaign.attachments && selectedCampaign.attachments.length > 0 ? (
+                    <div className="space-y-1">
+                      {selectedCampaign.message_template && !selectedCampaign.attachments.some(a => !a.caption) && (
+                        <MessageBubble
+                          message={{
+                            id: 'detail-text', message_id: 'detail-text',
+                            body: selectedCampaign.message_template,
+                            message_type: 'text', is_from_me: true, is_read: false, status: 'sent',
+                            timestamp: new Date().toISOString(),
+                          }}
+                        />
+                      )}
+                      {selectedCampaign.attachments.map((att, i) => (
+                        <MessageBubble
+                          key={`detail-att-${i}`}
+                          message={{
+                            id: `detail-att-${i}`, message_id: `detail-att-${i}`,
+                            body: att.caption || (i === 0 && selectedCampaign.message_template ? selectedCampaign.message_template : undefined),
+                            message_type: att.media_type,
+                            media_url: att.media_url,
+                            media_filename: att.file_name,
+                            is_from_me: true, is_read: false, status: 'sent',
+                            timestamp: new Date().toISOString(),
+                          }}
+                        />
+                      ))}
+                    </div>
+                  ) : selectedCampaign.message_template ? (
+                    <MessageBubble
+                      message={{
+                        id: 'detail-msg', message_id: 'detail-msg',
+                        body: selectedCampaign.message_template,
+                        message_type: selectedCampaign.media_type || 'text',
+                        media_url: selectedCampaign.media_url || undefined,
+                        is_from_me: true, is_read: false, status: 'sent',
+                        timestamp: new Date().toISOString(),
+                      }}
+                    />
+                  ) : (
+                    <p className="text-gray-400 text-xs italic">Sin mensaje de texto</p>
+                  )}
+                </div>
               </div>
+              {selectedCampaign.scheduled_at && (
+                <div className="flex items-center gap-2 text-blue-600 bg-blue-50 rounded-lg px-3 py-2">
+                  <CalendarClock className="w-4 h-4" />
+                  <span className="text-sm">
+                    Programada: {format(new Date(selectedCampaign.scheduled_at), "EEEE d 'de' MMMM 'a las' HH:mm", { locale: es })}
+                  </span>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="bg-green-50 rounded-lg p-3 text-center">
                   <p className="text-2xl font-bold text-green-700">{selectedCampaign.sent_count}</p>
@@ -893,6 +999,27 @@ export default function BroadcastsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Edit Campaign Modal */}
+      {editCampaign && (
+        <CreateCampaignModal
+          open={showEditModal}
+          onClose={() => { setShowEditModal(false); setEditCampaign(null) }}
+          onSubmit={handleEditCampaign}
+          devices={devices}
+          title="Editar Campaña"
+          subtitle={`Editando: ${editCampaign.name}`}
+          submitLabel="Guardar cambios"
+          initialName={editCampaign.name}
+          initialData={{
+            device_id: editCampaign.device_id,
+            message_template: editCampaign.message_template,
+            attachments: editCampaign.attachments || [],
+            settings: editCampaign.settings || {},
+            scheduled_at: editCampaign.scheduled_at || undefined,
+          }}
+        />
       )}
     </div>
   )
