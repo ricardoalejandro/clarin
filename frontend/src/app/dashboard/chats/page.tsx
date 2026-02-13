@@ -30,12 +30,18 @@ interface Chat {
   contact_name?: string
 }
 
+// Clean synced names that start with dots/punctuation
+const cleanName = (name?: string | null) => name?.replace(/^[\s.\u00b7\u2022\-]+/, '').trim() || ''
+
 // Get the best display name for a chat
 // Priority: custom_name (CRM) → contact_name (WhatsApp address book) → chat.name (push_name) → phone
 const getChatDisplayName = (chat: Chat): string => {
-  if (chat.contact_custom_name?.trim()) return chat.contact_custom_name.trim()
-  if (chat.contact_name?.trim()) return chat.contact_name.trim()
-  if (chat.name?.trim()) return chat.name.trim()
+  const cn = cleanName(chat.contact_custom_name)
+  if (cn) return cn
+  const nm = cleanName(chat.contact_name)
+  if (nm) return nm
+  const pn = cleanName(chat.name)
+  if (pn) return pn
   return formatPhone(chat.jid, chat.contact_phone) || chat.jid
 }
 
@@ -1019,9 +1025,14 @@ export default function ChatsPage() {
                   </div>
                   <div>
                     <p className="font-medium text-gray-900">{getChatDisplayName(selectedChat)}</p>
-                    {formatPhone(selectedChat.jid, selectedChat.contact_phone) && (
-                      <p className="text-sm text-gray-500">{formatPhone(selectedChat.jid, selectedChat.contact_phone)}</p>
-                    )}
+                    {(() => {
+                      const phone = formatPhone(selectedChat.jid, selectedChat.contact_phone)
+                      const name = getChatDisplayName(selectedChat)
+                      // Only show phone as subtitle if the name isn't already the phone
+                      return phone && phone !== name ? (
+                        <p className="text-sm text-gray-500">{phone}</p>
+                      ) : null
+                    })()}
                   </div>
                 </div>
               </div>

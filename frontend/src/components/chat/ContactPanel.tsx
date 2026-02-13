@@ -283,9 +283,13 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
 
   if (!isOpen) return null
 
-  const displayName = contact?.custom_name || contact?.name || contact?.push_name || lead?.name || 'Contacto'
-  const displayPhone = contact?.phone || lead?.phone || ''
+  // Clean name: remove leading dots/punctuation from synced names
+  const cleanName = (name?: string | null) => name?.replace(/^[\s.·•\-]+/, '').trim() || ''
+  const displayName = cleanName(contact?.custom_name) || cleanName(contact?.name) || cleanName(contact?.push_name) || cleanName(lead?.name) || 'Contacto'
+  const rawPhone = contact?.phone || lead?.phone || ''
+  const displayPhone = rawPhone ? (rawPhone.startsWith('+') ? rawPhone : '+' + rawPhone) : ''
   const avatarUrl = contact?.avatar_url
+  const fmtDevicePhone = devicePhone ? (devicePhone.startsWith('+') ? devicePhone : '+' + devicePhone) : ''
 
   return (
     <div className="border-l border-gray-200 bg-white flex flex-col h-full w-full">
@@ -355,8 +359,8 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
                 <span>Dispositivo</span>
               </div>
               <p className="text-sm font-bold text-gray-800">{deviceName || 'Sin nombre'}</p>
-              {devicePhone && (
-                <p className="text-sm font-medium text-gray-600">{devicePhone}</p>
+              {fmtDevicePhone && (
+                <p className="text-sm font-medium text-gray-600">{fmtDevicePhone}</p>
               )}
             </div>
           )}
