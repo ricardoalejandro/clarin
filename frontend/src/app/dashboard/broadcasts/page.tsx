@@ -71,6 +71,13 @@ interface Contact {
   name: string | null
   custom_name: string | null
   push_name: string | null
+  structured_tags?: { id: string; name: string; color: string }[] | null
+}
+
+interface BroadcastTag {
+  id: string
+  name: string
+  color: string
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -129,6 +136,8 @@ export default function BroadcastsPage() {
   const [csvSaveAsContacts, setCsvSaveAsContacts] = useState(false)
   const [selectionMode, setSelectionMode] = useState(false)
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<string>>(new Set())
+  const [allTags, setAllTags] = useState<BroadcastTag[]>([])
+  const [filterTagIds, setFilterTagIds] = useState<Set<string>>(new Set())
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -158,9 +167,13 @@ export default function BroadcastsPage() {
     }
   }, [token])
 
-  const fetchContacts = useCallback(async () => {
+  const fetchContacts = useCallback(async (tagIds?: Set<string>) => {
     try {
-      const res = await fetch('/api/contacts?limit=1000&has_phone=true', {
+      let url = '/api/contacts?limit=1000&has_phone=true'
+      if (tagIds && tagIds.size > 0) {
+        url += `&tag_ids=${Array.from(tagIds).join(',')}`
+      }
+      const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
@@ -170,17 +183,30 @@ export default function BroadcastsPage() {
     }
   }, [token])
 
+  const fetchTags = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tags', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) setAllTags(data.tags || [])
+    } catch (err) {
+      console.error('Failed to fetch tags:', err)
+    }
+  }, [token])
+
   useEffect(() => {
     fetchCampaigns()
     fetchDevices()
     fetchContacts()
+    fetchTags()
 
     // Auto-refresh running campaigns
     const interval = setInterval(() => {
       fetchCampaigns()
     }, 15000)
     return () => clearInterval(interval)
-  }, [fetchCampaigns, fetchDevices, fetchContacts])
+  }, [fetchCampaigns, fetchDevices, fetchContacts, fetchTags])
 
   const handleCreateCampaign = async (formResult: CampaignFormResult) => {
     try {
@@ -879,6 +905,49 @@ export default function BroadcastsPage() {
                   />
                 </div>
 
+                {/* Tag filter */}
+                {allTags.length > 0 && (
+                  <div className="mb-3">
+                    <p className="text-xs text-gray-500 mb-1.5">Filtrar por etiquetas:</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {allTags.map(tag => {
+                        const isActive = filterTagIds.has(tag.id)
+                        return (
+                          <button
+                            key={tag.id}
+                            onClick={() => {
+                              const newSet = new Set(filterTagIds)
+                              if (isActive) newSet.delete(tag.id)
+                              else newSet.add(tag.id)
+                              setFilterTagIds(newSet)
+                              fetchContacts(newSet)
+                            }}
+                            className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all ${
+                              isActive
+                                ? 'text-white ring-2 ring-offset-1'
+                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            }`}
+                            style={isActive ? { backgroundColor: tag.color || '#6b7280' } : undefined}
+                          >
+                            {tag.name}
+                          </button>
+                        )
+                      })}
+                      {filterTagIds.size > 0 && (
+                        <button
+                          onClick={() => {
+                            setFilterTagIds(new Set())
+                            fetchContacts(new Set())
+                          }}
+                          className="px-2 py-1 text-xs text-red-500 hover:bg-red-50 rounded-full"
+                        >
+                          Limpiar
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs text-gray-500">{selectedContactIds.size} seleccionado(s)</span>
                   <button
@@ -910,9 +979,24 @@ export default function BroadcastsPage() {
                           <p className="text-sm font-medium text-gray-900 truncate">
                             {contact.custom_name || contact.name || contact.push_name || 'Sin nombre'}
                           </p>
-                          <p className="text-xs text-gray-400 truncate">
-                            {contact.phone || contact.jid.replace('@s.whatsapp.net', '')}
-                          </p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs text-gray-400 truncate">
+                              {contact.phone || contact.jid.replace('@s.whatsapp.net', '')}
+                            </p>
+                            {contact.structured_tags && contact.structured_tags.length > 0 && (
+                              <div className="flex gap-1">
+                                {contact.structured_tags.slice(0, 3).map(tag => (
+                                  <span
+                                    key={tag.id}
+                                    className="px-1.5 py-0.5 text-[10px] rounded-full text-white"
+                                    style={{ backgroundColor: tag.color || '#6b7280' }}
+                                  >
+                                    {tag.name}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </label>
                     ))

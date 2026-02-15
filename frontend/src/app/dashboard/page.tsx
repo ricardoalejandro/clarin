@@ -6,6 +6,8 @@ import { MessageSquare, Smartphone, Users, TrendingUp, Signal, Wifi, WifiOff } f
 interface Stats {
   connected_devices: number
   ws_clients: number
+  leads: number
+  contacts: number
 }
 
 interface Device {
@@ -91,7 +93,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600" />
+        <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
       </div>
     )
   }
@@ -100,149 +102,132 @@ export default function DashboardPage() {
   const connectedDevices = devices.filter(d => d.status === 'connected').length
 
   return (
-    <div className="space-y-6 overflow-y-auto flex-1 min-h-0">
+    <div className="space-y-5 overflow-y-auto flex-1 min-h-0">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p className="text-gray-500">Resumen de tu cuenta</p>
+        <h1 className="text-xl font-bold text-slate-900">Dashboard</h1>
+        <p className="text-slate-500 text-sm mt-0.5">Resumen general de tu cuenta</p>
       </div>
 
       {/* Stats cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white rounded-xl p-6 border border-gray-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-500">Dispositivos</p>
-              <p className="text-2xl font-bold text-gray-900">{connectedDevices}/{devices.length}</p>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="bg-white rounded-xl p-4 border border-slate-200/80 hover:shadow-sm transition-shadow">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-9 h-9 bg-emerald-50 rounded-lg flex items-center justify-center">
+              <Smartphone className="w-[18px] h-[18px] text-emerald-600" />
             </div>
-            <div className="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
-              <Smartphone className="w-6 h-6 text-green-600" />
-            </div>
+            <span className="text-[11px] font-medium text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">{connectedDevices} activos</span>
           </div>
-          <p className="text-sm text-green-600 mt-2">
-            {connectedDevices} conectados
-          </p>
+          <p className="text-2xl font-bold text-slate-900">{devices.length}</p>
+          <p className="text-xs text-slate-500 mt-0.5">Dispositivos</p>
         </div>
 
-        <div className="bg-white rounded-xl p-6 border border-gray-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-500">Chats</p>
-              <p className="text-2xl font-bold text-gray-900">{chats.length}</p>
+        <div className="bg-white rounded-xl p-4 border border-slate-200/80 hover:shadow-sm transition-shadow">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-9 h-9 bg-blue-50 rounded-lg flex items-center justify-center">
+              <MessageSquare className="w-[18px] h-[18px] text-blue-600" />
             </div>
-            <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-              <MessageSquare className="w-6 h-6 text-blue-600" />
-            </div>
+            {totalUnread > 0 && <span className="text-[11px] font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">{totalUnread} nuevos</span>}
           </div>
-          <p className="text-sm text-blue-600 mt-2">
-            {totalUnread} mensajes sin leer
-          </p>
+          <p className="text-2xl font-bold text-slate-900">{chats.length}</p>
+          <p className="text-xs text-slate-500 mt-0.5">Chats</p>
         </div>
 
-        <div className="bg-white rounded-xl p-6 border border-gray-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-500">Leads</p>
-              <p className="text-2xl font-bold text-gray-900">--</p>
-            </div>
-            <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
-              <Users className="w-6 h-6 text-purple-600" />
+        <div className="bg-white rounded-xl p-4 border border-slate-200/80 hover:shadow-sm transition-shadow">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-9 h-9 bg-violet-50 rounded-lg flex items-center justify-center">
+              <Users className="w-[18px] h-[18px] text-violet-600" />
             </div>
           </div>
-          <p className="text-sm text-purple-600 mt-2">
-            Ver todos
-          </p>
+          <p className="text-2xl font-bold text-slate-900">{stats?.leads ?? '--'}</p>
+          <p className="text-xs text-slate-500 mt-0.5">Leads</p>
         </div>
 
-        <div className="bg-white rounded-xl p-6 border border-gray-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-500">Conversiones</p>
-              <p className="text-2xl font-bold text-gray-900">--</p>
-            </div>
-            <div className="w-12 h-12 bg-orange-100 rounded-lg flex items-center justify-center">
-              <TrendingUp className="w-6 h-6 text-orange-600" />
+        <div className="bg-white rounded-xl p-4 border border-slate-200/80 hover:shadow-sm transition-shadow">
+          <div className="flex items-center justify-between mb-3">
+            <div className="w-9 h-9 bg-amber-50 rounded-lg flex items-center justify-center">
+              <TrendingUp className="w-[18px] h-[18px] text-amber-600" />
             </div>
           </div>
-          <p className="text-sm text-orange-600 mt-2">
-            Este mes
-          </p>
+          <p className="text-2xl font-bold text-slate-900">{stats?.contacts ?? '--'}</p>
+          <p className="text-xs text-slate-500 mt-0.5">Contactos</p>
         </div>
       </div>
 
-      {/* Devices section */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-          <h2 className="font-semibold text-gray-900">Dispositivos</h2>
-          <a href="/dashboard/devices" className="text-sm text-green-600 hover:text-green-700">
-            Ver todos →
-          </a>
-        </div>
-        <div className="divide-y divide-gray-100">
-          {devices.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">
-              No hay dispositivos conectados
-            </div>
-          ) : (
-            devices.slice(0, 5).map((device) => (
-              <div key={device.id} className="p-4 flex items-center justify-between hover:bg-gray-50">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
-                    <Smartphone className="w-5 h-5 text-gray-600" />
-                  </div>
-                  <div>
-                    <p className="font-medium text-gray-900">{device.name || 'Dispositivo'}</p>
-                    <p className="text-sm text-gray-500">{device.phone || 'Sin número'}</p>
-                  </div>
-                </div>
-                <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm ${getStatusColor(device.status)}`}>
-                  {getStatusIcon(device.status)}
-                  {device.status === 'connected' ? 'Conectado' : 
-                   device.status === 'connecting' ? 'Conectando' : 'Desconectado'}
-                </span>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Devices section */}
+        <div className="bg-white rounded-xl border border-slate-200/80 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="font-semibold text-slate-800 text-sm">Dispositivos</h2>
+            <a href="/dashboard/devices" className="text-xs text-emerald-600 hover:text-emerald-700 font-medium">
+              Ver todos
+            </a>
+          </div>
+          <div className="divide-y divide-slate-50">
+            {devices.length === 0 ? (
+              <div className="p-8 text-center text-slate-400 text-sm">
+                No hay dispositivos conectados
               </div>
-            ))
-          )}
+            ) : (
+              devices.slice(0, 5).map((device) => (
+                <div key={device.id} className="px-4 py-3 flex items-center justify-between hover:bg-slate-50/50 transition-colors">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 bg-slate-100 rounded-lg flex items-center justify-center">
+                      <Smartphone className="w-4 h-4 text-slate-500" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-800 text-sm">{device.name || 'Dispositivo'}</p>
+                      <p className="text-xs text-slate-400">{device.phone || 'Sin número'}</p>
+                    </div>
+                  </div>
+                  <span className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(device.status)}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${device.status === 'connected' ? 'bg-emerald-500' : device.status === 'connecting' ? 'bg-yellow-500 animate-pulse' : 'bg-slate-400'}`} />
+                    {device.status === 'connected' ? 'Conectado' : device.status === 'connecting' ? 'Conectando' : 'Desconectado'}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* Recent chats */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-          <h2 className="font-semibold text-gray-900">Chats Recientes</h2>
-          <a href="/dashboard/chats" className="text-sm text-green-600 hover:text-green-700">
-            Ver todos →
-          </a>
-        </div>
-        <div className="divide-y divide-gray-100">
-          {chats.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">
-              No hay chats aún
-            </div>
-          ) : (
-            chats.slice(0, 5).map((chat) => (
-              <a 
-                key={chat.id} 
-                href={`/dashboard/chats?id=${chat.id}`}
-                className="p-4 flex items-center gap-3 hover:bg-gray-50 cursor-pointer"
-              >
-                <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                  <span className="text-green-700 font-medium">
-                    {getChatDisplayName(chat).charAt(0).toUpperCase()}
-                  </span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-gray-900 truncate">{getChatDisplayName(chat)}</p>
-                  <p className="text-sm text-gray-500 truncate">{chat.last_message || 'Sin mensajes'}</p>
-                </div>
-                {(chat.unread_count || 0) > 0 && (
-                  <span className="bg-green-600 text-white text-xs font-medium px-2 py-1 rounded-full">
-                    {chat.unread_count}
-                  </span>
-                )}
-              </a>
-            ))
-          )}
+        {/* Recent chats */}
+        <div className="bg-white rounded-xl border border-slate-200/80 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="font-semibold text-slate-800 text-sm">Chats Recientes</h2>
+            <a href="/dashboard/chats" className="text-xs text-emerald-600 hover:text-emerald-700 font-medium">
+              Ver todos
+            </a>
+          </div>
+          <div className="divide-y divide-slate-50">
+            {chats.length === 0 ? (
+              <div className="p-8 text-center text-slate-400 text-sm">
+                No hay chats aún
+              </div>
+            ) : (
+              chats.slice(0, 5).map((chat) => (
+                <a 
+                  key={chat.id} 
+                  href={`/dashboard/chats?id=${chat.id}`}
+                  className="px-4 py-3 flex items-center gap-3 hover:bg-slate-50/50 transition-colors cursor-pointer"
+                >
+                  <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center shrink-0">
+                    <span className="text-emerald-700 font-semibold text-sm">
+                      {getChatDisplayName(chat).charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-slate-800 truncate text-sm">{getChatDisplayName(chat)}</p>
+                    <p className="text-xs text-slate-400 truncate">{chat.last_message || 'Sin mensajes'}</p>
+                  </div>
+                  {(chat.unread_count || 0) > 0 && (
+                    <span className="bg-emerald-600 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center shrink-0">
+                      {chat.unread_count}
+                    </span>
+                  )}
+                </a>
+              ))
+            )}
+          </div>
         </div>
       </div>
     </div>

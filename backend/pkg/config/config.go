@@ -22,6 +22,12 @@ type Config struct {
 	MinioBucket    string
 	MinioUseSSL    bool
 	MinioPublicURL string
+	// Kommo CRM
+	KommoSubdomain    string
+	KommoClientID     string
+	KommoClientSecret string
+	KommoAccessToken  string
+	KommoRedirectURI  string
 }
 
 func Load() *Config {
@@ -47,6 +53,11 @@ func Load() *Config {
 		MinioBucket:    getEnv("MINIO_BUCKET", "clarin-media"),
 		MinioUseSSL:    getEnv("MINIO_USE_SSL", "false") == "true",
 		MinioPublicURL: getEnv("MINIO_PUBLIC_URL", "http://localhost:9000"),
+		KommoSubdomain:    getEnv("KOMMO_SUBDOMAIN", ""),
+		KommoClientID:     getEnv("KOMMO_CLIENT_ID", ""),
+		KommoClientSecret: getEnv("KOMMO_CLIENT_SECRET", ""),
+		KommoAccessToken:  getEnv("KOMMO_ACCESS_TOKEN", ""),
+		KommoRedirectURI:  getEnv("KOMMO_REDIRECT_URI", ""),
 	}
 }
 

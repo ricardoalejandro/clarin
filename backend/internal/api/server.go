@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,11 +21,14 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
+	"golang.org/x/crypto/bcrypt"
+	"github.com/naperu/clarin/internal/kommo"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/storage"
 	"github.com/naperu/clarin/internal/whatsapp"
 	"github.com/naperu/clarin/internal/ws"
+	"github.com/naperu/clarin/pkg/cache"
 	"github.com/naperu/clarin/pkg/config"
 )
 
@@ -39,9 +45,11 @@ type Server struct {
 	hub      *ws.Hub
 	pool     *whatsapp.DevicePool
 	storage  *storage.Storage
+	kommoSync *kommo.SyncService
+	cache    *cache.Cache
 }
 
-func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage) *Server {
+func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, c *cache.Cache) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:               "Clarin CRM",
 		BodyLimit:             32 * 1024 * 1024, // 32MB max upload
@@ -119,6 +127,8 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		hub:      hub,
 		pool:     pool,
 		storage:  store,
+		kommoSync: kommoSyncSvc,
+		cache:    c,
 	}
 
 	server.setupRoutes()
@@ -153,6 +163,12 @@ func (s *Server) setupRoutes() {
 	protected.Get("/me/accounts", s.handleGetMyAccounts)
 	protected.Post("/auth/logout", s.handleLogout)
 	protected.Post("/auth/switch-account", s.handleSwitchAccount)
+
+	// Settings routes
+	protected.Get("/settings", s.handleGetSettings)
+	protected.Put("/settings/profile", s.handleUpdateProfile)
+	protected.Put("/settings/account", s.handleUpdateAccount)
+	protected.Put("/settings/password", s.handleChangePassword)
 
 	// Device routes
 	devices := protected.Group("/devices")
@@ -201,11 +217,19 @@ func (s *Server) setupRoutes() {
 	leads.Put("/:id", s.handleUpdateLead)
 	leads.Delete("/:id", s.handleDeleteLead)
 	leads.Patch("/:id/status", s.handleUpdateLeadStatus)
+	leads.Patch("/:id/stage", s.handleUpdateLeadStage)
 	leads.Get("/:id/interactions", s.handleGetLeadInteractions)
 
 	// Pipeline routes
 	pipelines := protected.Group("/pipelines")
 	pipelines.Get("/", s.handleGetPipelines)
+	pipelines.Post("/", s.handleCreatePipeline)
+	pipelines.Put("/:id", s.handleUpdatePipeline)
+	pipelines.Delete("/:id", s.handleDeletePipeline)
+	pipelines.Post("/:id/stages", s.handleCreatePipelineStage)
+	pipelines.Put("/:id/stages/reorder", s.handleReorderPipelineStages)
+	pipelines.Put("/:id/stages/:stageId", s.handleUpdatePipelineStage)
+	pipelines.Delete("/:id/stages/:stageId", s.handleDeletePipelineStage)
 
 	// Tag routes
 	tags := protected.Group("/tags")
@@ -275,6 +299,24 @@ func (s *Server) setupRoutes() {
 	// Contact interactions and events
 	contacts.Get("/:id/interactions", s.handleGetContactInteractions)
 	contacts.Get("/:id/events", s.handleGetContactEvents)
+
+	// Quick replies (canned responses)
+	quickReplies := protected.Group("/quick-replies")
+	quickReplies.Get("/", s.handleGetQuickReplies)
+	quickReplies.Post("/", s.handleCreateQuickReply)
+	quickReplies.Put("/:id", s.handleUpdateQuickReply)
+	quickReplies.Delete("/:id", s.handleDeleteQuickReply)
+
+	// Kommo integration routes
+	kommoGroup := protected.Group("/kommo")
+	kommoGroup.Get("/status", s.handleKommoStatus)
+	kommoGroup.Post("/sync", s.handleKommoSync)
+	kommoGroup.Get("/pipelines", s.handleKommoGetPipelines)
+	kommoGroup.Get("/connected", s.handleKommoGetConnected)
+	kommoGroup.Post("/pipelines/:kommoId/connect", s.handleKommoConnectPipeline)
+	kommoGroup.Delete("/pipelines/:kommoId/connect", s.handleKommoDisconnectPipeline)
+	kommoGroup.Get("/sync/status", s.handleKommoSyncStatus)
+	kommoGroup.Get("/sync/full-status", s.handleKommoFullSyncStatus)
 
 	// WebSocket route
 	s.app.Use("/ws", s.wsUpgrade)
@@ -479,6 +521,129 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 	})
 }
 
+// --- Settings Handlers ---
+
+func (s *Server) handleGetSettings(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(uuid.UUID)
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	user, err := s.services.Auth.GetUser(c.Context(), userID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "User not found"})
+	}
+
+	account, _ := s.services.Account.GetByID(c.Context(), accountID)
+
+	result := fiber.Map{
+		"success": true,
+		"user": fiber.Map{
+			"id":    user.ID,
+			"name":  user.DisplayName,
+			"email": user.Email,
+			"role":  user.Role,
+		},
+	}
+
+	if account != nil {
+		result["account"] = fiber.Map{
+			"id":         account.ID,
+			"name":       account.Name,
+			"slug":       account.Slug,
+			"plan":       account.Plan,
+			"created_at": account.CreatedAt,
+		}
+	}
+
+	return c.JSON(result)
+}
+
+func (s *Server) handleUpdateProfile(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(uuid.UUID)
+
+	var req struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	user, err := s.services.Auth.GetUser(c.Context(), userID)
+	if err != nil || user == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "User not found"})
+	}
+
+	if req.Name != "" {
+		user.DisplayName = req.Name
+	}
+	if req.Email != "" {
+		user.Email = req.Email
+	}
+
+	if err := s.services.Account.UpdateUser(c.Context(), user); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update profile"})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleUpdateAccount(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	account, err := s.services.Account.GetByID(c.Context(), accountID)
+	if err != nil || account == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Account not found"})
+	}
+
+	if req.Name != "" {
+		account.Name = req.Name
+	}
+
+	if err := s.services.Account.Update(c.Context(), account); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update account"})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleChangePassword(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(uuid.UUID)
+
+	var req struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	if len(req.NewPassword) < 8 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "La contraseña debe tener al menos 8 caracteres"})
+	}
+
+	user, err := s.services.Auth.GetUser(c.Context(), userID)
+	if err != nil || user == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "User not found"})
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Contraseña actual incorrecta"})
+	}
+
+	if err := s.services.Account.ResetPassword(c.Context(), userID, req.NewPassword); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to change password"})
+	}
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
 // --- Device Handlers ---
 
 func (s *Server) handleGetDevices(c *fiber.Ctx) error {
@@ -608,6 +773,16 @@ func (s *Server) handleGetChats(c *fiber.Ctx) error {
 		}
 	}
 
+	// Parse tag_ids filter (same pattern as device_ids)
+	tagIDsRaw := c.Context().QueryArgs().PeekMulti("tag_ids")
+	for _, raw := range tagIDsRaw {
+		for _, idStr := range strings.Split(string(raw), ",") {
+			if uid, err := uuid.Parse(strings.TrimSpace(idStr)); err == nil {
+				filter.TagIDs = append(filter.TagIDs, uid)
+			}
+		}
+	}
+
 	chats, total, err := s.services.Chat.GetByAccountIDWithFilters(c.Context(), accountID, filter)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -633,6 +808,16 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 	}
 	if details == nil || details.Chat == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
+	}
+
+	// Load structured tags for contact
+	if details.Contact != nil {
+		tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", details.Contact.ID)
+		details.Contact.StructuredTags = tags
+	}
+	if details.Lead != nil {
+		tags, _ := s.services.Tag.GetByEntity(c.Context(), "lead", details.Lead.ID)
+		details.Lead.StructuredTags = tags
 	}
 
 	return c.JSON(fiber.Map{
@@ -1117,30 +1302,86 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 
 func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	cacheKey := "leads:" + accountID.String()
+
+	// Try Redis cache first
+	if s.cache != nil {
+		if cached, err := s.cache.Get(c.Context(), cacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
+	}
+
 	leads, err := s.services.Lead.GetByAccountID(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"success": true, "leads": leads})
+
+	// Batch load structured tags for all leads in one query
+	if len(leads) > 0 {
+		rows, err := s.repos.DB().Query(c.Context(), `
+			SELECT lt.lead_id, t.id, t.account_id, t.name, t.color
+			FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id
+			WHERE lt.lead_id = ANY(SELECT id FROM leads WHERE account_id = $1)
+			ORDER BY t.name
+		`, accountID)
+		if err == nil {
+			defer rows.Close()
+			tagMap := make(map[uuid.UUID][]*domain.Tag)
+			for rows.Next() {
+				var leadID uuid.UUID
+				t := &domain.Tag{}
+				if err := rows.Scan(&leadID, &t.ID, &t.AccountID, &t.Name, &t.Color); err != nil {
+					continue
+				}
+				tagMap[leadID] = append(tagMap[leadID], t)
+			}
+			for _, lead := range leads {
+				lead.StructuredTags = tagMap[lead.ID]
+			}
+		}
+	}
+
+	result := fiber.Map{"success": true, "leads": leads}
+
+	// Store in Redis cache (30s TTL)
+	if s.cache != nil {
+		if data, err := json.Marshal(result); err == nil {
+			_ = s.cache.Set(c.Context(), cacheKey, data, 30*time.Second)
+		}
+	}
+
+	return c.JSON(result)
+}
+
+// invalidateLeadsCache invalidates the cached leads for an account
+func (s *Server) invalidateLeadsCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.Del(context.Background(), "leads:"+accountID.String())
+	}
 }
 
 func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
 	var req struct {
-		Name   string `json:"name"`
-		Phone  string `json:"phone"`
-		Email  string `json:"email"`
-		Source string `json:"source"`
-		Notes  string `json:"notes"`
+		Name    string     `json:"name"`
+		Phone   string     `json:"phone"`
+		Email   string     `json:"email"`
+		Source  string     `json:"source"`
+		Notes   string     `json:"notes"`
+		StageID *uuid.UUID `json:"stage_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
+	phone := kommo.NormalizePhone(req.Phone)
+	jid := phone + "@s.whatsapp.net"
+
 	lead := &domain.Lead{
 		AccountID: accountID,
-		JID:       req.Phone + "@s.whatsapp.net",
+		JID:       jid,
 		Name:      strPtr(req.Name),
 		Phone:     strPtr(req.Phone),
 		Email:     strPtr(req.Email),
@@ -1149,10 +1390,56 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		Status:    strPtr(domain.LeadStatusNew),
 	}
 
+	// Auto-assign default pipeline and stage
+	if req.StageID != nil {
+		lead.StageID = req.StageID
+		// Get the pipeline from the stage
+		pipelines, _ := s.services.Pipeline.GetByAccountID(c.Context(), accountID)
+		for _, p := range pipelines {
+			for _, st := range p.Stages {
+				if st.ID == *req.StageID {
+					lead.PipelineID = &p.ID
+					break
+				}
+			}
+		}
+	} else {
+		// Assign to default pipeline first stage
+		defaultPipeline, _ := s.services.Pipeline.GetDefaultPipeline(c.Context(), accountID)
+		if defaultPipeline != nil {
+			lead.PipelineID = &defaultPipeline.ID
+			if len(defaultPipeline.Stages) > 0 {
+				lead.StageID = &defaultPipeline.Stages[0].ID
+			}
+		}
+	}
+
+	// Auto-link existing contact by JID
+	contact, _ := s.repos.Contact.GetByJID(c.Context(), accountID, jid)
+	if contact != nil {
+		lead.ContactID = &contact.ID
+		// Copy contact fields to lead if lead fields are empty
+		if lead.Name == nil || *lead.Name == "" {
+			dn := contact.DisplayName()
+			lead.Name = &dn
+		}
+		if (lead.Phone == nil || *lead.Phone == "") && contact.Phone != nil {
+			lead.Phone = contact.Phone
+		}
+		if (lead.Email == nil || *lead.Email == "") && contact.Email != nil {
+			lead.Email = contact.Email
+		}
+		lead.LastName = contact.LastName
+		lead.ShortName = contact.ShortName
+		lead.Company = contact.Company
+		lead.Age = contact.Age
+	}
+
 	if err := s.services.Lead.Create(c.Context(), lead); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	s.invalidateLeadsCache(accountID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "lead": lead})
 }
 
@@ -1169,6 +1456,9 @@ func (s *Server) handleGetLead(c *fiber.Ctx) error {
 	if lead == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
 	}
+
+	tags, _ := s.services.Tag.GetByEntity(c.Context(), "lead", lead.ID)
+	lead.StructuredTags = tags
 
 	return c.JSON(fiber.Map{"success": true, "lead": lead})
 }
@@ -1191,14 +1481,20 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	// Parse update request
 	var req struct {
 		Name         *string                `json:"name"`
+		LastName     *string                `json:"last_name"`
+		ShortName    *string                `json:"short_name"`
 		Phone        *string                `json:"phone"`
 		Email        *string                `json:"email"`
+		Company      *string                `json:"company"`
+		Age          *int                   `json:"age"`
 		Status       *string                `json:"status"`
 		Source       *string                `json:"source"`
 		Notes        *string                `json:"notes"`
 		Tags         []string               `json:"tags"`
 		CustomFields map[string]interface{} `json:"custom_fields"`
 		AssignedTo   *string                `json:"assigned_to"`
+		StageID      *string                `json:"stage_id"`
+		PipelineID   *string                `json:"pipeline_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -1208,11 +1504,23 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	if req.Name != nil {
 		lead.Name = req.Name
 	}
+	if req.LastName != nil {
+		lead.LastName = req.LastName
+	}
+	if req.ShortName != nil {
+		lead.ShortName = req.ShortName
+	}
 	if req.Phone != nil {
 		lead.Phone = req.Phone
 	}
 	if req.Email != nil {
 		lead.Email = req.Email
+	}
+	if req.Company != nil {
+		lead.Company = req.Company
+	}
+	if req.Age != nil {
+		lead.Age = req.Age
 	}
 	if req.Status != nil {
 		lead.Status = req.Status
@@ -1236,11 +1544,29 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 			lead.AssignedTo = &uid
 		}
 	}
+	if req.StageID != nil {
+		if *req.StageID == "" {
+			lead.StageID = nil
+		} else if uid, err := uuid.Parse(*req.StageID); err == nil {
+			lead.StageID = &uid
+		}
+	}
+	if req.PipelineID != nil {
+		if *req.PipelineID == "" {
+			lead.PipelineID = nil
+		} else if uid, err := uuid.Parse(*req.PipelineID); err == nil {
+			lead.PipelineID = &uid
+		}
+	}
 
 	if err := s.services.Lead.Update(c.Context(), lead); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	// Sync shared fields to linked contact
+	_ = s.services.Lead.SyncToContact(c.Context(), lead)
+
+	s.invalidateLeadsCache(lead.AccountID)
 	return c.JSON(fiber.Map{"success": true, "lead": lead})
 }
 
@@ -1261,6 +1587,7 @@ func (s *Server) handleUpdateLeadStatus(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	s.invalidateLeadsCache(c.Locals("account_id").(uuid.UUID))
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -1274,6 +1601,7 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	s.invalidateLeadsCache(c.Locals("account_id").(uuid.UUID))
 	return c.JSON(fiber.Map{"success": true, "message": "Lead deleted"})
 }
 
@@ -1292,6 +1620,7 @@ func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 		if err := s.services.Lead.DeleteAll(c.Context(), accountID); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
+		s.invalidateLeadsCache(accountID)
 		return c.JSON(fiber.Map{"success": true, "message": "All leads deleted"})
 	}
 
@@ -1314,10 +1643,37 @@ func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	s.invalidateLeadsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("%d leads deleted", len(uuids))})
 }
 
 // --- Pipeline Handlers ---
+
+func (s *Server) handleUpdateLeadStage(c *fiber.Ctx) error {
+	leadID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
+	}
+
+	var req struct {
+		StageID string `json:"stage_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	stageID, err := uuid.Parse(req.StageID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
+	}
+
+	if err := s.services.Lead.UpdateStage(c.Context(), leadID, stageID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	s.invalidateLeadsCache(c.Locals("account_id").(uuid.UUID))
+	return c.JSON(fiber.Map{"success": true})
+}
 
 func (s *Server) handleGetPipelines(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -1325,7 +1681,174 @@ func (s *Server) handleGetPipelines(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+
+	// Filter: only show pipelines that are either non-Kommo or connected
+	if s.kommoSync != nil {
+		connected, _ := s.kommoSync.GetConnectedPipelines(c.Context(), accountID)
+		connectedIDs := make(map[int64]bool)
+		for _, cp := range connected {
+			if cp.Enabled {
+				connectedIDs[cp.KommoPipelineID] = true
+			}
+		}
+		var filtered []*domain.Pipeline
+		for _, p := range pipelines {
+			if p.KommoID == nil || connectedIDs[*p.KommoID] {
+				filtered = append(filtered, p)
+			}
+		}
+		pipelines = filtered
+	}
+
 	return c.JSON(fiber.Map{"success": true, "pipelines": pipelines})
+}
+
+func (s *Server) handleCreatePipeline(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	var req struct {
+		Name        string  `json:"name"`
+		Description *string `json:"description"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	pipeline := &domain.Pipeline{
+		AccountID:   accountID,
+		Name:        req.Name,
+		Description: req.Description,
+	}
+	if err := s.services.Pipeline.Create(c.Context(), pipeline); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "pipeline": pipeline})
+}
+
+func (s *Server) handleUpdatePipeline(c *fiber.Ctx) error {
+	pipelineID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
+	}
+	pipeline, err := s.services.Pipeline.GetByID(c.Context(), pipelineID)
+	if err != nil || pipeline == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
+	}
+	var req struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name != nil {
+		pipeline.Name = *req.Name
+	}
+	if req.Description != nil {
+		pipeline.Description = req.Description
+	}
+	if err := s.services.Pipeline.Update(c.Context(), pipeline); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "pipeline": pipeline})
+}
+
+func (s *Server) handleDeletePipeline(c *fiber.Ctx) error {
+	pipelineID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
+	}
+	if err := s.services.Pipeline.Delete(c.Context(), pipelineID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleCreatePipelineStage(c *fiber.Ctx) error {
+	pipelineID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
+	}
+	var req struct {
+		Name  string `json:"name"`
+		Color string `json:"color"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	if req.Color == "" {
+		req.Color = "#6366f1"
+	}
+	stage := &domain.PipelineStage{
+		PipelineID: pipelineID,
+		Name:       req.Name,
+		Color:      req.Color,
+	}
+	if err := s.services.Pipeline.CreateStage(c.Context(), stage); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "stage": stage})
+}
+
+func (s *Server) handleUpdatePipelineStage(c *fiber.Ctx) error {
+	stageID, err := uuid.Parse(c.Params("stageId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
+	}
+	var req struct {
+		Name     *string `json:"name"`
+		Color    *string `json:"color"`
+		Position *int    `json:"position"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	stage := &domain.PipelineStage{ID: stageID}
+	if req.Name != nil {
+		stage.Name = *req.Name
+	}
+	if req.Color != nil {
+		stage.Color = *req.Color
+	}
+	if req.Position != nil {
+		stage.Position = *req.Position
+	}
+	if err := s.services.Pipeline.UpdateStage(c.Context(), stage); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "stage": stage})
+}
+
+func (s *Server) handleDeletePipelineStage(c *fiber.Ctx) error {
+	stageID, err := uuid.Parse(c.Params("stageId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
+	}
+	if err := s.services.Pipeline.DeleteStage(c.Context(), stageID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleReorderPipelineStages(c *fiber.Ctx) error {
+	pipelineID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
+	}
+	var req struct {
+		StageIDs []string `json:"stage_ids"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	var stageIDs []uuid.UUID
+	for _, s := range req.StageIDs {
+		if uid, err := uuid.Parse(s); err == nil {
+			stageIDs = append(stageIDs, uid)
+		}
+	}
+	if err := s.services.Pipeline.ReorderStages(c.Context(), pipelineID, stageIDs); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
 }
 
 // --- Import CSV Handler ---
@@ -1352,30 +1875,119 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	}
 	defer f.Close()
 
-	reader := csv.NewReader(f)
-	reader.LazyQuotes = true
-	reader.TrimLeadingSpace = true
-
-	// Read header
-	headers, err := reader.Read()
+	// Read all content into memory to detect separators
+	rawBytes, err := io.ReadAll(f)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Cannot read CSV headers"})
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Cannot read file content"})
+	}
+	rawContent := string(rawBytes)
+	lines := strings.Split(rawContent, "\n")
+	if len(lines) < 2 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "CSV file must have at least a header and one data row"})
 	}
 
-	// Map header columns (case-insensitive)
+	// Detect separator: Kommo uses commas in header, semicolons in data.
+	// General approach: check which delimiter produces more columns consistently.
+	headerLine := strings.TrimSpace(lines[0])
+	dataLine := ""
+	for _, l := range lines[1:] {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" {
+			dataLine = trimmed
+			break
+		}
+	}
+
+	headerSep := detectCSVSeparator(headerLine)
+	dataSep := detectCSVSeparator(dataLine)
+
+	// Parse header with its detected separator
+	headerReader := csv.NewReader(strings.NewReader(headerLine))
+	headerReader.Comma = headerSep
+	headerReader.LazyQuotes = true
+	headerReader.TrimLeadingSpace = true
+	headers, err := headerReader.Read()
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Cannot parse CSV headers"})
+	}
+
+	// Build column mapping (case-insensitive, trimmed)
 	colMap := make(map[string]int)
 	for i, h := range headers {
-		colMap[strings.ToLower(strings.TrimSpace(h))] = i
+		key := strings.ToLower(strings.TrimSpace(h))
+		if key != "" {
+			colMap[key] = i
+		}
 	}
 
-	// Check required columns
+	// Find phone column by name
 	phoneCol := -1
-	for _, key := range []string{"phone", "telefono", "celular", "número", "numero"} {
+	for _, key := range []string{"phone", "telefono", "teléfono", "celular", "número", "numero", "movil", "móvil"} {
 		if idx, ok := colMap[key]; ok {
 			phoneCol = idx
 			break
 		}
 	}
+
+	// If phone column not found by name, scan first data row for phone-like values
+	// (Kommo exports have unlabeled phone columns containing '+51XXXXXXXXX)
+	if phoneCol == -1 && dataLine != "" {
+		dataReader := csv.NewReader(strings.NewReader(dataLine))
+		dataReader.Comma = dataSep
+		dataReader.LazyQuotes = true
+		dataReader.TrimLeadingSpace = true
+		if testRow, err := dataReader.Read(); err == nil {
+			bestCol := -1
+			bestScore := 0
+			for i, val := range testRow {
+				// Skip columns with known non-phone headers
+				if i < len(headers) {
+					hdr := strings.ToLower(strings.TrimSpace(headers[i]))
+					if hdr == "id" || hdr == "edad" || hdr == "age" || hdr == "dni" || hdr == "dni_ce" {
+						continue
+					}
+				}
+				raw := strings.TrimSpace(val)
+				cleaned := strings.Trim(raw, "'\"")
+				hasPlus := strings.HasPrefix(cleaned, "+")
+				hasTick := strings.HasPrefix(raw, "'") || strings.HasPrefix(raw, "\"'")
+				cleaned = strings.ReplaceAll(cleaned, " ", "")
+				cleaned = strings.ReplaceAll(cleaned, "-", "")
+				cleaned = strings.TrimPrefix(cleaned, "+")
+				if len(cleaned) < 8 || len(cleaned) > 15 {
+					continue
+				}
+				allDigits := true
+				for _, ch := range cleaned {
+					if ch < '0' || ch > '9' {
+						allDigits = false
+						break
+					}
+				}
+				if !allDigits {
+					continue
+				}
+				// Score: prefer values with + prefix or tick marks (phone formatting)
+				// and columns with empty headers (unlabeled = likely phone in Kommo)
+				score := 1
+				if hasPlus || hasTick {
+					score += 10
+				}
+				if i < len(headers) && strings.TrimSpace(headers[i]) == "" {
+					score += 5
+				}
+				if len(cleaned) >= 10 {
+					score += 2 // longer numbers more likely phone
+				}
+				if score > bestScore {
+					bestScore = score
+					bestCol = i
+				}
+			}
+			phoneCol = bestCol
+		}
+	}
+
 	if phoneCol == -1 {
 		return c.Status(400).JSON(fiber.Map{
 			"success": false,
@@ -1383,105 +1995,75 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 		})
 	}
 
-	nameCol := -1
-	for _, key := range []string{"name", "nombre", "nombre_completo"} {
-		if idx, ok := colMap[key]; ok {
-			nameCol = idx
-			break
-		}
-	}
-	emailCol := -1
-	if idx, ok := colMap["email"]; ok {
-		emailCol = idx
-	} else if idx, ok := colMap["correo"]; ok {
-		emailCol = idx
-	}
-	notesCol := -1
-	if idx, ok := colMap["notes"]; ok {
-		notesCol = idx
-	} else if idx, ok := colMap["notas"]; ok {
-		notesCol = idx
-	}
-	tagsCol := -1
-	if idx, ok := colMap["tags"]; ok {
-		tagsCol = idx
-	} else if idx, ok := colMap["etiquetas"]; ok {
-		tagsCol = idx
-	}
-	companyCol := -1
-	if idx, ok := colMap["company"]; ok {
-		companyCol = idx
-	} else if idx, ok := colMap["empresa"]; ok {
-		companyCol = idx
-	}
-	lastNameCol := -1
-	for _, key := range []string{"last_name", "apellido", "apellidos"} {
-		if idx, ok := colMap[key]; ok {
-			lastNameCol = idx
-			break
-		}
-	}
+	// Map known columns (supports Kommo naming)
+	nameCol := findCol(colMap, "name", "nombre", "nombre_completo", "nombre completo")
+	emailCol := findCol(colMap, "email", "correo", "e-mail", "e-mail priv.")
+	notesCol := findCol(colMap, "notes", "notas", "observaciones")
+	tagsCol := findCol(colMap, "tags", "etiquetas")
+	companyCol := findCol(colMap, "company", "empresa")
+	lastNameCol := findCol(colMap, "last_name", "apellido", "apellidos")
+	stageCol := findCol(colMap, "estatus del lead", "stage", "etapa", "estado lead", "status")
+	_ = findCol(colMap, "embudo de ventas", "pipeline", "embudo") // reserved for future multi-pipeline import
+	ageCol := findCol(colMap, "edad", "age")
+
+	// Get default pipeline for stage assignment
+	defaultPipeline, _ := s.services.Pipeline.GetDefaultPipeline(c.Context(), accountID)
 
 	imported := 0
 	skipped := 0
-	var errors []string
+	var importErrors []string
 
-	for {
-		row, err := reader.Read()
-		if err == io.EOF {
-			break
+	// Parse data rows using the data separator
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
 		}
+		rowReader := csv.NewReader(strings.NewReader(line))
+		rowReader.Comma = dataSep
+		rowReader.LazyQuotes = true
+		rowReader.TrimLeadingSpace = true
+
+		row, err := rowReader.Read()
 		if err != nil {
 			skipped++
 			continue
 		}
 
-		phone := strings.TrimSpace(row[phoneCol])
+		phone := safeCol(row, phoneCol)
 		if phone == "" {
 			skipped++
 			continue
 		}
 
-		// Normalize phone: remove spaces, dashes, ensure digits
+		// Normalize phone: remove quotes, ticks, spaces, dashes
+		phone = strings.Trim(phone, "'\"` ")
 		phone = strings.ReplaceAll(phone, " ", "")
 		phone = strings.ReplaceAll(phone, "-", "")
 		phone = strings.ReplaceAll(phone, "(", "")
 		phone = strings.ReplaceAll(phone, ")", "")
 		phone = strings.TrimPrefix(phone, "+")
+		if phone == "" || len(phone) < 6 {
+			skipped++
+			continue
+		}
 
 		jid := phone + "@s.whatsapp.net"
 
-		name := ""
-		if nameCol >= 0 && nameCol < len(row) {
-			name = strings.TrimSpace(row[nameCol])
-		}
-		email := ""
-		if emailCol >= 0 && emailCol < len(row) {
-			email = strings.TrimSpace(row[emailCol])
-		}
-		notes := ""
-		if notesCol >= 0 && notesCol < len(row) {
-			notes = strings.TrimSpace(row[notesCol])
-		}
-		tags := ""
-		if tagsCol >= 0 && tagsCol < len(row) {
-			tags = strings.TrimSpace(row[tagsCol])
-		}
-		company := ""
-		if companyCol >= 0 && companyCol < len(row) {
-			company = strings.TrimSpace(row[companyCol])
-		}
-		lastName := ""
-		if lastNameCol >= 0 && lastNameCol < len(row) {
-			lastName = strings.TrimSpace(row[lastNameCol])
-		}
+		name := safeCol(row, nameCol)
+		email := safeCol(row, emailCol)
+		notes := safeCol(row, notesCol)
+		tags := safeCol(row, tagsCol)
+		company := safeCol(row, companyCol)
+		lastName := safeCol(row, lastNameCol)
+		stageName := safeCol(row, stageCol)
+		ageStr := safeCol(row, ageCol)
 
 		if importType == "contacts" || importType == "both" {
 			contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, name, "", false)
 			if err != nil {
-				errors = append(errors, fmt.Sprintf("row %d contact: %s", imported+skipped+1, err.Error()))
+				importErrors = append(importErrors, fmt.Sprintf("row %d contact: %s", i+1, err.Error()))
 			} else if contact != nil {
-				// Update extra fields if provided
 				needUpdate := false
 				if email != "" && (contact.Email == nil || *contact.Email == "") {
 					contact.Email = &email
@@ -1515,27 +2097,100 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 				Source:    strPtr("csv_import"),
 				Status:    strPtr(domain.LeadStatusNew),
 			}
+
+			// Assign pipeline stage if available
+			if stageName != "" && defaultPipeline != nil && defaultPipeline.Stages != nil {
+				for _, st := range defaultPipeline.Stages {
+					if strings.EqualFold(st.Name, stageName) {
+						lead.PipelineID = &defaultPipeline.ID
+						lead.StageID = &st.ID
+						break
+					}
+				}
+			}
+			// Fallback: assign to default pipeline first stage
+			if lead.PipelineID == nil && defaultPipeline != nil && defaultPipeline.Stages != nil && len(defaultPipeline.Stages) > 0 {
+				lead.PipelineID = &defaultPipeline.ID
+				lead.StageID = &defaultPipeline.Stages[0].ID
+			}
+
 			if tags != "" {
+				// Kommo uses ", " as tag separator within the cell
 				tagList := strings.Split(tags, ",")
-				for i := range tagList {
-					tagList[i] = strings.TrimSpace(tagList[i])
+				for j := range tagList {
+					tagList[j] = strings.TrimSpace(tagList[j])
 				}
 				lead.Tags = tagList
 			}
+			if company != "" {
+				lead.Company = strPtr(company)
+			}
+			if lastName != "" {
+				lead.LastName = strPtr(lastName)
+			}
+			if ageStr != "" {
+				if age, err := strconv.Atoi(strings.TrimSpace(ageStr)); err == nil && age > 0 && age < 200 {
+					lead.Age = &age
+				}
+			}
 			if err := s.services.Lead.Create(c.Context(), lead); err != nil {
-				errors = append(errors, fmt.Sprintf("row %d lead: %s", imported+skipped+1, err.Error()))
+				importErrors = append(importErrors, fmt.Sprintf("row %d lead: %s", i+1, err.Error()))
 			}
 		}
 
 		imported++
 	}
 
+	s.invalidateLeadsCache(accountID)
 	return c.JSON(fiber.Map{
 		"success":  true,
 		"imported": imported,
 		"skipped":  skipped,
-		"errors":   errors,
+		"errors":   importErrors,
 	})
+}
+
+// detectCSVSeparator counts commas, semicolons and tabs outside quotes and returns the most frequent one
+func detectCSVSeparator(line string) rune {
+	counts := map[rune]int{',': 0, ';': 0, '\t': 0}
+	inQuote := false
+	for _, ch := range line {
+		if ch == '"' {
+			inQuote = !inQuote
+		}
+		if !inQuote {
+			if _, ok := counts[ch]; ok {
+				counts[ch]++
+			}
+		}
+	}
+	best := ','
+	bestCount := 0
+	for sep, cnt := range counts {
+		if cnt > bestCount {
+			bestCount = cnt
+			best = sep
+		}
+	}
+	return best
+}
+
+// findCol returns the column index for the first matching key, or -1
+func findCol(colMap map[string]int, keys ...string) int {
+	for _, key := range keys {
+		if idx, ok := colMap[key]; ok {
+			return idx
+		}
+	}
+	return -1
+}
+
+// safeCol returns the trimmed value at the given index, or "" if out of bounds
+func safeCol(row []string, idx int) string {
+	if idx >= 0 && idx < len(row) {
+		return strings.TrimSpace(row[idx])
+	}
+	return ""
 }
 
 // --- Contact Handlers ---
@@ -1565,10 +2220,25 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 		filter.Tags = strings.Split(tagsStr, ",")
 	}
 
+	if tagIDsStr := c.Query("tag_ids"); tagIDsStr != "" {
+		for _, tidStr := range strings.Split(tagIDsStr, ",") {
+			if tid, err := uuid.Parse(strings.TrimSpace(tidStr)); err == nil {
+				filter.TagIDs = append(filter.TagIDs, tid)
+			}
+		}
+	}
+
 	contacts, total, err := s.services.Contact.GetByAccountIDWithFilters(c.Context(), accountID, filter)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+
+	// Load structured tags for each contact
+	for _, contact := range contacts {
+		tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID)
+		contact.StructuredTags = tags
+	}
+
 	return c.JSON(fiber.Map{
 		"success":  true,
 		"contacts": contacts,
@@ -1591,6 +2261,10 @@ func (s *Server) handleGetContact(c *fiber.Ctx) error {
 	if contact == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "contact not found"})
 	}
+
+	tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID)
+	contact.StructuredTags = tags
+
 	return c.JSON(fiber.Map{"success": true, "contact": contact})
 }
 
@@ -1654,6 +2328,9 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 
 	// Sync shared fields to all linked event_participants
 	_ = s.services.Contact.SyncToParticipants(c.Context(), contact)
+
+	// Sync shared fields to linked lead
+	_ = s.services.Contact.SyncToLead(c.Context(), contact)
 
 	return c.JSON(fiber.Map{"success": true, "contact": contact})
 }
@@ -2905,11 +3582,21 @@ func (s *Server) handleGetContactEvents(c *fiber.Ctx) error {
 // --- Stats Handler ---
 
 func (s *Server) handleGetStats(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	var leadCount, contactCount int
+	_ = s.repos.DB().QueryRow(c.Context(),
+		`SELECT COUNT(*) FROM leads WHERE account_id = $1`, accountID).Scan(&leadCount)
+	_ = s.repos.DB().QueryRow(c.Context(),
+		`SELECT COUNT(*) FROM contacts WHERE account_id = $1`, accountID).Scan(&contactCount)
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"stats": fiber.Map{
 			"connected_devices": s.pool.GetConnectedCount(),
 			"ws_clients":        s.hub.GetClientCount(),
+			"leads":             leadCount,
+			"contacts":          contactCount,
 		},
 	})
 }
@@ -3460,4 +4147,227 @@ func (s *Server) handleAdminRemoveUserAccount(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true})
+}
+
+// --- Quick Reply Handlers ---
+
+func (s *Server) handleGetQuickReplies(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	replies, err := s.services.QuickReply.GetByAccountID(c.Context(), accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if replies == nil {
+		replies = make([]*domain.QuickReply, 0)
+	}
+	return c.JSON(fiber.Map{"success": true, "quick_replies": replies})
+}
+
+func (s *Server) handleCreateQuickReply(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	var req struct {
+		Shortcut string `json:"shortcut"`
+		Title    string `json:"title"`
+		Body     string `json:"body"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Shortcut == "" || req.Body == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Shortcut and body are required"})
+	}
+	qr := &domain.QuickReply{AccountID: accountID, Shortcut: req.Shortcut, Title: req.Title, Body: req.Body}
+	if err := s.services.QuickReply.Create(c.Context(), qr); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "quick_reply": qr})
+}
+
+func (s *Server) handleUpdateQuickReply(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid quick reply ID"})
+	}
+	var req struct {
+		Shortcut string `json:"shortcut"`
+		Title    string `json:"title"`
+		Body     string `json:"body"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	qr := &domain.QuickReply{ID: id, Shortcut: req.Shortcut, Title: req.Title, Body: req.Body}
+	if err := s.services.QuickReply.Update(c.Context(), qr); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "quick_reply": qr})
+}
+
+func (s *Server) handleDeleteQuickReply(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid quick reply ID"})
+	}
+	if err := s.services.QuickReply.Delete(c.Context(), id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// --- Kommo Handlers ---
+
+func (s *Server) handleKommoStatus(c *fiber.Ctx) error {
+	configured := s.cfg.KommoAccessToken != "" && s.cfg.KommoSubdomain != ""
+	result := fiber.Map{
+		"success":    true,
+		"configured": configured,
+		"subdomain":  s.cfg.KommoSubdomain,
+	}
+	if configured && s.kommoSync != nil {
+		client := kommo.NewClient(s.cfg.KommoSubdomain, s.cfg.KommoAccessToken)
+		acc, err := client.GetAccount()
+		if err != nil {
+			result["connected"] = false
+			result["error"] = err.Error()
+		} else {
+			result["connected"] = true
+			result["account"] = fiber.Map{
+				"id":       acc.ID,
+				"name":     acc.Name,
+				"currency": acc.Currency,
+				"country":  acc.Country,
+			}
+		}
+	}
+	return c.JSON(result)
+}
+
+func (s *Server) handleKommoSync(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	started := s.kommoSync.StartFullSyncAsync(accountID)
+	if !started {
+		return c.Status(409).JSON(fiber.Map{
+			"success": false,
+			"error":   "Ya hay una sincronización en curso para esta cuenta",
+		})
+	}
+
+	// Invalidate cache when sync starts (will be stale)
+	s.invalidateLeadsCache(accountID)
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Sincronización iniciada en segundo plano",
+	})
+}
+
+func (s *Server) handleKommoFullSyncStatus(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	status := s.kommoSync.GetFullSyncStatus(accountID)
+	if status == nil {
+		return c.JSON(fiber.Map{"success": true, "status": nil})
+	}
+	return c.JSON(fiber.Map{"success": true, "status": status})
+}
+
+func (s *Server) handleKommoGetPipelines(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	client := kommo.NewClient(s.cfg.KommoSubdomain, s.cfg.KommoAccessToken)
+	pipelines, err := client.GetPipelines()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	// Also get connected pipelines to mark status
+	accountID := c.Locals("account_id").(uuid.UUID)
+	connected, _ := s.kommoSync.GetConnectedPipelines(c.Context(), accountID)
+	connectedMap := make(map[int64]bool)
+	for _, cp := range connected {
+		if cp.Enabled {
+			connectedMap[cp.KommoPipelineID] = true
+		}
+	}
+
+	type pipelineInfo struct {
+		ID       int    `json:"id"`
+		Name     string `json:"name"`
+		IsMain   bool   `json:"is_main"`
+		Stages   int    `json:"stages"`
+		Connected bool  `json:"connected"`
+	}
+	var result []pipelineInfo
+	for _, p := range pipelines {
+		result = append(result, pipelineInfo{
+			ID:     p.ID,
+			Name:   p.Name,
+			IsMain: p.IsMain,
+			Stages: len(p.Statuses),
+			Connected: connectedMap[int64(p.ID)],
+		})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "pipelines": result})
+}
+
+func (s *Server) handleKommoGetConnected(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	connected, err := s.kommoSync.GetConnectedPipelines(c.Context(), accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if connected == nil {
+		connected = []kommo.ConnectedPipeline{}
+	}
+	return c.JSON(fiber.Map{"success": true, "connected": connected})
+}
+
+func (s *Server) handleKommoConnectPipeline(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	kommoID, err := strconv.Atoi(c.Params("kommoId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	cp, err := s.kommoSync.ConnectPipeline(c.Context(), accountID, kommoID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "connected_pipeline": cp})
+}
+
+func (s *Server) handleKommoDisconnectPipeline(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	kommoID, err := strconv.Atoi(c.Params("kommoId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	if err := s.kommoSync.DisconnectPipeline(c.Context(), accountID, kommoID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleKommoSyncStatus(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	status := s.kommoSync.GetStatus()
+	return c.JSON(fiber.Map{"success": true, "status": status})
 }

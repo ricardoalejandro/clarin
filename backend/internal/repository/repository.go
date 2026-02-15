@@ -33,6 +33,7 @@ type Repositories struct {
 	Reaction          *ReactionRepository
 	Poll              *PollRepository
 	CampaignAttachment *CampaignAttachmentRepository
+	QuickReply         *QuickReplyRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -57,7 +58,13 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Reaction:          &ReactionRepository{db: db},
 		Poll:              &PollRepository{db: db},
 		CampaignAttachment: &CampaignAttachmentRepository{db: db},
+		QuickReply:         &QuickReplyRepository{db: db},
 	}
+}
+
+// DB returns the underlying database pool.
+func (r *Repositories) DB() *pgxpool.Pool {
+	return r.db
 }
 
 // UserRepository handles user data access
@@ -552,6 +559,13 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		argNum++
 	}
 
+	// Tag filter (filter by contact tags)
+	if len(filter.TagIDs) > 0 {
+		baseQuery += fmt.Sprintf(" AND ctc.id IN (SELECT contact_id FROM contact_tags WHERE tag_id = ANY($%d))", argNum)
+		args = append(args, filter.TagIDs)
+		argNum++
+	}
+
 	// Unread filter
 	if filter.UnreadOnly {
 		baseQuery += " AND c.unread_count > 0"
@@ -853,6 +867,12 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		argNum++
 	}
 
+	if len(filter.TagIDs) > 0 {
+		baseQuery += fmt.Sprintf(" AND id IN (SELECT contact_id FROM contact_tags WHERE tag_id = ANY($%d))", argNum)
+		args = append(args, filter.TagIDs)
+		argNum++
+	}
+
 	// Count
 	var total int
 	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) "+baseQuery, args...).Scan(&total); err != nil {
@@ -949,6 +969,25 @@ func (r *ContactRepository) SyncToParticipants(ctx context.Context, contact *dom
 			name = COALESCE($1, name), last_name = $2, short_name = $3, phone = $4, email = $5, age = $6, updated_at = NOW()
 		WHERE contact_id = $7
 	`, contact.Name, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Age, contact.ID)
+	return err
+}
+
+// SyncToLead propagates shared contact fields to the linked lead
+func (r *ContactRepository) SyncToLead(ctx context.Context, contact *domain.Contact) error {
+	displayName := contact.DisplayName()
+	_, err := r.db.Exec(ctx, `
+		UPDATE leads SET
+			name = COALESCE($1, name),
+			last_name = COALESCE($2, last_name),
+			short_name = COALESCE($3, short_name),
+			phone = COALESCE($4, phone),
+			email = COALESCE($5, email),
+			company = COALESCE($6, company),
+			age = COALESCE($7, age),
+			notes = COALESCE($8, notes),
+			updated_at = NOW()
+		WHERE account_id = $9 AND jid = $10
+	`, &displayName, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Company, contact.Age, contact.Notes, contact.AccountID, contact.JID)
 	return err
 }
 
@@ -1112,23 +1151,27 @@ type LeadRepository struct {
 
 func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 	return r.db.QueryRow(ctx, `
-		INSERT INTO leads (account_id, contact_id, jid, name, phone, email, status, source, notes)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO leads (account_id, contact_id, jid, name, last_name, short_name, phone, email, company, age, status, source, notes, pipeline_id, stage_id, tags)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (account_id, jid) DO UPDATE SET
 			name = COALESCE(EXCLUDED.name, leads.name),
 			phone = COALESCE(EXCLUDED.phone, leads.phone),
+			tags = COALESCE(EXCLUDED.tags, leads.tags),
 			updated_at = NOW()
 		RETURNING id, created_at, updated_at
-	`, lead.AccountID, lead.ContactID, lead.JID, lead.Name, lead.Phone,
-		lead.Email, lead.Status, lead.Source, lead.Notes,
+	`, lead.AccountID, lead.ContactID, lead.JID, lead.Name, lead.LastName, lead.ShortName, lead.Phone,
+		lead.Email, lead.Company, lead.Age, lead.Status, lead.Source, lead.Notes, lead.PipelineID, lead.StageID, lead.Tags,
 	).Scan(&lead.ID, &lead.CreatedAt, &lead.UpdatedAt)
 }
 
 func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Lead, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, contact_id, jid, name, phone, email, status, source, notes, 
-		       tags, custom_fields, assigned_to, created_at, updated_at
-		FROM leads WHERE account_id = $1 ORDER BY created_at DESC
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes, 
+		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
+		       ps.name, ps.color, ps.position
+		FROM leads l
+		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+		WHERE l.account_id = $1 ORDER BY l.created_at DESC
 	`, accountID)
 	if err != nil {
 		return nil, err
@@ -1139,9 +1182,10 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 	for rows.Next() {
 		lead := &domain.Lead{}
 		if err := rows.Scan(
-			&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.Phone,
-			&lead.Email, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
-			&lead.CustomFields, &lead.AssignedTo, &lead.CreatedAt, &lead.UpdatedAt,
+			&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
+			&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+			&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
+			&lead.StageName, &lead.StageColor, &lead.StagePosition,
 		); err != nil {
 			return nil, err
 		}
@@ -1153,13 +1197,17 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Lead, error) {
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, contact_id, jid, name, phone, email, status, source, notes, 
-		       tags, custom_fields, assigned_to, created_at, updated_at
-		FROM leads WHERE account_id = $1 AND jid = $2
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes, 
+		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
+		       ps.name, ps.color, ps.position
+		FROM leads l
+		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+		WHERE l.account_id = $1 AND l.jid = $2
 	`, accountID, jid).Scan(
-		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.Phone,
-		&lead.Email, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
-		&lead.CustomFields, &lead.AssignedTo, &lead.CreatedAt, &lead.UpdatedAt,
+		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
+		&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
+		&lead.StageName, &lead.StageColor, &lead.StagePosition,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1175,13 +1223,17 @@ func (r *LeadRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status 
 func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lead, error) {
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, contact_id, jid, name, phone, email, status, source, notes, 
-		       tags, custom_fields, assigned_to, created_at, updated_at
-		FROM leads WHERE id = $1
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes, 
+		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
+		       ps.name, ps.color, ps.position
+		FROM leads l
+		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+		WHERE l.id = $1
 	`, id).Scan(
-		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.Phone,
-		&lead.Email, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
-		&lead.CustomFields, &lead.AssignedTo, &lead.CreatedAt, &lead.UpdatedAt,
+		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
+		&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
+		&lead.StageName, &lead.StageColor, &lead.StagePosition,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1192,12 +1244,63 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE leads SET 
-			name = $1, phone = $2, email = $3, status = $4, source = $5, 
-			notes = $6, tags = $7, custom_fields = $8, assigned_to = $9, updated_at = NOW()
-		WHERE id = $10
-	`, lead.Name, lead.Phone, lead.Email, lead.Status, lead.Source,
-		lead.Notes, lead.Tags, lead.CustomFields, lead.AssignedTo, lead.ID)
+			name = $1, last_name = $2, short_name = $3, phone = $4, email = $5, company = $6, age = $7,
+			status = $8, source = $9, notes = $10, tags = $11, custom_fields = $12, assigned_to = $13,
+			pipeline_id = $14, stage_id = $15, updated_at = NOW()
+		WHERE id = $16
+	`, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email, lead.Company, lead.Age,
+		lead.Status, lead.Source, lead.Notes, lead.Tags, lead.CustomFields, lead.AssignedTo,
+		lead.PipelineID, lead.StageID, lead.ID)
 	return err
+}
+
+// UpdateStage moves a lead to a different pipeline stage
+func (r *LeadRepository) UpdateStage(ctx context.Context, id uuid.UUID, stageID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE leads SET stage_id = $1, updated_at = NOW() WHERE id = $2`, stageID, id)
+	return err
+}
+
+// SyncToContact propagates shared lead fields to the linked contact
+func (r *LeadRepository) SyncToContact(ctx context.Context, lead *domain.Lead) error {
+	if lead.ContactID == nil {
+		return nil
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE contacts SET
+			custom_name = COALESCE($1, custom_name),
+			last_name = COALESCE($2, last_name),
+			short_name = COALESCE($3, short_name),
+			phone = COALESCE($4, phone),
+			email = COALESCE($5, email),
+			company = COALESCE($6, company),
+			age = COALESCE($7, age),
+			notes = COALESCE($8, notes),
+			updated_at = NOW()
+		WHERE id = $9
+	`, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email, lead.Company, lead.Age, lead.Notes, *lead.ContactID)
+	return err
+}
+
+// GetByContactID finds a lead linked to a specific contact
+func (r *LeadRepository) GetByContactID(ctx context.Context, contactID uuid.UUID) (*domain.Lead, error) {
+	lead := &domain.Lead{}
+	err := r.db.QueryRow(ctx, `
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes, 
+		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
+		       ps.name, ps.color, ps.position
+		FROM leads l
+		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+		WHERE l.contact_id = $1
+	`, contactID).Scan(
+		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
+		&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
+		&lead.StageName, &lead.StageColor, &lead.StagePosition,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return lead, err
 }
 
 func (r *LeadRepository) Delete(ctx context.Context, id uuid.UUID) error {
@@ -1222,7 +1325,7 @@ type PipelineRepository struct {
 
 func (r *PipelineRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Pipeline, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT p.id, p.account_id, p.name, p.description, p.is_default, p.created_at, p.updated_at
+		SELECT p.id, p.account_id, p.name, p.description, p.is_default, p.kommo_id, p.created_at, p.updated_at
 		FROM pipelines p WHERE p.account_id = $1 ORDER BY p.created_at
 	`, accountID)
 	if err != nil {
@@ -1235,7 +1338,7 @@ func (r *PipelineRepository) GetByAccountID(ctx context.Context, accountID uuid.
 		pipeline := &domain.Pipeline{}
 		if err := rows.Scan(
 			&pipeline.ID, &pipeline.AccountID, &pipeline.Name, &pipeline.Description,
-			&pipeline.IsDefault, &pipeline.CreatedAt, &pipeline.UpdatedAt,
+			&pipeline.IsDefault, &pipeline.KommoID, &pipeline.CreatedAt, &pipeline.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1254,8 +1357,9 @@ func (r *PipelineRepository) GetByAccountID(ctx context.Context, accountID uuid.
 
 func (r *PipelineRepository) GetStages(ctx context.Context, pipelineID uuid.UUID) ([]*domain.PipelineStage, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, pipeline_id, name, color, position, created_at
-		FROM pipeline_stages WHERE pipeline_id = $1 ORDER BY position
+		SELECT ps.id, ps.pipeline_id, ps.name, ps.color, ps.position, ps.created_at,
+		       (SELECT COUNT(*) FROM leads WHERE stage_id = ps.id) as lead_count
+		FROM pipeline_stages ps WHERE ps.pipeline_id = $1 ORDER BY ps.position
 	`, pipelineID)
 	if err != nil {
 		return nil, err
@@ -1267,13 +1371,130 @@ func (r *PipelineRepository) GetStages(ctx context.Context, pipelineID uuid.UUID
 		stage := &domain.PipelineStage{}
 		if err := rows.Scan(
 			&stage.ID, &stage.PipelineID, &stage.Name, &stage.Color,
-			&stage.Position, &stage.CreatedAt,
+			&stage.Position, &stage.CreatedAt, &stage.LeadCount,
 		); err != nil {
 			return nil, err
 		}
 		stages = append(stages, stage)
 	}
 	return stages, nil
+}
+
+func (r *PipelineRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Pipeline, error) {
+	pipeline := &domain.Pipeline{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, name, description, is_default, created_at, updated_at
+		FROM pipelines WHERE id = $1
+	`, id).Scan(
+		&pipeline.ID, &pipeline.AccountID, &pipeline.Name, &pipeline.Description,
+		&pipeline.IsDefault, &pipeline.CreatedAt, &pipeline.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	stages, err := r.GetStages(ctx, pipeline.ID)
+	if err != nil {
+		return nil, err
+	}
+	pipeline.Stages = stages
+	return pipeline, nil
+}
+
+func (r *PipelineRepository) Create(ctx context.Context, pipeline *domain.Pipeline) error {
+	pipeline.ID = uuid.New()
+	now := time.Now()
+	pipeline.CreatedAt = now
+	pipeline.UpdatedAt = now
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO pipelines (id, account_id, name, description, is_default, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, pipeline.ID, pipeline.AccountID, pipeline.Name, pipeline.Description, pipeline.IsDefault, pipeline.CreatedAt, pipeline.UpdatedAt)
+	return err
+}
+
+func (r *PipelineRepository) Update(ctx context.Context, pipeline *domain.Pipeline) error {
+	pipeline.UpdatedAt = time.Now()
+	_, err := r.db.Exec(ctx, `
+		UPDATE pipelines SET name = $1, description = $2, updated_at = $3 WHERE id = $4
+	`, pipeline.Name, pipeline.Description, pipeline.UpdatedAt, pipeline.ID)
+	return err
+}
+
+func (r *PipelineRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	// Unlink leads from this pipeline's stages first
+	_, _ = r.db.Exec(ctx, `UPDATE leads SET pipeline_id = NULL, stage_id = NULL WHERE pipeline_id = $1`, id)
+	// Delete stages (FK cascade would also do it)
+	_, _ = r.db.Exec(ctx, `DELETE FROM pipeline_stages WHERE pipeline_id = $1`, id)
+	_, err := r.db.Exec(ctx, `DELETE FROM pipelines WHERE id = $1`, id)
+	return err
+}
+
+func (r *PipelineRepository) CreateStage(ctx context.Context, stage *domain.PipelineStage) error {
+	stage.ID = uuid.New()
+	stage.CreatedAt = time.Now()
+	// Auto-set position to the end
+	if stage.Position == 0 {
+		var maxPos *int
+		r.db.QueryRow(ctx, `SELECT MAX(position) FROM pipeline_stages WHERE pipeline_id = $1`, stage.PipelineID).Scan(&maxPos)
+		if maxPos != nil {
+			stage.Position = *maxPos + 1
+		}
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO pipeline_stages (id, pipeline_id, name, color, position, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, stage.ID, stage.PipelineID, stage.Name, stage.Color, stage.Position, stage.CreatedAt)
+	return err
+}
+
+func (r *PipelineRepository) UpdateStage(ctx context.Context, stage *domain.PipelineStage) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE pipeline_stages SET name = $1, color = $2, position = $3 WHERE id = $4
+	`, stage.Name, stage.Color, stage.Position, stage.ID)
+	return err
+}
+
+func (r *PipelineRepository) DeleteStage(ctx context.Context, id uuid.UUID) error {
+	// Move leads in this stage to no stage
+	_, _ = r.db.Exec(ctx, `UPDATE leads SET stage_id = NULL WHERE stage_id = $1`, id)
+	_, err := r.db.Exec(ctx, `DELETE FROM pipeline_stages WHERE id = $1`, id)
+	return err
+}
+
+func (r *PipelineRepository) ReorderStages(ctx context.Context, pipelineID uuid.UUID, stageIDs []uuid.UUID) error {
+	for i, stageID := range stageIDs {
+		_, err := r.db.Exec(ctx, `UPDATE pipeline_stages SET position = $1 WHERE id = $2 AND pipeline_id = $3`, i, stageID, pipelineID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PipelineRepository) GetDefaultPipeline(ctx context.Context, accountID uuid.UUID) (*domain.Pipeline, error) {
+	pipeline := &domain.Pipeline{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, name, description, is_default, created_at, updated_at
+		FROM pipelines WHERE account_id = $1 AND is_default = TRUE LIMIT 1
+	`, accountID).Scan(
+		&pipeline.ID, &pipeline.AccountID, &pipeline.Name, &pipeline.Description,
+		&pipeline.IsDefault, &pipeline.CreatedAt, &pipeline.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	stages, err := r.GetStages(ctx, pipeline.ID)
+	if err != nil {
+		return nil, err
+	}
+	pipeline.Stages = stages
+	return pipeline, nil
 }
 
 // TagRepository handles tag data access
@@ -2476,5 +2697,72 @@ func (r *CampaignAttachmentRepository) GetByCampaignID(ctx context.Context, camp
 
 func (r *CampaignAttachmentRepository) DeleteByCampaignID(ctx context.Context, campaignID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM campaign_attachments WHERE campaign_id = $1`, campaignID)
+	return err
+}
+
+// ============================================================
+// QuickReplyRepository handles quick reply (canned response) data access
+// ============================================================
+
+type QuickReplyRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *QuickReplyRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.QuickReply, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, shortcut, title, body, created_at, updated_at
+		FROM quick_replies WHERE account_id = $1 ORDER BY shortcut
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var replies []*domain.QuickReply
+	for rows.Next() {
+		qr := &domain.QuickReply{}
+		if err := rows.Scan(&qr.ID, &qr.AccountID, &qr.Shortcut, &qr.Title, &qr.Body, &qr.CreatedAt, &qr.UpdatedAt); err != nil {
+			return nil, err
+		}
+		replies = append(replies, qr)
+	}
+	return replies, nil
+}
+
+func (r *QuickReplyRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.QuickReply, error) {
+	qr := &domain.QuickReply{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, shortcut, title, body, created_at, updated_at
+		FROM quick_replies WHERE id = $1
+	`, id).Scan(&qr.ID, &qr.AccountID, &qr.Shortcut, &qr.Title, &qr.Body, &qr.CreatedAt, &qr.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return qr, err
+}
+
+func (r *QuickReplyRepository) Create(ctx context.Context, qr *domain.QuickReply) error {
+	qr.ID = uuid.New()
+	now := time.Now()
+	qr.CreatedAt = now
+	qr.UpdatedAt = now
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO quick_replies (id, account_id, shortcut, title, body, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, qr.ID, qr.AccountID, qr.Shortcut, qr.Title, qr.Body, qr.CreatedAt, qr.UpdatedAt)
+	return err
+}
+
+func (r *QuickReplyRepository) Update(ctx context.Context, qr *domain.QuickReply) error {
+	qr.UpdatedAt = time.Now()
+	_, err := r.db.Exec(ctx, `
+		UPDATE quick_replies SET shortcut = $1, title = $2, body = $3, updated_at = $4
+		WHERE id = $5
+	`, qr.Shortcut, qr.Title, qr.Body, qr.UpdatedAt, qr.ID)
+	return err
+}
+
+func (r *QuickReplyRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM quick_replies WHERE id = $1`, id)
 	return err
 }

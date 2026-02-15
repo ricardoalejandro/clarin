@@ -472,8 +472,10 @@ export default function ContactsPage() {
     }
   }
 
-  const handleSendMessageToContact = async () => {
-    if (!selectedContact || !sendDeviceId) return
+  const handleSendMessageToContact = async (deviceId?: string) => {
+    const devId = deviceId || sendDeviceId
+    if (!selectedContact || !devId) return
+    setSendDeviceId(devId)
     setSendLoading(true)
 
     const phone = selectedContact.phone || selectedContact.jid?.replace(/@.*$/, '') || ''
@@ -491,7 +493,7 @@ export default function ContactsPage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          device_id: sendDeviceId,
+          device_id: devId,
           phone: phone.replace(/[^0-9]/g, ''),
         }),
       })
@@ -1189,7 +1191,7 @@ export default function ContactsPage() {
       {/* Send Message Modal */}
       {showSendMessage && selectedContact && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-sm shadow-xl">
+          <div className="bg-white rounded-xl p-6 w-full max-w-sm">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
                 <Send className="w-5 h-5 text-green-600" />
@@ -1202,40 +1204,37 @@ export default function ContactsPage() {
             <p className="text-sm text-gray-600 mb-4">
               Selecciona el dispositivo para iniciar la conversación:
             </p>
-            <select
-              value={sendDeviceId}
-              onChange={(e) => setSendDeviceId(e.target.value)}
-              className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 mb-4"
+            {devices.filter(d => d.status === 'connected').length === 0 ? (
+              <p className="text-sm text-gray-400 text-center py-4">No hay dispositivos conectados</p>
+            ) : (
+              <div className="space-y-2">
+                {devices.filter(d => d.status === 'connected').map((device) => (
+                  <button
+                    key={device.id}
+                    onClick={() => handleSendMessageToContact(device.id)}
+                    disabled={sendLoading}
+                    className="w-full flex items-center gap-3 p-3 border border-gray-200 rounded-lg hover:bg-green-50 hover:border-green-300 transition text-left disabled:opacity-50"
+                  >
+                    <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+                      <Smartphone className="w-5 h-5 text-green-600" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-medium text-gray-900">{device.name || 'Dispositivo'}</p>
+                      <p className="text-xs text-gray-500">{device.phone || ''}</p>
+                    </div>
+                    {sendLoading && sendDeviceId === device.id && (
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-600" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={() => { setShowSendMessage(false); setSendDeviceId('') }}
+              className="w-full mt-4 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
             >
-              <option value="">Seleccionar dispositivo</option>
-              {devices.filter(d => d.status === 'connected').map(d => (
-                <option key={d.id} value={d.id}>
-                  📱 {d.name} {d.phone ? `(${d.phone})` : ''}
-                </option>
-              ))}
-            </select>
-            <div className="flex gap-3">
-              <button
-                onClick={() => { setShowSendMessage(false); setSendDeviceId('') }}
-                className="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={handleSendMessageToContact}
-                disabled={!sendDeviceId || sendLoading}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
-              >
-                {sendLoading ? (
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
-                ) : (
-                  <>
-                    <MessageSquare className="w-4 h-4" />
-                    Ir al Chat
-                  </>
-                )}
-              </button>
-            </div>
+              Cancelar
+            </button>
           </div>
         </div>
       )}

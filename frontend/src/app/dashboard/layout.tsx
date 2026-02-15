@@ -14,7 +14,6 @@ import {
   X,
   LayoutDashboard,
   ChevronRight,
-  ChevronLeft,
   BookUser,
   PanelLeftClose,
   PanelLeftOpen,
@@ -137,7 +136,6 @@ export default function DashboardLayout({
         localStorage.setItem('token', data.token)
         setUser(data.user)
         setShowAccountSwitcher(false)
-        // Reload the page to refresh all data with new account context
         window.location.href = '/dashboard'
       }
     } catch (e) {
@@ -152,16 +150,21 @@ export default function DashboardLayout({
     { href: '/dashboard/devices', icon: Smartphone, label: 'Dispositivos' },
     { href: '/dashboard/leads', icon: Users, label: 'Leads' },
     { href: '/dashboard/events', icon: CalendarDays, label: 'Eventos' },
-    { href: '/dashboard/broadcasts', icon: Radio, label: 'Envíos Masivos' },
+    { href: '/dashboard/broadcasts', icon: Radio, label: 'Difusión' },
     { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas' },
     { href: '/dashboard/settings', icon: Settings, label: 'Configuración' },
-    ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Administración' }] : []),
+    ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin' }] : []),
   ]
 
   if (loading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-gray-50">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600" />
+      <div className="h-screen flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center">
+            <MessageSquare className="w-5 h-5 text-white" />
+          </div>
+          <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
+        </div>
       </div>
     )
   }
@@ -170,11 +173,11 @@ export default function DashboardLayout({
 
   return (
     <NotificationProvider accountId={user.account_id}>
-    <div className="bg-gray-50 flex overflow-hidden" style={{ height: 'var(--app-height, 100vh)' }}>
+    <div className="bg-slate-50 flex overflow-hidden" style={{ height: 'var(--app-height, 100vh)' }}>
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
         <div 
-          className="fixed inset-0 bg-black/50 z-30 lg:hidden"
+          className="fixed inset-0 bg-black/30 backdrop-blur-sm z-30 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
@@ -182,37 +185,37 @@ export default function DashboardLayout({
       {/* Sidebar */}
       <aside className={`
         fixed lg:static inset-y-0 left-0 z-40
-        ${sidebarCollapsed ? 'lg:w-16' : 'lg:w-64'} w-64
-        bg-white border-r border-gray-200
+        ${sidebarCollapsed ? 'lg:w-[68px]' : 'lg:w-60'} w-64
+        bg-white border-r border-slate-200/80
         transform transition-all duration-200 ease-in-out
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         flex flex-col
       `}>
         {/* Logo */}
-        <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200 shrink-0">
-          <Link href="/dashboard" className="flex items-center gap-2 overflow-hidden">
-            <div className="w-8 h-8 bg-green-600 rounded-lg flex items-center justify-center shrink-0">
-              <MessageSquare className="w-5 h-5 text-white" />
+        <div className={`h-14 flex items-center justify-between ${sidebarCollapsed ? 'px-3' : 'px-4'} border-b border-slate-100 shrink-0`}>
+          <Link href="/dashboard" className="flex items-center gap-2.5 overflow-hidden">
+            <div className="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center shrink-0">
+              <MessageSquare className="w-[18px] h-[18px] text-white" />
             </div>
-            {!sidebarCollapsed && <span className="font-bold text-xl text-gray-800 whitespace-nowrap">Clarin</span>}
+            {!sidebarCollapsed && <span className="font-bold text-lg text-slate-800 whitespace-nowrap tracking-tight">Clarin</span>}
           </Link>
           <button 
             onClick={() => setSidebarOpen(false)}
-            className="lg:hidden p-1 hover:bg-gray-100 rounded"
+            className="lg:hidden p-1 hover:bg-slate-100 rounded-lg"
           >
-            <X className="w-5 h-5" />
+            <X className="w-5 h-5 text-slate-500" />
           </button>
           <button 
             onClick={toggleSidebarCollapsed}
-            className="hidden lg:flex p-1 hover:bg-gray-100 rounded text-gray-500"
+            className="hidden lg:flex p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors"
             title={sidebarCollapsed ? 'Expandir menú' : 'Colapsar menú'}
           >
-            {sidebarCollapsed ? <PanelLeftOpen className="w-5 h-5" /> : <PanelLeftClose className="w-5 h-5" />}
+            {sidebarCollapsed ? <PanelLeftOpen className="w-[18px] h-[18px]" /> : <PanelLeftClose className="w-[18px] h-[18px]" />}
           </button>
         </div>
 
         {/* Navigation */}
-        <nav className={`${sidebarCollapsed ? 'p-2' : 'p-4'} space-y-1 flex-1 overflow-y-auto`}>
+        <nav className={`${sidebarCollapsed ? 'px-2 py-3' : 'px-3 py-3'} space-y-0.5 flex-1 overflow-y-auto`}>
           {navItems.map((item) => {
             const isActive = pathname === item.href || 
               (item.href !== '/dashboard' && pathname.startsWith(item.href))
@@ -224,16 +227,16 @@ export default function DashboardLayout({
                 onClick={() => setSidebarOpen(false)}
                 title={sidebarCollapsed ? item.label : undefined}
                 className={`
-                  flex items-center ${sidebarCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2.5 rounded-lg transition-colors
+                  flex items-center ${sidebarCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-lg transition-all text-[13px]
                   ${isActive 
-                    ? 'bg-green-50 text-green-700 font-medium' 
-                    : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                    ? 'bg-emerald-50 text-emerald-700 font-semibold' 
+                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'
                   }
                 `}
               >
-                <item.icon className="w-5 h-5 shrink-0" />
+                <item.icon className={`w-[18px] h-[18px] shrink-0 ${isActive ? 'text-emerald-600' : ''}`} />
                 {!sidebarCollapsed && <span>{item.label}</span>}
-                {!sidebarCollapsed && isActive && <ChevronRight className="w-4 h-4 ml-auto" />}
+                {!sidebarCollapsed && isActive && <ChevronRight className="w-3.5 h-3.5 ml-auto opacity-50" />}
               </Link>
             )
           })}
@@ -241,34 +244,34 @@ export default function DashboardLayout({
 
         {/* Account switcher */}
         {accounts.length > 1 && (
-          <div ref={accountSwitcherRef} className={`shrink-0 border-t border-gray-200 ${sidebarCollapsed ? 'p-2' : 'p-3'} relative`}>
+          <div ref={accountSwitcherRef} className={`shrink-0 border-t border-slate-100 ${sidebarCollapsed ? 'p-2' : 'px-3 py-2'} relative`}>
             <button
               onClick={() => setShowAccountSwitcher(!showAccountSwitcher)}
               title={sidebarCollapsed ? (user.account_name || 'Cambiar cuenta') : undefined}
-              className={`w-full flex items-center ${sidebarCollapsed ? 'justify-center p-2' : 'gap-2 px-3 py-2'} rounded-lg hover:bg-gray-100 transition-colors text-gray-700`}
+              className={`w-full flex items-center ${sidebarCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} rounded-lg hover:bg-slate-50 transition-colors text-slate-600`}
             >
-              <Building2 className="w-4 h-4 shrink-0" />
+              <Building2 className="w-4 h-4 shrink-0 text-slate-400" />
               {!sidebarCollapsed && (
                 <>
-                  <span className="flex-1 text-left text-sm truncate">{user.account_name || 'Cuenta'}</span>
-                  <ChevronsUpDown className="w-4 h-4 shrink-0 text-gray-400" />
+                  <span className="flex-1 text-left text-xs truncate font-medium">{user.account_name || 'Cuenta'}</span>
+                  <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-slate-300" />
                 </>
               )}
             </button>
             {showAccountSwitcher && (
-              <div className={`absolute ${sidebarCollapsed ? 'left-full ml-2 bottom-0' : 'left-3 right-3 bottom-full mb-1'} bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1`}>
-                <div className="px-3 py-1.5 text-xs font-medium text-gray-400 uppercase">Cambiar cuenta</div>
+              <div className={`absolute ${sidebarCollapsed ? 'left-full ml-2 bottom-0' : 'left-3 right-3 bottom-full mb-1'} bg-white border border-slate-200 rounded-xl shadow-lg shadow-slate-200/50 z-50 py-1 min-w-[180px]`}>
+                <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Cambiar cuenta</div>
                 {accounts.map((acc) => (
                   <button
                     key={acc.account_id}
                     onClick={() => handleSwitchAccount(acc.account_id)}
-                    className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 transition-colors flex items-center gap-2 ${
-                      acc.account_id === user.account_id ? 'text-green-700 bg-green-50 font-medium' : 'text-gray-700'
+                    className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 transition-colors flex items-center gap-2 ${
+                      acc.account_id === user.account_id ? 'text-emerald-700 bg-emerald-50 font-medium' : 'text-slate-600'
                     }`}
                   >
                     <Building2 className="w-3.5 h-3.5 shrink-0" />
                     <span className="truncate">{acc.account_name}</span>
-                    {acc.account_id === user.account_id && <span className="ml-auto text-xs text-green-600">●</span>}
+                    {acc.account_id === user.account_id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-500" />}
                   </button>
                 ))}
               </div>
@@ -277,47 +280,45 @@ export default function DashboardLayout({
         )}
 
         {/* User section */}
-        <div className="shrink-0 p-4 border-t border-gray-200">
+        <div className={`shrink-0 ${sidebarCollapsed ? 'p-2' : 'px-3 py-3'} border-t border-slate-100`}>
           {sidebarCollapsed ? (
             <div className="flex flex-col items-center gap-2">
-              <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                <span className="text-green-700 font-medium">
+              <div className="w-9 h-9 bg-emerald-50 rounded-lg flex items-center justify-center">
+                <span className="text-emerald-700 font-semibold text-sm">
                   {user.display_name?.charAt(0) || user.username.charAt(0).toUpperCase()}
                 </span>
               </div>
               <button
                 onClick={handleLogout}
                 title="Cerrar Sesión"
-                className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
               >
                 <LogOut className="w-4 h-4" />
               </button>
             </div>
           ) : (
-            <>
-              <div className="flex items-center gap-3 mb-3">
-                <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center shrink-0">
-                  <span className="text-green-700 font-medium">
-                    {user.display_name?.charAt(0) || user.username.charAt(0).toUpperCase()}
-                  </span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-gray-900 truncate">
-                    {user.display_name || user.username}
-                  </p>
-                  <p className="text-sm text-gray-500 truncate">
-                    {user.is_super_admin ? 'Super Admin' : user.is_admin ? 'Administrador' : 'Usuario'}
-                  </p>
-                </div>
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 bg-emerald-50 rounded-lg flex items-center justify-center shrink-0">
+                <span className="text-emerald-700 font-semibold text-sm">
+                  {user.display_name?.charAt(0) || user.username.charAt(0).toUpperCase()}
+                </span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-slate-800 truncate text-sm leading-tight">
+                  {user.display_name || user.username}
+                </p>
+                <p className="text-[11px] text-slate-400 truncate">
+                  {user.is_super_admin ? 'Super Admin' : user.is_admin ? 'Admin' : user.role || 'Usuario'}
+                </p>
               </div>
               <button
                 onClick={handleLogout}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                title="Cerrar Sesión"
+                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors shrink-0"
               >
                 <LogOut className="w-4 h-4" />
-                <span>Cerrar Sesión</span>
               </button>
-            </>
+            </div>
           )}
         </div>
       </aside>
@@ -325,19 +326,24 @@ export default function DashboardLayout({
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
         {/* Top bar - mobile only */}
-        <header className="h-16 bg-white border-b border-gray-200 flex items-center px-4 lg:hidden shrink-0">
+        <header className="h-14 bg-white border-b border-slate-200/80 flex items-center px-4 lg:hidden shrink-0">
           <button
             onClick={() => setSidebarOpen(true)}
-            className="p-2 hover:bg-gray-100 rounded-lg"
+            className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
           >
-            <Menu className="w-6 h-6" />
+            <Menu className="w-5 h-5 text-slate-600" />
           </button>
-          <span className="ml-3 font-semibold text-gray-800">Clarin</span>
+          <div className="ml-3 flex items-center gap-2">
+            <div className="w-6 h-6 bg-emerald-600 rounded-md flex items-center justify-center">
+              <MessageSquare className="w-3.5 h-3.5 text-white" />
+            </div>
+            <span className="font-semibold text-slate-800 text-sm">Clarin</span>
+          </div>
         </header>
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          pathname === '/dashboard/chats' ? 'p-0 md:p-4 lg:p-6' : 'p-2 sm:p-4 lg:p-6'
+          pathname === '/dashboard/chats' ? 'p-0 md:p-4 lg:p-5' : 'p-3 sm:p-4 lg:p-5'
         }`}>
           {children}
         </main>

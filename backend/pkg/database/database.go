@@ -450,6 +450,12 @@ func Migrate(db *pgxpool.Pool) error {
 		// Campaign recipient metadata for custom variables
 		`ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'`,
 
+		// Lead contact fields sync
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_name VARCHAR(255)`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS short_name VARCHAR(100)`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS company VARCHAR(255)`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS age INTEGER`,
+
 		// Campaign attachments (multi-file support)
 		`CREATE TABLE IF NOT EXISTS campaign_attachments (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -463,6 +469,49 @@ func Migrate(db *pgxpool.Pool) error {
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_campaign_attachments_campaign ON campaign_attachments(campaign_id)`,
+
+		// Quick replies (canned responses)
+		`CREATE TABLE IF NOT EXISTS quick_replies (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			shortcut VARCHAR(100) NOT NULL,
+			title VARCHAR(255) NOT NULL,
+			body TEXT NOT NULL,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_quick_replies_account ON quick_replies(account_id)`,
+
+		// Lead pipeline linkage
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS pipeline_id UUID REFERENCES pipelines(id) ON DELETE SET NULL`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS stage_id UUID REFERENCES pipeline_stages(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_leads_pipeline ON leads(pipeline_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage_id)`,
+
+		// Kommo CRM integration
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_id BIGINT`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS kommo_id BIGINT`,
+		`ALTER TABLE pipelines ADD COLUMN IF NOT EXISTS kommo_id BIGINT`,
+		`ALTER TABLE pipeline_stages ADD COLUMN IF NOT EXISTS kommo_id BIGINT`,
+		`ALTER TABLE tags ADD COLUMN IF NOT EXISTS kommo_id BIGINT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_kommo_id ON leads(account_id, kommo_id) WHERE kommo_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_kommo_id ON contacts(account_id, kommo_id) WHERE kommo_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pipelines_kommo_id ON pipelines(account_id, kommo_id) WHERE kommo_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_stages_kommo_id ON pipeline_stages(kommo_id) WHERE kommo_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_kommo_id ON tags(account_id, kommo_id) WHERE kommo_id IS NOT NULL`,
+
+		// Kommo connected pipelines (real-time sync tracking)
+		`CREATE TABLE IF NOT EXISTS kommo_connected_pipelines (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			kommo_pipeline_id BIGINT NOT NULL,
+			pipeline_id UUID REFERENCES pipelines(id) ON DELETE SET NULL,
+			enabled BOOLEAN DEFAULT TRUE,
+			last_synced_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE(account_id, kommo_pipeline_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_kommo_connected_pipelines_account ON kommo_connected_pipelines(account_id)`,
 	}
 
 	for _, migration := range migrations {
@@ -520,38 +569,56 @@ func SeedAdmin(db *pgxpool.Pool, cfg *config.Config) error {
 		return fmt.Errorf("failed to create admin user: %w", err)
 	}
 
-	// Create default pipeline
+	// Create default pipeline (idempotent)
 	var pipelineID string
 	err = db.QueryRow(ctx, `
-		INSERT INTO pipelines (account_id, name, description, is_default)
-		VALUES ($1, 'Pipeline Principal', 'Pipeline por defecto para leads', TRUE)
-		RETURNING id
+		SELECT id FROM pipelines WHERE account_id = $1 AND is_default = TRUE LIMIT 1
 	`, accountID).Scan(&pipelineID)
 	if err != nil {
-		return fmt.Errorf("failed to create default pipeline: %w", err)
-	}
-
-	// Create default stages
-	stages := []struct {
-		name  string
-		color string
-	}{
-		{"Nuevo", "#6366f1"},
-		{"Contactado", "#f59e0b"},
-		{"En Negociación", "#3b82f6"},
-		{"Propuesta", "#8b5cf6"},
-		{"Cerrado", "#10b981"},
-		{"Perdido", "#ef4444"},
-	}
-
-	for i, stage := range stages {
-		_, err = db.Exec(ctx, `
-			INSERT INTO pipeline_stages (pipeline_id, name, color, position)
-			VALUES ($1, $2, $3, $4)
-		`, pipelineID, stage.name, stage.color, i)
+		// No default pipeline exists, create one
+		err = db.QueryRow(ctx, `
+			INSERT INTO pipelines (account_id, name, description, is_default)
+			VALUES ($1, 'Pipeline Principal', 'Pipeline por defecto para leads', TRUE)
+			RETURNING id
+		`, accountID).Scan(&pipelineID)
 		if err != nil {
-			return fmt.Errorf("failed to create stage %s: %w", stage.name, err)
+			return fmt.Errorf("failed to create default pipeline: %w", err)
 		}
+
+		// Create default stages
+		stages := []struct {
+			name  string
+			color string
+		}{
+			{"Nuevo", "#6366f1"},
+			{"Contactado", "#f59e0b"},
+			{"En Negociación", "#3b82f6"},
+			{"Propuesta", "#8b5cf6"},
+			{"Cerrado", "#10b981"},
+			{"Perdido", "#ef4444"},
+		}
+
+		for i, stage := range stages {
+			_, err = db.Exec(ctx, `
+				INSERT INTO pipeline_stages (pipeline_id, name, color, position)
+				VALUES ($1, $2, $3, $4)
+			`, pipelineID, stage.name, stage.color, i)
+			if err != nil {
+				return fmt.Errorf("failed to create stage %s: %w", stage.name, err)
+			}
+		}
+	}
+
+	// Assign existing leads without pipeline to the default pipeline's first stage
+	var firstStageID string
+	err = db.QueryRow(ctx, `
+		SELECT id FROM pipeline_stages WHERE pipeline_id = $1 ORDER BY position LIMIT 1
+	`, pipelineID).Scan(&firstStageID)
+	if err == nil {
+		_, _ = db.Exec(ctx, `
+			UPDATE leads SET pipeline_id = $1, stage_id = $2
+			WHERE account_id = $3 AND pipeline_id IS NULL
+		`, pipelineID, firstStageID, accountID)
 	}
 
 	return nil

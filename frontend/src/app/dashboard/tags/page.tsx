@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { Plus, Trash2, Edit, Tag, Palette, X, Check } from 'lucide-react'
+import { Plus, Trash2, Edit, Tag, X, Check, LayoutGrid, List, Grid3X3, Search } from 'lucide-react'
 
 interface TagItem {
   id: string
@@ -13,10 +13,13 @@ interface TagItem {
 }
 
 const PRESET_COLORS = [
-  '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e',
-  '#14b8a6', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6',
-  '#a855f7', '#d946ef', '#ec4899', '#f43f5e', '#64748b',
+  '#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e',
+  '#14b8a6', '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1', '#8b5cf6',
+  '#a855f7', '#d946ef', '#ec4899', '#f43f5e', '#64748b', '#78716c',
+  '#0d9488', '#059669', '#dc2626', '#9333ea', '#c026d3', '#db2777',
 ]
+
+type ViewMode = 'grid' | 'list' | 'compact'
 
 export default function TagsPage() {
   const [tags, setTags] = useState<TagItem[]>([])
@@ -25,6 +28,9 @@ export default function TagsPage() {
   const [editingTag, setEditingTag] = useState<TagItem | null>(null)
   const [formName, setFormName] = useState('')
   const [formColor, setFormColor] = useState('#6366f1')
+  const [customColor, setCustomColor] = useState('')
+  const [viewMode, setViewMode] = useState<ViewMode>('grid')
+  const [searchQuery, setSearchQuery] = useState('')
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -57,6 +63,7 @@ export default function TagsPage() {
         setShowCreateModal(false)
         setFormName('')
         setFormColor('#6366f1')
+        setCustomColor('')
         fetchTags()
       } else {
         alert(data.error || 'Error al crear etiqueta')
@@ -79,6 +86,7 @@ export default function TagsPage() {
         setEditingTag(null)
         setFormName('')
         setFormColor('#6366f1')
+        setCustomColor('')
         fetchTags()
       } else {
         alert(data.error || 'Error al actualizar etiqueta')
@@ -107,7 +115,26 @@ export default function TagsPage() {
     setEditingTag(tag)
     setFormName(tag.name)
     setFormColor(tag.color)
+    setCustomColor(PRESET_COLORS.includes(tag.color) ? '' : tag.color)
   }
+
+  const openCreate = () => {
+    setFormName('')
+    setFormColor('#6366f1')
+    setCustomColor('')
+    setShowCreateModal(true)
+  }
+
+  const handleCustomColorChange = (hex: string) => {
+    setCustomColor(hex)
+    if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
+      setFormColor(hex)
+    }
+  }
+
+  const filteredTags = searchQuery
+    ? tags.filter(t => t.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    : tags
 
   if (loading) {
     return (
@@ -126,7 +153,7 @@ export default function TagsPage() {
           <p className="text-gray-600 mt-1">{tags.length} etiquetas globales — se comparten en contactos, leads y chats</p>
         </div>
         <button
-          onClick={() => { setFormName(''); setFormColor('#6366f1'); setShowCreateModal(true) }}
+          onClick={openCreate}
           className="inline-flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition"
         >
           <Plus className="w-5 h-5" />
@@ -134,43 +161,120 @@ export default function TagsPage() {
         </button>
       </div>
 
-      {/* Tags grid */}
-      {tags.length === 0 ? (
+      {/* Search & View Toggle */}
+      <div className="flex items-center gap-3">
+        <div className="relative flex-1 max-w-xs">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Buscar etiquetas..."
+            className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 placeholder:text-gray-400"
+          />
+        </div>
+        <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
+          <button
+            onClick={() => setViewMode('grid')}
+            className={`p-2 rounded-md transition ${viewMode === 'grid' ? 'bg-white shadow text-green-600' : 'text-gray-500 hover:text-gray-700'}`}
+            title="Cuadrícula"
+          >
+            <LayoutGrid className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setViewMode('list')}
+            className={`p-2 rounded-md transition ${viewMode === 'list' ? 'bg-white shadow text-green-600' : 'text-gray-500 hover:text-gray-700'}`}
+            title="Lista"
+          >
+            <List className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setViewMode('compact')}
+            className={`p-2 rounded-md transition ${viewMode === 'compact' ? 'bg-white shadow text-green-600' : 'text-gray-500 hover:text-gray-700'}`}
+            title="Compacto"
+          >
+            <Grid3X3 className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Tags display */}
+      {filteredTags.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
           <Tag className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900">Sin etiquetas</h3>
-          <p className="text-gray-500 mt-1">Crea etiquetas para organizar tus contactos, leads y chats</p>
+          <h3 className="text-lg font-medium text-gray-900">{searchQuery ? 'Sin resultados' : 'Sin etiquetas'}</h3>
+          <p className="text-gray-500 mt-1">
+            {searchQuery ? 'No se encontraron etiquetas con ese nombre' : 'Crea etiquetas para organizar tus contactos, leads y chats'}
+          </p>
         </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-          {tags.map(tag => (
+      ) : viewMode === 'grid' ? (
+        /* Grid View */
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
+          {filteredTags.map(tag => (
             <div
               key={tag.id}
-              className="bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition group"
+              className="bg-white rounded-lg border border-gray-200 px-3 py-2.5 hover:shadow-sm transition group flex items-center gap-2"
             >
-              <div className="flex items-center gap-3 mb-3">
-                <div
-                  className="w-8 h-8 rounded-full shrink-0"
-                  style={{ backgroundColor: tag.color }}
-                />
-                <span className="font-medium text-gray-900 truncate">{tag.name}</span>
+              <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
+              <span className="font-medium text-sm text-gray-800 truncate flex-1">{tag.name}</span>
+              <div className="flex items-center gap-0.5 shrink-0 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                <button onClick={() => openEdit(tag)} className="p-1 text-gray-400 hover:text-blue-600 rounded" title="Editar">
+                  <Edit className="w-3.5 h-3.5" />
+                </button>
+                <button onClick={() => handleDelete(tag.id)} className="p-1 text-gray-400 hover:text-red-600 rounded" title="Eliminar">
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
               </div>
-              <div className="flex items-center justify-end gap-1 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                <button
-                  onClick={() => openEdit(tag)}
-                  className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"
-                  title="Editar"
-                >
+            </div>
+          ))}
+        </div>
+      ) : viewMode === 'list' ? (
+        /* List View */
+        <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
+          {filteredTags.map(tag => (
+            <div
+              key={tag.id}
+              className="flex items-center gap-4 px-4 py-3 hover:bg-gray-50 transition group"
+            >
+              <div className="w-4 h-4 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
+              <span className="font-medium text-sm text-gray-900 flex-1">{tag.name}</span>
+              <span className="text-xs text-gray-400 font-mono">{tag.color}</span>
+              <span className="text-xs text-gray-400">{new Date(tag.created_at).toLocaleDateString('es-PE')}</span>
+              <div className="flex items-center gap-1 shrink-0 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                <button onClick={() => openEdit(tag)} className="p-1.5 text-gray-400 hover:text-blue-600 rounded hover:bg-blue-50" title="Editar">
                   <Edit className="w-4 h-4" />
                 </button>
-                <button
-                  onClick={() => handleDelete(tag.id)}
-                  className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"
-                  title="Eliminar"
-                >
+                <button onClick={() => handleDelete(tag.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded hover:bg-red-50" title="Eliminar">
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        /* Compact View - colored chips */
+        <div className="flex flex-wrap gap-2">
+          {filteredTags.map(tag => (
+            <div
+              key={tag.id}
+              className="inline-flex items-center gap-1.5 pl-3 pr-1 py-1 rounded-full text-white text-sm font-medium group cursor-default"
+              style={{ backgroundColor: tag.color }}
+            >
+              <span>{tag.name}</span>
+              <button
+                onClick={() => openEdit(tag)}
+                className="p-0.5 rounded-full hover:bg-white/20 transition opacity-0 group-hover:opacity-100"
+                title="Editar"
+              >
+                <Edit className="w-3 h-3" />
+              </button>
+              <button
+                onClick={() => handleDelete(tag.id)}
+                className="p-0.5 rounded-full hover:bg-white/20 transition opacity-0 group-hover:opacity-100"
+                title="Eliminar"
+              >
+                <X className="w-3 h-3" />
+              </button>
             </div>
           ))}
         </div>
@@ -179,7 +283,7 @@ export default function TagsPage() {
       {/* Create/Edit Modal */}
       {(showCreateModal || editingTag) && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-sm">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md">
             <h2 className="text-xl font-bold text-gray-900 mb-4">
               {editingTag ? 'Editar Etiqueta' : 'Nueva Etiqueta'}
             </h2>
@@ -199,20 +303,42 @@ export default function TagsPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Color</label>
-                <div className="flex flex-wrap gap-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Color</label>
+                {/* Preset colors */}
+                <div className="flex flex-wrap gap-2 mb-3">
                   {PRESET_COLORS.map(color => (
                     <button
                       key={color}
-                      onClick={() => setFormColor(color)}
-                      className={`w-8 h-8 rounded-full border-2 transition ${
-                        formColor === color ? 'border-gray-900 scale-110' : 'border-transparent'
+                      onClick={() => { setFormColor(color); setCustomColor('') }}
+                      className={`w-7 h-7 rounded-full border-2 transition hover:scale-110 ${
+                        formColor === color && !customColor ? 'border-gray-900 scale-110 ring-2 ring-gray-300' : 'border-transparent'
                       }`}
                       style={{ backgroundColor: color }}
                     >
-                      {formColor === color && <Check className="w-4 h-4 text-white mx-auto" />}
+                      {formColor === color && !customColor && <Check className="w-3.5 h-3.5 text-white mx-auto" />}
                     </button>
                   ))}
+                </div>
+                {/* Custom color */}
+                <div className="flex items-center gap-3 mt-2">
+                  <div className="flex items-center gap-2 flex-1">
+                    <input
+                      type="color"
+                      value={formColor}
+                      onChange={e => { setFormColor(e.target.value); setCustomColor(e.target.value) }}
+                      className="w-9 h-9 rounded-lg border border-gray-300 cursor-pointer p-0.5"
+                      title="Selector de color personalizado"
+                    />
+                    <input
+                      type="text"
+                      value={customColor || formColor}
+                      onChange={e => handleCustomColorChange(e.target.value)}
+                      placeholder="#6366f1"
+                      maxLength={7}
+                      className="w-24 px-3 py-1.5 border border-gray-300 rounded-lg text-sm font-mono text-gray-900 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                    />
+                  </div>
+                  <span className="text-xs text-gray-400">Color personalizado</span>
                 </div>
               </div>
               <div>
@@ -227,7 +353,7 @@ export default function TagsPage() {
             </div>
             <div className="flex gap-3 mt-6">
               <button
-                onClick={() => { setShowCreateModal(false); setEditingTag(null) }}
+                onClick={() => { setShowCreateModal(false); setEditingTag(null); setCustomColor('') }}
                 className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
               >
                 Cancelar

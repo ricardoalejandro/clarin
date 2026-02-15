@@ -5,6 +5,14 @@ import { X, User, Phone, Mail, Tag, FileText, Edit2, Save, Smartphone, Clock, Pl
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import ImageViewer from '@/components/chat/ImageViewer'
+import TagInput from '@/components/TagInput'
+
+interface StructuredTag {
+  id: string
+  account_id: string
+  name: string
+  color: string
+}
 
 interface Contact {
   id: string
@@ -20,6 +28,7 @@ interface Contact {
   age?: number
   notes?: string
   is_group: boolean
+  structured_tags?: StructuredTag[]
 }
 
 interface Lead {
@@ -448,6 +457,21 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
               </div>
             )}
           </div>
+
+          {/* Tags */}
+          {contact && (
+            <div className="p-4 border-b border-gray-100">
+              <h5 className="text-sm font-bold text-gray-700 uppercase tracking-wide mb-2">Etiquetas</h5>
+              <TagInput
+                entityType="contact"
+                entityId={contact.id}
+                assignedTags={contact.structured_tags || []}
+                onTagsChange={(newTags) => {
+                  setContact({ ...contact, structured_tags: newTags })
+                }}
+              />
+            </div>
+          )}
 
           {/* Lead status */}
           {lead && (

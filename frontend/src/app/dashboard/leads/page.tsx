@@ -1,20 +1,67 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MessageCircle, Trash2, Edit, ChevronDown, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload } from 'lucide-react'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import ImportCSVModal from '@/components/ImportCSVModal'
+import TagInput from '@/components/TagInput'
+import { useRouter } from 'next/navigation'
+import { createWebSocket } from '@/lib/api'
+
+interface StructuredTag {
+  id: string
+  account_id: string
+  name: string
+  color: string
+}
+
+interface PipelineStage {
+  id: string
+  pipeline_id: string
+  name: string
+  color: string
+  position: number
+  lead_count: number
+}
+
+interface Pipeline {
+  id: string
+  account_id: string
+  name: string
+  description: string | null
+  is_default: boolean
+  stages: PipelineStage[] | null
+}
+
+interface Device {
+  id: string
+  name: string
+  phone: string
+  jid: string
+  status: string
+}
 
 interface Lead {
   id: string
   jid: string
+  contact_id: string | null
   name: string
+  last_name: string | null
+  short_name: string | null
   phone: string
   email: string
+  company: string | null
+  age: number | null
   status: string
+  pipeline_id: string | null
+  stage_id: string | null
+  stage_name: string | null
+  stage_color: string | null
+  stage_position: number | null
   notes: string
   tags: string[]
+  structured_tags: StructuredTag[] | null
   assigned_to: string
   created_at: string
   updated_at: string
@@ -32,21 +79,16 @@ interface Observation {
   created_at: string
 }
 
-const STATUS_OPTIONS = [
-  { value: 'new', label: 'Nuevo', color: 'bg-blue-100 text-blue-700' },
-  { value: 'contacted', label: 'Contactado', color: 'bg-yellow-100 text-yellow-700' },
-  { value: 'qualified', label: 'Calificado', color: 'bg-purple-100 text-purple-700' },
-  { value: 'proposal', label: 'Propuesta', color: 'bg-orange-100 text-orange-700' },
-  { value: 'negotiation', label: 'Negociación', color: 'bg-pink-100 text-pink-700' },
-  { value: 'won', label: 'Ganado', color: 'bg-green-100 text-green-700' },
-  { value: 'lost', label: 'Perdido', color: 'bg-red-100 text-red-700' },
-]
-
 export default function LeadsPage() {
+  const router = useRouter()
   const [leads, setLeads] = useState<Lead[]>([])
+  const [pipelines, setPipelines] = useState<Pipeline[]>([])
+  const [activePipeline, setActivePipeline] = useState<Pipeline | null>(null)
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
-  const [filterStatus, setFilterStatus] = useState<string>('')
+  const [showFilterDropdown, setShowFilterDropdown] = useState(false)
+  const [filterStageIds, setFilterStageIds] = useState<Set<string>>(new Set())
+  const [filterTagNames, setFilterTagNames] = useState<Set<string>>(new Set())
   const [showAddModal, setShowAddModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
@@ -59,7 +101,6 @@ export default function LeadsPage() {
     name: '',
     phone: '',
     email: '',
-    status: 'new',
     notes: '',
     tags: '',
   })
@@ -78,6 +119,51 @@ export default function LeadsPage() {
   const [historyFilterFrom, setHistoryFilterFrom] = useState('')
   const [historyFilterTo, setHistoryFilterTo] = useState('')
 
+  // Inline editing for lead fields
+  const [editingField, setEditingField] = useState<string | null>(null)
+  const [editValues, setEditValues] = useState<Record<string, string>>({})
+  const [savingField, setSavingField] = useState(false)
+  const [editingNotes, setEditingNotes] = useState(false)
+  const [notesValue, setNotesValue] = useState('')
+  const [savingNotes, setSavingNotes] = useState(false)
+
+  // Pipeline stage management
+  const [showStageModal, setShowStageModal] = useState(false)
+  const [newStageName, setNewStageName] = useState('')
+  const [newStageColor, setNewStageColor] = useState('#6366f1')
+  const [editingStageId, setEditingStageId] = useState<string | null>(null)
+  const [editStageName, setEditStageName] = useState('')
+  const [editStageColor, setEditStageColor] = useState('')
+  const [hiddenStageIds, setHiddenStageIds] = useState<Set<string>>(new Set())
+  const [dragSrcIdx, setDragSrcIdx] = useState<number | null>(null)
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+
+  // Device selector for WhatsApp
+  const [showDeviceSelector, setShowDeviceSelector] = useState(false)
+  const [devices, setDevices] = useState<Device[]>([])
+  const [whatsappPhone, setWhatsappPhone] = useState('')
+
+  const kanbanRef = useRef<HTMLDivElement>(null)
+  const topScrollRef = useRef<HTMLDivElement>(null)
+  const syncingScroll = useRef(false)
+
+  const fetchPipelines = useCallback(async () => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/pipelines', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success && data.pipelines) {
+        setPipelines(data.pipelines)
+        const defaultP = data.pipelines.find((p: Pipeline) => p.is_default) || data.pipelines[0]
+        if (defaultP) setActivePipeline(defaultP)
+      }
+    } catch (err) {
+      console.error('Failed to fetch pipelines:', err)
+    }
+  }, [])
+
   const fetchLeads = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
@@ -95,9 +181,97 @@ export default function LeadsPage() {
     }
   }, [])
 
+  const fetchDevices = useCallback(async () => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/devices', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setDevices((data.devices || []).filter((d: Device) => d.status === 'connected'))
+      }
+    } catch (err) {
+      console.error('Failed to fetch devices:', err)
+    }
+  }, [])
+
   useEffect(() => {
+    fetchPipelines()
     fetchLeads()
+    // Load hidden stages from localStorage
+    try {
+      const saved = localStorage.getItem('hiddenStageIds')
+      if (saved) setHiddenStageIds(new Set(JSON.parse(saved)))
+    } catch {}
+  }, [fetchPipelines, fetchLeads])
+
+  // WebSocket: listen for lead_update events for real-time refresh
+  useEffect(() => {
+    const ws = createWebSocket((data: unknown) => {
+      const msg = data as { event?: string }
+      if (msg.event === 'lead_update') {
+        fetchLeads()
+      }
+    })
+    return () => {
+      if (ws) ws.close()
+    }
   }, [fetchLeads])
+
+  // Sync horizontal scroll between top scrollbar and kanban
+  const handleTopScroll = () => {
+    if (syncingScroll.current) return
+    syncingScroll.current = true
+    if (kanbanRef.current && topScrollRef.current) {
+      kanbanRef.current.scrollLeft = topScrollRef.current.scrollLeft
+    }
+    syncingScroll.current = false
+  }
+  const handleKanbanScroll = () => {
+    if (syncingScroll.current) return
+    syncingScroll.current = true
+    if (kanbanRef.current && topScrollRef.current) {
+      topScrollRef.current.scrollLeft = kanbanRef.current.scrollLeft
+    }
+    syncingScroll.current = false
+  }
+
+  const toggleStageVisibility = (stageId: string) => {
+    setHiddenStageIds(prev => {
+      const next = new Set(prev)
+      if (next.has(stageId)) next.delete(stageId)
+      else next.add(stageId)
+      localStorage.setItem('hiddenStageIds', JSON.stringify(Array.from(next)))
+      return next
+    })
+  }
+
+  const handleReorderStages = async (fromIdx: number, toIdx: number) => {
+    if (!activePipeline || fromIdx === toIdx) return
+    const reordered = [...stages]
+    const [moved] = reordered.splice(fromIdx, 1)
+    reordered.splice(toIdx, 0, moved)
+    // Optimistically update
+    const updated = { ...activePipeline, stages: reordered.map((s, i) => ({ ...s, position: i })) }
+    setActivePipeline(updated)
+    setPipelines(prev => prev.map(p => p.id === updated.id ? updated : p))
+    // API call
+    const token = localStorage.getItem('token')
+    try {
+      await fetch(`/api/pipelines/${activePipeline.id}/stages/reorder`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ stage_ids: reordered.map(s => s.id) }),
+      })
+    } catch (err) {
+      console.error('Failed to reorder stages:', err)
+      fetchPipelines()
+    }
+  }
+
+  const allStages = activePipeline?.stages || []
+  const stages = allStages.filter(s => !hiddenStageIds.has(s.id))
 
   const handleCreateLead = async () => {
     const token = localStorage.getItem('token')
@@ -116,7 +290,7 @@ export default function LeadsPage() {
       const data = await res.json()
       if (data.success) {
         setShowAddModal(false)
-        setFormData({ name: '', phone: '', email: '', status: 'new', notes: '', tags: '' })
+        setFormData({ name: '', phone: '', email: '', notes: '', tags: '' })
         fetchLeads()
       } else {
         alert(data.error || 'Error al crear lead')
@@ -167,19 +341,15 @@ export default function LeadsPage() {
       const data = await res.json()
       if (data.success) {
         fetchLeads()
-      } else {
-        alert(data.error || 'Error al eliminar lead')
       }
     } catch (err) {
       console.error('Failed to delete lead:', err)
-      alert('Error al eliminar lead')
     }
   }
 
   const handleDeleteSelected = async () => {
     if (selectedIds.size === 0) return
     if (!confirm(`¿Estás seguro de eliminar ${selectedIds.size} lead(s)?`)) return
-    
     const token = localStorage.getItem('token')
     setDeleting(true)
     try {
@@ -196,12 +366,9 @@ export default function LeadsPage() {
         setSelectedIds(new Set())
         setSelectionMode(false)
         fetchLeads()
-      } else {
-        alert(data.error || 'Error al eliminar leads')
       }
     } catch (err) {
       console.error('Failed to delete leads:', err)
-      alert('Error al eliminar leads')
     } finally {
       setDeleting(false)
     }
@@ -210,7 +377,6 @@ export default function LeadsPage() {
   const handleDeleteAll = async () => {
     if (!confirm('¿Estás seguro de eliminar TODOS los leads? Esta acción no se puede deshacer.')) return
     if (!confirm('Esta acción eliminará todos los leads permanentemente. ¿Continuar?')) return
-    
     const token = localStorage.getItem('token')
     setDeleting(true)
     try {
@@ -227,12 +393,9 @@ export default function LeadsPage() {
         setSelectedIds(new Set())
         setSelectionMode(false)
         fetchLeads()
-      } else {
-        alert(data.error || 'Error al eliminar leads')
       }
     } catch (err) {
       console.error('Failed to delete all leads:', err)
-      alert('Error al eliminar leads')
     } finally {
       setDeleting(false)
     }
@@ -252,45 +415,127 @@ export default function LeadsPage() {
     setSelectedIds(new Set(filteredLeads.map(l => l.id)))
   }
 
-  const deselectAll = () => {
-    setSelectedIds(new Set())
+  const openDetailPanel = (lead: Lead) => {
+    setDetailLead(lead)
+    setShowDetailPanel(true)
+    setObsDisplayCount(5)
+    setEditingField(null)
+    setEditingNotes(false)
+    setNotesValue(lead.notes || '')
+    fetchObservations(lead.id)
   }
 
-  const handleUpdateStatus = async (leadId: string, newStatus: string) => {
+  const startEditing = (field: string, currentValue: string) => {
+    setEditingField(field)
+    setEditValues({ ...editValues, [field]: currentValue })
+  }
+
+  const cancelEditing = () => {
+    setEditingField(null)
+  }
+
+  const saveLeadField = async (field: string) => {
+    if (!detailLead?.id) return
+    setSavingField(true)
     const token = localStorage.getItem('token')
     try {
-      await fetch(`/api/leads/${leadId}`, {
+      const payload: Record<string, string | number | null> = {}
+      const val = editValues[field]?.trim() ?? ''
+      if (field === 'age') {
+        payload[field] = val ? parseInt(val, 10) : null
+      } else {
+        payload[field] = val || null
+      }
+      const res = await fetch(`/api/leads/${detailLead.id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ status: newStatus }),
+        body: JSON.stringify(payload),
       })
-      fetchLeads()
+      const data = await res.json()
+      if (data.success && data.lead) {
+        setDetailLead(data.lead)
+        setLeads(prev => prev.map(l => l.id === data.lead.id ? data.lead : l))
+      }
     } catch (err) {
-      console.error('Failed to update status:', err)
+      console.error('Failed to save lead field:', err)
+    } finally {
+      setSavingField(false)
+      setEditingField(null)
     }
   }
 
-  const openEditModal = (lead: Lead) => {
-    setSelectedLead(lead)
-    setFormData({
-      name: lead.name || '',
-      phone: lead.phone || '',
-      email: lead.email || '',
-      status: lead.status || 'new',
-      notes: lead.notes || '',
-      tags: (lead.tags || []).join(', '),
-    })
-    setShowEditModal(true)
+  const handleFieldKeyDown = (e: React.KeyboardEvent, field: string) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      saveLeadField(field)
+    } else if (e.key === 'Escape') {
+      cancelEditing()
+    }
   }
 
-  const openDetailPanel = (lead: Lead) => {
-    setDetailLead(lead)
-    setShowDetailPanel(true)
-    setObsDisplayCount(5)
-    fetchObservations(lead.id)
+  const saveNotes = async () => {
+    if (!detailLead) return
+    setSavingNotes(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${detailLead.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ notes: notesValue }),
+      })
+      const data = await res.json()
+      if (data.success && data.lead) {
+        setDetailLead(data.lead)
+        setLeads(prev => prev.map(l => l.id === data.lead.id ? data.lead : l))
+      }
+      setEditingNotes(false)
+    } catch (err) {
+      console.error('Failed to save notes:', err)
+    } finally {
+      setSavingNotes(false)
+    }
+  }
+
+  const handleUpdateLeadStage = async (leadId: string, stageId: string) => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${leadId}/stage`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ stage_id: stageId }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        const stage = stages.find(s => s.id === stageId)
+        setLeads(prev => prev.map(l => l.id === leadId ? {
+          ...l,
+          stage_id: stageId,
+          stage_name: stage?.name || null,
+          stage_color: stage?.color || null,
+          stage_position: stage?.position ?? null,
+        } : l))
+        if (detailLead?.id === leadId) {
+          setDetailLead(prev => prev ? {
+            ...prev,
+            stage_id: stageId,
+            stage_name: stage?.name || null,
+            stage_color: stage?.color || null,
+            stage_position: stage?.position ?? null,
+          } : null)
+        }
+      }
+    } catch (err) {
+      console.error('Failed to update stage:', err)
+    }
   }
 
   const fetchObservations = async (leadId: string) => {
@@ -358,15 +603,11 @@ export default function LeadsPage() {
     }
   }
 
-  const getStatusInfo = (status: string) => {
-    return STATUS_OPTIONS.find(s => s.value === status) || STATUS_OPTIONS[0]
-  }
-
+  // Drag and drop (using stage_id)
   const handleDragStart = (e: React.DragEvent, leadId: string) => {
     setDraggedLeadId(leadId)
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', leadId)
-    // Make drag image semi-transparent
     if (e.currentTarget instanceof HTMLElement) {
       e.currentTarget.style.opacity = '0.5'
     }
@@ -380,91 +621,176 @@ export default function LeadsPage() {
     }
   }
 
-  const handleDragOver = (e: React.DragEvent, columnStatus: string) => {
+  const handleDragOver = (e: React.DragEvent, stageId: string) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
-    setDragOverColumn(columnStatus)
+    setDragOverColumn(stageId)
   }
 
   const handleDragLeave = () => {
     setDragOverColumn(null)
   }
 
-  const handleDrop = (e: React.DragEvent, targetStatus: string) => {
+  const handleDrop = (e: React.DragEvent, targetStageId: string) => {
     e.preventDefault()
     setDragOverColumn(null)
     const leadId = e.dataTransfer.getData('text/plain')
     if (leadId) {
       const lead = leads.find(l => l.id === leadId)
-      if (lead && lead.status !== targetStatus) {
-        handleUpdateStatus(leadId, targetStatus)
+      if (lead && lead.stage_id !== targetStageId) {
+        handleUpdateLeadStage(leadId, targetStageId)
       }
     }
     setDraggedLeadId(null)
   }
 
+  // Stage management
+  const handleAddStage = async () => {
+    if (!activePipeline || !newStageName.trim()) return
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/pipelines/${activePipeline.id}/stages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ name: newStageName.trim(), color: newStageColor }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setNewStageName('')
+        setNewStageColor('#6366f1')
+        fetchPipelines()
+      }
+    } catch (err) {
+      console.error('Failed to add stage:', err)
+    }
+  }
+
+  const handleDeleteStage = async (stageId: string) => {
+    if (!activePipeline) return
+    if (!confirm('¿Eliminar esta etapa? Los leads en esta etapa quedarán sin etapa asignada.')) return
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/pipelines/${activePipeline.id}/stages/${stageId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        fetchPipelines()
+        fetchLeads()
+      }
+    } catch (err) {
+      console.error('Failed to delete stage:', err)
+    }
+  }
+
+  const handleUpdateStage = async (stageId: string) => {
+    if (!activePipeline || !editStageName.trim()) return
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/pipelines/${activePipeline.id}/stages/${stageId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ name: editStageName.trim(), color: editStageColor }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setEditingStageId(null)
+        fetchPipelines()
+      }
+    } catch (err) {
+      console.error('Failed to update stage:', err)
+    }
+  }
+
+  // WhatsApp internal chat
+  const handleSendWhatsApp = async (phone: string) => {
+    setWhatsappPhone(phone)
+    await fetchDevices()
+    setShowDeviceSelector(true)
+  }
+
+  const handleDeviceSelected = (device: Device) => {
+    setShowDeviceSelector(false)
+    const jid = whatsappPhone.replace(/[^0-9]/g, '') + '@s.whatsapp.net'
+    router.push(`/dashboard/chats?jid=${encodeURIComponent(jid)}&device=${device.id}`)
+  }
+
   const filteredLeads = leads.filter((lead) => {
-    const matchesSearch = 
+    const matchesSearch =
       (lead.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
       (lead.phone || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (lead.email || '').toLowerCase().includes(searchTerm.toLowerCase())
-    const matchesStatus = !filterStatus || lead.status === filterStatus
-    return matchesSearch && matchesStatus
+      (lead.email || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (lead.company || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (lead.last_name || '').toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesPipeline = !activePipeline || lead.pipeline_id === activePipeline.id || !lead.pipeline_id
+    const matchesStageFilter = filterStageIds.size === 0 || (lead.stage_id && filterStageIds.has(lead.stage_id))
+    const matchesTagFilter = filterTagNames.size === 0 || (lead.structured_tags && lead.structured_tags.some(t => filterTagNames.has(t.name)))
+    return matchesSearch && matchesPipeline && matchesStageFilter && matchesTagFilter
   })
 
-  const leadsByStatus = STATUS_OPTIONS.map(status => ({
-    ...status,
-    leads: filteredLeads.filter(l => l.status === status.value),
+  // Collect unique tags from all leads for filter dropdown
+  const allUniqueTags = Array.from(
+    new Map(leads.flatMap(l => l.structured_tags || []).map(t => [t.name, t])).values()
+  ).sort((a, b) => a.name.localeCompare(b.name))
+
+  const activeFilterCount = filterStageIds.size + filterTagNames.size
+
+  // Group leads by stage
+  const leadsByStage = stages.map(stage => ({
+    ...stage,
+    leads: filteredLeads.filter(l => l.stage_id === stage.id),
   }))
+  const unassignedLeads = filteredLeads.filter(l => !l.stage_id || !stages.find(s => s.id === l.stage_id))
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600" />
+        <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
       </div>
     )
   }
 
   return (
-    <div className="space-y-6 overflow-y-auto flex-1 min-h-0">
+    <div className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Leads</h1>
-          <p className="text-gray-600 mt-1">{filteredLeads.length} leads en total</p>
+          <h1 className="text-xl font-bold text-slate-900">Leads</h1>
+          <p className="text-slate-500 text-sm mt-0.5">{filteredLeads.length} leads en total</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {selectionMode ? (
             <>
-              <span className="flex items-center px-3 py-2 text-sm text-gray-600">
+              <span className="flex items-center px-3 py-1.5 text-xs text-slate-500 font-medium">
                 {selectedIds.size} seleccionado(s)
               </span>
-              <button
-                onClick={selectAll}
-                className="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
-                Seleccionar todos
+              <button onClick={selectAll} className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600 font-medium">
+                Todos
               </button>
               <button
                 onClick={handleDeleteSelected}
                 disabled={selectedIds.size === 0 || deleting}
-                className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                className="px-3 py-1.5 text-xs bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 font-medium"
               >
                 {deleting ? 'Eliminando...' : `Eliminar (${selectedIds.size})`}
               </button>
               <button
                 onClick={handleDeleteAll}
                 disabled={deleting || leads.length === 0}
-                className="px-3 py-2 text-sm bg-red-800 text-white rounded-lg hover:bg-red-900 disabled:opacity-50"
+                className="px-3 py-1.5 text-xs bg-red-700 text-white rounded-lg hover:bg-red-800 disabled:opacity-50 font-medium"
               >
                 Eliminar todos
               </button>
               <button
-                onClick={() => {
-                  setSelectionMode(false)
-                  setSelectedIds(new Set())
-                }}
-                className="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
+                className="p-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-400"
               >
                 <XCircle className="w-4 h-4" />
               </button>
@@ -473,76 +799,195 @@ export default function LeadsPage() {
             <>
               <button
                 onClick={() => setSelectionMode(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition text-slate-600 text-xs font-medium"
               >
-                <CheckSquare className="w-5 h-5" />
+                <CheckSquare className="w-3.5 h-3.5" />
                 Seleccionar
               </button>
               <button
-                onClick={() => setShowImportModal(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+                onClick={() => setShowStageModal(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition text-slate-600 text-xs font-medium"
               >
-                <Upload className="w-5 h-5" />
-                Importar CSV
+                <Settings className="w-3.5 h-3.5" />
+                Etapas
+              </button>
+              <button
+                onClick={() => setShowImportModal(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition text-slate-600 text-xs font-medium"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                CSV
               </button>
               <button
                 onClick={() => setShowAddModal(true)}
-                className="inline-flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition"
+                className="inline-flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-700 transition text-xs font-medium shadow-sm shadow-emerald-600/20"
               >
-                <Plus className="w-5 h-5" />
-                Nuevo Lead
+                <Plus className="w-3.5 h-3.5" />
+                Nuevo
               </button>
             </>
           )}
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-3">
+      {/* Pipeline selector + Search */}
+      <div className="flex flex-col sm:flex-row gap-3 mb-3">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <input
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Buscar por nombre, teléfono o email..."
-            className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+            onFocus={() => setShowFilterDropdown(true)}
+            placeholder="Buscar leads..."
+            className="w-full pl-9 pr-10 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 text-sm"
           />
-        </div>
-        <div className="relative">
-          <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-          <select
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-            className="pl-10 pr-8 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 appearance-none cursor-pointer text-gray-900"
+          <button
+            onClick={() => setShowFilterDropdown(!showFilterDropdown)}
+            className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md transition ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+            title="Filtros avanzados"
           >
-            <option value="">Todos los estados</option>
-            {STATUS_OPTIONS.map(status => (
-              <option key={status.value} value={status.value}>{status.label}</option>
-            ))}
-          </select>
-          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+            <Filter className="w-4 h-4" />
+            {activeFilterCount > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 bg-green-600 text-white text-[10px] rounded-full flex items-center justify-center">{activeFilterCount}</span>
+            )}
+          </button>
+
+          {/* Filter Dropdown */}
+          {showFilterDropdown && (
+            <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-30 max-h-[400px] overflow-y-auto">
+              <div className="p-3 border-b border-gray-100 flex items-center justify-between">
+                <span className="text-sm font-semibold text-gray-700">Filtros</span>
+                <div className="flex items-center gap-2">
+                  {activeFilterCount > 0 && (
+                    <button
+                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()) }}
+                      className="text-xs text-red-500 hover:text-red-700"
+                    >
+                      Limpiar filtros
+                    </button>
+                  )}
+                  <button onClick={() => setShowFilterDropdown(false)} className="p-0.5 hover:bg-gray-100 rounded">
+                    <X className="w-4 h-4 text-gray-400" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Stage filters */}
+              {stages.length > 0 && (
+                <div className="p-3 border-b border-gray-100">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Etapa</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {stages.map(stage => {
+                      const isActive = filterStageIds.has(stage.id)
+                      return (
+                        <button
+                          key={stage.id}
+                          onClick={() => {
+                            const next = new Set(filterStageIds)
+                            if (isActive) next.delete(stage.id); else next.add(stage.id)
+                            setFilterStageIds(next)
+                          }}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition border ${
+                            isActive ? 'border-transparent text-white' : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+                          }`}
+                          style={isActive ? { backgroundColor: stage.color } : {}}
+                        >
+                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: stage.color }} />
+                          {stage.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Tag filters */}
+              {allUniqueTags.length > 0 && (
+                <div className="p-3">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Etiquetas</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {allUniqueTags.map(tag => {
+                      const isActive = filterTagNames.has(tag.name)
+                      return (
+                        <button
+                          key={tag.id}
+                          onClick={() => {
+                            const next = new Set(filterTagNames)
+                            if (isActive) next.delete(tag.name); else next.add(tag.name)
+                            setFilterTagNames(next)
+                          }}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition border ${
+                            isActive ? 'border-transparent text-white' : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+                          }`}
+                          style={isActive ? { backgroundColor: tag.color } : {}}
+                        >
+                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: tag.color }} />
+                          {tag.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
+        {pipelines.length > 1 && (
+          <div className="relative">
+            <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <select
+              value={activePipeline?.id || ''}
+              onChange={(e) => {
+                const p = pipelines.find(p => p.id === e.target.value)
+                if (p) setActivePipeline(p)
+              }}
+              className="pl-9 pr-8 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 appearance-none cursor-pointer text-sm text-slate-900"
+            >
+              {pipelines.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+          </div>
+        )}
       </div>
 
-      {/* Pipeline view */}
-      <div className="overflow-x-auto pb-4">
-        <div className="flex gap-4 min-w-max">
-          {leadsByStatus.map((column) => (
-            <div key={column.value} className="w-72 flex-shrink-0">
-              <div className={`p-3 rounded-t-lg ${column.color}`}>
+      {/* Pipeline Kanban */}
+      <div className="flex-1 min-h-0 flex flex-col">
+      {/* Top synced scrollbar */}
+      <div
+        ref={topScrollRef}
+        onScroll={handleTopScroll}
+        className="overflow-x-auto kanban-scroll-top flex-shrink-0"
+        style={{ height: 12 }}
+      >
+        <div style={{ width: `${(stages.length + (unassignedLeads.length > 0 ? 1 : 0)) * 288}px`, height: 1 }} />
+      </div>
+      <div
+        ref={kanbanRef}
+        onScroll={handleKanbanScroll}
+        className="overflow-x-auto overflow-y-auto flex-1 min-h-0 kanban-scroll"
+      >
+        <div className="flex gap-3" style={{ minWidth: `${(stages.length + (unassignedLeads.length > 0 ? 1 : 0)) * 288}px` }}>
+          {leadsByStage.map((column) => (
+            <div key={column.id} className="w-[272px] flex-shrink-0">
+              <div
+                className="px-3 py-2.5 rounded-t-xl text-white sticky top-0 z-10 shadow-md"
+                style={{ backgroundColor: column.color, boxShadow: `0 2px 8px ${column.color}40` }}
+              >
                 <div className="flex items-center justify-between">
-                  <span className="font-medium">{column.label}</span>
-                  <span className="text-sm">{column.leads.length}</span>
+                  <span className="text-sm font-bold tracking-wide uppercase drop-shadow-sm">{column.name}</span>
+                  <span className="text-xs bg-white/30 px-2 py-0.5 rounded-full font-bold">{column.leads.length}</span>
                 </div>
               </div>
               <div
-                className={`bg-gray-100 rounded-b-lg p-2 min-h-[200px] space-y-2 transition-colors ${
-                  dragOverColumn === column.value ? 'bg-green-50 ring-2 ring-green-300 ring-inset' : ''
+                className={`bg-slate-50/80 p-2 min-h-[200px] space-y-2 transition-colors ${
+                  dragOverColumn === column.id ? 'bg-emerald-50 ring-2 ring-emerald-300 ring-inset' : ''
                 }`}
-                onDragOver={(e) => handleDragOver(e, column.value)}
+                onDragOver={(e) => handleDragOver(e, column.id)}
                 onDragLeave={handleDragLeave}
-                onDrop={(e) => handleDrop(e, column.value)}
+                onDrop={(e) => handleDrop(e, column.id)}
               >
                 {column.leads.map((lead) => (
                   <div
@@ -550,171 +995,202 @@ export default function LeadsPage() {
                     draggable={!selectionMode}
                     onDragStart={(e) => handleDragStart(e, lead.id)}
                     onDragEnd={handleDragEnd}
-                    className={`bg-white p-3 rounded-lg shadow-sm border hover:shadow-md transition cursor-pointer ${
-                      selectedIds.has(lead.id) ? 'border-green-500 ring-2 ring-green-200' : 'border-gray-200'
+                    className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
+                      selectedIds.has(lead.id) ? 'border-emerald-500 ring-2 ring-emerald-100' : 'border-slate-100'
                     } ${draggedLeadId === lead.id ? 'opacity-50' : ''} ${!selectionMode ? 'cursor-grab active:cursor-grabbing' : ''}`}
                     onClick={() => selectionMode ? toggleSelection(lead.id) : openDetailPanel(lead)}
                   >
-                    <div className="flex items-start justify-between">
+                    <div className="flex items-start justify-between group">
                       <div className="flex items-center gap-2">
                         {selectionMode ? (
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              toggleSelection(lead.id)
-                            }}
+                            onClick={(e) => { e.stopPropagation(); toggleSelection(lead.id) }}
                             className="p-0.5"
                           >
                             {selectedIds.has(lead.id) ? (
-                              <CheckSquare className="w-5 h-5 text-green-600" />
+                              <CheckSquare className="w-4 h-4 text-emerald-600" />
                             ) : (
-                              <Square className="w-5 h-5 text-gray-400" />
+                              <Square className="w-4 h-4 text-slate-300" />
                             )}
                           </button>
                         ) : (
-                          <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
-                            <span className="text-green-700 text-sm font-medium">
+                          <div className="w-7 h-7 bg-emerald-50 rounded-full flex items-center justify-center">
+                            <span className="text-emerald-700 text-xs font-semibold">
                               {(lead.name || '?').charAt(0).toUpperCase()}
                             </span>
                           </div>
                         )}
-                        <p className="font-medium text-gray-900 truncate max-w-[150px]">
+                        <p className="text-[13px] font-medium text-slate-900 truncate max-w-[150px]">
                           {lead.name || 'Sin nombre'}
                         </p>
                       </div>
                       {!selectionMode && (
                         <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleDeleteLead(lead.id)
-                          }}
-                          className="p-1 text-gray-400 hover:text-red-500"
+                          onClick={(e) => { e.stopPropagation(); handleDeleteLead(lead.id) }}
+                          className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       )}
                     </div>
                     {lead.phone && (
-                      <div className="flex items-center gap-2 mt-2 text-sm text-gray-600">
-                        <Phone className="w-3.5 h-3.5" />
+                      <div className="flex items-center gap-1.5 mt-1.5 text-xs text-slate-500">
+                        <Phone className="w-3 h-3" />
                         {lead.phone}
                       </div>
                     )}
                     {lead.email && (
-                      <div className="flex items-center gap-2 mt-1 text-sm text-gray-600">
-                        <Mail className="w-3.5 h-3.5" />
+                      <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-500">
+                        <Mail className="w-3 h-3" />
                         <span className="truncate max-w-[180px]">{lead.email}</span>
                       </div>
                     )}
-                    {lead.tags && lead.tags.length > 0 && (
+                    {lead.company && (
+                      <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-400">
+                        <Building2 className="w-3 h-3" />
+                        <span className="truncate max-w-[180px]">{lead.company}</span>
+                      </div>
+                    )}
+                    {lead.structured_tags && lead.structured_tags.length > 0 ? (
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {lead.structured_tags.slice(0, 3).map((tag) => (
+                          <span
+                            key={tag.id}
+                            className="px-1.5 py-0.5 text-[10px] rounded-full text-white font-medium"
+                            style={{ backgroundColor: tag.color || '#6b7280' }}
+                          >
+                            {tag.name}
+                          </span>
+                        ))}
+                        {lead.structured_tags.length > 3 && (
+                          <span className="px-1.5 py-0.5 text-slate-400 text-[10px]">
+                            +{lead.structured_tags.length - 3}
+                          </span>
+                        )}
+                      </div>
+                    ) : lead.tags && lead.tags.length > 0 ? (
                       <div className="flex flex-wrap gap-1 mt-2">
                         {lead.tags.slice(0, 2).map((tag, i) => (
-                          <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
+                          <span key={i} className="px-1.5 py-0.5 bg-slate-100 text-slate-500 text-[10px] rounded-full">
                             {tag}
                           </span>
                         ))}
                         {lead.tags.length > 2 && (
-                          <span className="px-2 py-0.5 text-gray-400 text-xs">
-                            +{lead.tags.length - 2}
-                          </span>
+                          <span className="px-1.5 py-0.5 text-slate-400 text-[10px]">+{lead.tags.length - 2}</span>
                         )}
                       </div>
-                    )}
-                    <div className="flex items-center justify-between mt-2 text-xs text-gray-400">
+                    ) : null}
+                    <div className="flex items-center justify-between mt-2 text-[10px] text-slate-400">
                       <span>{formatDistanceToNow(new Date(lead.created_at), { locale: es })}</span>
-                      <MessageCircle className="w-3.5 h-3.5" />
+                      <MessageCircle className="w-3 h-3" />
                     </div>
                   </div>
                 ))}
               </div>
             </div>
           ))}
+          {/* Unassigned column */}
+          {unassignedLeads.length > 0 && (
+            <div className="w-[272px] flex-shrink-0">
+              <div className="px-3 py-2.5 rounded-t-xl bg-slate-500 text-white sticky top-0 z-10 shadow-md">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-bold tracking-wide uppercase drop-shadow-sm">Sin etapa</span>
+                  <span className="text-xs bg-white/30 px-2 py-0.5 rounded-full font-bold">{unassignedLeads.length}</span>
+                </div>
+              </div>
+              <div className="bg-slate-50/80 p-2 min-h-[200px] space-y-2">
+                {unassignedLeads.map((lead) => (
+                  <div
+                    key={lead.id}
+                    draggable={!selectionMode}
+                    onDragStart={(e) => handleDragStart(e, lead.id)}
+                    onDragEnd={handleDragEnd}
+                    className="bg-white p-3 rounded-xl shadow-sm border border-slate-100 hover:shadow-md transition cursor-pointer"
+                    onClick={() => selectionMode ? toggleSelection(lead.id) : openDetailPanel(lead)}
+                  >
+                    <p className="text-[13px] font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
+                    {lead.phone && (
+                      <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-500">
+                        <Phone className="w-3 h-3" />{lead.phone}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
+      </div>
       </div>
 
       {/* Add Lead Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md">
-            <h2 className="text-xl font-bold text-gray-900 mb-4">Nuevo Lead</h2>
-            <div className="space-y-4">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md border border-slate-100">
+            <h2 className="text-lg font-semibold text-slate-900 mb-4">Nuevo Lead</h2>
+            <div className="space-y-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre *</label>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Nombre *</label>
                 <input
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
                   placeholder="Nombre del lead"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Teléfono</label>
                 <input
                   type="tel"
                   value={formData.phone}
                   onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
                   placeholder="+51 999 888 777"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Email</label>
                 <input
                   type="email"
                   value={formData.email}
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
                   placeholder="correo@ejemplo.com"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Estado</label>
-                <select
-                  value={formData.status}
-                  onChange={(e) => setFormData({ ...formData, status: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                >
-                  {STATUS_OPTIONS.map(s => (
-                    <option key={s.value} value={s.value}>{s.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Etiquetas</label>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Etiquetas</label>
                 <input
                   type="text"
                   value={formData.tags}
                   onChange={(e) => setFormData({ ...formData, tags: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                  placeholder="ventas, premium, urgente (separadas por coma)"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
+                  placeholder="ventas, premium (separadas por coma)"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notas</label>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Notas</label>
                 <textarea
                   value={formData.notes}
                   onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
                   rows={3}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                  placeholder="Notas adicionales sobre el lead..."
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
+                  placeholder="Notas adicionales..."
                 />
               </div>
             </div>
-            <div className="flex gap-3 mt-6">
+            <div className="flex gap-3 mt-5">
               <button
-                onClick={() => {
-                  setShowAddModal(false)
-                  setFormData({ name: '', phone: '', email: '', status: 'new', notes: '', tags: '' })
-                }}
-                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                onClick={() => { setShowAddModal(false); setFormData({ name: '', phone: '', email: '', notes: '', tags: '' }) }}
+                className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
               >
                 Cancelar
               </button>
               <button
                 onClick={handleCreateLead}
                 disabled={!formData.name}
-                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm"
               >
                 Crear Lead
               </button>
@@ -723,95 +1199,114 @@ export default function LeadsPage() {
         </div>
       )}
 
-      {/* Edit Lead Modal */}
-      {showEditModal && selectedLead && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold text-gray-900 mb-4">Editar Lead</h2>
-            <div className="space-y-4">
+      {/* Stage Management Modal */}
+      {showStageModal && activePipeline && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md max-h-[85vh] overflow-y-auto border border-gray-100">
+            <div className="flex items-center justify-between mb-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre *</label>
-                <input
-                  type="text"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                />
+                <h2 className="text-lg font-semibold text-gray-900">Gestionar Etapas</h2>
+                <p className="text-sm text-gray-500 mt-0.5">{activePipeline.name}</p>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
-                <input
-                  type="tel"
-                  value={formData.phone}
-                  onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                <input
-                  type="email"
-                  value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Estado</label>
-                <select
-                  value={formData.status}
-                  onChange={(e) => setFormData({ ...formData, status: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                >
-                  {STATUS_OPTIONS.map(s => (
-                    <option key={s.value} value={s.value}>{s.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Etiquetas</label>
-                <input
-                  type="text"
-                  value={formData.tags}
-                  onChange={(e) => setFormData({ ...formData, tags: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notas</label>
-                <textarea
-                  value={formData.notes}
-                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                  rows={3}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
-                />
-              </div>
+              <button onClick={() => setShowStageModal(false)} className="p-1.5 hover:bg-gray-100 rounded-lg transition">
+                <X className="w-5 h-5 text-gray-400" />
+              </button>
             </div>
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => {
-                  setShowEditModal(false)
-                  setSelectedLead(null)
-                }}
-                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={() => {
-                  handleUpdateLead()
-                  if (detailLead && selectedLead && detailLead.id === selectedLead.id) {
-                    setTimeout(() => {
-                      const updated = leads.find(l => l.id === selectedLead.id)
-                      if (updated) setDetailLead(updated)
-                    }, 500)
-                  }
-                }}
-                disabled={!formData.name}
-                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
-              >
-                Guardar Cambios
-              </button>
+
+            {/* Current stages with drag reorder */}
+            <div className="space-y-1.5 mb-5">
+              {allStages.map((stage, idx) => (
+                <div
+                  key={stage.id}
+                  draggable={editingStageId !== stage.id}
+                  onDragStart={() => setDragSrcIdx(idx)}
+                  onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx) }}
+                  onDragEnd={() => { if (dragSrcIdx !== null && dragOverIdx !== null) handleReorderStages(dragSrcIdx, dragOverIdx); setDragSrcIdx(null); setDragOverIdx(null) }}
+                  className={`p-2.5 rounded-xl transition-all ${
+                    dragOverIdx === idx ? 'bg-green-50 ring-2 ring-green-300' : 'bg-gray-50 hover:bg-gray-100'
+                  } ${hiddenStageIds.has(stage.id) ? 'opacity-50' : ''}`}
+                >
+                  {editingStageId === stage.id ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={editStageColor}
+                        onChange={(e) => setEditStageColor(e.target.value)}
+                        className="w-8 h-8 rounded border border-gray-300 cursor-pointer shrink-0"
+                      />
+                      <input
+                        type="text"
+                        value={editStageName}
+                        onChange={(e) => setEditStageName(e.target.value)}
+                        className="flex-1 px-2 py-1 border border-gray-300 rounded-lg text-sm text-gray-900 focus:ring-2 focus:ring-green-500"
+                        onKeyDown={(e) => e.key === 'Enter' && handleUpdateStage(stage.id)}
+                      />
+                      <button onClick={() => handleUpdateStage(stage.id)} className="px-2.5 py-1 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700">
+                        Guardar
+                      </button>
+                      <button onClick={() => setEditingStageId(null)} className="p-1 text-gray-400 hover:text-gray-600">
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <GripVertical className="w-4 h-4 text-gray-300 cursor-grab shrink-0" />
+                      <div className="w-3.5 h-3.5 rounded-full shrink-0" style={{ backgroundColor: stage.color }} />
+                      <span className="flex-1 text-sm font-medium text-gray-800 truncate">{stage.name}</span>
+                      <span className="text-xs text-gray-400 shrink-0">{stage.lead_count}</span>
+                      <button
+                        onClick={() => toggleStageVisibility(stage.id)}
+                        className="p-1 text-gray-400 hover:text-gray-600"
+                        title={hiddenStageIds.has(stage.id) ? 'Mostrar etapa' : 'Ocultar etapa'}
+                      >
+                        {hiddenStageIds.has(stage.id) ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                      <button
+                        onClick={() => { setEditingStageId(stage.id); setEditStageName(stage.name); setEditStageColor(stage.color) }}
+                        className="p-1 text-gray-400 hover:text-blue-500"
+                        title="Editar"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteStage(stage.id)}
+                        className="p-1 text-gray-400 hover:text-red-500"
+                        title="Eliminar"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Add new stage */}
+            <div className="border-t border-gray-200 pt-4">
+              <h4 className="text-sm font-semibold text-gray-700 mb-3">Agregar nueva etapa</h4>
+              <div className="flex gap-2">
+                <input
+                  type="color"
+                  value={newStageColor}
+                  onChange={(e) => setNewStageColor(e.target.value)}
+                  className="w-10 h-10 rounded-lg border border-gray-300 cursor-pointer"
+                />
+                <input
+                  type="text"
+                  value={newStageName}
+                  onChange={(e) => setNewStageName(e.target.value)}
+                  placeholder="Nombre de la etapa"
+                  className="flex-1 px-3 py-2 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-green-500"
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddStage()}
+                />
+                <button
+                  onClick={handleAddStage}
+                  disabled={!newStageName.trim()}
+                  className="px-4 py-2 bg-green-600 text-white rounded-xl hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
+                >
+                  Agregar
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -820,81 +1315,200 @@ export default function LeadsPage() {
       {/* Lead Detail Panel (Slide-over) */}
       {showDetailPanel && detailLead && (
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
-          <div className="absolute inset-0 bg-black/30" onClick={() => { setShowDetailPanel(false); setNewObservation('') }} />
-          <div className="relative w-full max-w-md bg-white shadow-xl overflow-y-auto overscroll-contain">
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setShowDetailPanel(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }} />
+          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200">
             {/* Header */}
-            <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between z-10">
-              <h2 className="text-lg font-semibold text-gray-900">Detalle del Lead</h2>
-              <button onClick={() => { setShowDetailPanel(false); setNewObservation('') }} className="p-1 hover:bg-gray-100 rounded">
-                <X className="w-5 h-5" />
+            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
+              <h2 className="text-sm font-semibold text-slate-900">Detalle del Lead</h2>
+              <button onClick={() => { setShowDetailPanel(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <X className="w-4 h-4 text-slate-400" />
               </button>
             </div>
 
             <div className="p-6 space-y-6">
-              {/* Lead Info */}
-              <div className="flex items-center gap-4">
-                <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center">
-                  <span className="text-green-700 font-bold text-lg">
+              {/* Lead Avatar & Name */}
+              <div className="text-center">
+                <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
+                  <span className="text-emerald-700 font-bold text-base">
                     {(detailLead.name || '?').charAt(0).toUpperCase()}
                   </span>
                 </div>
-                <div>
-                  <h3 className="text-xl font-bold text-gray-900">{detailLead.name || 'Sin nombre'}</h3>
-                  <span className={`inline-block px-2 py-0.5 text-xs rounded-full mt-1 ${getStatusInfo(detailLead.status).color}`}>
-                    {getStatusInfo(detailLead.status).label}
+                {editingField === 'name' ? (
+                  <input
+                    autoFocus
+                    value={editValues.name ?? ''}
+                    onChange={(e) => setEditValues({ ...editValues, name: e.target.value })}
+                    onKeyDown={(e) => handleFieldKeyDown(e, 'name')}
+                    onBlur={() => saveLeadField('name')}
+                    className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
+                    placeholder="Nombre"
+                  />
+                ) : (
+                  <h3
+                    className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
+                    onClick={() => startEditing('name', detailLead.name || '')}
+                    title="Clic para editar nombre"
+                  >
+                    {detailLead.name || 'Sin nombre'}
+                  </h3>
+                )}
+                {detailLead.stage_name && (
+                  <span
+                    className="inline-block px-2 py-0.5 text-xs rounded-full mt-1 text-white"
+                    style={{ backgroundColor: detailLead.stage_color || '#6b7280' }}
+                  >
+                    {detailLead.stage_name}
                   </span>
+                )}
+              </div>
+
+              {/* Inline editable info fields */}
+              <div className="space-y-3">
+                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
+
+                {/* Phone */}
+                <div className="flex items-center gap-3 group">
+                  <Phone className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'phone' ? (
+                    <input autoFocus value={editValues.phone ?? ''} onChange={(e) => setEditValues({ ...editValues, phone: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'phone')} onBlur={() => saveLeadField('phone')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Teléfono" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.phone ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('phone', detailLead.phone || '')} title="Clic para editar">
+                      {detailLead.phone || 'Agregar teléfono'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Email */}
+                <div className="flex items-center gap-3 group">
+                  <Mail className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'email' ? (
+                    <input autoFocus value={editValues.email ?? ''} onChange={(e) => setEditValues({ ...editValues, email: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'email')} onBlur={() => saveLeadField('email')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="correo@ejemplo.com" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.email ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('email', detailLead.email || '')} title="Clic para editar">
+                      {detailLead.email || 'Agregar email'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Last Name */}
+                <div className="flex items-center gap-3 group">
+                  <User className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'last_name' ? (
+                    <input autoFocus value={editValues.last_name ?? ''} onChange={(e) => setEditValues({ ...editValues, last_name: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'last_name')} onBlur={() => saveLeadField('last_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Apellido" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.last_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('last_name', detailLead.last_name || '')} title="Clic para editar">
+                      {detailLead.last_name || 'Agregar apellido'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Company */}
+                <div className="flex items-center gap-3 group">
+                  <Building2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'company' ? (
+                    <input autoFocus value={editValues.company ?? ''} onChange={(e) => setEditValues({ ...editValues, company: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'company')} onBlur={() => saveLeadField('company')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Empresa" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.company ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('company', detailLead.company || '')} title="Clic para editar">
+                      {detailLead.company || 'Agregar empresa'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Age */}
+                <div className="flex items-center gap-3 group">
+                  <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'age' ? (
+                    <input autoFocus type="number" value={editValues.age ?? ''} onChange={(e) => setEditValues({ ...editValues, age: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'age')} onBlur={() => saveLeadField('age')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Edad" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.age ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('age', detailLead.age?.toString() || '')} title="Clic para editar">
+                      {detailLead.age ? `${detailLead.age} años` : 'Agregar edad'}
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {/* Info fields */}
-              <div className="space-y-3">
-                {detailLead.phone && (
-                  <div className="flex items-center gap-3 text-gray-700">
-                    <Phone className="w-4 h-4 text-gray-400" />
-                    <span>{detailLead.phone}</span>
+              {/* Tags */}
+              <div className="space-y-2">
+                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
+                <TagInput
+                  entityType="lead"
+                  entityId={detailLead.id}
+                  assignedTags={detailLead.structured_tags || []}
+                  onTagsChange={(newTags) => {
+                    const updated = { ...detailLead, structured_tags: newTags }
+                    setDetailLead(updated)
+                    setLeads(prev => prev.map(l => l.id === detailLead.id ? updated : l))
+                  }}
+                />
+              </div>
+
+              {/* Pipeline Stage selector */}
+              {stages.length > 0 && (
+                <div className="border-t border-slate-100 pt-4">
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Etapa del Pipeline</h5>
+                  <div className="flex flex-wrap gap-2">
+                    {stages.map(stage => (
+                      <button
+                        key={stage.id}
+                        onClick={() => handleUpdateLeadStage(detailLead.id, stage.id)}
+                        className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${
+                          detailLead.stage_id === stage.id
+                            ? 'text-white shadow-sm'
+                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                        style={detailLead.stage_id === stage.id ? { backgroundColor: stage.color } : {}}
+                      >
+                        {stage.name}
+                      </button>
+                    ))}
                   </div>
-                )}
-                {detailLead.email && (
-                  <div className="flex items-center gap-3 text-gray-700">
-                    <Mail className="w-4 h-4 text-gray-400" />
-                    <span>{detailLead.email}</span>
-                  </div>
-                )}
-                {detailLead.tags && detailLead.tags.length > 0 && (
-                  <div className="flex items-start gap-3">
-                    <Tag className="w-4 h-4 text-gray-400 mt-1" />
-                    <div className="flex flex-wrap gap-1">
-                      {detailLead.tags.map((tag, i) => (
-                        <span key={i} className="px-2 py-1 bg-green-50 text-green-700 text-xs rounded-full">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {detailLead.notes && (
-                  <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700">
-                    <p className="font-medium text-gray-500 text-xs mb-1">Notas</p>
-                    {detailLead.notes}
+                </div>
+              )}
+
+              {/* Notes */}
+              <div className="border-t border-slate-100 pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Notas</h5>
+                  {editingNotes ? (
+                    <button onClick={saveNotes} disabled={savingNotes} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
+                      <Save className="w-3.5 h-3.5" />
+                      {savingNotes ? 'Guardando...' : 'Guardar'}
+                    </button>
+                  ) : (
+                    <button onClick={() => { setEditingNotes(true); setNotesValue(detailLead.notes || '') }} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
+                      <Edit2 className="w-3.5 h-3.5" />
+                      Editar
+                    </button>
+                  )}
+                </div>
+                {editingNotes ? (
+                  <textarea
+                    value={notesValue}
+                    onChange={(e) => setNotesValue(e.target.value)}
+                    className="w-full h-28 p-3 text-sm text-slate-800 border-2 border-emerald-500 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent resize-none placeholder:text-slate-400"
+                    placeholder="Escribe notas sobre este lead..."
+                  />
+                ) : (
+                  <div className="text-sm text-slate-700 bg-slate-50 rounded-xl p-3 min-h-[50px] border border-slate-100">
+                    {detailLead.notes || <span className="text-slate-400 italic">Sin notas</span>}
                   </div>
                 )}
               </div>
 
               {/* Actions */}
-              <div className="flex flex-col gap-2 pt-2 border-t border-gray-200">
+              <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
+                {detailLead.phone && (
+                  <button
+                    onClick={() => handleSendWhatsApp(detailLead.phone)}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition text-sm font-medium shadow-sm"
+                  >
+                    <MessageCircle className="w-4 h-4" />
+                    Enviar WhatsApp
+                  </button>
+                )}
                 <button
-                  onClick={() => openEditModal(detailLead)}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-                >
-                  <Edit className="w-4 h-4" />
-                  Editar Lead
-                </button>
-                <button
-                  onClick={() => {
-                    handleDeleteLead(detailLead.id)
-                    setShowDetailPanel(false)
-                  }}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-red-200 text-red-600 rounded-lg hover:bg-red-50"
+                  onClick={() => { handleDeleteLead(detailLead.id); setShowDetailPanel(false) }}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-sm"
                 >
                   <Trash2 className="w-4 h-4" />
                   Eliminar
@@ -904,92 +1518,63 @@ export default function LeadsPage() {
               {/* Observations / History */}
               <div>
                 <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-sm font-semibold text-gray-600 flex items-center gap-2">
-                    <FileText className="w-4 h-4" />
+                  <h4 className="text-xs font-semibold text-slate-500 flex items-center gap-2">
+                    <FileText className="w-3.5 h-3.5" />
                     Historial de Observaciones
                   </h4>
                   {observations.length > 0 && (
-                    <button
-                      onClick={() => setShowHistoryModal(true)}
-                      className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition"
-                      title="Ver historial completo"
-                    >
+                    <button onClick={() => setShowHistoryModal(true)} className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Ver historial completo">
                       <Maximize2 className="w-4 h-4" />
                     </button>
                   )}
                 </div>
 
-                {/* Add new observation */}
                 <div className="mb-3">
                   <textarea
                     value={newObservation}
                     onChange={(e) => setNewObservation(e.target.value)}
                     placeholder="Escribir una observación..."
                     rows={2}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-sm text-gray-900 placeholder:text-gray-400 resize-none"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
                   />
                   <button
                     onClick={handleAddObservation}
                     disabled={!newObservation.trim() || savingObservation}
-                    className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:opacity-50 transition"
+                    className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs rounded-xl hover:bg-emerald-700 disabled:opacity-50 transition"
                   >
-                    {savingObservation ? (
-                      <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" />
-                    ) : (
-                      <Plus className="w-3.5 h-3.5" />
-                    )}
+                    {savingObservation ? <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" /> : <Plus className="w-3.5 h-3.5" />}
                     Agregar
                   </button>
                 </div>
 
-                {/* Observations list */}
                 {loadingObservations ? (
                   <div className="flex justify-center py-4">
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-green-600" />
+                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-emerald-200 border-t-emerald-600" />
                   </div>
                 ) : observations.length === 0 ? (
-                  <p className="text-sm text-gray-400 text-center py-3">Sin observaciones aún</p>
+                  <p className="text-xs text-slate-400 text-center py-3">Sin observaciones aún</p>
                 ) : (
                   <div className="space-y-2">
                     {observations.slice(0, obsDisplayCount).map((obs) => (
-                      <div key={obs.id} className="p-3 bg-gray-50 rounded-lg group relative">
+                      <div key={obs.id} className="p-2.5 bg-slate-50 rounded-xl group relative border border-slate-100">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
-                            <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">
-                              {obs.notes || '(sin contenido)'}
-                            </p>
-                            <div className="flex items-center gap-2 mt-1.5">
-                              <Clock className="w-3 h-3 text-gray-400" />
-                              <span className="text-xs text-gray-400">
-                                {formatDistanceToNow(new Date(obs.created_at), { locale: es, addSuffix: true })}
-                              </span>
-                              {obs.created_by_name && (
-                                <span className="text-xs text-gray-500">
-                                  &mdash; {obs.created_by_name}
-                                </span>
-                              )}
-                              {obs.type !== 'note' && (
-                                <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
-                                  {obs.type}
-                                </span>
-                              )}
+                            <p className="text-xs text-slate-800 whitespace-pre-wrap break-words">{obs.notes || '(sin contenido)'}</p>
+                            <div className="flex items-center gap-2 mt-1">
+                              <Clock className="w-3 h-3 text-slate-300" />
+                              <span className="text-[10px] text-slate-400">{formatDistanceToNow(new Date(obs.created_at), { locale: es, addSuffix: true })}</span>
+                              {obs.created_by_name && <span className="text-[10px] text-slate-500">&mdash; {obs.created_by_name}</span>}
+                              {obs.type !== 'note' && <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 text-[10px] rounded-full">{obs.type}</span>}
                             </div>
                           </div>
-                          <button
-                            onClick={() => handleDeleteObservation(obs.id)}
-                            className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
-                            title="Eliminar"
-                          >
+                          <button onClick={() => handleDeleteObservation(obs.id)} className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" title="Eliminar">
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
                     ))}
                     {observations.length > obsDisplayCount && (
-                      <button
-                        onClick={() => setObsDisplayCount(prev => prev + 10)}
-                        className="w-full py-2 text-sm text-green-600 hover:text-green-700 hover:bg-green-50 rounded-lg transition font-medium"
-                      >
+                      <button onClick={() => setObsDisplayCount(prev => prev + 10)} className="w-full py-2 text-xs text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-xl transition font-medium">
                         Mostrar más ({observations.length - obsDisplayCount} restantes)
                       </button>
                     )}
@@ -997,7 +1582,7 @@ export default function LeadsPage() {
                 )}
               </div>
 
-              <div className="text-xs text-gray-400 space-y-1">
+              <div className="text-[10px] text-slate-400 space-y-0.5">
                 <p>Creado: {new Date(detailLead.created_at).toLocaleDateString('es')}</p>
                 <p>Actualizado: {formatDistanceToNow(new Date(detailLead.updated_at), { locale: es, addSuffix: true })}</p>
               </div>
@@ -1008,28 +1593,23 @@ export default function LeadsPage() {
 
       {/* Full History Modal */}
       {showHistoryModal && detailLead && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col border border-slate-100">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">Historial Completo</h2>
-                <p className="text-sm text-gray-500">{detailLead.name || 'Sin nombre'} &mdash; {observations.length} registros</p>
+                <h2 className="text-sm font-semibold text-slate-900">Historial Completo</h2>
+                <p className="text-xs text-slate-500">{detailLead.name || 'Sin nombre'} &mdash; {observations.length} registros</p>
               </div>
-              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-1 text-gray-400 hover:text-gray-600 rounded">
-                <X className="w-5 h-5" />
+              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100">
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Filters */}
-            <div className="px-6 py-3 border-b border-gray-100 bg-gray-50">
+            <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
               <div className="flex items-center gap-3 flex-wrap">
                 <div>
-                  <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Tipo</label>
-                  <select
-                    value={historyFilterType}
-                    onChange={(e) => setHistoryFilterType(e.target.value)}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-green-500"
-                  >
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Tipo</label>
+                  <select value={historyFilterType} onChange={(e) => setHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500">
                     <option value="">Todos</option>
                     <option value="note">Nota</option>
                     <option value="call">Llamada</option>
@@ -1039,36 +1619,21 @@ export default function LeadsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Desde</label>
-                  <input
-                    type="date"
-                    value={historyFilterFrom}
-                    onChange={(e) => setHistoryFilterFrom(e.target.value)}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-green-500"
-                  />
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Desde</label>
+                  <input type="date" value={historyFilterFrom} onChange={(e) => setHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500" />
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Hasta</label>
-                  <input
-                    type="date"
-                    value={historyFilterTo}
-                    onChange={(e) => setHistoryFilterTo(e.target.value)}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-green-500"
-                  />
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Hasta</label>
+                  <input type="date" value={historyFilterTo} onChange={(e) => setHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500" />
                 </div>
                 {(historyFilterType || historyFilterFrom || historyFilterTo) && (
-                  <button
-                    onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }}
-                    className="mt-4 text-xs text-gray-500 hover:text-red-600 flex items-center gap-1"
-                  >
-                    <XCircle className="w-3.5 h-3.5" />
-                    Limpiar
+                  <button onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1">
+                    <XCircle className="w-3.5 h-3.5" />Limpiar
                   </button>
                 )}
               </div>
             </div>
 
-            {/* History list */}
             <div className="flex-1 overflow-y-auto p-6">
               {(() => {
                 const filtered = observations.filter(obs => {
@@ -1081,33 +1646,23 @@ export default function LeadsPage() {
                   }
                   return true
                 })
-                if (filtered.length === 0) return <p className="text-sm text-gray-400 text-center py-8">No hay registros con los filtros seleccionados</p>
+                if (filtered.length === 0) return <p className="text-xs text-slate-400 text-center py-8">No hay registros con los filtros seleccionados</p>
                 return (
-                  <div className="space-y-3">
+                  <div className="space-y-2">
                     {filtered.map((obs) => (
-                      <div key={obs.id} className="p-4 bg-gray-50 rounded-lg group relative border border-gray-100">
+                      <div key={obs.id} className="p-3 bg-slate-50 rounded-xl group relative border border-slate-100">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-1">
                               <span className={`px-2 py-0.5 text-xs rounded font-medium ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
                                 {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
                               </span>
-                              <span className="text-xs text-gray-400">
-                                {format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}
-                              </span>
+                              <span className="text-xs text-slate-400">{format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}</span>
                             </div>
-                            <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">
-                              {obs.notes || '(sin contenido)'}
-                            </p>
-                            {obs.created_by_name && (
-                              <p className="text-xs text-gray-400 mt-1.5">por {obs.created_by_name}</p>
-                            )}
+                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words">{obs.notes || '(sin contenido)'}</p>
+                            {obs.created_by_name && <p className="text-xs text-slate-400 mt-1.5">por {obs.created_by_name}</p>}
                           </div>
-                          <button
-                            onClick={() => handleDeleteObservation(obs.id)}
-                            className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
-                            title="Eliminar"
-                          >
+                          <button onClick={() => handleDeleteObservation(obs.id)} className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" title="Eliminar">
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
@@ -1121,10 +1676,44 @@ export default function LeadsPage() {
         </div>
       )}
 
+      {/* Device Selector Modal for WhatsApp */}
+      {showDeviceSelector && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
+            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
+            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
+            {devices.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
+            ) : (
+              <div className="space-y-2">
+                {devices.map((device) => (
+                  <button
+                    key={device.id}
+                    onClick={() => handleDeviceSelected(device)}
+                    className="w-full flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
+                  >
+                    <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center">
+                      <Phone className="w-4 h-4 text-emerald-600" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                      <p className="text-xs text-slate-500">{device.phone || device.jid}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setShowDeviceSelector(false)} className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+
       <ImportCSVModal
         open={showImportModal}
         onClose={() => setShowImportModal(false)}
-        onSuccess={fetchLeads}
+        onSuccess={() => { fetchLeads(); fetchPipelines() }}
         defaultType="leads"
       />
     </div>

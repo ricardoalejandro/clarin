@@ -5,11 +5,13 @@ import { Search, Send, MoreVertical, ArrowLeft, Plus, User, X, Trash2, CheckSqua
 import { formatDistanceToNow, format, isToday, isYesterday, differenceInCalendarDays } from 'date-fns'
 import { es } from 'date-fns/locale'
 import DeviceSelector from '@/components/chat/DeviceSelector'
+import TagSelector from '@/components/chat/TagSelector'
 import MessageBubble from '@/components/chat/MessageBubble'
 import ContactPanel from '@/components/chat/ContactPanel'
 import EmojiPicker from '@/components/chat/EmojiPicker'
 import FileUploader from '@/components/chat/FileUploader'
 import StickerPicker from '@/components/chat/StickerPicker'
+import QuickReplyPicker from '@/components/chat/QuickReplyPicker'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '@/components/WhatsAppTextInput'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ImageViewer from '@/components/chat/ImageViewer'
@@ -139,31 +141,31 @@ function PollModal({ onClose, onSend }: { onClose: () => void; onSend: (q: strin
   const valid = question.trim() && options.filter(o => o.trim()).length >= 2
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl w-full max-w-md shadow-2xl">
-        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl border border-slate-100">
+        <div className="p-4 border-b border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <BarChart3 className="w-5 h-5 text-green-600" />
-            <h3 className="font-semibold text-gray-900">Crear encuesta</h3>
+            <BarChart3 className="w-4 h-4 text-emerald-600" />
+            <h3 className="text-sm font-semibold text-slate-900">Crear encuesta</h3>
           </div>
-          <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600">
-            <X className="w-5 h-5" />
+          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600">
+            <X className="w-4 h-4" />
           </button>
         </div>
         <div className="p-4 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Pregunta</label>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Pregunta</label>
             <input
               type="text"
               value={question}
               onChange={e => setQuestion(e.target.value)}
               placeholder="Escribe tu pregunta..."
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
               autoFocus
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Opciones</label>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Opciones</label>
             <div className="space-y-2">
               {options.map((opt, i) => (
                 <div key={i} className="flex items-center gap-2">
@@ -176,10 +178,10 @@ function PollModal({ onClose, onSend }: { onClose: () => void; onSend: (q: strin
                       setOptions(newOpts)
                     }}
                     placeholder={`Opción ${i + 1}`}
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-green-500 focus:border-transparent text-sm"
+                    className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
                   />
                   {options.length > 2 && (
-                    <button onClick={() => removeOption(i)} className="p-1 text-gray-400 hover:text-red-500">
+                    <button onClick={() => removeOption(i)} className="p-1 text-slate-400 hover:text-red-500">
                       <X className="w-4 h-4" />
                     </button>
                   )}
@@ -189,20 +191,20 @@ function PollModal({ onClose, onSend }: { onClose: () => void; onSend: (q: strin
             {options.length < 12 && (
               <button
                 onClick={addOption}
-                className="mt-2 text-sm text-green-600 hover:text-green-700 font-medium"
+                className="mt-2 text-xs text-emerald-600 hover:text-emerald-700 font-medium"
               >
                 + Agregar opción
               </button>
             )}
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-xs font-medium text-slate-600 mb-1">
               Máx. selecciones permitidas
             </label>
             <select
               value={maxSelections}
               onChange={e => setMaxSelections(Number(e.target.value))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
             >
               {Array.from({ length: options.filter(o => o.trim()).length || 1 }, (_, i) => i + 1).map(n => (
                 <option key={n} value={n}>{n}</option>
@@ -210,10 +212,10 @@ function PollModal({ onClose, onSend }: { onClose: () => void; onSend: (q: strin
             </select>
           </div>
         </div>
-        <div className="p-4 border-t border-gray-200 flex justify-end gap-2">
+        <div className="p-4 border-t border-slate-100 flex justify-end gap-2">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg text-sm"
+            className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl text-sm"
           >
             Cancelar
           </button>
@@ -225,7 +227,7 @@ function PollModal({ onClose, onSend }: { onClose: () => void; onSend: (q: strin
               }
             }}
             disabled={!valid}
-            className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50"
+            className="px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm hover:bg-emerald-700 disabled:opacity-50 font-medium shadow-sm"
           >
             Enviar encuesta
           </button>
@@ -239,8 +241,13 @@ export default function ChatsPage() {
   const [chats, setChats] = useState<Chat[]>([])
   const [messages, setMessages] = useState<Message[]>([])
   const [devices, setDevices] = useState<Device[]>([])
+  const [tags, setTags] = useState<{ id: string; name: string; color: string }[]>([])
+  const [quickReplies, setQuickReplies] = useState<{ id: string; shortcut: string; title: string; body: string }[]>([])
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
   const [filterDevices, setFilterDevices] = useState<string[]>([])
+  const [filterTags, setFilterTags] = useState<string[]>([])
+  const [showQuickReply, setShowQuickReply] = useState(false)
+  const [quickReplyFilter, setQuickReplyFilter] = useState('')
   const [loading, setLoading] = useState(true)
   const [sendingMessage, setSendingMessage] = useState(false)
   const [messageText, setMessageText] = useState('')
@@ -336,6 +343,9 @@ export default function ChatsPage() {
       if (filterDevices.length > 0) {
         filterDevices.forEach(id => params.append('device_ids', id))
       }
+      if (filterTags.length > 0) {
+        filterTags.forEach(id => params.append('tag_ids', id))
+      }
       if (debouncedSearch) {
         params.append('search', debouncedSearch)
       }
@@ -352,7 +362,7 @@ export default function ChatsPage() {
     } finally {
       setLoading(false)
     }
-  }, [filterDevices, debouncedSearch])
+  }, [filterDevices, filterTags, debouncedSearch])
 
   const fetchDevices = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -367,6 +377,24 @@ export default function ChatsPage() {
     } catch (err) {
       console.error('Failed to fetch devices:', err)
     }
+  }, [])
+
+  const fetchTags = useCallback(async () => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/tags', { headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      if (data.success) setTags(data.tags || [])
+    } catch {}
+  }, [])
+
+  const fetchQuickReplies = useCallback(async () => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/quick-replies', { headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      if (data.success) setQuickReplies(data.quick_replies || [])
+    } catch {}
   }, [])
 
   const fetchSavedStickerUrls = useCallback(async () => {
@@ -433,15 +461,27 @@ export default function ChatsPage() {
   useEffect(() => {
     fetchChats()
     fetchDevices()
+    fetchTags()
+    fetchQuickReplies()
     fetchSavedStickerUrls()
-  }, [fetchChats, fetchDevices, fetchSavedStickerUrls])
+  }, [fetchChats, fetchDevices, fetchTags, fetchQuickReplies, fetchSavedStickerUrls])
 
-  // Auto-open chat from URL param (e.g., from contacts page "Enviar Mensaje")
+  // Auto-open chat from URL param (e.g., from contacts page "Enviar Mensaje" or leads "Enviar WhatsApp")
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const openChatId = params.get('open')
+    const jid = params.get('jid')
+    const deviceId = params.get('device')
     if (openChatId && chats.length > 0) {
       const chat = chats.find(c => c.id === openChatId)
+      if (chat) {
+        setSelectedChat(chat)
+      }
+      window.history.replaceState({}, '', '/dashboard/chats')
+    } else if (jid && chats.length > 0) {
+      // Find existing chat with this JID (prefer matching device)
+      const chat = (deviceId && chats.find(c => c.jid === jid && c.device_id === deviceId)) ||
+                   chats.find(c => c.jid === jid)
       if (chat) {
         setSelectedChat(chat)
       }
@@ -974,9 +1014,39 @@ export default function ChatsPage() {
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Quick reply picker intercepts Enter/Arrow keys when open
+    if (showQuickReply) {
+      if (e.key === 'Enter' || e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Escape') {
+        // Let QuickReplyPicker handle these via its global listener
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSendMessage()
+    }
+  }
+
+  const handleMessageChange = (text: string) => {
+    setMessageText(text)
+    // Detect `/` trigger for quick replies
+    if (text.startsWith('/')) {
+      setShowQuickReply(true)
+      setQuickReplyFilter(text.slice(1))
+    } else {
+      setShowQuickReply(false)
+      setQuickReplyFilter('')
+    }
+  }
+
+  const handleQuickReplySelect = (reply: { id: string; shortcut: string; title: string; body: string }) => {
+    setShowQuickReply(false)
+    setQuickReplyFilter('')
+    setMessageText(reply.body)
+    if (inputRef.current) {
+      inputRef.current.clear()
+      inputRef.current.insertAtCaret(reply.body)
+      inputRef.current.focus()
     }
   }
 
@@ -995,58 +1065,58 @@ export default function ChatsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600" />
+        <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
       </div>
     )
   }
 
   return (
-    <div className="flex-1 min-h-0 flex bg-white md:rounded-xl md:border border-gray-200 overflow-hidden">
+    <div className="flex-1 min-h-0 flex bg-white md:rounded-xl md:border border-slate-200 overflow-hidden">
       {/* Chat list */}
       <div
-        className={`border-r border-gray-200 flex flex-col min-h-0 overflow-hidden shrink-0 ${selectedChat ? 'hidden md:flex' : 'flex w-full md:w-auto'}`}
+        className={`border-r border-slate-200 flex flex-col min-h-0 overflow-hidden shrink-0 ${selectedChat ? 'hidden md:flex' : 'flex w-full md:w-auto'}`}
         style={isMdScreen ? { width: selectedChat ? leftPanelWidth : undefined, minWidth: selectedChat ? undefined : leftPanelWidth } : undefined}
       >
         {/* Header with device filter and new chat */}
-        <div className="p-3 border-b border-gray-200 space-y-3">
+        <div className="p-3 border-b border-slate-100 space-y-2.5">
           {selectionMode ? (
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <button
                   onClick={exitSelectionMode}
-                  className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg"
+                  className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg"
                   title="Cancelar"
                 >
-                  <X className="w-5 h-5" />
+                  <X className="w-4 h-4" />
                 </button>
-                <span className="text-sm font-medium text-gray-700">
+                <span className="text-xs font-medium text-slate-600">
                   {selectedChats.size} seleccionado{selectedChats.size !== 1 ? 's' : ''}
                 </span>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <button
                   onClick={toggleSelectAll}
-                  className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg"
+                  className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg"
                   title={selectedChats.size === chats.length ? 'Deseleccionar todos' : 'Seleccionar todos'}
                 >
                   {selectedChats.size === chats.length ? (
-                    <CheckSquare className="w-5 h-5 text-green-600" />
+                    <CheckSquare className="w-4 h-4 text-emerald-600" />
                   ) : (
-                    <Square className="w-5 h-5" />
+                    <Square className="w-4 h-4" />
                   )}
                 </button>
                 <button
                   onClick={deleteSelectedChats}
                   disabled={selectedChats.size === 0 || deleting}
-                  className="p-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                  className="p-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
                   title="Eliminar seleccionados"
                 >
-                  <Trash2 className="w-5 h-5" />
+                  <Trash2 className="w-4 h-4" />
                 </button>
                 <button
                   onClick={deleteAllChats}
                   disabled={chats.length === 0 || deleting}
-                  className="px-3 py-2 bg-red-800 text-white text-sm rounded-lg hover:bg-red-900 disabled:opacity-50"
+                  className="px-2.5 py-1.5 bg-red-800 text-white text-xs rounded-lg hover:bg-red-900 disabled:opacity-50"
                   title="Eliminar todos"
                 >
                   Borrar todos
@@ -1055,41 +1125,48 @@ export default function ChatsPage() {
             </div>
           ) : (
             <div className="flex items-center justify-between gap-2">
-              <DeviceSelector
-                devices={devices}
-                selectedDeviceIds={filterDevices}
-                onDeviceChange={setFilterDevices}
-                mode="multi"
-                placeholder="Todos los dispositivos"
-              />
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <DeviceSelector
+                  devices={devices}
+                  selectedDeviceIds={filterDevices}
+                  onDeviceChange={setFilterDevices}
+                  mode="multi"
+                  placeholder="Todos los dispositivos"
+                />
+                <TagSelector
+                  tags={tags}
+                  selectedTagIds={filterTags}
+                  onTagChange={setFilterTags}
+                />
+              </div>
               <div className="flex items-center gap-1">
                 {chats.length > 0 && (
                   <button
                     onClick={() => setSelectionMode(true)}
-                    className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg"
+                    className="p-1.5 text-slate-500 hover:bg-slate-100 rounded-lg"
                     title="Seleccionar chats"
                   >
-                    <Trash2 className="w-5 h-5" />
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 )}
                 <button
                   onClick={() => setShowNewChatModal(true)}
-                  className="p-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                  className="p-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
                   title="Nueva conversación"
                 >
-                  <Plus className="w-5 h-5" />
+                  <Plus className="w-4 h-4" />
                 </button>
               </div>
             </div>
           )}
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Buscar chat..."
-              className="w-full pl-10 pr-4 py-2.5 bg-gray-100 rounded-lg focus:bg-white focus:ring-2 focus:ring-green-500 border-transparent text-gray-900 placeholder:text-gray-400"
+              className="w-full pl-9 pr-4 py-2 bg-slate-50 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 border border-transparent focus:border-slate-200 text-sm text-slate-900 placeholder:text-slate-400"
             />
           </div>
         </div>
@@ -1097,7 +1174,7 @@ export default function ChatsPage() {
         {/* Chat list */}
         <div className="flex-1 overflow-y-auto">
           {filteredChats.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">
+            <div className="p-8 text-center text-slate-500 text-sm">
               {searchTerm ? 'No se encontraron chats' : 'No hay chats aún'}
             </div>
           ) : (
@@ -1105,8 +1182,8 @@ export default function ChatsPage() {
               <div
                 key={chat.id}
                 onClick={() => selectionMode ? toggleChatSelection(chat.id) : setSelectedChat(chat)}
-                className={`p-3 flex items-center gap-3 cursor-pointer hover:bg-gray-50 border-b border-gray-100 ${
-                  selectedChat?.id === chat.id && !selectionMode ? 'bg-green-50' : ''
+                className={`p-3 flex items-center gap-3 cursor-pointer hover:bg-slate-50 border-b border-slate-50 transition ${
+                  selectedChat?.id === chat.id && !selectionMode ? 'bg-emerald-50' : ''
                 } ${selectionMode && selectedChats.has(chat.id) ? 'bg-red-50' : ''}`}
               >
                 {selectionMode && (
@@ -1126,28 +1203,28 @@ export default function ChatsPage() {
                     onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }}
                   />
                 ) : null}
-                <div className={`w-12 h-12 bg-green-100 rounded-full flex items-center justify-center flex-shrink-0 ${chat.contact_avatar_url ? 'hidden' : ''}`}>
-                  <span className="text-green-700 font-medium text-lg">
+                <div className={`w-11 h-11 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0 ${chat.contact_avatar_url ? 'hidden' : ''}`}>
+                  <span className="text-emerald-700 font-medium text-base">
                     {getChatDisplayName(chat).charAt(0).toUpperCase()}
                   </span>
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between">
-                    <p className="font-medium text-gray-900 truncate">{getChatDisplayName(chat)}</p>
-                    <span className="text-xs text-gray-500">
+                    <p className="text-sm font-medium text-slate-900 truncate">{getChatDisplayName(chat)}</p>
+                    <span className="text-[10px] text-slate-400">
                       {formatTime(chat.last_message_at)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between mt-0.5">
-                    <p className="text-sm text-gray-500 truncate">{chat.last_message || 'Sin mensajes'}</p>
+                    <p className="text-xs text-slate-500 truncate">{chat.last_message || 'Sin mensajes'}</p>
                     {(chat.unread_count || 0) > 0 && (
-                      <span className="bg-green-600 text-white text-xs font-medium px-2 py-0.5 rounded-full ml-2">
+                      <span className="bg-emerald-600 text-white text-[10px] font-medium px-1.5 py-0.5 rounded-full ml-2">
                         {chat.unread_count}
                       </span>
                     )}
                   </div>
                   {chat.device_name && (
-                    <p className="text-xs font-semibold text-green-700 mt-0.5 truncate bg-green-50 px-1.5 py-0.5 rounded inline-block">
+                    <p className="text-[10px] font-semibold text-emerald-700 mt-0.5 truncate bg-emerald-50 px-1.5 py-0.5 rounded inline-block">
                       📱 {chat.device_name}
                     </p>
                   )}
@@ -1162,7 +1239,7 @@ export default function ChatsPage() {
       {selectedChat && (
         <div
           onMouseDown={(e) => startResize('left', e)}
-          className="hidden md:flex w-1 hover:w-1.5 bg-transparent hover:bg-green-400/50 cursor-col-resize shrink-0 transition-all active:bg-green-500/50"
+          className="hidden md:flex w-1 hover:w-1.5 bg-transparent hover:bg-emerald-400/50 cursor-col-resize shrink-0 transition-all active:bg-emerald-500/50"
         />
       )}
 
@@ -1171,11 +1248,11 @@ export default function ChatsPage() {
         {selectedChat ? (
           <>
             {/* Chat header */}
-            <div className="h-16 px-4 flex items-center justify-between border-b border-gray-200 bg-gray-50 shrink-0">
+            <div className="h-14 px-4 flex items-center justify-between border-b border-slate-100 bg-slate-50/80 shrink-0">
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => setSelectedChat(null)}
-                  className="md:hidden p-2 hover:bg-gray-200 rounded-lg"
+                  className="md:hidden p-1.5 hover:bg-slate-200 rounded-lg"
                 >
                   <ArrowLeft className="w-5 h-5" />
                 </button>
@@ -1195,19 +1272,19 @@ export default function ChatsPage() {
                       onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }}
                     />
                   ) : null}
-                  <div className={`w-10 h-10 bg-green-100 rounded-full flex items-center justify-center ${selectedChat.contact_avatar_url ? 'hidden' : ''}`}>
-                    <span className="text-green-700 font-medium">
+                  <div className={`w-10 h-10 bg-emerald-50 rounded-full flex items-center justify-center ${selectedChat.contact_avatar_url ? 'hidden' : ''}`}>
+                    <span className="text-emerald-700 font-medium">
                       {getChatDisplayName(selectedChat).charAt(0).toUpperCase()}
                     </span>
                   </div>
                   <div>
-                    <p className="font-medium text-gray-900">{getChatDisplayName(selectedChat)}</p>
+                    <p className="text-sm font-medium text-slate-900">{getChatDisplayName(selectedChat)}</p>
                     {(() => {
                       const phone = formatPhone(selectedChat.jid, selectedChat.contact_phone)
                       const name = getChatDisplayName(selectedChat)
                       // Only show phone as subtitle if the name isn't already the phone
                       return phone && phone !== name ? (
-                        <p className="text-sm text-gray-500">{phone}</p>
+                        <p className="text-xs text-slate-500">{phone}</p>
                       ) : null
                     })()}
                   </div>
@@ -1216,12 +1293,12 @@ export default function ChatsPage() {
               <div className="flex items-center gap-2">
                 <button 
                   onClick={() => setShowContactPanel(!showContactPanel)}
-                  className={`p-2 rounded-lg ${showContactPanel ? 'bg-green-100 text-green-600' : 'text-gray-500 hover:bg-gray-200'}`}
+                  className={`p-1.5 rounded-lg ${showContactPanel ? 'bg-emerald-100 text-emerald-600' : 'text-slate-500 hover:bg-slate-200'}`}
                 >
-                  <User className="w-5 h-5" />
+                  <User className="w-4 h-4" />
                 </button>
-                <button className="p-2 text-gray-500 hover:bg-gray-200 rounded-lg">
-                  <MoreVertical className="w-5 h-5" />
+                <button className="p-1.5 text-slate-500 hover:bg-slate-200 rounded-lg">
+                  <MoreVertical className="w-4 h-4" />
                 </button>
               </div>
             </div>
@@ -1234,7 +1311,7 @@ export default function ChatsPage() {
                 className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0 wa-chat-bg" 
               >
                 {messages.length === 0 ? (
-                  <div className="flex items-center justify-center h-full text-gray-500">
+                  <div className="flex items-center justify-center h-full text-slate-500 text-sm">
                     No hay mensajes aún
                   </div>
                 ) : (
@@ -1280,7 +1357,7 @@ export default function ChatsPage() {
                   {/* Resize handle - desktop only */}
                   <div
                     onMouseDown={(e) => startResize('right', e)}
-                    className="hidden md:flex w-1 hover:w-1.5 bg-transparent hover:bg-green-400/50 cursor-col-resize shrink-0 transition-all active:bg-green-500/50"
+                    className="hidden md:flex w-1 hover:w-1.5 bg-transparent hover:bg-emerald-400/50 cursor-col-resize shrink-0 transition-all active:bg-emerald-500/50"
                   />
                   {/* Mobile backdrop */}
                   <div
@@ -1304,23 +1381,23 @@ export default function ChatsPage() {
             </div>
 
             {/* Message input */}
-            <div className="bg-gray-50 border-t border-gray-200 shrink-0 pb-[env(safe-area-inset-bottom)]">
+            <div className="bg-slate-50 border-t border-slate-100 shrink-0 pb-[env(safe-area-inset-bottom)]">
               {/* Reply preview bar */}
               {replyingTo && (
                 <div className="px-3 pt-2">
-                  <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
-                    <Reply className="w-4 h-4 text-green-600 flex-shrink-0" />
-                    <div className="flex-1 min-w-0 border-l-2 border-green-500 pl-2">
-                      <p className="text-xs font-semibold text-green-700 truncate">
+                  <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-xl px-3 py-2">
+                    <Reply className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                    <div className="flex-1 min-w-0 border-l-2 border-emerald-500 pl-2">
+                      <p className="text-[10px] font-semibold text-emerald-700 truncate">
                         {replyingTo.is_from_me ? 'Tú' : (replyingTo.from_name || 'Contacto')}
                       </p>
-                      <p className="text-xs text-gray-500 truncate">
+                      <p className="text-[10px] text-slate-500 truncate">
                         {replyingTo.body || (replyingTo.media_url ? `[${replyingTo.message_type || 'media'}]` : '')}
                       </p>
                     </div>
                     <button
                       onClick={() => setReplyingTo(null)}
-                      className="p-1 text-gray-400 hover:text-gray-600 flex-shrink-0"
+                      className="p-1 text-slate-400 hover:text-slate-600 flex-shrink-0"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -1330,15 +1407,15 @@ export default function ChatsPage() {
 
               <div className="p-3">
               {!selectedDevice ? (
-                <div className="text-center text-gray-500 py-2">
+                <div className="text-center text-slate-500 py-2 text-sm">
                   Este chat no tiene un dispositivo asociado
                 </div>
               ) : !isChatDeviceConnected ? (
-                <div className="text-center py-2 space-y-1">
-                  <p className="text-red-500 font-medium text-sm">
+                <div>
+                  <p className="text-red-500 font-medium text-xs">
                     📱 Dispositivo &quot;{chatDevice?.name || 'Desconocido'}&quot; desconectado
                   </p>
-                  <p className="text-gray-400 text-xs">
+                  <p className="text-slate-400 text-[10px]">
                     Conecta el dispositivo para poder enviar mensajes en este chat
                   </p>
                 </div>
@@ -1363,17 +1440,24 @@ export default function ChatsPage() {
                     />
                     <button
                       onClick={() => setShowPollModal(true)}
-                      className="p-2.5 text-gray-500 hover:text-green-600 hover:bg-gray-100 rounded-lg transition-colors"
+                      className="p-2.5 text-slate-500 hover:text-emerald-600 hover:bg-slate-100 rounded-lg transition-colors"
                       title="Crear encuesta"
                     >
                       <BarChart3 className="w-5 h-5" />
                     </button>
-                    <div className="flex-1">
+                    <div className="flex-1 relative">
+                      <QuickReplyPicker
+                        replies={quickReplies}
+                        isOpen={showQuickReply}
+                        filter={quickReplyFilter}
+                        onSelect={handleQuickReplySelect}
+                        onClose={() => { setShowQuickReply(false); setQuickReplyFilter('') }}
+                      />
                       <WhatsAppTextInput
                         ref={inputRef}
                         value={messageText}
-                        onChange={setMessageText}
-                        placeholder="Escribe un mensaje..."
+                        onChange={handleMessageChange}
+                        placeholder="Escribe un mensaje... ( / para respuestas rápidas)"
                         onKeyDown={handleKeyDown}
                         disabled={sendingMessage}
                         singleLine
@@ -1382,7 +1466,7 @@ export default function ChatsPage() {
                     <button
                       onClick={handleSendMessage}
                       disabled={sendingMessage || !messageText.trim()}
-                      className="p-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="p-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <Send className="w-6 h-6" />
                     </button>
@@ -1393,18 +1477,18 @@ export default function ChatsPage() {
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center bg-gray-50">
+          <div className="flex-1 flex items-center justify-center bg-slate-50">
             <div className="text-center">
-              <div className="w-24 h-24 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg className="w-12 h-12 text-gray-400" viewBox="0 0 24 24" fill="currentColor">
+              <div className="w-20 h-20 bg-slate-200 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-10 h-10 text-slate-400" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
                 </svg>
               </div>
-              <h3 className="text-xl font-medium text-gray-700 mb-2">Clarin WhatsApp</h3>
-              <p className="text-gray-500">Selecciona un chat para comenzar</p>
+              <h3 className="text-lg font-medium text-slate-700 mb-1">Clarin WhatsApp</h3>
+              <p className="text-slate-500 text-sm">Selecciona un chat para comenzar</p>
               <button
                 onClick={() => setShowNewChatModal(true)}
-                className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 inline-flex items-center gap-2"
+                className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 inline-flex items-center gap-2 text-sm font-medium shadow-sm"
               >
                 <Plus className="w-4 h-4" />
                 Nueva conversación
@@ -1440,41 +1524,41 @@ export default function ChatsPage() {
 
       {/* Forward message modal */}
       {forwardingMsg && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl w-full max-w-md max-h-[70vh] flex flex-col shadow-2xl">
-            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md max-h-[70vh] flex flex-col shadow-2xl border border-slate-100">
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Forward className="w-5 h-5 text-green-600" />
-                <h3 className="font-semibold text-gray-900">Reenviar mensaje</h3>
+                <Forward className="w-4 h-4 text-emerald-600" />
+                <h3 className="text-sm font-semibold text-slate-900">Reenviar mensaje</h3>
               </div>
               <button
                 onClick={() => { setForwardingMsg(null); setForwardSearch('') }}
-                className="p-1 text-gray-400 hover:text-gray-600"
+                className="p-1 text-slate-400 hover:text-slate-600"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Forwarded message preview */}
-            <div className="px-4 py-2 bg-gray-50 border-b border-gray-200">
-              <div className="border-l-2 border-green-500 pl-2">
-                <p className="text-xs text-gray-500 truncate">
+            <div className="px-4 py-2 bg-slate-50 border-b border-slate-100">
+              <div className="border-l-2 border-emerald-500 pl-2">
+                <p className="text-xs text-slate-500 truncate">
                   {forwardingMsg.body || `[${forwardingMsg.message_type || 'media'}]`}
                 </p>
               </div>
             </div>
 
             {/* Search */}
-            <div className="p-3 border-b border-gray-200">
+            <div className="p-3 border-b border-slate-100">
               <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                 <input
                   type="text"
                   value={forwardSearch}
                   onChange={(e) => setForwardSearch(e.target.value)}
                   placeholder="Buscar chat..."
                   autoFocus
-                  className="w-full pl-9 pr-3 py-2 bg-gray-100 rounded-lg text-sm focus:bg-white focus:ring-2 focus:ring-green-500 border-transparent text-gray-900 placeholder:text-gray-400"
+                  className="w-full pl-9 pr-3 py-2 bg-slate-50 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-emerald-500 border border-transparent focus:border-slate-200 text-slate-900 placeholder:text-slate-400"
                 />
               </div>
             </div>
@@ -1491,7 +1575,7 @@ export default function ChatsPage() {
                   <div
                     key={c.id}
                     onClick={() => handleForwardToChat(c)}
-                    className="px-4 py-3 flex items-center gap-3 cursor-pointer hover:bg-gray-50 border-b border-gray-100"
+                    className="px-4 py-3 flex items-center gap-3 cursor-pointer hover:bg-slate-50 border-b border-slate-50"
                   >
                     {c.contact_avatar_url ? (
                       <img
@@ -1501,18 +1585,18 @@ export default function ChatsPage() {
                         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }}
                       />
                     ) : null}
-                    <div className={`w-10 h-10 bg-green-100 rounded-full flex items-center justify-center flex-shrink-0 ${c.contact_avatar_url ? 'hidden' : ''}`}>
-                      <span className="text-green-700 font-medium">
+                    <div className={`w-10 h-10 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0 ${c.contact_avatar_url ? 'hidden' : ''}`}>
+                      <span className="text-emerald-700 font-medium">
                         {getChatDisplayName(c).charAt(0).toUpperCase()}
                       </span>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-900 truncate">{getChatDisplayName(c)}</p>
+                      <p className="text-sm font-medium text-slate-900 truncate">{getChatDisplayName(c)}</p>
                       {c.device_name && (
-                        <p className="text-xs text-green-600">{c.device_name}</p>
+                        <p className="text-[10px] text-emerald-600">{c.device_name}</p>
                       )}
                     </div>
-                    <Forward className="w-4 h-4 text-gray-400" />
+                    <Forward className="w-4 h-4 text-slate-400" />
                   </div>
               ))}
             </div>

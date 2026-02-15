@@ -105,11 +105,13 @@ type Contact struct {
 	Notes      *string    `json:"notes,omitempty"`
 	Source     *string    `json:"source,omitempty"`
 	IsGroup    bool       `json:"is_group"`
+	KommoID    *int64     `json:"kommo_id,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 
 	// Relations (populated on demand)
-	DeviceNames []ContactDeviceName `json:"device_names,omitempty"`
+	DeviceNames    []ContactDeviceName `json:"device_names,omitempty"`
+	StructuredTags []*Tag              `json:"structured_tags,omitempty"`
 }
 
 // DisplayName returns the best available name for the contact
@@ -150,6 +152,7 @@ type ContactFilter struct {
 	HasPhone bool
 	IsGroup  bool
 	Tags     []string
+	TagIDs   []uuid.UUID
 	Limit    int
 	Offset   int
 }
@@ -188,6 +191,7 @@ type Chat struct {
 // ChatFilter defines filter options for listing chats
 type ChatFilter struct {
 	DeviceIDs  []uuid.UUID
+	TagIDs     []uuid.UUID
 	UnreadOnly bool
 	Archived   bool
 	Search     string
@@ -290,19 +294,30 @@ type Lead struct {
 	ContactID    *uuid.UUID             `json:"contact_id,omitempty"`
 	JID          string                 `json:"jid"`
 	Name         *string                `json:"name,omitempty"`
+	LastName     *string                `json:"last_name,omitempty"`
+	ShortName    *string                `json:"short_name,omitempty"`
 	Phone        *string                `json:"phone,omitempty"`
 	Email        *string                `json:"email,omitempty"`
-	Status       *string                `json:"status,omitempty"` // new, contacted, qualified, proposal, won, lost
+	Company      *string                `json:"company,omitempty"`
+	Age          *int                   `json:"age,omitempty"`
+	Status       *string                `json:"status,omitempty"` // legacy, kept for backward compat
+	PipelineID   *uuid.UUID             `json:"pipeline_id,omitempty"`
+	StageID      *uuid.UUID             `json:"stage_id,omitempty"`
 	Source       *string                `json:"source,omitempty"`
 	Notes        *string                `json:"notes,omitempty"`
 	Tags         []string               `json:"tags,omitempty"`
 	CustomFields map[string]interface{} `json:"custom_fields,omitempty"`
 	AssignedTo   *uuid.UUID             `json:"assigned_to,omitempty"`
+	KommoID      *int64                 `json:"kommo_id,omitempty"`
 	CreatedAt    time.Time              `json:"created_at"`
 	UpdatedAt    time.Time              `json:"updated_at"`
 
-	// Relations
-	Contact *Contact `json:"contact,omitempty"`
+	// Relations (populated on demand)
+	Contact        *Contact `json:"contact,omitempty"`
+	StructuredTags []*Tag   `json:"structured_tags,omitempty"`
+	StageName      *string  `json:"stage_name,omitempty"`
+	StageColor     *string  `json:"stage_color,omitempty"`
+	StagePosition  *int     `json:"stage_position,omitempty"`
 }
 
 // LeadStatus constants
@@ -322,6 +337,7 @@ type Pipeline struct {
 	Name        string           `json:"name"`
 	Description *string          `json:"description,omitempty"`
 	IsDefault   bool             `json:"is_default"`
+	KommoID     *int64           `json:"kommo_id,omitempty"`
 	Stages      []*PipelineStage `json:"stages,omitempty"`
 	CreatedAt   time.Time        `json:"created_at"`
 	UpdatedAt   time.Time        `json:"updated_at"`
@@ -334,7 +350,19 @@ type PipelineStage struct {
 	Name       string    `json:"name"`
 	Color      string    `json:"color"`
 	Position   int       `json:"position"`
+	KommoID    *int64    `json:"kommo_id,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
+	LeadCount  int       `json:"lead_count,omitempty"`
+}
+
+// LeadFilter defines filter options for listing leads
+type LeadFilter struct {
+	Search     string
+	PipelineID *uuid.UUID
+	StageID    *uuid.UUID
+	TagIDs     []uuid.UUID
+	Limit      int
+	Offset     int
 }
 
 // Tag represents a global label with color
@@ -343,6 +371,7 @@ type Tag struct {
 	AccountID uuid.UUID `json:"account_id"`
 	Name      string    `json:"name"`
 	Color     string    `json:"color"`
+	KommoID   *int64    `json:"kommo_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -537,6 +566,17 @@ type InteractionFilter struct {
 	Type          string
 	Limit         int
 	Offset        int
+}
+
+// QuickReply represents a canned/predefined response
+type QuickReply struct {
+	ID        uuid.UUID `json:"id"`
+	AccountID uuid.UUID `json:"account_id"`
+	Shortcut  string    `json:"shortcut"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Default campaign settings (anti-ban)

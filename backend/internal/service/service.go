@@ -9,6 +9,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/kommo"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/whatsapp"
 	"github.com/naperu/clarin/internal/ws"
@@ -27,6 +28,7 @@ type Services struct {
 	Campaign    *CampaignService
 	Event       *EventService
 	Interaction *InteractionService
+	QuickReply  *QuickReplyService
 }
 
 func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub *ws.Hub) *Services {
@@ -42,6 +44,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Campaign:    &CampaignService{repos: repos, pool: pool, hub: hub},
 		Event:       &EventService{repos: repos, hub: hub},
 		Interaction: &InteractionService{repos: repos, hub: hub},
+		QuickReply:  &QuickReplyService{repos: repos},
 	}
 }
 
@@ -399,8 +402,7 @@ func (s *ChatService) CreateNewChat(ctx context.Context, accountID, deviceID uui
 	// Normalize phone number to JID
 	jid := phone
 	if !strings.Contains(phone, "@") {
-		// Remove any non-numeric characters except +
-		phone = strings.TrimPrefix(phone, "+")
+		phone = kommo.NormalizePhone(phone)
 		jid = phone + "@s.whatsapp.net"
 	}
 
@@ -541,6 +543,10 @@ func (s *ContactService) SyncToParticipants(ctx context.Context, contact *domain
 	return s.repos.Contact.SyncToParticipants(ctx, contact)
 }
 
+func (s *ContactService) SyncToLead(ctx context.Context, contact *domain.Contact) error {
+	return s.repos.Contact.SyncToLead(ctx, contact)
+}
+
 func (s *ContactService) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repos.Contact.Delete(ctx, id)
 }
@@ -607,8 +613,16 @@ func (s *LeadService) Update(ctx context.Context, lead *domain.Lead) error {
 	return s.repos.Lead.Update(ctx, lead)
 }
 
+func (s *LeadService) SyncToContact(ctx context.Context, lead *domain.Lead) error {
+	return s.repos.Lead.SyncToContact(ctx, lead)
+}
+
 func (s *LeadService) UpdateStatus(ctx context.Context, leadID uuid.UUID, status string) error {
 	return s.repos.Lead.UpdateStatus(ctx, leadID, status)
+}
+
+func (s *LeadService) UpdateStage(ctx context.Context, leadID uuid.UUID, stageID uuid.UUID) error {
+	return s.repos.Lead.UpdateStage(ctx, leadID, stageID)
 }
 
 func (s *LeadService) GetByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Lead, error) {
@@ -634,6 +648,42 @@ type PipelineService struct {
 
 func (s *PipelineService) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Pipeline, error) {
 	return s.repos.Pipeline.GetByAccountID(ctx, accountID)
+}
+
+func (s *PipelineService) GetByID(ctx context.Context, id uuid.UUID) (*domain.Pipeline, error) {
+	return s.repos.Pipeline.GetByID(ctx, id)
+}
+
+func (s *PipelineService) GetDefaultPipeline(ctx context.Context, accountID uuid.UUID) (*domain.Pipeline, error) {
+	return s.repos.Pipeline.GetDefaultPipeline(ctx, accountID)
+}
+
+func (s *PipelineService) Create(ctx context.Context, pipeline *domain.Pipeline) error {
+	return s.repos.Pipeline.Create(ctx, pipeline)
+}
+
+func (s *PipelineService) Update(ctx context.Context, pipeline *domain.Pipeline) error {
+	return s.repos.Pipeline.Update(ctx, pipeline)
+}
+
+func (s *PipelineService) Delete(ctx context.Context, id uuid.UUID) error {
+	return s.repos.Pipeline.Delete(ctx, id)
+}
+
+func (s *PipelineService) CreateStage(ctx context.Context, stage *domain.PipelineStage) error {
+	return s.repos.Pipeline.CreateStage(ctx, stage)
+}
+
+func (s *PipelineService) UpdateStage(ctx context.Context, stage *domain.PipelineStage) error {
+	return s.repos.Pipeline.UpdateStage(ctx, stage)
+}
+
+func (s *PipelineService) DeleteStage(ctx context.Context, id uuid.UUID) error {
+	return s.repos.Pipeline.DeleteStage(ctx, id)
+}
+
+func (s *PipelineService) ReorderStages(ctx context.Context, pipelineID uuid.UUID, stageIDs []uuid.UUID) error {
+	return s.repos.Pipeline.ReorderStages(ctx, pipelineID, stageIDs)
 }
 
 // TagService handles tag operations
@@ -1101,4 +1151,29 @@ func (s *InteractionService) GetByLeadID(ctx context.Context, leadID uuid.UUID, 
 
 func (s *InteractionService) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repos.Interaction.Delete(ctx, id)
+}
+
+// QuickReplyService handles quick reply / canned response operations
+type QuickReplyService struct {
+	repos *repository.Repositories
+}
+
+func (s *QuickReplyService) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.QuickReply, error) {
+	return s.repos.QuickReply.GetByAccountID(ctx, accountID)
+}
+
+func (s *QuickReplyService) GetByID(ctx context.Context, id uuid.UUID) (*domain.QuickReply, error) {
+	return s.repos.QuickReply.GetByID(ctx, id)
+}
+
+func (s *QuickReplyService) Create(ctx context.Context, qr *domain.QuickReply) error {
+	return s.repos.QuickReply.Create(ctx, qr)
+}
+
+func (s *QuickReplyService) Update(ctx context.Context, qr *domain.QuickReply) error {
+	return s.repos.QuickReply.Update(ctx, qr)
+}
+
+func (s *QuickReplyService) Delete(ctx context.Context, id uuid.UUID) error {
+	return s.repos.QuickReply.Delete(ctx, id)
 }

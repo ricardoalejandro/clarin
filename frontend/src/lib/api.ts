@@ -142,15 +142,29 @@ export interface Message {
   timestamp: string
 }
 
+export interface Tag {
+  id: string
+  account_id: string
+  name: string
+  color: string
+  created_at: string
+}
+
 export interface Lead {
   id: string
   jid: string
+  contact_id: string | null
   name: string
+  last_name: string | null
+  short_name: string | null
   phone: string
   email: string
+  company: string | null
+  age: number | null
   status: string
   notes: string
   tags: string[]
+  structured_tags: Tag[] | null
   assigned_to: string
   created_at: string
   updated_at: string
@@ -169,6 +183,7 @@ export interface Contact {
   email: string | null
   company: string | null
   tags: string[] | null
+  structured_tags: Tag[] | null
   notes: string | null
   source: string | null
   is_group: boolean
@@ -189,4 +204,14 @@ export interface Account {
   slug: string
   plan: string
   created_at: string
+}
+
+export interface QuickReply {
+  id: string
+  account_id: string
+  shortcut: string
+  title: string
+  body: string
+  created_at: string
+  updated_at: string
 }

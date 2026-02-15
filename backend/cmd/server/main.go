@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"github.com/naperu/clarin/internal/api"
+	"github.com/naperu/clarin/internal/kommo"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/storage"
 	"github.com/naperu/clarin/internal/whatsapp"
 	"github.com/naperu/clarin/internal/ws"
+	"github.com/naperu/clarin/pkg/cache"
 	"github.com/naperu/clarin/pkg/config"
 	"github.com/naperu/clarin/pkg/database"
 )
@@ -85,8 +87,28 @@ func main() {
 	// Initialize services
 	services := service.NewServices(repos, devicePool, hub)
 
+	// Initialize Redis cache
+	var redisCache *cache.Cache
+	if cfg.RedisURL != "" {
+		redisCache, err = cache.New(cfg.RedisURL)
+		if err != nil {
+			log.Printf("Warning: Failed to initialize Redis cache: %v (caching disabled)", err)
+		} else {
+			log.Printf("✅ Redis cache initialized")
+		}
+	}
+
+	// Initialize Kommo integration (optional)
+	var kommoSyncSvc *kommo.SyncService
+	if cfg.KommoSubdomain != "" && cfg.KommoAccessToken != "" {
+		kommoClient := kommo.NewClient(cfg.KommoSubdomain, cfg.KommoAccessToken)
+		kommoSyncSvc = kommo.NewSyncService(kommoClient, db, hub)
+		kommoSyncSvc.Start() // Start background sync worker + poller
+		log.Printf("✅ Kommo integration configured for %s.kommo.com", cfg.KommoSubdomain)
+	}
+
 	// Initialize API server
-	server := api.NewServer(cfg, services, repos, hub, devicePool, store)
+	server := api.NewServer(cfg, services, repos, hub, devicePool, store, kommoSyncSvc, redisCache)
 
 	// Start campaign worker
 	campaignDone := make(chan struct{})
@@ -185,6 +207,11 @@ func main() {
 	go func() {
 		<-quit
 		log.Println("Shutting down server...")
+
+		// Stop Kommo sync worker
+		if kommoSyncSvc != nil {
+			kommoSyncSvc.Stop()
+		}
 
 		// Close all WhatsApp connections
 		devicePool.Shutdown()
