@@ -3,10 +3,10 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import {
-  Search, Phone, Mail, Building2, Tag, Edit, Trash2, RefreshCw, 
+  Search, Phone, Mail, Building2, Tag, Edit, Trash2, RefreshCw,
   ChevronDown, CheckSquare, Square, XCircle, MoreVertical,
   Users, Merge, Eye, X, Smartphone, AlertTriangle, MessageSquare, Send,
-  Clock, Plus, FileText, Maximize2, CalendarDays, Upload
+  Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -137,6 +137,14 @@ export default function ContactsPage() {
   const [historyFilterFrom, setHistoryFilterFrom] = useState('')
   const [historyFilterTo, setHistoryFilterTo] = useState('')
 
+  // Inline editing
+  const [editingField, setEditingField] = useState<string | null>(null)
+  const [editValues, setEditValues] = useState<Record<string, string>>({})
+  const [savingField, setSavingField] = useState(false)
+  const [editingNotes, setEditingNotes] = useState(false)
+  const [notesValue, setNotesValue] = useState('')
+  const [savingNotes, setSavingNotes] = useState(false)
+
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
   const fetchContacts = useCallback(async () => {
@@ -217,13 +225,96 @@ export default function ContactsPage() {
         setSelectedContact(data.contact)
         setShowDetailPanel(true)
         setObsDisplayCount(5)
+        setEditingField(null)
+        setEditingNotes(false)
+        setNotesValue(data.contact.notes || '')
         fetchObservations(data.contact.id)
       }
     } catch {
       setSelectedContact(contact)
       setShowDetailPanel(true)
       setObsDisplayCount(5)
+      setEditingField(null)
+      setEditingNotes(false)
+      setNotesValue(contact.notes || '')
       fetchObservations(contact.id)
+    }
+  }
+
+  const startEditingContact = (field: string, currentValue: string) => {
+    setEditingField(field)
+    setEditValues({ ...editValues, [field]: currentValue })
+  }
+
+  const cancelEditingContact = () => {
+    setEditingField(null)
+  }
+
+  const saveContactField = async (field: string) => {
+    if (!selectedContact?.id) return
+    setSavingField(true)
+    try {
+      const payload: Record<string, string | number | null> = {}
+      const val = editValues[field]?.trim() ?? ''
+      if (field === 'age') {
+        payload[field] = val ? parseInt(val, 10) : null
+      } else if (field === 'custom_name') {
+        payload[field] = val || null
+      } else {
+        payload[field] = val || null
+      }
+      const res = await fetch(`/api/contacts/${selectedContact.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json()
+      if (data.success && data.contact) {
+        setSelectedContact(data.contact)
+        fetchContacts()
+      }
+    } catch (err) {
+      console.error('Failed to save contact field:', err)
+    } finally {
+      setSavingField(false)
+      setEditingField(null)
+    }
+  }
+
+  const handleContactFieldKeyDown = (e: React.KeyboardEvent, field: string) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      saveContactField(field)
+    } else if (e.key === 'Escape') {
+      cancelEditingContact()
+    }
+  }
+
+  const saveContactNotes = async () => {
+    if (!selectedContact) return
+    setSavingNotes(true)
+    try {
+      const res = await fetch(`/api/contacts/${selectedContact.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ notes: notesValue }),
+      })
+      const data = await res.json()
+      if (data.success && data.contact) {
+        setSelectedContact(data.contact)
+        fetchContacts()
+      }
+      setEditingNotes(false)
+    } catch (err) {
+      console.error('Failed to save notes:', err)
+    } finally {
+      setSavingNotes(false)
     }
   }
 
@@ -759,98 +850,177 @@ export default function ContactsPage() {
       {/* Detail Panel (Slide-over) */}
       {showDetailPanel && selectedContact && (
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
-          <div className="absolute inset-0 bg-black/30" onClick={() => setShowDetailPanel(false)} />
-          <div className="relative w-full max-w-md bg-white shadow-xl overflow-y-auto overscroll-contain">
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setShowDetailPanel(false); setEditingField(null); setEditingNotes(false) }} />
+          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200">
             {/* Detail Header */}
-            <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between z-10">
-              <h2 className="text-lg font-semibold text-gray-900">Detalle del Contacto</h2>
-              <button onClick={() => setShowDetailPanel(false)} className="p-1 hover:bg-gray-100 rounded">
-                <X className="w-5 h-5" />
+            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
+              <h2 className="text-sm font-semibold text-slate-900">Detalle del Contacto</h2>
+              <button onClick={() => { setShowDetailPanel(false); setEditingField(null); setEditingNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <X className="w-4 h-4 text-slate-400" />
               </button>
             </div>
 
             <div className="p-6 space-y-6">
               {/* Avatar + Name */}
-              <div className="flex items-center gap-4">
+              <div className="text-center">
                 {selectedContact.avatar_url ? (
-                  <img src={selectedContact.avatar_url} alt="" className="w-16 h-16 rounded-full object-cover" />
+                  <img src={selectedContact.avatar_url} alt="" className="w-14 h-14 rounded-full object-cover mx-auto mb-2" />
                 ) : (
-                  <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center">
-                    <span className="text-green-700 font-bold text-xl">{getInitials(selectedContact)}</span>
+                  <div className="w-14 h-14 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
+                    <span className="text-emerald-700 font-bold text-lg">{getInitials(selectedContact)}</span>
                   </div>
                 )}
-                <div>
-                  <h3 className="text-xl font-bold text-gray-900">{getDisplayName(selectedContact)}</h3>
-                  {selectedContact.short_name && (
-                    <p className="text-sm text-gray-500 italic">{selectedContact.short_name}</p>
+                {editingField === 'custom_name' ? (
+                  <input
+                    autoFocus
+                    value={editValues.custom_name ?? ''}
+                    onChange={(e) => setEditValues({ ...editValues, custom_name: e.target.value })}
+                    onKeyDown={(e) => handleContactFieldKeyDown(e, 'custom_name')}
+                    onBlur={() => saveContactField('custom_name')}
+                    className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
+                    placeholder="Nombre"
+                  />
+                ) : (
+                  <h3
+                    className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
+                    onClick={() => startEditingContact('custom_name', selectedContact.custom_name || getDisplayName(selectedContact))}
+                    title="Clic para editar nombre"
+                  >
+                    {getDisplayName(selectedContact)}
+                  </h3>
+                )}
+                {selectedContact.push_name && selectedContact.push_name !== getDisplayName(selectedContact) && (
+                  <p className="text-xs text-slate-400 mt-0.5">Push: {selectedContact.push_name}</p>
+                )}
+                <p className="text-xs text-slate-400">{selectedContact.jid}</p>
+              </div>
+
+              {/* Inline editable info fields */}
+              <div className="space-y-3">
+                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
+
+                {/* Phone */}
+                <div className="flex items-center gap-3 group">
+                  <Phone className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'phone' ? (
+                    <input autoFocus value={editValues.phone ?? ''} onChange={(e) => setEditValues({ ...editValues, phone: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'phone')} onBlur={() => saveContactField('phone')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Teléfono" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.phone ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('phone', selectedContact.phone || '')} title="Clic para editar">
+                      {selectedContact.phone || 'Agregar teléfono'}
+                    </span>
                   )}
-                  {selectedContact.push_name && selectedContact.push_name !== getDisplayName(selectedContact) && (
-                    <p className="text-sm text-gray-500">Push: {selectedContact.push_name}</p>
+                </div>
+
+                {/* Email */}
+                <div className="flex items-center gap-3 group">
+                  <Mail className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'email' ? (
+                    <input autoFocus value={editValues.email ?? ''} onChange={(e) => setEditValues({ ...editValues, email: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'email')} onBlur={() => saveContactField('email')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="correo@ejemplo.com" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.email ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('email', selectedContact.email || '')} title="Clic para editar">
+                      {selectedContact.email || 'Agregar email'}
+                    </span>
                   )}
-                  <p className="text-sm text-gray-400">{selectedContact.jid}</p>
+                </div>
+
+                {/* Last Name */}
+                <div className="flex items-center gap-3 group">
+                  <User className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'last_name' ? (
+                    <input autoFocus value={editValues.last_name ?? ''} onChange={(e) => setEditValues({ ...editValues, last_name: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'last_name')} onBlur={() => saveContactField('last_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Apellido" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.last_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('last_name', selectedContact.last_name || '')} title="Clic para editar">
+                      {selectedContact.last_name || 'Agregar apellido'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Company */}
+                <div className="flex items-center gap-3 group">
+                  <Building2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'company' ? (
+                    <input autoFocus value={editValues.company ?? ''} onChange={(e) => setEditValues({ ...editValues, company: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'company')} onBlur={() => saveContactField('company')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Empresa" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.company ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('company', selectedContact.company || '')} title="Clic para editar">
+                      {selectedContact.company || 'Agregar empresa'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Age */}
+                <div className="flex items-center gap-3 group">
+                  <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'age' ? (
+                    <input autoFocus type="number" value={editValues.age ?? ''} onChange={(e) => setEditValues({ ...editValues, age: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'age')} onBlur={() => saveContactField('age')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Edad" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.age ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('age', selectedContact.age?.toString() || '')} title="Clic para editar">
+                      {selectedContact.age ? `${selectedContact.age} años` : 'Agregar edad'}
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {/* Info fields */}
-              <div className="space-y-3">
-                {selectedContact.phone && (
-                  <div className="flex items-center gap-3 text-gray-700">
-                    <Phone className="w-4 h-4 text-gray-400" />
-                    <span>{selectedContact.phone}</span>
+              {/* Tags */}
+              {selectedContact.tags && selectedContact.tags.length > 0 && (
+                <div className="space-y-2">
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedContact.tags.map((tag, i) => (
+                      <span key={i} className="px-2 py-0.5 bg-emerald-50 text-emerald-700 text-xs rounded-full font-medium">
+                        {tag}
+                      </span>
+                    ))}
                   </div>
-                )}
-                {selectedContact.email && (
-                  <div className="flex items-center gap-3 text-gray-700">
-                    <Mail className="w-4 h-4 text-gray-400" />
-                    <span>{selectedContact.email}</span>
-                  </div>
-                )}
-                {selectedContact.company && (
-                  <div className="flex items-center gap-3 text-gray-700">
-                    <Building2 className="w-4 h-4 text-gray-400" />
-                    <span>{selectedContact.company}</span>
-                  </div>
-                )}
-                {selectedContact.age && (
-                  <div className="text-sm text-gray-500">Edad: {selectedContact.age}</div>
-                )}
-                {selectedContact.tags && selectedContact.tags.length > 0 && (
-                  <div className="flex items-start gap-3">
-                    <Tag className="w-4 h-4 text-gray-400 mt-1" />
-                    <div className="flex flex-wrap gap-1">
-                      {selectedContact.tags.map((tag, i) => (
-                        <span key={i} className="px-2 py-1 bg-green-50 text-green-700 text-xs rounded-full">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {selectedContact.notes && (
-                  <div className="p-3 bg-gray-50 rounded-lg text-sm text-gray-700">
-                    <p className="font-medium text-gray-500 text-xs mb-1">Notas</p>
-                    {selectedContact.notes}
+                </div>
+              )}
+
+              {/* Notes */}
+              <div className="border-t border-slate-100 pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Notas</h5>
+                  {editingNotes ? (
+                    <button onClick={saveContactNotes} disabled={savingNotes} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
+                      <Save className="w-3.5 h-3.5" />
+                      {savingNotes ? 'Guardando...' : 'Guardar'}
+                    </button>
+                  ) : (
+                    <button onClick={() => { setEditingNotes(true); setNotesValue(selectedContact.notes || '') }} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
+                      <Edit2 className="w-3.5 h-3.5" />
+                      Editar
+                    </button>
+                  )}
+                </div>
+                {editingNotes ? (
+                  <textarea
+                    value={notesValue}
+                    onChange={(e) => setNotesValue(e.target.value)}
+                    className="w-full h-28 p-3 text-sm text-slate-800 border-2 border-emerald-500 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent resize-none placeholder:text-slate-400"
+                    placeholder="Escribe notas sobre este contacto..."
+                  />
+                ) : (
+                  <div className="text-sm text-slate-700 bg-slate-50 rounded-xl p-3 min-h-[50px] border border-slate-100">
+                    {selectedContact.notes || <span className="text-slate-400 italic">Sin notas</span>}
                   </div>
                 )}
               </div>
 
               {/* Device Names */}
               {selectedContact.device_names && selectedContact.device_names.length > 0 && (
-                <div>
-                  <h4 className="text-sm font-semibold text-gray-600 mb-2 flex items-center gap-2">
-                    <Smartphone className="w-4 h-4" />
+                <div className="border-t border-slate-100 pt-4">
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                    <Smartphone className="w-3.5 h-3.5" />
                     Nombres por Dispositivo
-                  </h4>
+                  </h5>
                   <div className="space-y-2">
                     {selectedContact.device_names.map((dn) => (
-                      <div key={dn.id} className="p-3 bg-gray-50 rounded-lg text-sm">
-                        <p className="font-medium text-gray-700">{dn.device_name || 'Dispositivo'}</p>
-                        <div className="text-gray-500 mt-1 space-y-0.5">
+                      <div key={dn.id} className="p-3 bg-slate-50 rounded-xl text-sm border border-slate-100">
+                        <p className="font-medium text-slate-700">{dn.device_name || 'Dispositivo'}</p>
+                        <div className="text-slate-500 mt-1 space-y-0.5">
                           {dn.name && <p>Nombre: {dn.name}</p>}
                           {dn.push_name && <p>Push: {dn.push_name}</p>}
                           {dn.business_name && <p>Negocio: {dn.business_name}</p>}
                         </div>
-                        <p className="text-xs text-gray-400 mt-1">
+                        <p className="text-[10px] text-slate-400 mt-1">
                           Sincronizado {formatDistanceToNow(new Date(dn.synced_at), { locale: es, addSuffix: true })}
                         </p>
                       </div>
@@ -860,7 +1030,7 @@ export default function ContactsPage() {
               )}
 
               {/* Actions */}
-              <div className="flex flex-col gap-2 pt-2 border-t border-gray-200">
+              <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
                 <button
                   onClick={() => {
                     const connDevices = devices.filter(d => d.status === 'connected')
@@ -875,28 +1045,21 @@ export default function ContactsPage() {
                     }
                     setShowSendMessage(true)
                   }}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition text-sm font-medium shadow-sm"
                 >
                   <MessageSquare className="w-4 h-4" />
                   Enviar Mensaje
                 </button>
                 <button
-                  onClick={() => { setShowDetailPanel(false); openEditModal(selectedContact) }}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-                >
-                  <Edit className="w-4 h-4" />
-                  Editar Contacto
-                </button>
-                <button
                   onClick={() => handleResetFromDevice(selectedContact.id)}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
                 >
                   <RefreshCw className="w-4 h-4" />
                   Restaurar del Dispositivo
                 </button>
                 <button
                   onClick={() => handleDeleteContact(selectedContact.id)}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-red-200 text-red-600 rounded-lg hover:bg-red-50"
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-sm"
                 >
                   <Trash2 className="w-4 h-4" />
                   Eliminar

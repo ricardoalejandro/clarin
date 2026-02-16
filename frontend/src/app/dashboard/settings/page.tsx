@@ -211,6 +211,14 @@ export default function SettingsPage() {
   }, [activeTab, kommoStatus?.connected, fetchKommoPipelines, fetchKommoConnected, fetchKommoWorkerStatus])
 
   const handleKommoConnectPipeline = async (kommoId: number) => {
+    // Check if another pipeline is already connected
+    const currentConnected = kommoConnected.find(c => c.enabled && c.kommo_pipeline_id !== kommoId)
+    if (currentConnected) {
+      const pipelineName = kommoPipelines.find(p => p.id === currentConnected.kommo_pipeline_id)?.name || 'actual'
+      if (!confirm(`El embudo "${pipelineName}" se desconectará. Solo un embudo puede estar activo. ¿Continuar?`)) {
+        return
+      }
+    }
     setKommoConnecting(kommoId)
     const token = localStorage.getItem('token')
     try {
@@ -682,7 +690,7 @@ export default function SettingsPage() {
               <div>
                 <h3 className="text-sm font-medium text-slate-900">Kommo CRM</h3>
                 <p className="text-xs text-slate-500 mt-1">
-                  Sincronización unidireccional: los datos fluyen de Kommo hacia Clarin (solo lectura).
+                  Sincronización bidireccional con Kommo: etapas, etiquetas y nuevos leads se sincronizan automáticamente.
                 </p>
               </div>
 
@@ -753,7 +761,7 @@ export default function SettingsPage() {
                         <Power className="w-4 h-4" /> Embudos (Pipelines)
                       </h4>
                       <p className="text-xs text-slate-500">
-                        Conecta los embudos que deseas sincronizar en tiempo real. Los leads de pipelines conectados se actualizan automáticamente cada 30 segundos.
+                        Selecciona un embudo para sincronizar en tiempo real. Solo un embudo puede estar activo a la vez.
                       </p>
                     </div>
                     <button
@@ -917,8 +925,8 @@ export default function SettingsPage() {
                   )}
 
                   {/* Read-only notice */}
-                  <div className="text-xs text-slate-500 bg-blue-50 border border-blue-100 rounded-xl p-3">
-                    <strong>Solo lectura:</strong> La integración es unidireccional (Kommo → Clarin). Los cambios en Clarin no se envían a Kommo, protegiendo tus datos en el CRM.
+                  <div className="text-xs text-slate-500 bg-emerald-50 border border-emerald-100 rounded-xl p-3">
+                    <strong>Sincronización bidireccional:</strong> Cambios de etapa, etiquetas y nuevos leads en Clarin se reflejan automáticamente en Kommo. Solo un embudo activo a la vez.
                   </div>
                 </div>
               )}

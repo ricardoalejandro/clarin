@@ -86,9 +86,11 @@ export default function LeadsPage() {
   const [activePipeline, setActivePipeline] = useState<Pipeline | null>(null)
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('')
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
   const [filterStageIds, setFilterStageIds] = useState<Set<string>>(new Set())
   const [filterTagNames, setFilterTagNames] = useState<Set<string>>(new Set())
+  const [tagSearchTerm, setTagSearchTerm] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
@@ -145,18 +147,31 @@ export default function LeadsPage() {
 
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
+  const filterDropdownRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
 
   const fetchPipelines = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/pipelines', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
+      const [pipelinesRes, connectedRes] = await Promise.all([
+        fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/api/kommo/connected', { headers: { Authorization: `Bearer ${token}` } }),
+      ])
+      const data = await pipelinesRes.json()
+      const connectedData = await connectedRes.json()
       if (data.success && data.pipelines) {
         setPipelines(data.pipelines)
-        const defaultP = data.pipelines.find((p: Pipeline) => p.is_default) || data.pipelines[0]
+        // Default to the Kommo-connected pipeline, then is_default, then first
+        let defaultP = null
+        if (connectedData.success && connectedData.connected) {
+          const active = connectedData.connected.find((c: { enabled: boolean }) => c.enabled)
+          if (active?.pipeline_id) {
+            defaultP = data.pipelines.find((p: Pipeline) => p.id === active.pipeline_id)
+          }
+        }
+        if (!defaultP) {
+          defaultP = data.pipelines.find((p: Pipeline) => p.is_default) || data.pipelines[0]
+        }
         if (defaultP) setActivePipeline(defaultP)
       }
     } catch (err) {
@@ -218,6 +233,27 @@ export default function LeadsPage() {
       if (ws) ws.close()
     }
   }, [fetchLeads])
+
+  // Debounce search term (500ms)
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearchTerm(searchTerm), 500)
+    return () => clearTimeout(timer)
+  }, [searchTerm])
+
+  // Click outside to close filter dropdown + reset tag search
+  useEffect(() => {
+    if (!showFilterDropdown) {
+      setTagSearchTerm('')
+      return
+    }
+    const handleClickOutside = (e: MouseEvent) => {
+      if (filterDropdownRef.current && !filterDropdownRef.current.contains(e.target as Node)) {
+        setShowFilterDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showFilterDropdown])
 
   // Sync horizontal scroll between top scrollbar and kanban
   const handleTopScroll = () => {
@@ -716,19 +752,34 @@ export default function LeadsPage() {
     setShowDeviceSelector(true)
   }
 
-  const handleDeviceSelected = (device: Device) => {
+  const handleDeviceSelected = async (device: Device) => {
     setShowDeviceSelector(false)
-    const jid = whatsappPhone.replace(/[^0-9]/g, '') + '@s.whatsapp.net'
-    router.push(`/dashboard/chats?jid=${encodeURIComponent(jid)}&device=${device.id}`)
+    const cleanPhone = whatsappPhone.replace(/[^0-9]/g, '')
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/chats/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ device_id: device.id, phone: cleanPhone }),
+      })
+      const data = await res.json()
+      if (data.success && data.chat) {
+        router.push(`/dashboard/chats?open=${data.chat.id}`)
+      } else {
+        alert(data.error || 'Error al crear conversación')
+      }
+    } catch {
+      alert('Error de conexión')
+    }
   }
 
   const filteredLeads = leads.filter((lead) => {
     const matchesSearch =
-      (lead.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (lead.phone || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (lead.email || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (lead.company || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (lead.last_name || '').toLowerCase().includes(searchTerm.toLowerCase())
+      (lead.name || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
+      (lead.phone || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
+      (lead.email || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
+      (lead.company || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
+      (lead.last_name || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase())
     const matchesPipeline = !activePipeline || lead.pipeline_id === activePipeline.id || !lead.pipeline_id
     const matchesStageFilter = filterStageIds.size === 0 || (lead.stage_id && filterStageIds.has(lead.stage_id))
     const matchesTagFilter = filterTagNames.size === 0 || (lead.structured_tags && lead.structured_tags.some(t => filterTagNames.has(t.name)))
@@ -739,6 +790,29 @@ export default function LeadsPage() {
   const allUniqueTags = Array.from(
     new Map(leads.flatMap(l => l.structured_tags || []).map(t => [t.name, t])).values()
   ).sort((a, b) => a.name.localeCompare(b.name))
+
+  // Count leads per tag
+  const tagLeadCounts = new Map<string, number>()
+  leads.forEach(l => {
+    (l.structured_tags || []).forEach(t => {
+      tagLeadCounts.set(t.name, (tagLeadCounts.get(t.name) || 0) + 1)
+    })
+  })
+
+  // Filter tags by search term (% = wildcard like Kommo/SQL LIKE)
+  const filteredTags = allUniqueTags.filter(tag => {
+    if (!tagSearchTerm.trim()) return true
+    const term = tagSearchTerm.trim()
+    if (term.includes('%')) {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*')
+      try {
+        return new RegExp(`^${escaped}$`, 'i').test(tag.name)
+      } catch {
+        return true
+      }
+    }
+    return tag.name.toLowerCase().includes(term.toLowerCase())
+  })
 
   const activeFilterCount = filterStageIds.size + filterTagNames.size
 
@@ -832,13 +906,14 @@ export default function LeadsPage() {
 
       {/* Pipeline selector + Search */}
       <div className="flex flex-col sm:flex-row gap-3 mb-3">
-        <div className="relative flex-1">
+        <div ref={filterDropdownRef} className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <input
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             onFocus={() => setShowFilterDropdown(true)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
             placeholder="Buscar leads..."
             className="w-full pl-9 pr-10 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 text-sm"
           />
@@ -902,34 +977,81 @@ export default function LeadsPage() {
                 </div>
               )}
 
-              {/* Tag filters */}
+              {/* Tag filters with search */}
               {allUniqueTags.length > 0 && (
                 <div className="p-3">
                   <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Etiquetas</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {allUniqueTags.map(tag => {
+                  <div className="relative mb-2">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                    <input
+                      type="text"
+                      value={tagSearchTerm}
+                      onChange={(e) => setTagSearchTerm(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
+                      placeholder="Buscar... (usa % como comodín)"
+                      className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                    />
+                  </div>
+                  {filterTagNames.size > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-2">
+                      {Array.from(filterTagNames).map(name => {
+                        const tag = allUniqueTags.find(t => t.name === name)
+                        return (
+                          <span
+                            key={name}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-white"
+                            style={{ backgroundColor: tag?.color || '#6b7280' }}
+                          >
+                            {name}
+                            <button onClick={() => { const next = new Set(filterTagNames); next.delete(name); setFilterTagNames(next) }} className="hover:opacity-75">
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          </span>
+                        )
+                      })}
+                    </div>
+                  )}
+                  <div className="max-h-[200px] overflow-y-auto space-y-0.5">
+                    {filteredTags.map(tag => {
                       const isActive = filterTagNames.has(tag.name)
+                      const count = tagLeadCounts.get(tag.name) || 0
                       return (
-                        <button
+                        <label
                           key={tag.id}
-                          onClick={() => {
-                            const next = new Set(filterTagNames)
-                            if (isActive) next.delete(tag.name); else next.add(tag.name)
-                            setFilterTagNames(next)
-                          }}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition border ${
-                            isActive ? 'border-transparent text-white' : 'border-gray-200 text-gray-700 hover:bg-gray-50'
-                          }`}
-                          style={isActive ? { backgroundColor: tag.color } : {}}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer transition"
                         >
-                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: tag.color }} />
-                          {tag.name}
-                        </button>
+                          <input
+                            type="checkbox"
+                            checked={isActive}
+                            onChange={() => {
+                              const next = new Set(filterTagNames)
+                              if (isActive) next.delete(tag.name); else next.add(tag.name)
+                              setFilterTagNames(next)
+                            }}
+                            className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                          />
+                          <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
+                          <span className="flex-1 text-xs text-slate-700">{tag.name}</span>
+                          <span className="text-[10px] text-slate-400 tabular-nums">{count}</span>
+                        </label>
                       )
                     })}
+                    {filteredTags.length === 0 && tagSearchTerm.trim() && (
+                      <p className="text-xs text-slate-400 text-center py-2">Sin resultados</p>
+                    )}
                   </div>
                 </div>
               )}
+
+              {/* Aplicar button */}
+              <div className="p-3 border-t border-gray-100 sticky bottom-0 bg-white rounded-b-xl">
+                <button
+                  onClick={() => setShowFilterDropdown(false)}
+                  className="w-full px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition text-sm font-medium"
+                >
+                  Aplicar
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -973,12 +1095,12 @@ export default function LeadsPage() {
           {leadsByStage.map((column) => (
             <div key={column.id} className="w-[272px] flex-shrink-0">
               <div
-                className="px-3 py-2.5 rounded-t-xl text-white sticky top-0 z-10 shadow-md"
-                style={{ backgroundColor: column.color, boxShadow: `0 2px 8px ${column.color}40` }}
+                className="px-3 py-2.5 rounded-t-xl sticky top-0 z-10"
+                style={{ background: `linear-gradient(135deg, ${column.color}30, ${column.color}18)`, borderBottom: `3px solid ${column.color}`, boxShadow: `0 2px 8px ${column.color}20` }}
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-bold tracking-wide uppercase drop-shadow-sm">{column.name}</span>
-                  <span className="text-xs bg-white/30 px-2 py-0.5 rounded-full font-bold">{column.leads.length}</span>
+                  <span className="text-sm font-bold tracking-wide uppercase text-slate-800">{column.name}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full font-bold text-white" style={{ backgroundColor: column.color }}>{column.leads.length}</span>
                 </div>
               </div>
               <div
@@ -1092,10 +1214,10 @@ export default function LeadsPage() {
           {/* Unassigned column */}
           {unassignedLeads.length > 0 && (
             <div className="w-[272px] flex-shrink-0">
-              <div className="px-3 py-2.5 rounded-t-xl bg-slate-500 text-white sticky top-0 z-10 shadow-md">
+              <div className="px-3 py-2.5 rounded-t-xl sticky top-0 z-10" style={{ background: 'linear-gradient(135deg, rgba(100,116,139,0.2), rgba(100,116,139,0.1))', borderBottom: '3px solid #64748b', boxShadow: '0 2px 8px rgba(100,116,139,0.15)' }}>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-bold tracking-wide uppercase drop-shadow-sm">Sin etapa</span>
-                  <span className="text-xs bg-white/30 px-2 py-0.5 rounded-full font-bold">{unassignedLeads.length}</span>
+                  <span className="text-sm font-bold tracking-wide uppercase text-slate-800">Sin etapa</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full font-bold text-white bg-slate-500">{unassignedLeads.length}</span>
                 </div>
               </div>
               <div className="bg-slate-50/80 p-2 min-h-[200px] space-y-2">

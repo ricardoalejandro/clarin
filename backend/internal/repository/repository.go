@@ -470,10 +470,10 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO chats (account_id, device_id, jid, name)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (account_id, jid) DO UPDATE SET 
+		ON CONFLICT (account_id, jid) DO UPDATE SET
 			device_id = EXCLUDED.device_id,
 			name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name IS NOT NULL THEN EXCLUDED.name ELSE chats.name END
-		RETURNING id, account_id, device_id, contact_id, jid, name, last_message, last_message_at, 
+		RETURNING id, account_id, device_id, contact_id, jid, name, last_message, last_message_at,
 		          unread_count, is_archived, is_pinned, created_at, updated_at
 	`, accountID, deviceID, jid, name).Scan(
 		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
@@ -486,7 +486,7 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Chat, error) {
 	chat := &domain.Chat{}
 	err := r.db.QueryRow(ctx, `
-		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at, 
+		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
 		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
 		       d.name, d.phone,
 		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
@@ -509,7 +509,7 @@ func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Cha
 
 func (r *ChatRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Chat, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at, 
+		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
 		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
 		       d.name, d.phone,
 		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
@@ -592,7 +592,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 
 	// Get data
 	selectQuery := `
-		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at, 
+		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
 		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
 		       d.name, d.phone,
 		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
@@ -687,7 +687,7 @@ type MessageRepository struct {
 
 func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) error {
 	return r.db.QueryRow(ctx, `
-		INSERT INTO messages (account_id, device_id, chat_id, message_id, from_jid, from_name, body, 
+		INSERT INTO messages (account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		                      message_type, media_url, media_mimetype, media_filename, media_size,
 		                      is_from_me, is_read, status, timestamp,
 		                      quoted_message_id, quoted_body, quoted_sender,
@@ -791,12 +791,12 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO contacts (account_id, device_id, jid, phone, name, push_name, is_group)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (account_id, jid) DO UPDATE SET 
+		ON CONFLICT (account_id, jid) DO UPDATE SET
 			name = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
 			push_name = COALESCE(NULLIF(EXCLUDED.push_name, ''), contacts.push_name),
 			phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
 			updated_at = NOW()
-		RETURNING id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		RETURNING id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
 		          email, company, age, tags, notes, source, is_group, created_at, updated_at
 	`, accountID, deviceID, jid, phone, name, pushName, isGroup).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
@@ -809,7 +809,7 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 
 func (r *ContactRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Contact, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
 		       email, company, age, tags, notes, source, is_group, created_at, updated_at
 		FROM contacts WHERE account_id = $1 ORDER BY COALESCE(custom_name, name, push_name, phone) ASC
 	`, accountID)
@@ -844,7 +844,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 
 	if filter.Search != "" {
 		baseQuery += fmt.Sprintf(` AND (
-			name ILIKE $%d OR last_name ILIKE $%d OR short_name ILIKE $%d OR custom_name ILIKE $%d OR push_name ILIKE $%d OR 
+			name ILIKE $%d OR last_name ILIKE $%d OR short_name ILIKE $%d OR custom_name ILIKE $%d OR push_name ILIKE $%d OR
 			phone ILIKE $%d OR jid ILIKE $%d OR email ILIKE $%d OR company ILIKE $%d
 		)`, argNum, argNum, argNum, argNum, argNum, argNum, argNum, argNum, argNum)
 		args = append(args, "%"+filter.Search+"%")
@@ -881,7 +881,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 
 	// Select
 	selectQuery := `
-		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
 		       email, company, age, tags, notes, source, is_group, created_at, updated_at
 	` + baseQuery + " ORDER BY COALESCE(custom_name, name, push_name, phone) ASC NULLS LAST"
 
@@ -917,7 +917,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 func (r *ContactRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Contact, error) {
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
 		       email, company, age, tags, notes, source, is_group, created_at, updated_at
 		FROM contacts WHERE account_id = $1 AND jid = $2
 	`, accountID, jid).Scan(
@@ -935,7 +935,7 @@ func (r *ContactRepository) GetByJID(ctx context.Context, accountID uuid.UUID, j
 func (r *ContactRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Contact, error) {
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, 
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
 		       email, company, age, tags, notes, source, is_group, created_at, updated_at
 		FROM contacts WHERE id = $1
 	`, id).Scan(
@@ -952,8 +952,8 @@ func (r *ContactRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 
 func (r *ContactRepository) Update(ctx context.Context, contact *domain.Contact) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE contacts SET 
-			name = $1, last_name = $2, short_name = $3, custom_name = $4, push_name = $5, 
+		UPDATE contacts SET
+			name = $1, last_name = $2, short_name = $3, custom_name = $4, push_name = $5,
 			email = $6, company = $7, age = $8,
 			tags = $9, notes = $10, phone = $11, updated_at = NOW()
 		WHERE id = $12
@@ -993,7 +993,7 @@ func (r *ContactRepository) SyncToLead(ctx context.Context, contact *domain.Cont
 
 func (r *ContactRepository) UpdateAvatarURL(ctx context.Context, accountID uuid.UUID, jid, avatarURL string) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE contacts SET avatar_url = $1, updated_at = NOW() 
+		UPDATE contacts SET avatar_url = $1, updated_at = NOW()
 		WHERE account_id = $2 AND jid = $3
 	`, avatarURL, accountID, jid)
 	return err
@@ -1009,14 +1009,19 @@ func (r *ContactRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) er
 	return err
 }
 
+func (r *ContactRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM contacts WHERE account_id = $1`, accountID)
+	return err
+}
+
 func (r *ContactRepository) FindDuplicates(ctx context.Context, accountID uuid.UUID) ([][]*domain.Contact, error) {
 	// Find contacts with the same phone number
 	rows, err := r.db.Query(ctx, `
-		SELECT c.id, c.account_id, c.device_id, c.jid, c.phone, c.name, c.last_name, c.short_name, c.custom_name, c.push_name, 
+		SELECT c.id, c.account_id, c.device_id, c.jid, c.phone, c.name, c.last_name, c.short_name, c.custom_name, c.push_name,
 		       c.avatar_url, c.email, c.company, c.age, c.tags, c.notes, c.source, c.is_group, c.created_at, c.updated_at
 		FROM contacts c
 		INNER JOIN (
-			SELECT phone FROM contacts 
+			SELECT phone FROM contacts
 			WHERE account_id = $1 AND phone IS NOT NULL AND phone != '' AND is_group = FALSE
 			GROUP BY phone HAVING COUNT(*) > 1
 		) dup ON c.phone = dup.phone
@@ -1166,7 +1171,7 @@ func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 
 func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Lead, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes, 
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position
 		FROM leads l
@@ -1197,7 +1202,7 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Lead, error) {
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
-		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes, 
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position
 		FROM leads l
@@ -1223,7 +1228,7 @@ func (r *LeadRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status 
 func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lead, error) {
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
-		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes, 
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position
 		FROM leads l
@@ -1243,7 +1248,7 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 
 func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE leads SET 
+		UPDATE leads SET
 			name = $1, last_name = $2, short_name = $3, phone = $4, email = $5, company = $6, age = $7,
 			status = $8, source = $9, notes = $10, tags = $11, custom_fields = $12, assigned_to = $13,
 			pipeline_id = $14, stage_id = $15, updated_at = NOW()
@@ -1285,7 +1290,7 @@ func (r *LeadRepository) SyncToContact(ctx context.Context, lead *domain.Lead) e
 func (r *LeadRepository) GetByContactID(ctx context.Context, contactID uuid.UUID) (*domain.Lead, error) {
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
-		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes, 
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position
 		FROM leads l
@@ -1495,6 +1500,21 @@ func (r *PipelineRepository) GetDefaultPipeline(ctx context.Context, accountID u
 	}
 	pipeline.Stages = stages
 	return pipeline, nil
+}
+
+// GetActivePipeline returns the pipeline connected to Kommo (enabled=TRUE), falling back to is_default, then any pipeline.
+func (r *PipelineRepository) GetActivePipeline(ctx context.Context, accountID uuid.UUID) (*domain.Pipeline, error) {
+	// 1. Try the Kommo-connected pipeline
+	var pipelineID uuid.UUID
+	err := r.db.QueryRow(ctx, `
+		SELECT pipeline_id FROM kommo_connected_pipelines
+		WHERE account_id = $1 AND enabled = TRUE AND pipeline_id IS NOT NULL LIMIT 1
+	`, accountID).Scan(&pipelineID)
+	if err == nil {
+		return r.GetByID(ctx, pipelineID)
+	}
+	// 2. Fallback to default pipeline
+	return r.GetDefaultPipeline(ctx, accountID)
 }
 
 // TagRepository handles tag data access

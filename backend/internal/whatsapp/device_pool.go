@@ -19,6 +19,7 @@ import (
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/storage"
 	"github.com/naperu/clarin/internal/ws"
+	"github.com/naperu/clarin/pkg/cache"
 	"github.com/naperu/clarin/pkg/config"
 	qrcode "github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
@@ -56,6 +57,7 @@ type DevicePool struct {
 	hub     *ws.Hub
 	cfg     *config.Config
 	storage *storage.Storage
+	cache   *cache.Cache
 	mu      sync.RWMutex
 }
 
@@ -89,6 +91,11 @@ func NewDevicePool(cfg *config.Config, repos *repository.Repositories, hub *ws.H
 // SetStorage sets the storage instance for media handling
 func (p *DevicePool) SetStorage(s *storage.Storage) {
 	p.storage = s
+}
+
+// SetCache sets the Redis cache for invalidation on data changes
+func (p *DevicePool) SetCache(c *cache.Cache) {
+	p.cache = c
 }
 
 // LoadExistingDevices loads all existing devices and connects them
@@ -582,8 +589,28 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				Status:    strPtr(domain.LeadStatusNew),
 				Source:    strPtr("whatsapp"),
 			}
-			_ = p.repos.Lead.Create(ctx, newLead)
-			log.Printf("[Lead] Auto-created lead for %s", contactJID)
+			if contact != nil {
+				newLead.ContactID = &contact.ID
+			}
+			if activePipeline, _ := p.repos.Pipeline.GetActivePipeline(ctx, instance.AccountID); activePipeline != nil {
+				newLead.PipelineID = &activePipeline.ID
+				if len(activePipeline.Stages) > 0 {
+					newLead.StageID = &activePipeline.Stages[0].ID
+				}
+			}
+			if err := p.repos.Lead.Create(ctx, newLead); err == nil {
+				log.Printf("[Lead] Auto-created lead for %s (pipeline=%v, stage=%v, contact=%v)", contactJID, newLead.PipelineID, newLead.StageID, newLead.ContactID)
+				// Invalidate leads cache so the API returns fresh data
+				if p.cache != nil {
+					_ = p.cache.Del(context.Background(), "leads:"+instance.AccountID.String())
+				}
+				// Notify frontend via WebSocket
+				p.hub.BroadcastToAccount(instance.AccountID, ws.EventLeadUpdate, map[string]interface{}{
+					"action": "created",
+				})
+			} else {
+				log.Printf("[Lead] Failed to auto-create lead for %s: %v", contactJID, err)
+			}
 		}
 	}
 

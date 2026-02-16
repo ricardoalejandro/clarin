@@ -467,27 +467,68 @@ export default function ChatsPage() {
   }, [fetchChats, fetchDevices, fetchTags, fetchQuickReplies, fetchSavedStickerUrls])
 
   // Auto-open chat from URL param (e.g., from contacts page "Enviar Mensaje" or leads "Enviar WhatsApp")
+  const autoOpenProcessedRef = useRef(false)
   useEffect(() => {
+    if (autoOpenProcessedRef.current) return
     const params = new URLSearchParams(window.location.search)
     const openChatId = params.get('open')
     const jid = params.get('jid')
     const deviceId = params.get('device')
-    if (openChatId && chats.length > 0) {
+
+    if (openChatId) {
+      // Try to find in loaded chats first
       const chat = chats.find(c => c.id === openChatId)
       if (chat) {
         setSelectedChat(chat)
+        autoOpenProcessedRef.current = true
+        window.history.replaceState({}, '', '/dashboard/chats')
+      } else if (chats.length > 0) {
+        // Chat not in loaded list (e.g., new chat outside top 50) — fetch it directly
+        autoOpenProcessedRef.current = true
+        window.history.replaceState({}, '', '/dashboard/chats')
+        const token = localStorage.getItem('token')
+        fetch(`/api/chats/${openChatId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+          .then(r => r.json())
+          .then(data => {
+            if (data.success && data.chat) {
+              setSelectedChat(data.chat)
+            }
+          })
+          .catch(() => {})
       }
-      window.history.replaceState({}, '', '/dashboard/chats')
-    } else if (jid && chats.length > 0) {
+    } else if (jid) {
+      if (chats.length === 0) return
       // Find existing chat with this JID (prefer matching device)
       const chat = (deviceId && chats.find(c => c.jid === jid && c.device_id === deviceId)) ||
                    chats.find(c => c.jid === jid)
       if (chat) {
         setSelectedChat(chat)
+        autoOpenProcessedRef.current = true
+        window.history.replaceState({}, '', '/dashboard/chats')
+      } else if (deviceId) {
+        // Chat not found — create it via backend
+        autoOpenProcessedRef.current = true
+        window.history.replaceState({}, '', '/dashboard/chats')
+        const phone = jid.replace(/@.*$/, '')
+        const token = localStorage.getItem('token')
+        fetch('/api/chats/new', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ device_id: deviceId, phone }),
+        })
+          .then(r => r.json())
+          .then(data => {
+            if (data.success && data.chat) {
+              fetchChats()
+              setSelectedChat(data.chat)
+            }
+          })
+          .catch(() => {})
       }
-      window.history.replaceState({}, '', '/dashboard/chats')
     }
-  }, [chats])
+  }, [chats, fetchChats])
 
   useEffect(() => {
     if (selectedChat) {
@@ -704,7 +745,7 @@ export default function ChatsPage() {
         body: formData,
       })
       const uploadData = await uploadRes.json()
-      
+
       if (!uploadData.success) {
         throw new Error(uploadData.error || 'Error al subir archivo')
       }
@@ -725,7 +766,7 @@ export default function ChatsPage() {
         }),
       })
       const data = await res.json()
-      
+
       if (data.success) {
         const realMsg = data.message
         if (realMsg) {
@@ -942,11 +983,11 @@ export default function ChatsPage() {
 
   const deleteSelectedChats = async () => {
     if (selectedChats.size === 0) return
-    
-    const confirmMsg = selectedChats.size === 1 
-      ? '¿Eliminar este chat y todos sus mensajes?' 
+
+    const confirmMsg = selectedChats.size === 1
+      ? '¿Eliminar este chat y todos sus mensajes?'
       : `¿Eliminar ${selectedChats.size} chats y todos sus mensajes?`
-    
+
     if (!confirm(confirmMsg)) return
 
     setDeleting(true)
@@ -1075,7 +1116,7 @@ export default function ChatsPage() {
       {/* Chat list */}
       <div
         className={`border-r border-slate-200 flex flex-col min-h-0 overflow-hidden shrink-0 ${selectedChat ? 'hidden md:flex' : 'flex w-full md:w-auto'}`}
-        style={isMdScreen ? { width: selectedChat ? leftPanelWidth : undefined, minWidth: selectedChat ? undefined : leftPanelWidth } : undefined}
+        style={isMdScreen ? { width: leftPanelWidth } : undefined}
       >
         {/* Header with device filter and new chat */}
         <div className="p-3 border-b border-slate-100 space-y-2.5">
@@ -1256,7 +1297,7 @@ export default function ChatsPage() {
                 >
                   <ArrowLeft className="w-5 h-5" />
                 </button>
-                <div 
+                <div
                   className="flex items-center gap-3 cursor-pointer"
                   onClick={() => setShowContactPanel(true)}
                 >
@@ -1291,7 +1332,7 @@ export default function ChatsPage() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button 
+                <button
                   onClick={() => setShowContactPanel(!showContactPanel)}
                   className={`p-1.5 rounded-lg ${showContactPanel ? 'bg-emerald-100 text-emerald-600' : 'text-slate-500 hover:bg-slate-200'}`}
                 >
@@ -1306,9 +1347,9 @@ export default function ChatsPage() {
             {/* Messages and contact panel container */}
             <div className="flex-1 flex overflow-hidden min-h-0">
               {/* Messages */}
-              <div 
+              <div
                 ref={messagesContainerRef}
-                className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0 wa-chat-bg" 
+                className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0 wa-chat-bg"
               >
                 {messages.length === 0 ? (
                   <div className="flex items-center justify-center h-full text-slate-500 text-sm">

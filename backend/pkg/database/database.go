@@ -512,6 +512,10 @@ func Migrate(db *pgxpool.Pool) error {
 			UNIQUE(account_id, kommo_pipeline_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_kommo_connected_pipelines_account ON kommo_connected_pipelines(account_id)`,
+
+		// Anti-loop: track last push timestamp to detect echoes from Kommo poller
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_last_pushed_at BIGINT DEFAULT 0`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS kommo_last_pushed_at BIGINT DEFAULT 0`,
 	}
 
 	for _, migration := range migrations {
@@ -540,8 +544,8 @@ func SeedAdmin(db *pgxpool.Pool, cfg *config.Config) error {
 	// Create default account
 	var accountID string
 	err = db.QueryRow(ctx, `
-		INSERT INTO accounts (name, plan, max_devices) 
-		VALUES ('Default Account', 'enterprise', 200) 
+		INSERT INTO accounts (name, plan, max_devices)
+		VALUES ('Default Account', 'enterprise', 200)
 		ON CONFLICT DO NOTHING
 		RETURNING id
 	`).Scan(&accountID)

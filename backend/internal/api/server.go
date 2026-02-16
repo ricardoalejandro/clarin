@@ -106,7 +106,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 			return strings.HasPrefix(path, "/api/media/file/") || strings.HasPrefix(path, "/ws")
 		},
 	}))
-	
+
 	// CORS Configuration
 	corsOrigins := "http://localhost:3000,http://localhost:8080"
 	if cfg.IsProduction() && len(cfg.CORSOrigins) > 0 {
@@ -327,7 +327,7 @@ func (s *Server) setupRoutes() {
 
 	// Super Admin routes
 	admin := protected.Group("/admin", s.superAdminMiddleware)
-	
+
 	// Account management
 	adminAccounts := admin.Group("/accounts")
 	adminAccounts.Get("/", s.handleAdminGetAccounts)
@@ -1439,6 +1439,11 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	// Push new lead to Kommo (async, only if pipeline is Kommo-connected)
+	if s.kommoSync != nil {
+		go s.kommoSync.PushNewLead(accountID, lead.ID)
+	}
+
 	s.invalidateLeadsCache(accountID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "lead": lead})
 }
@@ -1671,6 +1676,12 @@ func (s *Server) handleUpdateLeadStage(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	// Push stage change to Kommo (async, non-blocking)
+	if s.kommoSync != nil {
+		accountID := c.Locals("account_id").(uuid.UUID)
+		go s.kommoSync.PushLeadStageChange(accountID, leadID, stageID)
+	}
+
 	s.invalidateLeadsCache(c.Locals("account_id").(uuid.UUID))
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -1680,24 +1691,6 @@ func (s *Server) handleGetPipelines(c *fiber.Ctx) error {
 	pipelines, err := s.services.Pipeline.GetByAccountID(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	// Filter: only show pipelines that are either non-Kommo or connected
-	if s.kommoSync != nil {
-		connected, _ := s.kommoSync.GetConnectedPipelines(c.Context(), accountID)
-		connectedIDs := make(map[int64]bool)
-		for _, cp := range connected {
-			if cp.Enabled {
-				connectedIDs[cp.KommoPipelineID] = true
-			}
-		}
-		var filtered []*domain.Pipeline
-		for _, p := range pipelines {
-			if p.KommoID == nil || connectedIDs[*p.KommoID] {
-				filtered = append(filtered, p)
-			}
-		}
-		pipelines = filtered
 	}
 
 	return c.JSON(fiber.Map{"success": true, "pipelines": pipelines})
@@ -2363,11 +2356,25 @@ func (s *Server) handleDeleteContact(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeleteContactsBatch(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
 	var body struct {
-		IDs []uuid.UUID `json:"ids"`
+		IDs       []uuid.UUID `json:"ids"`
+		DeleteAll bool        `json:"delete_all"`
 	}
-	if err := c.BodyParser(&body); err != nil || len(body.IDs) == 0 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "provide ids array"})
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid request"})
+	}
+
+	if body.DeleteAll {
+		if err := s.services.Contact.DeleteAll(c.Context(), accountID); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"success": true, "message": "All contacts deleted"})
+	}
+
+	if len(body.IDs) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "provide ids array or delete_all"})
 	}
 
 	if err := s.services.Contact.DeleteBatch(c.Context(), body.IDs); err != nil {
@@ -2501,6 +2508,18 @@ func (s *Server) handleAssignTag(c *fiber.Ctx) error {
 	if err := s.services.Tag.Assign(c.Context(), req.EntityType, entityID, tagID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+
+	// Push tag change to Kommo (async)
+	if s.kommoSync != nil {
+		accountID := c.Locals("account_id").(uuid.UUID)
+		switch req.EntityType {
+		case "lead":
+			go s.kommoSync.PushLeadTagsChange(accountID, entityID)
+		case "contact":
+			go s.kommoSync.PushContactTagsChange(accountID, entityID)
+		}
+	}
+
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -2524,6 +2543,18 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 	if err := s.services.Tag.Remove(c.Context(), req.EntityType, entityID, tagID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+
+	// Push tag change to Kommo (async)
+	if s.kommoSync != nil {
+		accountID := c.Locals("account_id").(uuid.UUID)
+		switch req.EntityType {
+		case "lead":
+			go s.kommoSync.PushLeadTagsChange(accountID, entityID)
+		case "contact":
+			go s.kommoSync.PushContactTagsChange(accountID, entityID)
+		}
+	}
+
 	return c.JSON(fiber.Map{"success": true})
 }
 

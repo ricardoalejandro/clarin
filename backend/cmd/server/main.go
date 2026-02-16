@@ -98,6 +98,11 @@ func main() {
 		}
 	}
 
+	// Set Redis cache on device pool for lead cache invalidation
+	if redisCache != nil {
+		devicePool.SetCache(redisCache)
+	}
+
 	// Initialize Kommo integration (optional)
 	var kommoSyncSvc *kommo.SyncService
 	if cfg.KommoSubdomain != "" && cfg.KommoAccessToken != "" {

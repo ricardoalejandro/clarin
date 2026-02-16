@@ -326,7 +326,13 @@ return result, nil
 }
 
 // ConnectPipeline connects a Kommo pipeline for real-time sync.
+// Only ONE pipeline can be active per account — auto-disconnects any other.
 func (s *SyncService) ConnectPipeline(ctx context.Context, accountID uuid.UUID, kommoPipelineID int) (*ConnectedPipeline, error) {
+// Auto-disconnect any other enabled pipeline for this account
+_, _ = s.db.Exec(ctx,
+	`UPDATE kommo_connected_pipelines SET enabled = FALSE WHERE account_id = $1 AND kommo_pipeline_id != $2`,
+	accountID, kommoPipelineID)
+
 // Sync this pipeline's metadata (pipeline + stages) from Kommo
 pipelineID, err := s.syncSinglePipeline(ctx, accountID, kommoPipelineID)
 if err != nil {
@@ -582,30 +588,73 @@ tagNames = append(tagNames, t.Name)
 }
 }
 
-var leadID uuid.UUID
+// Determine lead name: prefer contact name over generic Kommo lead name
+	leadName := cleanQuotes(kl.Name)
+	if contactID != nil {
+		var contactName string
+		_ = s.db.QueryRow(ctx, `SELECT COALESCE(name, '') FROM contacts WHERE id = $1`, *contactID).Scan(&contactName)
+		if contactName != "" {
+			leadName = contactName
+		}
+	}
+
+	var leadID uuid.UUID
+	foundByKommoID := false
 	err = s.db.QueryRow(ctx, `SELECT id FROM leads WHERE account_id = $1 AND kommo_id = $2`, accountID, kommoID).Scan(&leadID)
+	if err == nil {
+		foundByKommoID = true
+	} else if jid != "" {
+		// Also try to find by JID (lead may exist from WhatsApp auto-create without kommo_id)
+		err = s.db.QueryRow(ctx, `SELECT id FROM leads WHERE account_id = $1 AND jid = $2`, accountID, jid).Scan(&leadID)
+	}
 	if err != nil {
 		leadID = uuid.New()
 		_, err = s.db.Exec(ctx, `
 			INSERT INTO leads (id, account_id, contact_id, jid, name, phone, email, status, source, notes,
 				pipeline_id, stage_id, tags, kommo_id, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, 'new', 'kommo', '', $8, $9, $10, $11, NOW(), NOW())
-		`, leadID, accountID, contactID, jid, nilIfEmpty(cleanQuotes(kl.Name)), nilIfEmpty(phone),
+		`, leadID, accountID, contactID, jid, nilIfEmpty(leadName), nilIfEmpty(phone),
 			nilIfEmpty(email), pipelineID, stageID, tagNames, kommoID)
 	} else {
-		_, err = s.db.Exec(ctx, `
-			UPDATE leads SET
-				name = CASE WHEN $1 != '' THEN $1 ELSE name END,
-				phone = COALESCE($2, phone),
-				email = COALESCE($3, email),
-				contact_id = COALESCE($4, contact_id),
-				pipeline_id = COALESCE($5, pipeline_id),
-				stage_id = COALESCE($6, stage_id),
-				tags = COALESCE($7, tags),
-				updated_at = NOW()
-			WHERE id = $8
-		`, cleanQuotes(kl.Name), nilIfEmpty(phone), nilIfEmpty(email),
-			contactID, pipelineID, stageID, tagNames, leadID)
+		// Anti-loop: skip update if this is an echo of our own push
+		var lastPushedAt int64
+		_ = s.db.QueryRow(ctx, `SELECT COALESCE(kommo_last_pushed_at, 0) FROM leads WHERE id = $1`, leadID).Scan(&lastPushedAt)
+		if lastPushedAt > 0 && lastPushedAt == kl.UpdatedAt {
+			// This update was caused by our own push — reset and skip
+			_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = 0 WHERE id = $1`, leadID)
+			return nil
+		}
+
+		if foundByKommoID {
+			// Already linked — full bidirectional update from Kommo
+			_, err = s.db.Exec(ctx, `
+				UPDATE leads SET
+					name = CASE WHEN $1 != '' THEN $1 ELSE name END,
+					phone = COALESCE($2, phone),
+					email = COALESCE($3, email),
+					contact_id = COALESCE($4, contact_id),
+					pipeline_id = COALESCE($5, pipeline_id),
+					stage_id = COALESCE($6, stage_id),
+					tags = COALESCE($7, tags),
+					updated_at = NOW()
+				WHERE id = $8
+			`, leadName, nilIfEmpty(phone), nilIfEmpty(email),
+				contactID, pipelineID, stageID, tagNames, leadID)
+		} else {
+			// First-time linking (found by JID) — Clarin keeps name/phone/email,
+			// only link kommo_id and sync CRM fields (pipeline, stage, tags)
+			_, err = s.db.Exec(ctx, `
+				UPDATE leads SET
+					kommo_id = $1,
+					contact_id = COALESCE($2, contact_id),
+					pipeline_id = COALESCE($3, pipeline_id),
+					stage_id = COALESCE($4, stage_id),
+					tags = COALESCE($5, tags),
+					updated_at = NOW()
+				WHERE id = $6
+			`, kommoID, contactID, pipelineID, stageID, tagNames, leadID)
+			log.Printf("[Kommo Sync] Linked existing Clarin lead %s to Kommo ID %d (preserved Clarin name/phone/email)", leadID, kommoID)
+		}
 	}
 	if err != nil {
 		return err
@@ -875,6 +924,245 @@ func (s *SyncService) syncContactTags(ctx context.Context, accountID, contactID 
 		_, _ = s.db.Exec(ctx, `
 			INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
 		`, contactID, tagID)
+	}
+}
+
+// --- Helpers ---
+
+// --- Push Operations (Clarin → Kommo, async, individual actions only) ---
+
+// PushLeadStageChange pushes a lead stage change to Kommo.
+// Only acts if the lead has a kommo_id and the stage has a kommo_id.
+func (s *SyncService) PushLeadStageChange(accountID, leadID, stageID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var kommoLeadID *int64
+	var kommoStageID *int64
+	var kommoPipelineID *int64
+
+	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoLeadID)
+	if err != nil || kommoLeadID == nil {
+		return // Not a Kommo lead
+	}
+
+	err = s.db.QueryRow(ctx, `
+		SELECT ps.kommo_id, p.kommo_id
+		FROM pipeline_stages ps
+		JOIN pipelines p ON ps.pipeline_id = p.id
+		WHERE ps.id = $1
+	`, stageID).Scan(&kommoStageID, &kommoPipelineID)
+	if err != nil || kommoStageID == nil || kommoPipelineID == nil {
+		return // Not a Kommo stage/pipeline
+	}
+
+	updatedAt, err := s.client.UpdateLeadStatus(int(*kommoLeadID), int(*kommoStageID), int(*kommoPipelineID))
+	if err != nil {
+		log.Printf("[PUSH] Lead %s stage change to Kommo failed: %v", leadID, err)
+		return
+	}
+
+	// Store the pushed timestamp for anti-loop
+	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
+	log.Printf("[PUSH] Lead %s stage → Kommo lead %d, stage %d (updated_at=%d)", leadID, *kommoLeadID, *kommoStageID, updatedAt)
+}
+
+// PushLeadTagsChange pushes all current tags of a lead to Kommo.
+func (s *SyncService) PushLeadTagsChange(accountID, leadID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var kommoLeadID *int64
+	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoLeadID)
+	if err != nil || kommoLeadID == nil {
+		return
+	}
+
+	// Get all current tags for this lead with their kommo_id
+	rows, err := s.db.Query(ctx, `
+		SELECT t.name, t.kommo_id FROM lead_tags lt
+		JOIN tags t ON lt.tag_id = t.id
+		WHERE lt.lead_id = $1
+	`, leadID)
+	if err != nil {
+		log.Printf("[PUSH] Lead %s: failed to fetch tags: %v", leadID, err)
+		return
+	}
+	defer rows.Close()
+
+	var tags []KommoTag
+	for rows.Next() {
+		var name string
+		var kommoTagID *int64
+		if err := rows.Scan(&name, &kommoTagID); err != nil {
+			continue
+		}
+		tag := KommoTag{Name: name}
+		if kommoTagID != nil {
+			tag.ID = int(*kommoTagID)
+		}
+		tags = append(tags, tag)
+	}
+
+	updatedAt, err := s.client.UpdateLeadTags(int(*kommoLeadID), tags)
+	if err != nil {
+		log.Printf("[PUSH] Lead %s tags to Kommo failed: %v", leadID, err)
+		return
+	}
+
+	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
+	log.Printf("[PUSH] Lead %s tags → Kommo lead %d (%d tags, updated_at=%d)", leadID, *kommoLeadID, len(tags), updatedAt)
+}
+
+// PushContactTagsChange pushes all current tags of a contact to Kommo.
+func (s *SyncService) PushContactTagsChange(accountID, contactID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var kommoContactID *int64
+	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM contacts WHERE id = $1 AND account_id = $2`, contactID, accountID).Scan(&kommoContactID)
+	if err != nil || kommoContactID == nil {
+		return
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT t.name, t.kommo_id FROM contact_tags ct
+		JOIN tags t ON ct.tag_id = t.id
+		WHERE ct.contact_id = $1
+	`, contactID)
+	if err != nil {
+		log.Printf("[PUSH] Contact %s: failed to fetch tags: %v", contactID, err)
+		return
+	}
+	defer rows.Close()
+
+	var tags []KommoTag
+	for rows.Next() {
+		var name string
+		var kommoTagID *int64
+		if err := rows.Scan(&name, &kommoTagID); err != nil {
+			continue
+		}
+		tag := KommoTag{Name: name}
+		if kommoTagID != nil {
+			tag.ID = int(*kommoTagID)
+		}
+		tags = append(tags, tag)
+	}
+
+	updatedAt, err := s.client.UpdateContactTags(int(*kommoContactID), tags)
+	if err != nil {
+		log.Printf("[PUSH] Contact %s tags to Kommo failed: %v", contactID, err)
+		return
+	}
+
+	_, _ = s.db.Exec(ctx, `UPDATE contacts SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, contactID)
+	log.Printf("[PUSH] Contact %s tags → Kommo contact %d (%d tags, updated_at=%d)", contactID, *kommoContactID, len(tags), updatedAt)
+}
+
+// PushNewLead creates a new lead (and optionally contact) in Kommo.
+// Only acts if the lead's pipeline has a kommo_id (connected to Kommo).
+func (s *SyncService) PushNewLead(accountID, leadID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Fetch lead details
+	var leadName, phone, email *string
+	var pipelineID, stageID, contactID *uuid.UUID
+	err := s.db.QueryRow(ctx, `
+		SELECT name, phone, email, pipeline_id, stage_id, contact_id
+		FROM leads WHERE id = $1 AND account_id = $2 AND kommo_id IS NULL
+	`, leadID, accountID).Scan(&leadName, &phone, &email, &pipelineID, &stageID, &contactID)
+	if err != nil {
+		return // Lead not found or already has kommo_id
+	}
+
+	if pipelineID == nil || stageID == nil {
+		return // No pipeline assigned
+	}
+
+	// Check if pipeline is connected to Kommo
+	var kommoPipelineID *int64
+	err = s.db.QueryRow(ctx, `SELECT kommo_id FROM pipelines WHERE id = $1`, *pipelineID).Scan(&kommoPipelineID)
+	if err != nil || kommoPipelineID == nil {
+		return // Not a Kommo pipeline
+	}
+
+	var kommoStageID *int64
+	err = s.db.QueryRow(ctx, `SELECT kommo_id FROM pipeline_stages WHERE id = $1`, *stageID).Scan(&kommoStageID)
+	if err != nil || kommoStageID == nil {
+		return
+	}
+
+	name := ""
+	if leadName != nil {
+		name = *leadName
+	}
+
+	// Create lead in Kommo
+	kommoLeadID, leadUpdatedAt, err := s.client.CreateLead(name, int(*kommoPipelineID), int(*kommoStageID), nil)
+	if err != nil {
+		log.Printf("[PUSH] Create lead %s in Kommo failed: %v", leadID, err)
+		return
+	}
+
+	// Store kommo_id and pushed_at
+	kommoIDVal := int64(kommoLeadID)
+	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_id = $1, kommo_last_pushed_at = $2 WHERE id = $3`,
+		kommoIDVal, leadUpdatedAt, leadID)
+	log.Printf("[PUSH] Created lead %s → Kommo lead %d", leadID, kommoLeadID)
+
+	// Create contact in Kommo if exists and doesn't have kommo_id
+	if contactID != nil {
+		var contactKommoID *int64
+		var cName, cLastName, cPhone, cEmail *string
+		err = s.db.QueryRow(ctx, `
+			SELECT kommo_id, name, last_name, phone, email
+			FROM contacts WHERE id = $1
+		`, *contactID).Scan(&contactKommoID, &cName, &cLastName, &cPhone, &cEmail)
+		if err != nil {
+			return
+		}
+
+		if contactKommoID == nil {
+			// Create contact in Kommo
+			cn := ""
+			if cName != nil {
+				cn = *cName
+			}
+			cfn := cn
+			cln := ""
+			if cLastName != nil {
+				cln = *cLastName
+			}
+			cp := ""
+			if cPhone != nil {
+				cp = *cPhone
+			}
+			ce := ""
+			if cEmail != nil {
+				ce = *cEmail
+			}
+
+			kommoContactID, contactUpdatedAt, err := s.client.CreateContact(cn, cfn, cln, cp, ce)
+			if err != nil {
+				log.Printf("[PUSH] Create contact for lead %s failed: %v", leadID, err)
+				return
+			}
+
+			contactKommoIDVal := int64(kommoContactID)
+			_, _ = s.db.Exec(ctx, `UPDATE contacts SET kommo_id = $1, kommo_last_pushed_at = $2 WHERE id = $3`,
+				contactKommoIDVal, contactUpdatedAt, *contactID)
+			contactKommoID = &contactKommoIDVal
+			log.Printf("[PUSH] Created contact %s → Kommo contact %d", *contactID, kommoContactID)
+		}
+
+		// Link contact to lead in Kommo
+		if contactKommoID != nil {
+			if err := s.client.LinkContactToLead(kommoLeadID, int(*contactKommoID)); err != nil {
+				log.Printf("[PUSH] Link contact %d to lead %d failed: %v", *contactKommoID, kommoLeadID, err)
+			}
+		}
 	}
 }
 

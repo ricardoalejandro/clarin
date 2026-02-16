@@ -555,6 +555,10 @@ func (s *ContactService) DeleteBatch(ctx context.Context, ids []uuid.UUID) error
 	return s.repos.Contact.DeleteBatch(ctx, ids)
 }
 
+func (s *ContactService) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
+	return s.repos.Contact.DeleteAll(ctx, accountID)
+}
+
 func (s *ContactService) FindDuplicates(ctx context.Context, accountID uuid.UUID) ([][]*domain.Contact, error) {
 	return s.repos.Contact.FindDuplicates(ctx, accountID)
 }
