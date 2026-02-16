@@ -521,6 +521,7 @@ type Interaction struct {
 	NextActionDate *time.Time `json:"next_action_date,omitempty"`
 	CreatedBy      *uuid.UUID `json:"created_by,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
+	KommoCallSlot  *int       `json:"kommo_call_slot,omitempty"`
 
 	// Populated on demand
 	CreatedByName *string `json:"created_by_name,omitempty"`

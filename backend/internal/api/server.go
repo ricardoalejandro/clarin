@@ -1564,12 +1564,29 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 		}
 	}
 
+	// Track if name changed for Kommo push
+	var oldName string
+	if lead.Name != nil {
+		oldName = *lead.Name
+	}
+
 	if err := s.services.Lead.Update(c.Context(), lead); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	// Sync shared fields to linked contact
 	_ = s.services.Lead.SyncToContact(c.Context(), lead)
+
+	// Push name change to Kommo if name was updated
+	if s.kommoSync != nil && req.Name != nil {
+		newName := ""
+		if lead.Name != nil {
+			newName = *lead.Name
+		}
+		if newName != oldName {
+			go s.kommoSync.PushLeadName(lead.AccountID, lead.ID)
+		}
+	}
 
 	s.invalidateLeadsCache(lead.AccountID)
 	return c.JSON(fiber.Map{"success": true, "lead": lead})
@@ -3491,6 +3508,12 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 	if err := s.services.Interaction.LogInteraction(c.Context(), interaction); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+
+	// Push call observations to Kommo if this is a call type with a lead
+	if s.kommoSync != nil && interaction.Type == "call" && interaction.LeadID != nil {
+		go s.kommoSync.PushLeadObservations(accountID, *interaction.LeadID)
+	}
+
 	return c.Status(201).JSON(fiber.Map{"success": true, "interaction": interaction})
 }
 
@@ -3554,9 +3577,22 @@ func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid interaction ID"})
 	}
+
+	// Before deleting, capture lead_id and type for Kommo re-push
+	accountID := c.Locals("account_id").(uuid.UUID)
+	var interactionLeadID *uuid.UUID
+	var interactionType string
+	_ = s.repos.DB().QueryRow(c.Context(), `SELECT lead_id, type FROM interactions WHERE id = $1`, id).Scan(&interactionLeadID, &interactionType)
+
 	if err := s.services.Interaction.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+
+	// Re-push all call observations to Kommo after deletion
+	if s.kommoSync != nil && interactionType == "call" && interactionLeadID != nil {
+		go s.kommoSync.PushLeadObservations(accountID, *interactionLeadID)
+	}
+
 	return c.JSON(fiber.Map{"success": true})
 }
 

@@ -647,3 +647,78 @@ func GetContactEmail(fields []KommoCustomField) string {
 	}
 	return ""
 }
+
+// UpdateLeadCustomFields updates custom fields on a lead in Kommo. Returns updated_at.
+func (c *Client) UpdateLeadCustomFields(kommoLeadID int, fields []KommoCustomFieldWrite) (int64, error) {
+	payload := struct {
+		ID           int                    `json:"id"`
+		CustomFields []KommoCustomFieldWrite `json:"custom_fields_values"`
+	}{
+		ID:           kommoLeadID,
+		CustomFields: fields,
+	}
+
+	data, err := c.doRequest("PATCH", "/leads", []interface{}{payload})
+	if err != nil {
+		return 0, fmt.Errorf("update lead custom fields: %w", err)
+	}
+
+	var resp struct {
+		Embedded struct {
+			Leads []struct {
+				ID        int   `json:"id"`
+				UpdatedAt int64 `json:"updated_at"`
+			} `json:"leads"`
+		} `json:"_embedded"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("parse update lead custom fields response: %w", err)
+	}
+	if len(resp.Embedded.Leads) == 0 {
+		return 0, fmt.Errorf("no lead in update response")
+	}
+	return resp.Embedded.Leads[0].UpdatedAt, nil
+}
+
+// KommoCustomFieldWrite is the write payload for a single custom field.
+type KommoCustomFieldWrite struct {
+	FieldID int                        `json:"field_id"`
+	Values  []KommoCustomFieldWriteVal `json:"values"`
+}
+
+// KommoCustomFieldWriteVal is a single value in a custom field write payload.
+type KommoCustomFieldWriteVal struct {
+	Value interface{} `json:"value"`
+}
+
+// UpdateLeadName updates the name of a lead in Kommo. Returns updated_at.
+func (c *Client) UpdateLeadName(kommoLeadID int, name string) (int64, error) {
+	payload := struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}{
+		ID:   kommoLeadID,
+		Name: name,
+	}
+
+	data, err := c.doRequest("PATCH", "/leads", []interface{}{payload})
+	if err != nil {
+		return 0, fmt.Errorf("update lead name: %w", err)
+	}
+
+	var resp struct {
+		Embedded struct {
+			Leads []struct {
+				ID        int   `json:"id"`
+				UpdatedAt int64 `json:"updated_at"`
+			} `json:"leads"`
+		} `json:"_embedded"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("parse update lead name response: %w", err)
+	}
+	if len(resp.Embedded.Leads) == 0 {
+		return 0, fmt.Errorf("no lead in update response")
+	}
+	return resp.Embedded.Leads[0].UpdatedAt, nil
+}

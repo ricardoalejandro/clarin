@@ -516,6 +516,10 @@ func Migrate(db *pgxpool.Pool) error {
 		// Anti-loop: track last push timestamp to detect echoes from Kommo poller
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_last_pushed_at BIGINT DEFAULT 0`,
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS kommo_last_pushed_at BIGINT DEFAULT 0`,
+
+		// Kommo call slot tracking on interactions (for dedup during sync)
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS kommo_call_slot INT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_interactions_kommo_call_slot ON interactions(lead_id, kommo_call_slot) WHERE kommo_call_slot IS NOT NULL`,
 	}
 
 	for _, migration := range migrations {

@@ -13,6 +13,34 @@ import (
 "github.com/naperu/clarin/internal/ws"
 )
 
+// --- Kommo Call Custom Field IDs ---
+// Each call slot has 3 fields: Responsable (text), Fecha (date_time), Resultado (textarea).
+// There are 10 slots total. Slot indexes are 0-based in the arrays below.
+
+// KommoCallSlotCount is the number of call slots in Kommo.
+const KommoCallSlotCount = 10
+
+// KommoCallFieldResponsable holds the field_id for "Responsable" in each call slot (1-10).
+var KommoCallFieldResponsable = [KommoCallSlotCount]int{
+	1405896, 1405898, 1405900, 1405902, 1405904,
+	1405906, 1405908, 1405910, 1405912, 1405914,
+}
+
+// KommoCallFieldFecha holds the field_id for "Fecha" in each call slot (1-10).
+var KommoCallFieldFecha = [KommoCallSlotCount]int{
+	1405890, 1405892, 1405918, 1405920, 1405922,
+	1405928, 1405930, 1405932, 1405934, 1405936,
+}
+
+// KommoCallFieldResultado holds the field_id for "Resultado" in each call slot (1-10).
+var KommoCallFieldResultado = [KommoCallSlotCount]int{
+	1405888, 1405894, 1405938, 1405940, 1405942,
+	1405944, 1405946, 1405948, 1405950, 1405952,
+}
+
+// KommoCallFieldOtrasLlamadas is the field_id for "Otras llamadas" (overflow, textarea).
+const KommoCallFieldOtrasLlamadas = 1405916
+
 // SyncResult holds the results of a sync operation.
 type SyncResult struct {
 Pipelines int       `json:"pipelines"`
@@ -665,10 +693,86 @@ tagNames = append(tagNames, t.Name)
 		s.syncLeadTags(ctx, accountID, leadID, tagNames)
 	}
 
+	// Sync call observations from Kommo custom fields → Clarin interactions
+	s.syncCallsFromKommo(ctx, accountID, leadID, contactID, kl.CustomFields)
+
 	return nil
 }
 
-// upsertContact inserts or updates a single contact. Returns the local UUID.
+// syncCallsFromKommo reads the 10 call slots from Kommo custom fields and upserts
+// them as type=call interactions in Clarin. Uses kommo_call_slot for dedup.
+func (s *SyncService) syncCallsFromKommo(ctx context.Context, accountID, leadID uuid.UUID, contactID *uuid.UUID, fields []KommoCustomField) {
+	if len(fields) == 0 {
+		return
+	}
+
+	// Build a lookup map: field_id → first value (as string)
+	fieldMap := make(map[int]string, len(fields))
+	for _, f := range fields {
+		if len(f.Values) > 0 && f.Values[0].Value != nil {
+			switch v := f.Values[0].Value.(type) {
+			case string:
+				fieldMap[f.FieldID] = v
+			case float64:
+				// date_time fields come as unix timestamps
+				fieldMap[f.FieldID] = fmt.Sprintf("%.0f", v)
+			}
+		}
+	}
+
+	for slot := 0; slot < KommoCallSlotCount; slot++ {
+		responsable := fieldMap[KommoCallFieldResponsable[slot]]
+		fecha := fieldMap[KommoCallFieldFecha[slot]]
+		resultado := fieldMap[KommoCallFieldResultado[slot]]
+
+		// Skip empty slots
+		if responsable == "" && resultado == "" {
+			continue
+		}
+
+		// Build the note with (sinc) prefix
+		var parts []string
+		if responsable != "" {
+			parts = append(parts, "Responsable: "+responsable)
+		}
+		if fecha != "" {
+			parts = append(parts, "Fecha: "+fecha)
+		}
+		if resultado != "" {
+			parts = append(parts, "Resultado: "+resultado)
+		}
+		notes := "(sinc) " + strings.Join(parts, " | ")
+		slotNum := slot + 1 // 1-based slot number
+
+		// Upsert: use kommo_call_slot unique index for dedup
+		_, err := s.db.Exec(ctx, `
+			INSERT INTO interactions (id, account_id, contact_id, lead_id, type, notes, kommo_call_slot, created_at)
+			VALUES (gen_random_uuid(), $1, $2, $3, 'call', $4, $5, NOW())
+			ON CONFLICT (lead_id, kommo_call_slot) WHERE kommo_call_slot IS NOT NULL
+			DO UPDATE SET notes = EXCLUDED.notes
+		`, accountID, contactID, leadID, notes, slotNum)
+		if err != nil {
+			log.Printf("[Kommo Sync] Error syncing call slot %d for lead %s: %v", slotNum, leadID, err)
+		}
+	}
+
+	// Handle "Otras llamadas" overflow field
+	otrasLlamadas := fieldMap[KommoCallFieldOtrasLlamadas]
+	if otrasLlamadas != "" {
+		notes := "(sinc) Otras llamadas: " + otrasLlamadas
+		slotNum := KommoCallSlotCount + 1 // slot 11 = overflow
+
+		_, err := s.db.Exec(ctx, `
+			INSERT INTO interactions (id, account_id, contact_id, lead_id, type, notes, kommo_call_slot, created_at)
+			VALUES (gen_random_uuid(), $1, $2, $3, 'call', $4, $5, NOW())
+			ON CONFLICT (lead_id, kommo_call_slot) WHERE kommo_call_slot IS NOT NULL
+			DO UPDATE SET notes = EXCLUDED.notes
+		`, accountID, contactID, leadID, notes, slotNum)
+		if err != nil {
+			log.Printf("[Kommo Sync] Error syncing 'Otras llamadas' for lead %s: %v", leadID, err)
+		}
+	}
+}
 func (s *SyncService) upsertContact(ctx context.Context, accountID uuid.UUID, kc KommoContact) *uuid.UUID {
 kommoID := int64(kc.ID)
 phone := GetContactPhone(kc.CustomFields)
@@ -1164,6 +1268,167 @@ func (s *SyncService) PushNewLead(accountID, leadID uuid.UUID) {
 			}
 		}
 	}
+}
+
+// PushLeadObservations reads all call interactions for a lead and pushes them
+// to Kommo's 10 call custom field slots + "Otras llamadas" overflow.
+func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var kommoLeadID *int64
+	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoLeadID)
+	if err != nil || kommoLeadID == nil {
+		return // Not a Kommo lead
+	}
+
+	// Get all call interactions for this lead, ordered ASC (oldest first)
+	rows, err := s.db.Query(ctx, `
+		SELECT i.notes, i.created_at, u.display_name
+		FROM interactions i
+		LEFT JOIN users u ON u.id = i.created_by
+		WHERE i.lead_id = $1 AND i.type = 'call'
+		ORDER BY i.created_at ASC
+	`, leadID)
+	if err != nil {
+		log.Printf("[PUSH] Lead %s: failed to fetch call interactions: %v", leadID, err)
+		return
+	}
+	defer rows.Close()
+
+	type callData struct {
+		notes       string
+		createdAt   time.Time
+		createdBy   string
+	}
+	var calls []callData
+	for rows.Next() {
+		var cd callData
+		var notes *string
+		var createdBy *string
+		if err := rows.Scan(&notes, &cd.createdAt, &createdBy); err != nil {
+			continue
+		}
+		if notes != nil {
+			cd.notes = *notes
+		}
+		if createdBy != nil {
+			cd.createdBy = *createdBy
+		}
+		calls = append(calls, cd)
+	}
+
+	// Build custom fields for the 10 slots
+	var fields []KommoCustomFieldWrite
+
+	for slot := 0; slot < KommoCallSlotCount; slot++ {
+		if slot < len(calls) {
+			call := calls[slot]
+
+			// Strip "(sinc) " prefix if present (avoid echoing back)
+			noteContent := call.notes
+			if strings.HasPrefix(noteContent, "(sinc) ") {
+				noteContent = strings.TrimPrefix(noteContent, "(sinc) ")
+			}
+
+			// Responsable: user who created + date
+			responsable := call.createdBy
+			if responsable == "" {
+				responsable = "Clarin"
+			}
+			fecha := call.createdAt.Format("02/01/2006 15:04")
+			responsable = fecha + " " + responsable
+
+			fields = append(fields,
+				KommoCustomFieldWrite{
+					FieldID: KommoCallFieldResponsable[slot],
+					Values:  []KommoCustomFieldWriteVal{{Value: responsable}},
+				},
+				KommoCustomFieldWrite{
+					FieldID: KommoCallFieldResultado[slot],
+					Values:  []KommoCustomFieldWriteVal{{Value: noteContent}},
+				},
+			)
+		} else {
+			// Clear empty slots
+			fields = append(fields,
+				KommoCustomFieldWrite{
+					FieldID: KommoCallFieldResponsable[slot],
+					Values:  []KommoCustomFieldWriteVal{},
+				},
+				KommoCustomFieldWrite{
+					FieldID: KommoCallFieldResultado[slot],
+					Values:  []KommoCustomFieldWriteVal{},
+				},
+			)
+		}
+	}
+
+	// Build "Otras llamadas" overflow for calls beyond 10
+	if len(calls) > KommoCallSlotCount {
+		var b strings.Builder
+		for i := KommoCallSlotCount; i < len(calls); i++ {
+			call := calls[i]
+			noteContent := call.notes
+			if strings.HasPrefix(noteContent, "(sinc) ") {
+				noteContent = strings.TrimPrefix(noteContent, "(sinc) ")
+			}
+			createdBy := call.createdBy
+			if createdBy == "" {
+				createdBy = "Clarin"
+			}
+			fmt.Fprintf(&b, "Llamada %d - %s %s: %s\n",
+				i+1, call.createdAt.Format("02/01/2006 15:04"), createdBy, noteContent)
+		}
+		fields = append(fields, KommoCustomFieldWrite{
+			FieldID: KommoCallFieldOtrasLlamadas,
+			Values:  []KommoCustomFieldWriteVal{{Value: b.String()}},
+		})
+	} else {
+		fields = append(fields, KommoCustomFieldWrite{
+			FieldID: KommoCallFieldOtrasLlamadas,
+			Values:  []KommoCustomFieldWriteVal{},
+		})
+	}
+
+	updatedAt, err := s.client.UpdateLeadCustomFields(int(*kommoLeadID), fields)
+	if err != nil {
+		log.Printf("[PUSH] Lead %s observations to Kommo failed: %v", leadID, err)
+		return
+	}
+
+	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
+	log.Printf("[PUSH] Lead %s observations → Kommo lead %d (%d calls, updated_at=%d)", leadID, *kommoLeadID, len(calls), updatedAt)
+}
+
+// PushLeadName pushes a lead's name change to Kommo.
+func (s *SyncService) PushLeadName(accountID, leadID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var kommoLeadID *int64
+	var leadName *string
+	err := s.db.QueryRow(ctx, `SELECT kommo_id, name FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoLeadID, &leadName)
+	if err != nil || kommoLeadID == nil {
+		return // Not a Kommo lead
+	}
+
+	name := ""
+	if leadName != nil {
+		name = *leadName
+	}
+	if name == "" {
+		return // Nothing to push
+	}
+
+	updatedAt, err := s.client.UpdateLeadName(int(*kommoLeadID), name)
+	if err != nil {
+		log.Printf("[PUSH] Lead %s name to Kommo failed: %v", leadID, err)
+		return
+	}
+
+	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
+	log.Printf("[PUSH] Lead %s name '%s' → Kommo lead %d (updated_at=%d)", leadID, name, *kommoLeadID, updatedAt)
 }
 
 // --- Helpers ---

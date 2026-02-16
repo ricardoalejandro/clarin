@@ -2481,6 +2481,33 @@ func (r *InteractionRepository) Delete(ctx context.Context, id uuid.UUID) error 
 	return err
 }
 
+// GetCallsByLeadID returns all call-type interactions for a lead, ordered by created_at ASC.
+func (r *InteractionRepository) GetCallsByLeadID(ctx context.Context, leadID uuid.UUID) ([]*domain.Interaction, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, contact_id, lead_id, event_id, participant_id, type, direction, outcome, notes,
+		       next_action, next_action_date, created_by, created_at, kommo_call_slot
+		FROM interactions
+		WHERE lead_id = $1 AND type = 'call'
+		ORDER BY created_at ASC
+	`, leadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var interactions []*domain.Interaction
+	for rows.Next() {
+		it := &domain.Interaction{}
+		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID,
+			&it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate,
+			&it.CreatedBy, &it.CreatedAt, &it.KommoCallSlot); err != nil {
+			return nil, err
+		}
+		interactions = append(interactions, it)
+	}
+	return interactions, nil
+}
+
 // SavedStickerRepository handles saved sticker data access
 type SavedStickerRepository struct {
 	db *pgxpool.Pool
