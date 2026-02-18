@@ -4,9 +4,21 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
+)
+
+const (
+	// Time allowed to write a message to the peer
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this interval (must be < pongWait)
+	pingInterval = 30 * time.Second
 )
 
 // Event types for WebSocket communication
@@ -223,10 +235,17 @@ func (c *Client) ReadPump() {
 		c.Conn.Close()
 	}()
 
+	// Set read deadline — reset on every pong
+	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.Conn.SetPongHandler(func(string) error {
+		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
 	for {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNoStatusReceived) {
 				log.Printf("[WS Client] Read error: %v", err)
 			}
 			break
@@ -246,21 +265,33 @@ func (c *Client) ReadPump() {
 
 // WritePump writes messages to the WebSocket connection
 func (c *Client) WritePump() {
+	ticker := time.NewTicker(pingInterval)
 	defer func() {
+		ticker.Stop()
 		c.Conn.Close()
 	}()
 
 	for {
-		message, ok := <-c.Send
-		if !ok {
-			// Hub closed the channel
-			c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
-			return
-		}
+		select {
+		case message, ok := <-c.Send:
+			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				// Hub closed the channel
+				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
 
-		if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
-			log.Printf("[WS Client] Write error: %v", err)
-			return
+			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				log.Printf("[WS Client] Write error: %v", err)
+				return
+			}
+
+		case <-ticker.C:
+			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("[WS Client] Ping error: %v", err)
+				return
+			}
 		}
 	}
 }

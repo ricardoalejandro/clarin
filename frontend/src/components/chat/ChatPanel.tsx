@@ -73,7 +73,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<WhatsAppTextInputHandle>(null)
-  const wsRef = useRef<WebSocket | null>(null)
+  const wsRef = useRef<ReturnType<typeof createWebSocket>>(null)
   const optimisticIdRef = useRef(0)
 
   // Fetch quick replies
@@ -151,47 +151,40 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       wsRef.current.close()
     }
 
-    // Connect new WS with dummy handler (we overwrite onmessage below to handle raw events if needed)
-    const ws = createWebSocket(() => {})
-    if (!ws) return
+    const ws = createWebSocket(
+      (data: unknown) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const msg = data as any
+        const eventType = msg.type || msg.event
+        const payload = msg.message || msg.data
 
+        if ((eventType === 'new_message') && payload) {
+          if (payload.chat_id === chatId ||
+              (chat && payload.from_jid === chat?.jid) ||
+              (chat && payload.to === chat?.jid)) {
+            setMessages(prev => {
+              if (prev.some(m => m.id === payload.id)) return prev
+              return [...prev, payload as Message]
+            })
+            scrollToBottom()
+          }
+        } else if ((eventType === 'message_update') && payload) {
+          setMessages(prev => prev.map(m => m.id === payload.id ? (payload as Message) : m))
+        }
+      },
+      (send) => {
+        send(JSON.stringify({
+          type: 'subscribe_chat',
+          chat_id: chatId,
+          device_id: deviceId
+        }))
+      }
+    )
+    if (!ws) return
     wsRef.current = ws
 
-    ws.onopen = () => {
-        // Subscribe to chat events
-        ws.send(JSON.stringify({
-            type: 'subscribe_chat',
-            chat_id: chatId,
-            device_id: deviceId
-        }))
-    }
-
-    ws.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data)
-            if (data.type === 'new_message' && data.message) {
-                // Ensure message belongs to this chat
-                if (data.message.chat_id === chatId ||
-                    (chat && data.message.from_jid === chat?.jid) ||
-                    (chat && data.message.to === chat?.jid)) {
-
-                    setMessages(prev => {
-                        // Avoid duplicates
-                        if (prev.some(m => m.id === data.message.id)) return prev
-                        return [...prev, data.message]
-                    })
-                    scrollToBottom()
-                }
-            } else if (data.type === 'message_update' && data.message) {
-                 setMessages(prev => prev.map(m => m.id === data.message.id ? data.message : m))
-            }
-        } catch (e) {
-            console.error('WS parse error', e)
-        }
-    }
-
     return () => {
-        ws.close()
+      ws.close()
     }
   }, [chatId, deviceId, chat])
 

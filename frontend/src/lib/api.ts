@@ -68,8 +68,11 @@ export const apiPut = <T>(endpoint: string, body: unknown) =>
 export const apiDelete = <T>(endpoint: string) =>
   api<T>(endpoint, { method: 'DELETE' })
 
-// WebSocket helper
-export function createWebSocket(onMessage: (data: unknown) => void) {
+// WebSocket helper with auto-reconnect and exponential backoff
+export function createWebSocket(
+  onMessage: (data: unknown) => void,
+  onConnect?: (send: (data: string) => void) => void
+) {
   if (typeof window === 'undefined') return null
 
   const token = localStorage.getItem('token')
@@ -78,30 +81,62 @@ export function createWebSocket(onMessage: (data: unknown) => void) {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = `${protocol}//${window.location.host}/ws?token=${token}`
 
-  const ws = new WebSocket(wsUrl)
+  let ws: WebSocket | null = null
+  let reconnectAttempts = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let intentionallyClosed = false
 
-  ws.onopen = () => {
-    console.log('WebSocket connected')
-  }
+  function connect() {
+    ws = new WebSocket(wsUrl)
 
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data)
-      onMessage(data)
-    } catch (err) {
-      console.error('WebSocket parse error:', err)
+    ws.onopen = () => {
+      console.log('WebSocket connected')
+      reconnectAttempts = 0
+      if (onConnect) {
+        onConnect((data: string) => {
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(data)
+        })
+      }
+    }
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        onMessage(data)
+      } catch (err) {
+        console.error('WebSocket parse error:', err)
+      }
+    }
+
+    ws.onerror = () => {
+      // Error is logged by the browser natively
+    }
+
+    ws.onclose = () => {
+      if (intentionallyClosed) return
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
+      reconnectAttempts++
+      console.log(`WebSocket reconnecting in ${delay / 1000}s...`)
+      reconnectTimer = setTimeout(connect, delay)
     }
   }
 
-  ws.onerror = (err) => {
-    console.error('WebSocket error:', err)
-  }
+  connect()
 
-  ws.onclose = () => {
-    console.log('WebSocket disconnected')
+  // Return proxy that delegates to current ws instance
+  return {
+    close() {
+      intentionallyClosed = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws) ws.close()
+    },
+    get readyState() {
+      return ws ? ws.readyState : WebSocket.CLOSED
+    },
+    send(data: string) {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data)
+    },
   }
-
-  return ws
 }
 
 // Type definitions for API responses

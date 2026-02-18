@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { Smartphone, Plus, Wifi, WifiOff, Signal, Trash2, Power, RefreshCw, QrCode, Edit } from 'lucide-react'
+import { createWebSocket } from '@/lib/api'
 
 interface Device {
   id: string
@@ -50,29 +51,18 @@ export default function DevicesPage() {
 
   // Setup WebSocket for real-time updates
   useEffect(() => {
-    const token = localStorage.getItem('token')
-    if (!token) return
-
-    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${token}`
-    const ws = new WebSocket(wsUrl)
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      if (data.event === 'device_status') {
-        // Close QR modal when device connects
-        if (data.data?.status === 'connected' && selectedDevice?.id === data.data?.device_id) {
+    const ws = createWebSocket((data: unknown) => {
+      const msg = data as { event?: string; data?: { status?: string; device_id?: string } }
+      if (msg.event === 'device_status') {
+        if (msg.data?.status === 'connected' && selectedDevice?.id === msg.data?.device_id) {
           setSelectedDevice(null)
         }
         fetchDevices()
-      } else if (data.event === 'qr_code') {
+      } else if (msg.event === 'qr_code') {
         fetchDevices()
       }
-    }
-
-    ws.onerror = () => {
-      console.log('WebSocket error, falling back to polling')
-    }
-
+    })
+    if (!ws) return
     return () => ws.close()
   }, [fetchDevices, selectedDevice])
 
@@ -277,9 +267,9 @@ export default function DevicesPage() {
               Abre WhatsApp en tu teléfono y escanea este código
             </p>
             <div className="bg-white p-4 rounded-xl border border-slate-100 inline-block mb-4">
-              <img 
-                src={selectedDevice.qr_code} 
-                alt="QR Code" 
+              <img
+                src={selectedDevice.qr_code}
+                alt="QR Code"
                 className="w-56 h-56"
               />
             </div>

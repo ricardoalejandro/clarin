@@ -1,6 +1,7 @@
 'use client'
 
 import { createContext, useContext, useEffect, useRef, useCallback, useState } from 'react'
+import { createWebSocket } from '@/lib/api'
 import {
   getNotificationSettings,
   playNotificationSound,
@@ -30,8 +31,7 @@ interface Props {
 
 export default function NotificationProvider({ accountId, children }: Props) {
   const [settings, setSettings] = useState<NotificationSettings | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const wsRef = useRef<ReturnType<typeof createWebSocket>>(null)
 
   // Load / refresh settings
   const refreshSettings = useCallback(() => {
@@ -61,43 +61,15 @@ export default function NotificationProvider({ accountId, children }: Props) {
 
   // WebSocket connection for notifications
   useEffect(() => {
-    const token = localStorage.getItem('token')
-    if (!token) return
-
-    let alive = true
-
-    function connect() {
-      if (!alive) return
-      const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?token=${token}`
-      const ws = new WebSocket(wsUrl)
-      wsRef.current = ws
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          if (data.event === 'new_message' && !data.data?.is_from_me) {
-            handleIncomingMessage(data.data)
-          }
-        } catch { /* ignore parse errors */ }
+    const ws = createWebSocket((data: unknown) => {
+      const msg = data as { event?: string; data?: { is_from_me?: boolean } }
+      if (msg.event === 'new_message' && !msg.data?.is_from_me) {
+        handleIncomingMessage(msg.data as Parameters<typeof handleIncomingMessage>[0])
       }
-
-      ws.onclose = () => {
-        if (alive) {
-          // Reconnect after 5s
-          reconnectTimer.current = setTimeout(connect, 5000)
-        }
-      }
-
-      ws.onerror = () => {
-        ws.close()
-      }
-    }
-
-    connect()
+    })
+    wsRef.current = ws
 
     return () => {
-      alive = false
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       wsRef.current?.close()
       wsRef.current = null
     }

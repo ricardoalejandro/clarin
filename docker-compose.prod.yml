@@ -117,10 +117,7 @@ services:
       - "traefik.http.routers.clarin-api.tls.certresolver=letsencrypt"
       - "traefik.http.services.clarin-api.loadbalancer.server.port=8080"
       - "traefik.http.routers.clarin-api.priority=100"
-      # WebSocket support
-      - "traefik.http.middlewares.clarin-ws.headers.customrequestheaders.Connection=keep-alive, Upgrade"
-      - "traefik.http.middlewares.clarin-ws.headers.customrequestheaders.Upgrade=websocket"
-      - "traefik.http.routers.clarin-api.middlewares=clarin-ws"
+      # WebSocket: Traefik handles WS upgrade natively — no middleware needed
 
   frontend:
     build:
