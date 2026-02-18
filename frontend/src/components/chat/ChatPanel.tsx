@@ -16,6 +16,7 @@ import WhatsAppTextInput, { WhatsAppTextInputHandle } from '../WhatsAppTextInput
 import ImageViewer from './ImageViewer'
 import MessageBubble from './MessageBubble'
 import StickerPicker from './StickerPicker'
+import EmojiPicker from './EmojiPicker'
 import PollModal from './PollModal'
 import ContactPanel from './ContactPanel'
 import QuickReplyPicker from './QuickReplyPicker'
@@ -808,12 +809,12 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                   <button onClick={() => setShowAttachments(!showAttachments)} className="p-2 text-slate-500 hover:text-emerald-600 transition">
                       <Paperclip className="w-6 h-6" />
                   </button>
-                  <button
-                     onClick={() => setActivePopup(activePopup === 'emoji' ? null : 'emoji')}
-                     className={`p-2 transition ${activePopup === 'emoji' ? 'text-emerald-600' : 'text-slate-500 hover:text-emerald-600'}`}
-                  >
-                      <Smile className="w-6 h-6" />
-                  </button>
+                  <EmojiPicker
+                    onEmojiSelect={(emoji) => setMessageText(prev => prev + emoji)}
+                    isOpen={activePopup === 'emoji'}
+                    onToggle={() => setActivePopup(activePopup === 'emoji' ? null : 'emoji')}
+                    buttonClassName={`p-2 transition ${activePopup === 'emoji' ? 'text-emerald-600' : 'text-slate-500 hover:text-emerald-600'}`}
+                  />
               </div>
 
               <div className="flex-1 relative">

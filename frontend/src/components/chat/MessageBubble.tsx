@@ -318,7 +318,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
   }
 
   const hasVisualMedia = !!message.media_url && ['image', 'video'].includes(message.message_type || '')
-  const isOptimistic = message.id.startsWith('optimistic-')
+  const isOptimistic = (message.id || '').startsWith('optimistic-')
 
   return (
     <div className={`group flex ${message.is_from_me ? 'justify-end' : 'justify-start'}`}>
