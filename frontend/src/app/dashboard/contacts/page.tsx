@@ -42,6 +42,7 @@ interface Contact {
   notes: string | null
   source: string | null
   is_group: boolean
+  kommo_id: number | null
   created_at: string
   updated_at: string
   device_names?: ContactDeviceName[]
@@ -98,6 +99,7 @@ export default function ContactsPage() {
   // Detail / Edit
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null)
   const [showDetailPanel, setShowDetailPanel] = useState(false)
+  const [syncingKommo, setSyncingKommo] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [editForm, setEditForm] = useState({
     custom_name: '',
@@ -290,6 +292,29 @@ export default function ContactsPage() {
       saveContactField(field)
     } else if (e.key === 'Escape') {
       cancelEditingContact()
+    }
+  }
+
+  const handleSyncKommo = async () => {
+    if (!selectedContact) return
+    setSyncingKommo(true)
+    try {
+      const res = await fetch(`/api/contacts/${selectedContact.id}/sync-kommo`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success && data.contact) {
+        setSelectedContact(data.contact)
+        fetchContacts()
+      } else {
+        alert(data.error || 'Error al sincronizar')
+      }
+    } catch (err) {
+      console.error('Sync error:', err)
+      alert('Error de conexión al sincronizar')
+    } finally {
+      setSyncingKommo(false)
     }
   }
 
@@ -855,9 +880,21 @@ export default function ContactsPage() {
             {/* Detail Header */}
             <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
               <h2 className="text-sm font-semibold text-slate-900">Detalle del Contacto</h2>
-              <button onClick={() => { setShowDetailPanel(false); setEditingField(null); setEditingNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
-                <X className="w-4 h-4 text-slate-400" />
-              </button>
+              <div className="flex items-center gap-1">
+                {selectedContact.kommo_id && (
+                  <button
+                    onClick={handleSyncKommo}
+                    disabled={syncingKommo}
+                    title="Sincronizar desde Kommo"
+                    className="p-1.5 hover:bg-emerald-50 rounded-lg text-slate-400 hover:text-emerald-600 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${syncingKommo ? 'animate-spin' : ''}`} />
+                  </button>
+                )}
+                <button onClick={() => { setShowDetailPanel(false); setEditingField(null); setEditingNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                  <X className="w-4 h-4 text-slate-400" />
+                </button>
+              </div>
             </div>
 
             <div className="p-6 space-y-6">
@@ -931,6 +968,18 @@ export default function ContactsPage() {
                   ) : (
                     <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.last_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('last_name', selectedContact.last_name || '')} title="Clic para editar">
                       {selectedContact.last_name || 'Agregar apellido'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Short Name */}
+                <div className="flex items-center gap-3 group">
+                  <Edit2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'short_name' ? (
+                    <input autoFocus value={editValues.short_name ?? ''} onChange={(e) => setEditValues({ ...editValues, short_name: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'short_name')} onBlur={() => saveContactField('short_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Nombre corto" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.short_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('short_name', selectedContact.short_name || '')} title="Clic para editar">
+                      {selectedContact.short_name || 'Agregar nombre corto'}
                     </span>
                   )}
                 </div>

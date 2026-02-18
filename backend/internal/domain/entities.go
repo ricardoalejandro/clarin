@@ -8,14 +8,15 @@ import (
 
 // Account represents a tenant in the multi-tenant system
 type Account struct {
-	ID         uuid.UUID `json:"id"`
-	Name       string    `json:"name"`
-	Slug       string    `json:"slug"`
-	Plan       string    `json:"plan"`
-	MaxDevices int       `json:"max_devices"`
-	IsActive   bool      `json:"is_active"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         uuid.UUID  `json:"id"`
+	Name       string     `json:"name"`
+	Slug       string     `json:"slug"`
+	Plan       string     `json:"plan"`
+	MaxDevices int        `json:"max_devices"`
+	IsActive   bool       `json:"is_active"`
+	DefaultIncomingStageID *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 
 	// Populated on demand
 	UserCount   int `json:"user_count,omitempty"`
@@ -365,6 +366,16 @@ type LeadFilter struct {
 	Offset     int
 }
 
+// Person represents a unified search result from contacts and leads
+type Person struct {
+	ID         uuid.UUID `json:"id"`
+	Name       string    `json:"name"`
+	Phone      string    `json:"phone,omitempty"`
+	Email      string    `json:"email,omitempty"`
+	SourceType string    `json:"source_type"` // "contact" or "lead"
+	Tags       []*Tag    `json:"tags,omitempty"`
+}
+
 // Tag represents a global label with color
 type Tag struct {
 	ID        uuid.UUID `json:"id"`
@@ -438,6 +449,7 @@ const (
 	CampaignStatusRunning   = "running"
 	CampaignStatusPaused    = "paused"
 	CampaignStatusCompleted = "completed"
+	CampaignStatusCancelled = "cancelled"
 	CampaignStatusFailed    = "failed"
 )
 
@@ -571,13 +583,16 @@ type InteractionFilter struct {
 
 // QuickReply represents a canned/predefined response
 type QuickReply struct {
-	ID        uuid.UUID `json:"id"`
-	AccountID uuid.UUID `json:"account_id"`
-	Shortcut  string    `json:"shortcut"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID            uuid.UUID `json:"id"`
+	AccountID     uuid.UUID `json:"account_id"`
+	Shortcut      string    `json:"shortcut"`
+	Title         string    `json:"title"`
+	Body          string    `json:"body"`
+	MediaURL      string    `json:"media_url"`
+	MediaType     string    `json:"media_type"`
+	MediaFilename string    `json:"media_filename"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // Default campaign settings (anti-ban)

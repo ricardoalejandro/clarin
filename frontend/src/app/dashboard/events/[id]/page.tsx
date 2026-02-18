@@ -12,6 +12,7 @@ import {
 import { format, formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
+import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
 
 const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
 
@@ -108,10 +109,13 @@ export default function EventDetailPage() {
   const [selectedContacts, setSelectedContacts] = useState<Contact[]>([])
   const [manualForm, setManualForm] = useState({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
 
-  // Edit participant
+  // Edit participant (slide-over panel with inline editing)
   const [editingParticipant, setEditingParticipant] = useState<Participant | null>(null)
-  const [editForm, setEditForm] = useState({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '', notes: '' })
+  const [editField, setEditField] = useState<string | null>(null)
+  const [editFieldValues, setEditFieldValues] = useState<Record<string, string>>({})
   const [savingEdit, setSavingEdit] = useState(false)
+  const [editNotes, setEditNotes] = useState(false)
+  const [editNotesValue, setEditNotesValue] = useState('')
 
   // Interaction form
   const [intForm, setIntForm] = useState({ type: '', outcome: '', notes: '', direction: 'outbound', next_action: '', next_action_date: '' })
@@ -267,6 +271,35 @@ export default function EventDetailPage() {
     fetchEvent()
   }
 
+  const existingContactIds = useMemo(() => {
+    const ids = new Set<string>()
+    participants.forEach(p => { if (p.contact_id) ids.add(p.contact_id) })
+    return ids
+  }, [participants])
+
+  const handleAddFromSelector = async (selected: SelectedPerson[]) => {
+    if (selected.length === 0) return
+    const parts = selected.map(p => ({
+      contact_id: p.source_type === 'contact' ? p.id : undefined,
+      name: p.name,
+      phone: p.phone || '',
+      email: p.email || '',
+    }))
+    const res = await fetch(`/api/events/${eventId}/participants/bulk`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ participants: parts }),
+    })
+    const data = await res.json()
+    if (!data.success) {
+      alert(data.error || 'Error al agregar participantes')
+      return
+    }
+    setShowAddModal(false)
+    fetchParticipants()
+    fetchEvent()
+  }
+
   const handleAddManual = async () => {
     const body: Record<string, unknown> = {
       name: manualForm.name,
@@ -294,47 +327,77 @@ export default function EventDetailPage() {
 
   // Edit participant
   const openEditParticipant = (p: Participant) => {
-    setEditForm({
-      name: p.name,
-      last_name: p.last_name || '',
-      short_name: p.short_name || '',
-      phone: p.phone || '',
-      email: p.email || '',
-      age: p.age ? String(p.age) : '',
-      notes: p.notes || '',
-    })
     setEditingParticipant(p)
+    setEditField(null)
+    setEditFieldValues({})
+    setEditNotes(false)
+    setEditNotesValue(p.notes || '')
   }
 
-  const handleSaveEdit = async () => {
+  const startEditField = (field: string, value: string) => {
+    setEditField(field)
+    setEditFieldValues(prev => ({ ...prev, [field]: value }))
+  }
+
+  const saveEditField = async (field: string) => {
     if (!editingParticipant) return
     setSavingEdit(true)
     try {
-      const body: Record<string, unknown> = {
-        name: editForm.name,
-        last_name: editForm.last_name || null,
-        short_name: editForm.short_name || null,
-        phone: editForm.phone || null,
-        email: editForm.email || null,
-        age: editForm.age ? parseInt(editForm.age) : null,
-        notes: editForm.notes || null,
+      const val = editFieldValues[field]?.trim() ?? ''
+      const payload: Record<string, string | number | null> = {
+        name: editingParticipant.name,
+      }
+      if (field === 'age') {
+        payload[field] = val ? parseInt(val, 10) : null
+      } else {
+        payload[field] = val || null
       }
       const res = await fetch(`/api/events/${eventId}/participants/${editingParticipant.id}`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       })
       const data = await res.json()
-      if (data.success) {
-        setEditingParticipant(null)
+      if (data.success && data.participant) {
+        setEditingParticipant(data.participant)
         fetchParticipants()
         if (selectedParticipant?.id === editingParticipant.id) {
           setSelectedParticipant(data.participant)
         }
-      } else {
-        alert(data.error || 'Error al guardar')
       }
-    } catch (e) { console.error(e); alert('Error de conexión') }
+    } catch (e) { console.error(e) }
+    setSavingEdit(false)
+    setEditField(null)
+  }
+
+  const handleEditFieldKeyDown = (e: React.KeyboardEvent, field: string) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      saveEditField(field)
+    } else if (e.key === 'Escape') {
+      setEditField(null)
+    }
+  }
+
+  const saveEditNotes = async () => {
+    if (!editingParticipant) return
+    setSavingEdit(true)
+    try {
+      const res = await fetch(`/api/events/${eventId}/participants/${editingParticipant.id}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: editingParticipant.name, notes: editNotesValue || null }),
+      })
+      const data = await res.json()
+      if (data.success && data.participant) {
+        setEditingParticipant(data.participant)
+        setEditNotes(false)
+        fetchParticipants()
+        if (selectedParticipant?.id === editingParticipant.id) {
+          setSelectedParticipant(data.participant)
+        }
+      }
+    } catch (e) { console.error(e) }
     setSavingEdit(false)
   }
 
@@ -574,9 +637,12 @@ export default function EventDetailPage() {
             Envío Masivo
           </button>
 
-          <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium shadow-sm">
+          <button onClick={() => { setAddTab('search'); setShowAddModal(true) }} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium shadow-sm">
             <UserPlus className="w-4 h-4" />
             Agregar
+          </button>
+          <button onClick={() => { setAddTab('manual'); setShowAddModal(true) }} className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition" title="Agregar manualmente">
+            <Plus className="w-4 h-4" />
           </button>
         </div>
 
@@ -1033,185 +1099,227 @@ export default function EventDetailPage() {
         )}
       </div>
 
-      {/* Add Participant Modal */}
-      {showAddModal && (
+      {/* Add Participant - ContactSelector */}
+      <ContactSelector
+        open={showAddModal && addTab === 'search'}
+        onClose={() => setShowAddModal(false)}
+        onConfirm={handleAddFromSelector}
+        title="Agregar Participantes"
+        subtitle="Busca entre tus contactos y leads para agregar al evento"
+        confirmLabel="Agregar"
+        excludeIds={existingContactIds}
+      />
+
+      {/* Add Participant - Manual Modal */}
+      {showAddModal && addTab === 'manual' && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] overflow-hidden flex flex-col">
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900">Agregar Participantes</h2>
+              <h2 className="text-lg font-semibold text-gray-900">Agregar Manualmente</h2>
               <button onClick={() => setShowAddModal(false)} className="p-1 text-gray-400 hover:text-gray-600 rounded">
                 <X className="w-5 h-5" />
               </button>
             </div>
-
-            <div className="flex border-b border-gray-200">
-              <button onClick={() => setAddTab('search')} className={`flex-1 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${addTab === 'search' ? 'border-green-600 text-green-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-                Buscar Contacto
-              </button>
-              <button onClick={() => setAddTab('manual')} className={`flex-1 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${addTab === 'manual' ? 'border-green-600 text-green-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-                Agregar Manual
-              </button>
-            </div>
-
             <div className="flex-1 overflow-y-auto p-6">
-              {addTab === 'search' ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Nombre *</label>
+                    <input value={manualForm.name} onChange={e => setManualForm(f => ({ ...f, name: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Apellido</label>
+                    <input value={manualForm.last_name} onChange={e => setManualForm(f => ({ ...f, last_name: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
+                  </div>
+                </div>
                 <div>
-                  <div className="relative mb-4">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                    <input
-                      value={contactSearch}
-                      onChange={e => setContactSearch(e.target.value)}
-                      placeholder="Buscar por nombre o teléfono..."
-                      className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900"
-                    />
-                  </div>
-
-                  {selectedContacts.length > 0 && (
-                    <div className="mb-4">
-                      <p className="text-xs text-gray-500 mb-2">{selectedContacts.length} seleccionados</p>
-                      <div className="flex flex-wrap gap-2">
-                        {selectedContacts.map(c => (
-                          <span key={c.id} className="inline-flex items-center gap-1 px-2.5 py-1 bg-green-100 text-green-700 rounded-full text-xs">
-                            {c.name}
-                            <button onClick={() => setSelectedContacts(prev => prev.filter(x => x.id !== c.id))} className="hover:text-green-900">
-                              <X className="w-3 h-3" />
-                            </button>
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="space-y-2">
-                    {contactResults.map(c => {
-                      const isSelected = selectedContacts.some(x => x.id === c.id)
-                      return (
-                        <button
-                          key={c.id}
-                          onClick={() => {
-                            if (isSelected) setSelectedContacts(prev => prev.filter(x => x.id !== c.id))
-                            else setSelectedContacts(prev => [...prev, c])
-                          }}
-                          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-colors ${isSelected ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:bg-gray-50'}`}
-                        >
-                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium ${isSelected ? 'bg-green-200 text-green-700' : 'bg-gray-200 text-gray-600'}`}>
-                            {c.name.charAt(0).toUpperCase()}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium text-gray-900 truncate">{c.name}</p>
-                            <p className="text-xs text-gray-500">{c.phone}</p>
-                          </div>
-                          {isSelected && <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />}
-                        </button>
-                      )
-                    })}
-                    {contactSearch.length >= 2 && contactResults.length === 0 && (
-                      <p className="text-center text-gray-400 text-sm py-4">No se encontraron contactos</p>
-                    )}
-                  </div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Nombre Corto</label>
+                  <input value={manualForm.short_name} onChange={e => setManualForm(f => ({ ...f, short_name: e.target.value }))} placeholder="Apodo o nombre corto" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
                 </div>
-              ) : (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Nombre *</label>
-                      <input value={manualForm.name} onChange={e => setManualForm(f => ({ ...f, name: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Apellido</label>
-                      <input value={manualForm.last_name} onChange={e => setManualForm(f => ({ ...f, last_name: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Nombre Corto</label>
-                    <input value={manualForm.short_name} onChange={e => setManualForm(f => ({ ...f, short_name: e.target.value }))} placeholder="Apodo o nombre corto" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
-                    <input value={manualForm.phone} onChange={e => setManualForm(f => ({ ...f, phone: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" placeholder="+51..." />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                    <input value={manualForm.email} onChange={e => setManualForm(f => ({ ...f, email: e.target.value }))} type="email" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Edad</label>
-                    <input value={manualForm.age} onChange={e => setManualForm(f => ({ ...f, age: e.target.value }))} type="number" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
-                  </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
+                  <input value={manualForm.phone} onChange={e => setManualForm(f => ({ ...f, phone: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" placeholder="+51..." />
                 </div>
-              )}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input value={manualForm.email} onChange={e => setManualForm(f => ({ ...f, email: e.target.value }))} type="email" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Edad</label>
+                  <input value={manualForm.age} onChange={e => setManualForm(f => ({ ...f, age: e.target.value }))} type="number" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
+                </div>
+              </div>
+              <button
+                onClick={() => setAddTab('search')}
+                className="mt-4 text-sm text-green-600 hover:text-green-700 font-medium"
+              >
+                Buscar contacto/lead existente
+              </button>
             </div>
-
             <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
               <button onClick={() => setShowAddModal(false)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">
                 Cancelar
               </button>
-              {addTab === 'search' ? (
-                <button onClick={handleAddFromContacts} disabled={selectedContacts.length === 0} className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 font-medium">
-                  Agregar {selectedContacts.length > 0 ? `(${selectedContacts.length})` : ''}
-                </button>
-              ) : (
-                <button onClick={handleAddManual} disabled={!manualForm.name} className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 font-medium">
-                  Agregar
-                </button>
-              )}
+              <button onClick={handleAddManual} disabled={!manualForm.name} className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 font-medium">
+                Agregar
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Edit Participant Modal */}
+      {/* Edit Participant Panel (Slide-over) */}
       {editingParticipant && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900">Editar Participante</h2>
-              <button onClick={() => setEditingParticipant(null)} className="p-1 text-gray-400 hover:text-gray-600 rounded">
-                <X className="w-5 h-5" />
+        <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setEditingParticipant(null); setEditField(null); setEditNotes(false) }} />
+          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200">
+            {/* Header */}
+            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
+              <h2 className="text-sm font-semibold text-slate-900">Editar Participante</h2>
+              <button onClick={() => { setEditingParticipant(null); setEditField(null); setEditNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <X className="w-4 h-4 text-slate-400" />
               </button>
             </div>
-            <div className="p-6 space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Nombre *</label>
-                  <input value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
+
+            <div className="p-6 space-y-6">
+              {/* Avatar & Name */}
+              <div className="text-center">
+                <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
+                  <span className="text-emerald-700 font-bold text-base">
+                    {(editingParticipant.name || '?').charAt(0).toUpperCase()}
+                  </span>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Apellido</label>
-                  <input value={editForm.last_name} onChange={e => setEditForm(f => ({ ...f, last_name: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
+                {editField === 'name' ? (
+                  <input
+                    autoFocus
+                    value={editFieldValues.name ?? ''}
+                    onChange={(e) => setEditFieldValues(prev => ({ ...prev, name: e.target.value }))}
+                    onKeyDown={(e) => handleEditFieldKeyDown(e, 'name')}
+                    onBlur={() => saveEditField('name')}
+                    className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
+                    placeholder="Nombre"
+                  />
+                ) : (
+                  <h3
+                    className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
+                    onClick={() => startEditField('name', editingParticipant.name || '')}
+                    title="Clic para editar nombre"
+                  >
+                    {editingParticipant.name || 'Sin nombre'}
+                  </h3>
+                )}
+                {editingParticipant.status && (
+                  <span className={`inline-block px-2 py-0.5 text-xs rounded-full mt-1 text-white ${statusInfo(editingParticipant.status)?.color || 'bg-gray-400'}`}>
+                    {statusInfo(editingParticipant.status)?.label || editingParticipant.status}
+                  </span>
+                )}
+              </div>
+
+              {/* Inline editable info fields */}
+              <div className="space-y-3">
+                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
+
+                {/* Phone */}
+                <div className="flex items-center gap-3 group">
+                  <Phone className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editField === 'phone' ? (
+                    <input autoFocus value={editFieldValues.phone ?? ''} onChange={(e) => setEditFieldValues(prev => ({ ...prev, phone: e.target.value }))} onKeyDown={(e) => handleEditFieldKeyDown(e, 'phone')} onBlur={() => saveEditField('phone')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Teléfono" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingParticipant.phone ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditField('phone', editingParticipant.phone || '')} title="Clic para editar">
+                      {editingParticipant.phone || 'Agregar teléfono'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Email */}
+                <div className="flex items-center gap-3 group">
+                  <Mail className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editField === 'email' ? (
+                    <input autoFocus value={editFieldValues.email ?? ''} onChange={(e) => setEditFieldValues(prev => ({ ...prev, email: e.target.value }))} onKeyDown={(e) => handleEditFieldKeyDown(e, 'email')} onBlur={() => saveEditField('email')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="correo@ejemplo.com" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingParticipant.email ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditField('email', editingParticipant.email || '')} title="Clic para editar">
+                      {editingParticipant.email || 'Agregar email'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Last Name */}
+                <div className="flex items-center gap-3 group">
+                  <Users className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editField === 'last_name' ? (
+                    <input autoFocus value={editFieldValues.last_name ?? ''} onChange={(e) => setEditFieldValues(prev => ({ ...prev, last_name: e.target.value }))} onKeyDown={(e) => handleEditFieldKeyDown(e, 'last_name')} onBlur={() => saveEditField('last_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Apellido" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingParticipant.last_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditField('last_name', editingParticipant.last_name || '')} title="Clic para editar">
+                      {editingParticipant.last_name || 'Agregar apellido'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Short Name */}
+                <div className="flex items-center gap-3 group">
+                  <Pencil className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editField === 'short_name' ? (
+                    <input autoFocus value={editFieldValues.short_name ?? ''} onChange={(e) => setEditFieldValues(prev => ({ ...prev, short_name: e.target.value }))} onKeyDown={(e) => handleEditFieldKeyDown(e, 'short_name')} onBlur={() => saveEditField('short_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Nombre corto" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingParticipant.short_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditField('short_name', editingParticipant.short_name || '')} title="Clic para editar">
+                      {editingParticipant.short_name || 'Agregar nombre corto'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Age */}
+                <div className="flex items-center gap-3 group">
+                  <CalendarDays className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editField === 'age' ? (
+                    <input autoFocus type="number" value={editFieldValues.age ?? ''} onChange={(e) => setEditFieldValues(prev => ({ ...prev, age: e.target.value }))} onKeyDown={(e) => handleEditFieldKeyDown(e, 'age')} onBlur={() => saveEditField('age')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Edad" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingParticipant.age ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditField('age', editingParticipant.age?.toString() || '')} title="Clic para editar">
+                      {editingParticipant.age ? `${editingParticipant.age} años` : 'Agregar edad'}
+                    </span>
+                  )}
                 </div>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre Corto</label>
-                <input value={editForm.short_name} onChange={e => setEditForm(f => ({ ...f, short_name: e.target.value }))} placeholder="Apodo o nombre corto" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
-                  <input value={editForm.phone} onChange={e => setEditForm(f => ({ ...f, phone: e.target.value }))} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" placeholder="+51..." />
+
+              {/* Notes */}
+              <div className="border-t border-slate-100 pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Notas</h5>
+                  {editNotes ? (
+                    <button onClick={saveEditNotes} disabled={savingEdit} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
+                      <Save className="w-3.5 h-3.5" />
+                      {savingEdit ? 'Guardando...' : 'Guardar'}
+                    </button>
+                  ) : (
+                    <button onClick={() => { setEditNotes(true); setEditNotesValue(editingParticipant.notes || '') }} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
+                      <Pencil className="w-3.5 h-3.5" />
+                      Editar
+                    </button>
+                  )}
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Edad</label>
-                  <input value={editForm.age} onChange={e => setEditForm(f => ({ ...f, age: e.target.value }))} type="number" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
-                </div>
+                {editNotes ? (
+                  <textarea
+                    value={editNotesValue}
+                    onChange={(e) => setEditNotesValue(e.target.value)}
+                    className="w-full h-28 p-3 text-sm text-slate-800 border-2 border-emerald-500 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent resize-none placeholder:text-slate-400"
+                    placeholder="Escribe notas sobre este participante..."
+                  />
+                ) : (
+                  <div className="text-sm text-slate-700 bg-slate-50 rounded-xl p-3 min-h-[50px] border border-slate-100">
+                    {editingParticipant.notes || <span className="text-slate-400 italic">Sin notas</span>}
+                  </div>
+                )}
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                <input value={editForm.email} onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))} type="email" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
+
+              {/* Actions */}
+              <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
+                <button
+                  onClick={() => { handleDeleteParticipant(editingParticipant.id); setEditingParticipant(null) }}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-sm"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Eliminar participante
+                </button>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notas</label>
-                <textarea value={editForm.notes} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} rows={3} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900" />
-              </div>
-            </div>
-            <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
-              <button onClick={() => setEditingParticipant(null)} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">
-                Cancelar
-              </button>
-              <button onClick={handleSaveEdit} disabled={!editForm.name || savingEdit} className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 font-medium flex items-center gap-2">
-                <Save className="w-4 h-4" />
-                {savingEdit ? 'Guardando...' : 'Guardar'}
-              </button>
             </div>
           </div>
         </div>

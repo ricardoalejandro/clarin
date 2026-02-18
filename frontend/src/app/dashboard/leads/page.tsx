@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import ImportCSVModal from '@/components/ImportCSVModal'
 import TagInput from '@/components/TagInput'
+import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import { useRouter } from 'next/navigation'
 import { createWebSocket } from '@/lib/api'
 
@@ -62,6 +63,7 @@ interface Lead {
   notes: string
   tags: string[]
   structured_tags: StructuredTag[] | null
+  kommo_id: number | null
   assigned_to: string
   created_at: string
   updated_at: string
@@ -118,6 +120,7 @@ export default function LeadsPage() {
   const [obsDisplayCount, setObsDisplayCount] = useState(5)
   const [showHistoryModal, setShowHistoryModal] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
+  const [syncingKommo, setSyncingKommo] = useState(false)
   const [historyFilterType, setHistoryFilterType] = useState('')
   const [historyFilterFrom, setHistoryFilterFrom] = useState('')
   const [historyFilterTo, setHistoryFilterTo] = useState('')
@@ -145,6 +148,10 @@ export default function LeadsPage() {
   const [showDeviceSelector, setShowDeviceSelector] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
   const [whatsappPhone, setWhatsappPhone] = useState('')
+
+  // Broadcast from leads
+  const [showBroadcastModal, setShowBroadcastModal] = useState(false)
+  const [submittingBroadcast, setSubmittingBroadcast] = useState(false)
 
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
@@ -411,33 +418,6 @@ export default function LeadsPage() {
     }
   }
 
-  const handleDeleteAll = async () => {
-    if (!confirm('¿Estás seguro de eliminar TODOS los leads? Esta acción no se puede deshacer.')) return
-    if (!confirm('Esta acción eliminará todos los leads permanentemente. ¿Continuar?')) return
-    const token = localStorage.getItem('token')
-    setDeleting(true)
-    try {
-      const res = await fetch('/api/leads/batch', {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ delete_all: true }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setSelectedIds(new Set())
-        setSelectionMode(false)
-        fetchLeads()
-      }
-    } catch (err) {
-      console.error('Failed to delete all leads:', err)
-    } finally {
-      setDeleting(false)
-    }
-  }
-
   const toggleSelection = (leadId: string) => {
     const newSelected = new Set(selectedIds)
     if (newSelected.has(leadId)) {
@@ -493,8 +473,9 @@ export default function LeadsPage() {
       })
       const data = await res.json()
       if (data.success && data.lead) {
-        setDetailLead(data.lead)
-        setLeads(prev => prev.map(l => l.id === data.lead.id ? data.lead : l))
+        const merged = { ...data.lead, structured_tags: data.lead.structured_tags || detailLead.structured_tags }
+        setDetailLead(merged)
+        setLeads(prev => prev.map(l => l.id === data.lead.id ? merged : l))
       }
     } catch (err) {
       console.error('Failed to save lead field:', err)
@@ -528,8 +509,9 @@ export default function LeadsPage() {
       })
       const data = await res.json()
       if (data.success && data.lead) {
-        setDetailLead(data.lead)
-        setLeads(prev => prev.map(l => l.id === data.lead.id ? data.lead : l))
+        const merged = { ...data.lead, structured_tags: data.lead.structured_tags || detailLead.structured_tags }
+        setDetailLead(merged)
+        setLeads(prev => prev.map(l => l.id === data.lead.id ? merged : l))
       }
       setEditingNotes(false)
     } catch (err) {
@@ -590,6 +572,31 @@ export default function LeadsPage() {
       console.error('Failed to fetch observations:', err)
     } finally {
       setLoadingObservations(false)
+    }
+  }
+
+  const handleSyncKommo = async () => {
+    if (!detailLead) return
+    setSyncingKommo(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${detailLead.id}/sync-kommo`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success && data.lead) {
+        setDetailLead(data.lead)
+        setLeads(prev => prev.map(l => l.id === data.lead.id ? data.lead : l))
+        fetchObservations(detailLead.id)
+      } else {
+        alert(data.error || 'Error al sincronizar')
+      }
+    } catch (err) {
+      console.error('Sync error:', err)
+      alert('Error de conexión al sincronizar')
+    } finally {
+      setSyncingKommo(false)
     }
   }
 
@@ -817,6 +824,78 @@ export default function LeadsPage() {
 
   const activeFilterCount = filterStageIds.size + filterTagNames.size
 
+  // Leads with phone for broadcast
+  const broadcastableLeads = filteredLeads.filter(l => l.phone)
+
+  const handleCreateBroadcastFromLeads = async (formResult: CampaignFormResult) => {
+    setSubmittingBroadcast(true)
+    const token = localStorage.getItem('token')
+    try {
+      // 1. Create the campaign
+      const res = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          name: formResult.name,
+          device_id: formResult.device_id,
+          message_template: formResult.message_template,
+          attachments: formResult.attachments,
+          scheduled_at: formResult.scheduled_at || undefined,
+          settings: formResult.settings,
+        }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'Error al crear campaña')
+        return
+      }
+
+      const campaignId = data.campaign?.id
+      if (!campaignId) {
+        alert('Error: no se recibió el ID de la campaña')
+        return
+      }
+
+      // 2. Schedule if needed
+      if (formResult.scheduled_at) {
+        await fetch(`/api/campaigns/${campaignId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
+        })
+      }
+
+      // 3. Add filtered leads as recipients
+      const recipientsList = broadcastableLeads.map(lead => {
+        const cleanPhone = (lead.phone || '').replace(/[^0-9]/g, '')
+        return {
+          jid: cleanPhone ? cleanPhone + '@s.whatsapp.net' : '',
+          name: lead.name || null,
+          phone: cleanPhone,
+          metadata: {
+            ...(lead.short_name ? { nombre_corto: lead.short_name } : {}),
+            ...(lead.company ? { empresa: lead.company } : {}),
+          },
+        }
+      }).filter(r => r.jid)
+
+      if (recipientsList.length > 0) {
+        await fetch(`/api/campaigns/${campaignId}/recipients`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ recipients: recipientsList }),
+        })
+      }
+
+      setShowBroadcastModal(false)
+      router.push('/dashboard/broadcasts')
+    } catch (err) {
+      alert('Error al crear campaña desde leads')
+    } finally {
+      setSubmittingBroadcast(false)
+    }
+  }
+
   // Group leads by stage
   const leadsByStage = stages.map(stage => ({
     ...stage,
@@ -857,13 +936,6 @@ export default function LeadsPage() {
                 {deleting ? 'Eliminando...' : `Eliminar (${selectedIds.size})`}
               </button>
               <button
-                onClick={handleDeleteAll}
-                disabled={deleting || leads.length === 0}
-                className="px-3 py-1.5 text-xs bg-red-700 text-white rounded-lg hover:bg-red-800 disabled:opacity-50 font-medium"
-              >
-                Eliminar todos
-              </button>
-              <button
                 onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
                 className="p-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-400"
               >
@@ -892,6 +964,14 @@ export default function LeadsPage() {
               >
                 <Upload className="w-3.5 h-3.5" />
                 CSV
+              </button>
+              <button
+                onClick={() => { fetchDevices(); setShowBroadcastModal(true) }}
+                disabled={filteredLeads.filter(l => l.phone).length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-emerald-200 rounded-lg hover:bg-emerald-50 transition text-emerald-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Radio className="w-3.5 h-3.5" />
+                Masivo
               </button>
               <button
                 onClick={() => setShowAddModal(true)}
@@ -1443,9 +1523,21 @@ export default function LeadsPage() {
             {/* Header */}
             <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
               <h2 className="text-sm font-semibold text-slate-900">Detalle del Lead</h2>
-              <button onClick={() => { setShowDetailPanel(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
-                <X className="w-4 h-4 text-slate-400" />
-              </button>
+              <div className="flex items-center gap-1">
+                {detailLead.kommo_id && (
+                  <button
+                    onClick={handleSyncKommo}
+                    disabled={syncingKommo}
+                    title="Sincronizar desde Kommo"
+                    className="p-1.5 hover:bg-emerald-50 rounded-lg text-slate-400 hover:text-emerald-600 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${syncingKommo ? 'animate-spin' : ''}`} />
+                  </button>
+                )}
+                <button onClick={() => { setShowDetailPanel(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                  <X className="w-4 h-4 text-slate-400" />
+                </button>
+              </div>
             </div>
 
             <div className="p-6 space-y-6">
@@ -1521,6 +1613,18 @@ export default function LeadsPage() {
                   ) : (
                     <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.last_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('last_name', detailLead.last_name || '')} title="Clic para editar">
                       {detailLead.last_name || 'Agregar apellido'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Short Name */}
+                <div className="flex items-center gap-3 group">
+                  <Edit2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'short_name' ? (
+                    <input autoFocus value={editValues.short_name ?? ''} onChange={(e) => setEditValues({ ...editValues, short_name: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'short_name')} onBlur={() => saveLeadField('short_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Nombre corto" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.short_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('short_name', detailLead.short_name || '')} title="Clic para editar">
+                      {detailLead.short_name || 'Agregar nombre corto'}
                     </span>
                   )}
                 </div>
@@ -1867,6 +1971,37 @@ export default function LeadsPage() {
         onClose={() => setShowImportModal(false)}
         onSuccess={() => { fetchLeads(); fetchPipelines() }}
         defaultType="leads"
+      />
+
+      {/* Broadcast from Leads Modal */}
+      <CreateCampaignModal
+        open={showBroadcastModal}
+        onClose={() => setShowBroadcastModal(false)}
+        onSubmit={handleCreateBroadcastFromLeads}
+        devices={devices}
+        submitting={submittingBroadcast}
+        title="Envío Masivo desde Leads"
+        subtitle={`Se incluirán ${broadcastableLeads.length} leads con teléfono`}
+        submitLabel={submittingBroadcast ? 'Creando...' : 'Crear y agregar destinatarios'}
+        initialName={`Leads - ${new Date().toLocaleDateString('es-PE', { day: 'numeric', month: 'short' })}`}
+        infoPanel={
+          <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-800">
+            <div className="flex items-center gap-2 mb-1">
+              <Radio className="w-3.5 h-3.5 text-emerald-600" />
+              <span className="font-medium">Destinatarios desde Leads</span>
+            </div>
+            <p className="text-emerald-600">
+              Se agregarán automáticamente <strong>{broadcastableLeads.length}</strong> leads
+              {filterStageIds.size > 0 || filterTagNames.size > 0 || debouncedSearchTerm
+                ? ' (filtrados)' : ''} como destinatarios de esta campaña.
+            </p>
+            {filteredLeads.length !== broadcastableLeads.length && (
+              <p className="text-amber-600 mt-1">
+                {filteredLeads.length - broadcastableLeads.length} lead(s) sin teléfono serán excluidos.
+              </p>
+            )}
+          </div>
+        }
       />
     </div>
   )

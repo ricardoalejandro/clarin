@@ -4,12 +4,12 @@ import { useEffect, useState, useRef } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
-import { 
-  MessageSquare, 
-  Smartphone, 
-  Users, 
-  Settings, 
-  LogOut, 
+import {
+  MessageSquare,
+  Smartphone,
+  Users,
+  Settings,
+  LogOut,
   Menu,
   X,
   LayoutDashboard,
@@ -156,6 +156,9 @@ export default function DashboardLayout({
     ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin' }] : []),
   ]
 
+  // When mobile overlay is open, always show expanded (not collapsed)
+  const isCollapsed = sidebarCollapsed && !sidebarOpen
+
   if (loading) {
     return (
       <div className="h-screen flex items-center justify-center bg-slate-50">
@@ -176,7 +179,7 @@ export default function DashboardLayout({
     <div className="bg-slate-50 flex overflow-hidden" style={{ height: 'var(--app-height, 100vh)' }}>
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/30 backdrop-blur-sm z-30 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
@@ -185,27 +188,27 @@ export default function DashboardLayout({
       {/* Sidebar */}
       <aside className={`
         fixed lg:static inset-y-0 left-0 z-40
-        ${sidebarCollapsed ? 'lg:w-[68px]' : 'lg:w-60'} w-64
+        ${isCollapsed ? 'lg:w-[68px]' : 'lg:w-60'} w-64
         bg-white border-r border-slate-200/80
         transform transition-all duration-200 ease-in-out
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         flex flex-col
       `}>
         {/* Logo */}
-        <div className={`h-14 flex items-center justify-between ${sidebarCollapsed ? 'px-3' : 'px-4'} border-b border-slate-100 shrink-0`}>
+        <div className={`h-14 flex items-center justify-between ${isCollapsed ? 'px-3' : 'px-4'} border-b border-slate-100 shrink-0`}>
           <Link href="/dashboard" className="flex items-center gap-2.5 overflow-hidden">
             <div className="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center shrink-0">
               <MessageSquare className="w-[18px] h-[18px] text-white" />
             </div>
-            {!sidebarCollapsed && <span className="font-bold text-lg text-slate-800 whitespace-nowrap tracking-tight">Clarin</span>}
+            {!isCollapsed && <span className="font-bold text-lg text-slate-800 whitespace-nowrap tracking-tight">Clarin</span>}
           </Link>
-          <button 
+          <button
             onClick={() => setSidebarOpen(false)}
             className="lg:hidden p-1 hover:bg-slate-100 rounded-lg"
           >
             <X className="w-5 h-5 text-slate-500" />
           </button>
-          <button 
+          <button
             onClick={toggleSidebarCollapsed}
             className="hidden lg:flex p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors"
             title={sidebarCollapsed ? 'Expandir menú' : 'Colapsar menú'}
@@ -215,28 +218,28 @@ export default function DashboardLayout({
         </div>
 
         {/* Navigation */}
-        <nav className={`${sidebarCollapsed ? 'px-2 py-3' : 'px-3 py-3'} space-y-0.5 flex-1 overflow-y-auto`}>
+        <nav className={`${isCollapsed ? 'px-2 py-3' : 'px-3 py-3'} space-y-0.5 flex-1 overflow-y-auto`}>
           {navItems.map((item) => {
-            const isActive = pathname === item.href || 
+            const isActive = pathname === item.href ||
               (item.href !== '/dashboard' && pathname.startsWith(item.href))
-            
+
             return (
               <Link
                 key={item.href}
                 href={item.href}
                 onClick={() => setSidebarOpen(false)}
-                title={sidebarCollapsed ? item.label : undefined}
+                title={isCollapsed ? item.label : undefined}
                 className={`
-                  flex items-center ${sidebarCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-lg transition-all text-[13px]
-                  ${isActive 
-                    ? 'bg-emerald-50 text-emerald-700 font-semibold' 
+                  flex items-center ${isCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-lg transition-all text-[13px]
+                  ${isActive
+                    ? 'bg-emerald-50 text-emerald-700 font-semibold'
                     : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'
                   }
                 `}
               >
                 <item.icon className={`w-[18px] h-[18px] shrink-0 ${isActive ? 'text-emerald-600' : ''}`} />
-                {!sidebarCollapsed && <span>{item.label}</span>}
-                {!sidebarCollapsed && isActive && <ChevronRight className="w-3.5 h-3.5 ml-auto opacity-50" />}
+                {!isCollapsed && <span>{item.label}</span>}
+                {!isCollapsed && isActive && <ChevronRight className="w-3.5 h-3.5 ml-auto opacity-50" />}
               </Link>
             )
           })}
@@ -244,14 +247,14 @@ export default function DashboardLayout({
 
         {/* Account switcher */}
         {accounts.length > 1 && (
-          <div ref={accountSwitcherRef} className={`shrink-0 border-t border-slate-100 ${sidebarCollapsed ? 'p-2' : 'px-3 py-2'} relative`}>
+          <div ref={accountSwitcherRef} className={`shrink-0 border-t border-slate-100 ${isCollapsed ? 'p-2' : 'px-3 py-2'} relative`}>
             <button
               onClick={() => setShowAccountSwitcher(!showAccountSwitcher)}
-              title={sidebarCollapsed ? (user.account_name || 'Cambiar cuenta') : undefined}
-              className={`w-full flex items-center ${sidebarCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} rounded-lg hover:bg-slate-50 transition-colors text-slate-600`}
+              title={isCollapsed ? (user.account_name || 'Cambiar cuenta') : undefined}
+              className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} rounded-lg hover:bg-slate-50 transition-colors text-slate-600`}
             >
               <Building2 className="w-4 h-4 shrink-0 text-slate-400" />
-              {!sidebarCollapsed && (
+              {!isCollapsed && (
                 <>
                   <span className="flex-1 text-left text-xs truncate font-medium">{user.account_name || 'Cuenta'}</span>
                   <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-slate-300" />
@@ -259,7 +262,7 @@ export default function DashboardLayout({
               )}
             </button>
             {showAccountSwitcher && (
-              <div className={`absolute ${sidebarCollapsed ? 'left-full ml-2 bottom-0' : 'left-3 right-3 bottom-full mb-1'} bg-white border border-slate-200 rounded-xl shadow-lg shadow-slate-200/50 z-50 py-1 min-w-[180px]`}>
+              <div className={`absolute ${isCollapsed ? 'left-full ml-2 bottom-0' : 'left-3 right-3 bottom-full mb-1'} bg-white border border-slate-200 rounded-xl shadow-lg shadow-slate-200/50 z-50 py-1 min-w-[180px]`}>
                 <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Cambiar cuenta</div>
                 {accounts.map((acc) => (
                   <button
@@ -280,8 +283,8 @@ export default function DashboardLayout({
         )}
 
         {/* User section */}
-        <div className={`shrink-0 ${sidebarCollapsed ? 'p-2' : 'px-3 py-3'} border-t border-slate-100`}>
-          {sidebarCollapsed ? (
+        <div className={`shrink-0 ${isCollapsed ? 'p-2' : 'px-3 py-3'} border-t border-slate-100`}>
+          {isCollapsed ? (
             <div className="flex flex-col items-center gap-2">
               <div className="w-9 h-9 bg-emerald-50 rounded-lg flex items-center justify-center">
                 <span className="text-emerald-700 font-semibold text-sm">

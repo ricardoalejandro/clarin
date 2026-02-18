@@ -482,6 +482,11 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_quick_replies_account ON quick_replies(account_id)`,
 
+		// Quick replies media support
+		`ALTER TABLE quick_replies ADD COLUMN IF NOT EXISTS media_url TEXT DEFAULT ''`,
+		`ALTER TABLE quick_replies ADD COLUMN IF NOT EXISTS media_type VARCHAR(50) DEFAULT ''`,
+		`ALTER TABLE quick_replies ADD COLUMN IF NOT EXISTS media_filename VARCHAR(255) DEFAULT ''`,
+
 		// Lead pipeline linkage
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS pipeline_id UUID REFERENCES pipelines(id) ON DELETE SET NULL`,
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS stage_id UUID REFERENCES pipeline_stages(id) ON DELETE SET NULL`,
@@ -520,6 +525,15 @@ func Migrate(db *pgxpool.Pool) error {
 		// Kommo call slot tracking on interactions (for dedup during sync)
 		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS kommo_call_slot INT`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_interactions_kommo_call_slot ON interactions(lead_id, kommo_call_slot) WHERE kommo_call_slot IS NOT NULL`,
+
+		// Account settings: default incoming stage for new leads
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS default_incoming_stage_id UUID REFERENCES pipeline_stages(id) ON DELETE SET NULL`,
+
+		// Performance indexes for chat listing
+		`CREATE INDEX IF NOT EXISTS idx_chats_account_lastmsg ON chats(account_id, last_message_at DESC NULLS LAST) WHERE jid NOT LIKE '%@g.us' AND jid NOT LIKE '%@newsletter' AND jid NOT LIKE '%@broadcast' AND jid NOT LIKE '%@lid'`,
+		`CREATE INDEX IF NOT EXISTS idx_chats_device_id ON chats(device_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_contacts_jid ON contacts(jid)`,
+		`CREATE INDEX IF NOT EXISTS idx_leads_jid ON leads(account_id, jid)`,
 	}
 
 	for _, migration := range migrations {

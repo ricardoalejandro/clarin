@@ -6,12 +6,14 @@ import {
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
   BarChart3, ZoomIn, ZoomOut, CalendarClock, X, Paperclip,
-  MessageSquare, Upload, UserPlus, Download, CheckSquare, Square
+  MessageSquare, Upload, UserPlus, Download, CheckSquare, Square,
+  Phone, Mail, Save, Pencil, Ban
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import MessageBubble from '@/components/chat/MessageBubble'
 import CreateCampaignModal, { CampaignFormResult, CampaignAttachment } from '@/components/CreateCampaignModal'
+import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
 import { renderFormattedText } from '@/lib/whatsappFormat'
 import * as XLSX from 'xlsx'
 
@@ -86,6 +88,7 @@ const STATUS_COLORS: Record<string, string> = {
   running: 'bg-yellow-100 text-yellow-700',
   paused: 'bg-orange-100 text-orange-700',
   completed: 'bg-green-100 text-green-700',
+  cancelled: 'bg-red-100 text-red-700',
   failed: 'bg-red-100 text-red-700',
 }
 
@@ -95,6 +98,7 @@ const STATUS_LABELS: Record<string, string> = {
   running: 'Enviando',
   paused: 'Pausada',
   completed: 'Completada',
+  cancelled: 'Cancelada',
   failed: 'Fallida',
 }
 
@@ -138,6 +142,12 @@ export default function BroadcastsPage() {
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<string>>(new Set())
   const [allTags, setAllTags] = useState<BroadcastTag[]>([])
   const [filterTagIds, setFilterTagIds] = useState<Set<string>>(new Set())
+
+  // Edit recipient panel
+  const [editingRecipient, setEditingRecipient] = useState<Recipient | null>(null)
+  const [editRecField, setEditRecField] = useState<string | null>(null)
+  const [editRecValues, setEditRecValues] = useState<Record<string, string>>({})
+  const [savingRecEdit, setSavingRecEdit] = useState(false)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -276,6 +286,35 @@ export default function BroadcastsPage() {
     }
   }
 
+  const handleAddFromPeopleSelector = async (selected: SelectedPerson[]) => {
+    if (!selectedCampaign || selected.length === 0) return
+    const recipientsList = selected.map(p => {
+      const cleanPhone = (p.phone || '').replace(/[^0-9]/g, '')
+      return {
+        contact_id: p.source_type === 'contact' ? p.id : undefined,
+        jid: cleanPhone ? cleanPhone + '@s.whatsapp.net' : '',
+        name: p.name || null,
+        phone: cleanPhone,
+      }
+    }).filter(r => r.jid)
+    try {
+      const res = await fetch(`/api/campaigns/${selectedCampaign.id}/recipients`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ recipients: recipientsList }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowRecipientsModal(false)
+        fetchCampaigns()
+      } else {
+        alert(data.error || 'Error al agregar destinatarios')
+      }
+    } catch (err) {
+      alert('Error al agregar destinatarios')
+    }
+  }
+
   const handleAddManualRecipients = async () => {
     if (!selectedCampaign || manualEntries.length === 0) return
     const recipientsList = manualEntries.map(e => {
@@ -366,6 +405,60 @@ export default function BroadcastsPage() {
     } catch (err) {
       alert('Error al eliminar destinatario')
     }
+  }
+
+  const openEditRecipient = (rec: Recipient) => {
+    setEditingRecipient(rec)
+    setEditRecField(null)
+    setEditRecValues({})
+  }
+
+  const startEditRecField = (field: string, value: string) => {
+    setEditRecField(field)
+    setEditRecValues(prev => ({ ...prev, [field]: value }))
+  }
+
+  const saveRecField = async (field: string) => {
+    if (!editingRecipient || !selectedCampaign) return
+    setSavingRecEdit(true)
+    try {
+      const val = editRecValues[field]?.trim() ?? ''
+      const currentMeta = editingRecipient.metadata || {}
+      let payload: { name: string | null; phone: string | null; metadata: Record<string, any> }
+      if (field === 'name' || field === 'phone') {
+        payload = {
+          name: field === 'name' ? (val || null) : (editingRecipient.name || null),
+          phone: field === 'phone' ? (val || null) : (editingRecipient.phone || null),
+          metadata: currentMeta,
+        }
+      } else {
+        // metadata field (nombre_corto, empresa, etc)
+        const newMeta = { ...currentMeta, [field]: val || undefined }
+        if (!val) delete newMeta[field]
+        payload = {
+          name: editingRecipient.name || null,
+          phone: editingRecipient.phone || null,
+          metadata: newMeta,
+        }
+      }
+      const res = await fetch(`/api/campaigns/${selectedCampaign.id}/recipients/${editingRecipient.id}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json()
+      if (data.success && data.recipient) {
+        setEditingRecipient(data.recipient)
+        setRecipients(prev => prev.map(r => r.id === data.recipient.id ? data.recipient : r))
+      }
+    } catch (e) { console.error(e) }
+    setSavingRecEdit(false)
+    setEditRecField(null)
+  }
+
+  const handleRecFieldKeyDown = (e: React.KeyboardEvent, field: string) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveRecField(field) }
+    else if (e.key === 'Escape') setEditRecField(null)
   }
 
   const handleBatchDelete = async () => {
@@ -461,6 +554,21 @@ export default function BroadcastsPage() {
       else alert(data.error || 'Error al pausar campaña')
     } catch (err) {
       alert('Error al pausar campaña')
+    }
+  }
+
+  const handleCancelCampaign = async (id: string) => {
+    if (!confirm('¿Cancelar esta campaña? Los mensajes pendientes no se enviarán. Esta acción no se puede deshacer.')) return
+    try {
+      const res = await fetch(`/api/campaigns/${id}/cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) fetchCampaigns()
+      else alert(data.error || 'Error al cancelar campaña')
+    } catch (err) {
+      alert('Error al cancelar campaña')
     }
   }
 
@@ -766,6 +874,15 @@ export default function BroadcastsPage() {
                         <Pause className="w-5 h-5" />
                       </button>
                     )}
+                    {(campaign.status === 'running' || campaign.status === 'paused' || campaign.status === 'scheduled') && (
+                      <button
+                        onClick={() => handleCancelCampaign(campaign.id)}
+                        className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition"
+                        title="Cancelar envío"
+                      >
+                        <Ban className="w-5 h-5" />
+                      </button>
+                    )}
                     {(campaign.status === 'draft' || campaign.status === 'scheduled') && (
                       <button
                         onClick={() => {
@@ -808,7 +925,7 @@ export default function BroadcastsPage() {
                     >
                       <Copy className="w-5 h-5" />
                     </button>
-                    {(campaign.status === 'draft' || campaign.status === 'scheduled' || campaign.status === 'completed' || campaign.status === 'failed') && (
+                    {campaign.status !== 'running' && (
                       <button
                         onClick={() => handleDeleteCampaign(campaign.id)}
                         className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition"
@@ -891,133 +1008,27 @@ export default function BroadcastsPage() {
               </button>
             </div>
 
-            {/* Contacts tab */}
+            {/* Contacts tab - opens ContactSelector */}
             {recipientTab === 'contacts' && (
               <>
-                <div className="relative mb-3">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                  <input
-                    type="text"
-                    value={searchContacts}
-                    onChange={e => setSearchContacts(e.target.value)}
-                    placeholder="Buscar contacto..."
-                    className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
-                  />
-                </div>
-
-                {/* Tag filter */}
-                {allTags.length > 0 && (
-                  <div className="mb-3">
-                    <p className="text-xs text-gray-500 mb-1.5">Filtrar por etiquetas:</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {allTags.map(tag => {
-                        const isActive = filterTagIds.has(tag.id)
-                        return (
-                          <button
-                            key={tag.id}
-                            onClick={() => {
-                              const newSet = new Set(filterTagIds)
-                              if (isActive) newSet.delete(tag.id)
-                              else newSet.add(tag.id)
-                              setFilterTagIds(newSet)
-                              fetchContacts(newSet)
-                            }}
-                            className={`px-2.5 py-1 text-xs font-medium rounded-full transition-all ${
-                              isActive
-                                ? 'text-white ring-2 ring-offset-1'
-                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                            }`}
-                            style={isActive ? { backgroundColor: tag.color || '#6b7280' } : undefined}
-                          >
-                            {tag.name}
-                          </button>
-                        )
-                      })}
-                      {filterTagIds.size > 0 && (
-                        <button
-                          onClick={() => {
-                            setFilterTagIds(new Set())
-                            fetchContacts(new Set())
-                          }}
-                          className="px-2 py-1 text-xs text-red-500 hover:bg-red-50 rounded-full"
-                        >
-                          Limpiar
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-gray-500">{selectedContactIds.size} seleccionado(s)</span>
+                <div className="flex-1 flex flex-col items-center justify-center py-8 text-center">
+                  <Users className="w-10 h-10 text-gray-300 mb-3" />
+                  <p className="text-sm text-gray-500 mb-4">Busca y selecciona contactos y leads para agregar como destinatarios</p>
                   <button
-                    onClick={() => setSelectedContactIds(new Set(filteredContacts.map(c => c.id)))}
-                    className="text-xs text-green-600 hover:underline"
+                    onClick={() => setRecipientTab('contacts')}
+                    className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium"
                   >
-                    Seleccionar todos
+                    Abrir buscador
                   </button>
                 </div>
-
-                <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0">
-                  {filteredContacts.length === 0 ? (
-                    <div className="p-8 text-center text-gray-400 text-sm">
-                      No se encontraron contactos
-                    </div>
-                  ) : (
-                    filteredContacts.map(contact => (
-                      <label
-                        key={contact.id}
-                        className="flex items-center gap-3 p-3 hover:bg-gray-50 cursor-pointer"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={selectedContactIds.has(contact.id)}
-                          onChange={() => toggleContactSelection(contact.id)}
-                          className="rounded border-gray-300 text-green-600 focus:ring-green-500"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-900 truncate">
-                            {contact.custom_name || contact.name || contact.push_name || 'Sin nombre'}
-                          </p>
-                          <div className="flex items-center gap-2">
-                            <p className="text-xs text-gray-400 truncate">
-                              {contact.phone || contact.jid.replace('@s.whatsapp.net', '')}
-                            </p>
-                            {contact.structured_tags && contact.structured_tags.length > 0 && (
-                              <div className="flex gap-1">
-                                {contact.structured_tags.slice(0, 3).map(tag => (
-                                  <span
-                                    key={tag.id}
-                                    className="px-1.5 py-0.5 text-[10px] rounded-full text-white"
-                                    style={{ backgroundColor: tag.color || '#6b7280' }}
-                                  >
-                                    {tag.name}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </label>
-                    ))
-                  )}
-                </div>
-
-                <div className="flex gap-3 mt-4">
-                  <button
-                    onClick={() => { setShowRecipientsModal(false); setSelectedContactIds(new Set()); setSearchContacts('') }}
-                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    onClick={handleAddRecipients}
-                    disabled={selectedContactIds.size === 0}
-                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
-                  >
-                    Agregar {selectedContactIds.size}
-                  </button>
-                </div>
+                <ContactSelector
+                  open={true}
+                  onClose={() => setRecipientTab('manual')}
+                  onConfirm={handleAddFromPeopleSelector}
+                  title="Agregar Destinatarios"
+                  subtitle={`Campaña: ${selectedCampaign.name}`}
+                  confirmLabel="Agregar"
+                />
               </>
             )}
 
@@ -1418,13 +1429,22 @@ export default function BroadcastsPage() {
                         {rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente'}
                       </span>
                       {rec.status === 'pending' && (selectedCampaign.status === 'draft' || selectedCampaign.status === 'scheduled') && (
-                        <button
-                          onClick={() => handleDeleteRecipient(rec.id)}
-                          className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition"
-                          title="Eliminar destinatario"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        <>
+                          <button
+                            onClick={() => openEditRecipient(rec)}
+                            className="p-1 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded transition"
+                            title="Editar destinatario"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteRecipient(rec.id)}
+                            className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition"
+                            title="Eliminar destinatario"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -1606,6 +1626,127 @@ export default function BroadcastsPage() {
                 <Copy className="w-4 h-4 inline mr-2" />
                 Duplicar
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Recipient Panel (Slide-over) */}
+      {editingRecipient && selectedCampaign && (
+        <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setEditingRecipient(null); setEditRecField(null) }} />
+          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200">
+            {/* Header */}
+            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
+              <h2 className="text-sm font-semibold text-slate-900">Editar Destinatario</h2>
+              <button onClick={() => { setEditingRecipient(null); setEditRecField(null) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <X className="w-4 h-4 text-slate-400" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Avatar & Name */}
+              <div className="text-center">
+                <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
+                  <span className="text-emerald-700 font-bold text-base">
+                    {(editingRecipient.name || editingRecipient.jid?.replace('@s.whatsapp.net', '') || '?').charAt(0).toUpperCase()}
+                  </span>
+                </div>
+                {editRecField === 'name' ? (
+                  <input
+                    autoFocus
+                    value={editRecValues.name ?? ''}
+                    onChange={(e) => setEditRecValues(prev => ({ ...prev, name: e.target.value }))}
+                    onKeyDown={(e) => handleRecFieldKeyDown(e, 'name')}
+                    onBlur={() => saveRecField('name')}
+                    className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
+                    placeholder="Nombre"
+                  />
+                ) : (
+                  <h3
+                    className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
+                    onClick={() => startEditRecField('name', editingRecipient.name || '')}
+                    title="Clic para editar nombre"
+                  >
+                    {editingRecipient.name || editingRecipient.jid?.replace('@s.whatsapp.net', '') || 'Sin nombre'}
+                  </h3>
+                )}
+                <span className={`inline-block px-2 py-0.5 text-xs rounded-full mt-1 ${
+                  editingRecipient.status === 'sent' ? 'bg-green-100 text-green-700' :
+                  editingRecipient.status === 'failed' ? 'bg-red-100 text-red-700' :
+                  'bg-gray-100 text-gray-600'
+                }`}>
+                  {editingRecipient.status === 'sent' ? 'Enviado' : editingRecipient.status === 'failed' ? 'Fallido' : 'Pendiente'}
+                </span>
+              </div>
+
+              {/* Inline editable fields */}
+              <div className="space-y-3">
+                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
+
+                {/* Phone */}
+                <div className="flex items-center gap-3 group">
+                  <Phone className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editRecField === 'phone' ? (
+                    <input autoFocus value={editRecValues.phone ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, phone: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, 'phone')} onBlur={() => saveRecField('phone')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Teléfono" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingRecipient.phone ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditRecField('phone', editingRecipient.phone || '')} title="Clic para editar">
+                      {editingRecipient.phone || editingRecipient.jid?.replace('@s.whatsapp.net', '') || 'Sin teléfono'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Nombre Corto (stored in metadata) */}
+                <div className="flex items-center gap-3 group">
+                  <Pencil className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editRecField === 'nombre_corto' ? (
+                    <input autoFocus value={editRecValues.nombre_corto ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, nombre_corto: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, 'nombre_corto')} onBlur={() => saveRecField('nombre_corto')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Nombre corto" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingRecipient.metadata?.nombre_corto ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditRecField('nombre_corto', (editingRecipient.metadata?.nombre_corto as string) || '')} title="Clic para editar">
+                      {(editingRecipient.metadata?.nombre_corto as string) || 'Agregar nombre corto'}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Metadata / Custom Variables */}
+              {editingRecipient.metadata && Object.keys(editingRecipient.metadata).filter(k => k !== 'nombre_corto').length > 0 && (
+                <div className="space-y-3">
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Variables personalizadas</h5>
+                  {Object.entries(editingRecipient.metadata).filter(([k]) => k !== 'nombre_corto').map(([key, val]) => (
+                    <div key={key} className="flex items-center gap-3 group">
+                      <FileText className="w-4 h-4 text-emerald-600 shrink-0" />
+                      {editRecField === key ? (
+                        <input autoFocus value={editRecValues[key] ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, [key]: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, key)} onBlur={() => saveRecField(key)} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder={key} />
+                      ) : (
+                        <span className="text-sm flex-1 cursor-pointer hover:text-emerald-700 text-slate-800" onClick={() => startEditRecField(key, String(val || ''))} title="Clic para editar">
+                          <span className="text-slate-400 text-xs">{key}:</span> {String(val)}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
+                {editingRecipient.status === 'pending' && (
+                  <button
+                    onClick={() => { handleDeleteRecipient(editingRecipient.id); setEditingRecipient(null) }}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-sm"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Eliminar destinatario
+                  </button>
+                )}
+              </div>
+
+              {/* Info */}
+              <div className="text-xs text-slate-400 space-y-1">
+                <p>JID: {editingRecipient.jid}</p>
+                {editingRecipient.sent_at && <p>Enviado: {format(new Date(editingRecipient.sent_at), 'dd/MM/yyyy HH:mm:ss', { locale: es })}</p>}
+                {editingRecipient.error_message && <p className="text-red-400">Error: {editingRecipient.error_message}</p>}
+              </div>
             </div>
           </div>
         </div>

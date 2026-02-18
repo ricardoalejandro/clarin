@@ -370,6 +370,9 @@ return nil, fmt.Errorf("failed to sync pipeline metadata: %w", err)
 // Sync tags (needed for leads)
 _, _ = s.syncTags(ctx, accountID)
 
+// Push local tags to Kommo
+_, _ = s.pushMissingTagsToKommo(ctx, accountID)
+
 // Insert or update the connected pipeline record
 var cp ConnectedPipeline
 err = s.db.QueryRow(ctx, `
@@ -439,12 +442,29 @@ pCount++
 }
 result.Pipelines = pCount
 
+// Only sync tags if the account has at least one active pipeline.
+// Tags come from the shared Kommo API, so syncing without a pipeline
+// would incorrectly assign another account's tags to this account.
+if len(activePipelines) > 0 {
 setProgress("Sincronizando etiquetas...")
 tCount, err := s.syncTags(ctx, accountID)
 if err != nil {
 result.Errors = append(result.Errors, fmt.Sprintf("tags: %v", err))
 }
 result.Tags = tCount
+
+// Push Clarin-only tags to Kommo (bidirectional sync)
+setProgress("Sincronizando etiquetas locales a Kommo...")
+pushedTags, pushErr := s.pushMissingTagsToKommo(ctx, accountID)
+if pushErr != nil {
+result.Errors = append(result.Errors, fmt.Sprintf("push tags: %v", pushErr))
+}
+if pushedTags > 0 {
+log.Printf("[SYNC] Pushed %d local tags to Kommo for account %s", pushedTags, accountID)
+}
+} else {
+log.Printf("[SYNC] Skipping tag sync for account %s — no active pipelines", accountID)
+}
 
 // Contacts are synced automatically when leads are synced (via upsertLead → upsertContact),
 // so we only sync contacts that are linked to leads in connected pipelines.
@@ -730,6 +750,16 @@ func (s *SyncService) syncCallsFromKommo(ctx context.Context, accountID, leadID 
 			continue
 		}
 
+		slotNum := slot + 1 // 1-based slot number
+
+		// Check if a locally-created interaction already owns this slot
+		var existingNotes *string
+		_ = s.db.QueryRow(ctx, `SELECT notes FROM interactions WHERE lead_id = $1 AND kommo_call_slot = $2`, leadID, slotNum).Scan(&existingNotes)
+		if existingNotes != nil && !strings.HasPrefix(*existingNotes, "(sinc) ") {
+			// This slot is owned by a local interaction — don't overwrite
+			continue
+		}
+
 		// Build the note with (sinc) prefix
 		var parts []string
 		if responsable != "" {
@@ -742,7 +772,6 @@ func (s *SyncService) syncCallsFromKommo(ctx context.Context, accountID, leadID 
 			parts = append(parts, "Resultado: "+resultado)
 		}
 		notes := "(sinc) " + strings.Join(parts, " | ")
-		slotNum := slot + 1 // 1-based slot number
 
 		// Upsert: use kommo_call_slot unique index for dedup
 		_, err := s.db.Exec(ctx, `
@@ -918,6 +947,43 @@ count++
 return count, nil
 }
 
+// pushMissingTagsToKommo creates tags in Kommo that exist locally but have no kommo_id.
+// This enables bidirectional tag sync: tags created in Clarin are pushed to Kommo.
+func (s *SyncService) pushMissingTagsToKommo(ctx context.Context, accountID uuid.UUID) (int, error) {
+	rows, err := s.db.Query(ctx, `SELECT id, name FROM tags WHERE account_id = $1 AND kommo_id IS NULL`, accountID)
+	if err != nil {
+		return 0, fmt.Errorf("query missing tags: %w", err)
+	}
+	defer rows.Close()
+
+	type localTag struct {
+		id   uuid.UUID
+		name string
+	}
+	var missing []localTag
+	for rows.Next() {
+		var t localTag
+		if err := rows.Scan(&t.id, &t.name); err != nil {
+			continue
+		}
+		missing = append(missing, t)
+	}
+
+	count := 0
+	for _, t := range missing {
+		newKommoID, createErr := s.client.CreateLeadTag(t.name)
+		if createErr != nil {
+			log.Printf("[SYNC] Failed to create tag %q in Kommo: %v", t.name, createErr)
+			continue
+		}
+		kommoID64 := int64(newKommoID)
+		_, _ = s.db.Exec(ctx, `UPDATE tags SET kommo_id = $1, updated_at = NOW() WHERE id = $2`, kommoID64, t.id)
+		log.Printf("[SYNC] Created tag %q in Kommo (kommo_id=%d)", t.name, newKommoID)
+		count++
+	}
+	return count, nil
+}
+
 func (s *SyncService) syncContacts(ctx context.Context, accountID uuid.UUID) (int, error) {
 count := 0
 page := 1
@@ -1084,7 +1150,7 @@ func (s *SyncService) PushLeadTagsChange(accountID, leadID uuid.UUID) {
 
 	// Get all current tags for this lead with their kommo_id
 	rows, err := s.db.Query(ctx, `
-		SELECT t.name, t.kommo_id FROM lead_tags lt
+		SELECT t.id, t.name, t.kommo_id FROM lead_tags lt
 		JOIN tags t ON lt.tag_id = t.id
 		WHERE lt.lead_id = $1
 	`, leadID)
@@ -1096,16 +1162,29 @@ func (s *SyncService) PushLeadTagsChange(accountID, leadID uuid.UUID) {
 
 	var tags []KommoTag
 	for rows.Next() {
+		var tagLocalID uuid.UUID
 		var name string
 		var kommoTagID *int64
-		if err := rows.Scan(&name, &kommoTagID); err != nil {
+		if err := rows.Scan(&tagLocalID, &name, &kommoTagID); err != nil {
 			continue
 		}
-		tag := KommoTag{Name: name}
 		if kommoTagID != nil {
-			tag.ID = int(*kommoTagID)
+			tags = append(tags, KommoTag{ID: int(*kommoTagID), Name: name})
+		} else {
+			// Tag doesn't exist in Kommo — create it one by one
+			newKommoID, createErr := s.client.CreateLeadTag(name)
+			if createErr != nil {
+				log.Printf("[PUSH] Lead %s: failed to create tag %q in Kommo: %v", leadID, name, createErr)
+				// Still include by name so Kommo can try auto-create
+				tags = append(tags, KommoTag{Name: name})
+				continue
+			}
+			// Save the new kommo_id back to our database
+			kommoID64 := int64(newKommoID)
+			_, _ = s.db.Exec(ctx, `UPDATE tags SET kommo_id = $1, updated_at = NOW() WHERE id = $2`, kommoID64, tagLocalID)
+			tags = append(tags, KommoTag{ID: newKommoID, Name: name})
+			log.Printf("[PUSH] Lead %s: created tag %q in Kommo (kommo_id=%d)", leadID, name, newKommoID)
 		}
-		tags = append(tags, tag)
 	}
 
 	updatedAt, err := s.client.UpdateLeadTags(int(*kommoLeadID), tags)
@@ -1130,7 +1209,7 @@ func (s *SyncService) PushContactTagsChange(accountID, contactID uuid.UUID) {
 	}
 
 	rows, err := s.db.Query(ctx, `
-		SELECT t.name, t.kommo_id FROM contact_tags ct
+		SELECT t.id, t.name, t.kommo_id FROM contact_tags ct
 		JOIN tags t ON ct.tag_id = t.id
 		WHERE ct.contact_id = $1
 	`, contactID)
@@ -1142,16 +1221,27 @@ func (s *SyncService) PushContactTagsChange(accountID, contactID uuid.UUID) {
 
 	var tags []KommoTag
 	for rows.Next() {
+		var tagLocalID uuid.UUID
 		var name string
 		var kommoTagID *int64
-		if err := rows.Scan(&name, &kommoTagID); err != nil {
+		if err := rows.Scan(&tagLocalID, &name, &kommoTagID); err != nil {
 			continue
 		}
-		tag := KommoTag{Name: name}
 		if kommoTagID != nil {
-			tag.ID = int(*kommoTagID)
+			tags = append(tags, KommoTag{ID: int(*kommoTagID), Name: name})
+		} else {
+			// Tag doesn't exist in Kommo — create it one by one
+			newKommoID, createErr := s.client.CreateContactTag(name)
+			if createErr != nil {
+				log.Printf("[PUSH] Contact %s: failed to create tag %q in Kommo: %v", contactID, name, createErr)
+				tags = append(tags, KommoTag{Name: name})
+				continue
+			}
+			kommoID64 := int64(newKommoID)
+			_, _ = s.db.Exec(ctx, `UPDATE tags SET kommo_id = $1, updated_at = NOW() WHERE id = $2`, kommoID64, tagLocalID)
+			tags = append(tags, KommoTag{ID: newKommoID, Name: name})
+			log.Printf("[PUSH] Contact %s: created tag %q in Kommo (kommo_id=%d)", contactID, name, newKommoID)
 		}
-		tags = append(tags, tag)
 	}
 
 	updatedAt, err := s.client.UpdateContactTags(int(*kommoContactID), tags)
@@ -1272,6 +1362,7 @@ func (s *SyncService) PushNewLead(accountID, leadID uuid.UUID) {
 
 // PushLeadObservations reads all call interactions for a lead and pushes them
 // to Kommo's 10 call custom field slots + "Otras llamadas" overflow.
+// Only pushes locally-created calls (excludes (sinc) synced ones).
 func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1282,12 +1373,13 @@ func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 		return // Not a Kommo lead
 	}
 
-	// Get all call interactions for this lead, ordered ASC (oldest first)
+	// Get only locally-created call interactions (exclude synced ones with "(sinc)" prefix)
 	rows, err := s.db.Query(ctx, `
-		SELECT i.notes, i.created_at, u.display_name
+		SELECT i.id, i.notes, i.created_at, u.display_name
 		FROM interactions i
 		LEFT JOIN users u ON u.id = i.created_by
 		WHERE i.lead_id = $1 AND i.type = 'call'
+		  AND (i.notes IS NULL OR i.notes NOT LIKE '(sinc)%')
 		ORDER BY i.created_at ASC
 	`, leadID)
 	if err != nil {
@@ -1297,16 +1389,17 @@ func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 	defer rows.Close()
 
 	type callData struct {
-		notes       string
-		createdAt   time.Time
-		createdBy   string
+		id        uuid.UUID
+		notes     string
+		createdAt time.Time
+		createdBy string
 	}
 	var calls []callData
 	for rows.Next() {
 		var cd callData
 		var notes *string
 		var createdBy *string
-		if err := rows.Scan(&notes, &cd.createdAt, &createdBy); err != nil {
+		if err := rows.Scan(&cd.id, &notes, &cd.createdAt, &createdBy); err != nil {
 			continue
 		}
 		if notes != nil {
@@ -1325,12 +1418,6 @@ func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 		if slot < len(calls) {
 			call := calls[slot]
 
-			// Strip "(sinc) " prefix if present (avoid echoing back)
-			noteContent := call.notes
-			if strings.HasPrefix(noteContent, "(sinc) ") {
-				noteContent = strings.TrimPrefix(noteContent, "(sinc) ")
-			}
-
 			// Responsable: user who created + date
 			responsable := call.createdBy
 			if responsable == "" {
@@ -1346,19 +1433,19 @@ func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 				},
 				KommoCustomFieldWrite{
 					FieldID: KommoCallFieldResultado[slot],
-					Values:  []KommoCustomFieldWriteVal{{Value: noteContent}},
+					Values:  []KommoCustomFieldWriteVal{{Value: call.notes}},
 				},
 			)
 		} else {
-			// Clear empty slots
+			// Clear empty slots — Kommo requires exactly 1 value element
 			fields = append(fields,
 				KommoCustomFieldWrite{
 					FieldID: KommoCallFieldResponsable[slot],
-					Values:  []KommoCustomFieldWriteVal{},
+					Values:  []KommoCustomFieldWriteVal{{Value: ""}},
 				},
 				KommoCustomFieldWrite{
 					FieldID: KommoCallFieldResultado[slot],
-					Values:  []KommoCustomFieldWriteVal{},
+					Values:  []KommoCustomFieldWriteVal{{Value: ""}},
 				},
 			)
 		}
@@ -1369,16 +1456,12 @@ func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 		var b strings.Builder
 		for i := KommoCallSlotCount; i < len(calls); i++ {
 			call := calls[i]
-			noteContent := call.notes
-			if strings.HasPrefix(noteContent, "(sinc) ") {
-				noteContent = strings.TrimPrefix(noteContent, "(sinc) ")
-			}
 			createdBy := call.createdBy
 			if createdBy == "" {
 				createdBy = "Clarin"
 			}
 			fmt.Fprintf(&b, "Llamada %d - %s %s: %s\n",
-				i+1, call.createdAt.Format("02/01/2006 15:04"), createdBy, noteContent)
+				i+1, call.createdAt.Format("02/01/2006 15:04"), createdBy, call.notes)
 		}
 		fields = append(fields, KommoCustomFieldWrite{
 			FieldID: KommoCallFieldOtrasLlamadas,
@@ -1387,7 +1470,7 @@ func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 	} else {
 		fields = append(fields, KommoCustomFieldWrite{
 			FieldID: KommoCallFieldOtrasLlamadas,
-			Values:  []KommoCustomFieldWriteVal{},
+			Values:  []KommoCustomFieldWriteVal{{Value: ""}},
 		})
 	}
 
@@ -1397,11 +1480,22 @@ func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 		return
 	}
 
+	// Remove all (sinc) entries — they are echoes of Kommo data that we just overwrote
+	_, _ = s.db.Exec(ctx, `DELETE FROM interactions WHERE lead_id = $1 AND type = 'call' AND notes LIKE '(sinc)%'`, leadID)
+
+	// Assign kommo_call_slot to local interactions so syncCallsFromKommo won't overwrite them
+	for i, call := range calls {
+		if i < KommoCallSlotCount {
+			slotNum := i + 1
+			_, _ = s.db.Exec(ctx, `UPDATE interactions SET kommo_call_slot = $1 WHERE id = $2`, slotNum, call.id)
+		}
+	}
+
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
 	log.Printf("[PUSH] Lead %s observations → Kommo lead %d (%d calls, updated_at=%d)", leadID, *kommoLeadID, len(calls), updatedAt)
 }
 
-// PushLeadName pushes a lead's name change to Kommo.
+// PushLeadName pushes a lead's name change to Kommo (both lead and linked contact).
 func (s *SyncService) PushLeadName(accountID, leadID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1429,6 +1523,22 @@ func (s *SyncService) PushLeadName(accountID, leadID uuid.UUID) {
 
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
 	log.Printf("[PUSH] Lead %s name '%s' → Kommo lead %d (updated_at=%d)", leadID, name, *kommoLeadID, updatedAt)
+
+	// Also update the linked contact name in Kommo
+	var kommoContactID *int64
+	err = s.db.QueryRow(ctx, `
+		SELECT c.kommo_id FROM contacts c
+		JOIN leads l ON l.contact_id = c.id
+		WHERE l.id = $1 AND c.kommo_id IS NOT NULL
+	`, leadID).Scan(&kommoContactID)
+	if err == nil && kommoContactID != nil {
+		contactUpdatedAt, err := s.client.UpdateContactName(int(*kommoContactID), name)
+		if err != nil {
+			log.Printf("[PUSH] Contact for lead %s name to Kommo failed: %v", leadID, err)
+		} else {
+			log.Printf("[PUSH] Contact name '%s' → Kommo contact %d (updated_at=%d)", name, *kommoContactID, contactUpdatedAt)
+		}
+	}
 }
 
 // --- Helpers ---
@@ -1469,4 +1579,55 @@ func nilIfEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// SyncSingleContact fetches a contact from Kommo by its kommo_id and updates Clarin.
+// This is a synchronous operation for on-demand use.
+func (s *SyncService) SyncSingleContact(ctx context.Context, accountID, contactID uuid.UUID) error {
+	var kommoID *int64
+	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM contacts WHERE id = $1 AND account_id = $2`, contactID, accountID).Scan(&kommoID)
+	if err != nil {
+		return fmt.Errorf("contact not found")
+	}
+	if kommoID == nil {
+		return fmt.Errorf("contact not linked to Kommo")
+	}
+
+	kc, err := s.client.GetContactByID(int(*kommoID))
+	if err != nil {
+		return fmt.Errorf("failed to fetch from Kommo: %w", err)
+	}
+
+	s.upsertContact(ctx, accountID, *kc)
+	log.Printf("[Kommo Sync] Manual contact sync: %s (Kommo ID %d)", contactID, *kommoID)
+	return nil
+}
+
+// SyncSingleLead fetches a lead from Kommo by its kommo_id and updates Clarin.
+// Updates name, email, tags, pipeline/stage from Kommo. For calls, only adds new
+// ones from Kommo without overwriting locally-created calls.
+func (s *SyncService) SyncSingleLead(ctx context.Context, accountID, leadID uuid.UUID) error {
+	var kommoID *int64
+	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoID)
+	if err != nil {
+		return fmt.Errorf("lead not found")
+	}
+	if kommoID == nil {
+		return fmt.Errorf("lead not linked to Kommo")
+	}
+
+	kl, err := s.client.GetLeadByID(int(*kommoID))
+	if err != nil {
+		return fmt.Errorf("failed to fetch from Kommo: %w", err)
+	}
+
+	// Clear anti-loop flag so the upsert performs a full update
+	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = 0 WHERE id = $1`, leadID)
+
+	if err := s.upsertLead(ctx, accountID, *kl); err != nil {
+		return fmt.Errorf("failed to update from Kommo: %w", err)
+	}
+
+	log.Printf("[Kommo Sync] Manual lead sync: %s (Kommo ID %d)", leadID, *kommoID)
+	return nil
 }

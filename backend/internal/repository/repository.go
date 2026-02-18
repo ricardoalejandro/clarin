@@ -312,12 +312,12 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Account, error) {
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), a.default_incoming_stage_id, a.created_at, a.updated_at,
 			(SELECT COUNT(*) FROM users WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
 			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
 		FROM accounts a WHERE a.id = $1
-	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.CreatedAt, &a.UpdatedAt,
+	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
 		&a.UserCount, &a.DeviceCount, &a.ChatCount)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -921,6 +921,25 @@ func (r *ContactRepository) GetByJID(ctx context.Context, accountID uuid.UUID, j
 		       email, company, age, tags, notes, source, is_group, created_at, updated_at
 		FROM contacts WHERE account_id = $1 AND jid = $2
 	`, accountID, jid).Scan(
+		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return contact, err
+}
+
+func (r *ContactRepository) GetByPhone(ctx context.Context, accountID uuid.UUID, phone string) (*domain.Contact, error) {
+	contact := &domain.Contact{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
+		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		FROM contacts WHERE account_id = $1 AND phone = $2
+		LIMIT 1
+	`, accountID, phone).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
 		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
@@ -1915,6 +1934,29 @@ func (r *CampaignRepository) DeleteRecipient(ctx context.Context, campaignID, re
 	return err
 }
 
+func (r *CampaignRepository) UpdateRecipientData(ctx context.Context, campaignID, recipientID uuid.UUID, name *string, phone *string, metadata map[string]interface{}) (*domain.CampaignRecipient, error) {
+	metaJSON, _ := json.Marshal(metadata)
+	_, err := r.db.Exec(ctx, `
+		UPDATE campaign_recipients SET name = $1, phone = $2, metadata = $3
+		WHERE id = $4 AND campaign_id = $5 AND status = 'pending'
+	`, name, phone, metaJSON, recipientID, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	rec := &domain.CampaignRecipient{}
+	err = r.db.QueryRow(ctx, `
+		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message, wait_time_ms, metadata
+		FROM campaign_recipients WHERE id = $1
+	`, recipientID).Scan(
+		&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone,
+		&rec.Status, &rec.SentAt, &rec.ErrorMessage, &rec.WaitTimeMs, &rec.Metadata,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
 func (r *CampaignRepository) GetRunningCampaigns(ctx context.Context) ([]*domain.Campaign, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT c.id, c.account_id, c.device_id, c.name, c.message_template, c.media_url, c.media_type,
@@ -2295,6 +2337,11 @@ func (r *ParticipantRepository) SyncToContact(ctx context.Context, p *domain.Eve
 			name = COALESCE($1, name), last_name = $2, short_name = $3, phone = COALESCE($4, phone), email = $5, age = $6, updated_at = NOW()
 		WHERE id = $7
 	`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, *p.ContactID)
+	return err
+}
+
+func (r *ParticipantRepository) LinkContact(ctx context.Context, participantID, contactID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE event_participants SET contact_id = $2 WHERE id = $1`, participantID, contactID)
 	return err
 }
 
@@ -2757,7 +2804,7 @@ type QuickReplyRepository struct {
 
 func (r *QuickReplyRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.QuickReply, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, shortcut, title, body, created_at, updated_at
+		SELECT id, account_id, shortcut, title, body, COALESCE(media_url,''), COALESCE(media_type,''), COALESCE(media_filename,''), created_at, updated_at
 		FROM quick_replies WHERE account_id = $1 ORDER BY shortcut
 	`, accountID)
 	if err != nil {
@@ -2768,7 +2815,7 @@ func (r *QuickReplyRepository) GetByAccountID(ctx context.Context, accountID uui
 	var replies []*domain.QuickReply
 	for rows.Next() {
 		qr := &domain.QuickReply{}
-		if err := rows.Scan(&qr.ID, &qr.AccountID, &qr.Shortcut, &qr.Title, &qr.Body, &qr.CreatedAt, &qr.UpdatedAt); err != nil {
+		if err := rows.Scan(&qr.ID, &qr.AccountID, &qr.Shortcut, &qr.Title, &qr.Body, &qr.MediaURL, &qr.MediaType, &qr.MediaFilename, &qr.CreatedAt, &qr.UpdatedAt); err != nil {
 			return nil, err
 		}
 		replies = append(replies, qr)
@@ -2779,9 +2826,9 @@ func (r *QuickReplyRepository) GetByAccountID(ctx context.Context, accountID uui
 func (r *QuickReplyRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.QuickReply, error) {
 	qr := &domain.QuickReply{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, shortcut, title, body, created_at, updated_at
+		SELECT id, account_id, shortcut, title, body, COALESCE(media_url,''), COALESCE(media_type,''), COALESCE(media_filename,''), created_at, updated_at
 		FROM quick_replies WHERE id = $1
-	`, id).Scan(&qr.ID, &qr.AccountID, &qr.Shortcut, &qr.Title, &qr.Body, &qr.CreatedAt, &qr.UpdatedAt)
+	`, id).Scan(&qr.ID, &qr.AccountID, &qr.Shortcut, &qr.Title, &qr.Body, &qr.MediaURL, &qr.MediaType, &qr.MediaFilename, &qr.CreatedAt, &qr.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -2794,18 +2841,18 @@ func (r *QuickReplyRepository) Create(ctx context.Context, qr *domain.QuickReply
 	qr.CreatedAt = now
 	qr.UpdatedAt = now
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO quick_replies (id, account_id, shortcut, title, body, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, qr.ID, qr.AccountID, qr.Shortcut, qr.Title, qr.Body, qr.CreatedAt, qr.UpdatedAt)
+		INSERT INTO quick_replies (id, account_id, shortcut, title, body, media_url, media_type, media_filename, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, qr.ID, qr.AccountID, qr.Shortcut, qr.Title, qr.Body, qr.MediaURL, qr.MediaType, qr.MediaFilename, qr.CreatedAt, qr.UpdatedAt)
 	return err
 }
 
 func (r *QuickReplyRepository) Update(ctx context.Context, qr *domain.QuickReply) error {
 	qr.UpdatedAt = time.Now()
 	_, err := r.db.Exec(ctx, `
-		UPDATE quick_replies SET shortcut = $1, title = $2, body = $3, updated_at = $4
-		WHERE id = $5
-	`, qr.Shortcut, qr.Title, qr.Body, qr.UpdatedAt, qr.ID)
+		UPDATE quick_replies SET shortcut = $1, title = $2, body = $3, media_url = $4, media_type = $5, media_filename = $6, updated_at = $7
+		WHERE id = $8
+	`, qr.Shortcut, qr.Title, qr.Body, qr.MediaURL, qr.MediaType, qr.MediaFilename, qr.UpdatedAt, qr.ID)
 	return err
 }
 

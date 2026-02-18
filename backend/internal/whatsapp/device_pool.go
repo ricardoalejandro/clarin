@@ -558,12 +558,21 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	// Update chat last message
 	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, evt.Info.Timestamp, !isFromMe)
 
+	// Invalidate chats cache
+	if p.cache != nil {
+		_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
+	}
+
 	// Use chatJID for contact in 1-to-1 chats so the LEFT JOIN in queries matches
 	contactJID := senderJID
 	if !isFromMe {
 		contactJID = chatJID
 	}
 	contact, _ := p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, contactJID, phone, senderName, evt.Info.PushName, false)
+	// Sync contact name/fields to linked lead (if lead exists)
+	if contact != nil {
+		_ = p.repos.Contact.SyncToLead(ctx, contact)
+	}
 
 	// Fetch and store avatar if contact has no avatar yet
 	if contact != nil && contact.AvatarURL == nil && !isFromMe {
@@ -595,7 +604,27 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 			if activePipeline, _ := p.repos.Pipeline.GetActivePipeline(ctx, instance.AccountID); activePipeline != nil {
 				newLead.PipelineID = &activePipeline.ID
 				if len(activePipeline.Stages) > 0 {
-					newLead.StageID = &activePipeline.Stages[0].ID
+					// 1. Check account-configured default incoming stage
+					var configured bool
+					if acct, _ := p.repos.Account.GetByID(ctx, instance.AccountID); acct != nil && acct.DefaultIncomingStageID != nil {
+						for _, st := range activePipeline.Stages {
+							if st.ID == *acct.DefaultIncomingStageID {
+								newLead.StageID = &st.ID
+								configured = true
+								break
+							}
+						}
+					}
+					if !configured {
+						// 2. Fallback: prefer "Leads Entrantes", then first stage
+						newLead.StageID = &activePipeline.Stages[0].ID
+						for _, st := range activePipeline.Stages {
+							if strings.EqualFold(st.Name, "Leads Entrantes") {
+								newLead.StageID = &st.ID
+								break
+							}
+						}
+					}
 				}
 			}
 			if err := p.repos.Lead.Create(ctx, newLead); err == nil {

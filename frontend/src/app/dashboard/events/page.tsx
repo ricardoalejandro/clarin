@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   CalendarDays, Plus, Search, MapPin, Users, Clock, Edit2, Trash2,
-  Filter, ChevronDown, Eye
+  Filter, ChevronDown, Eye, LayoutGrid, List
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -50,6 +50,7 @@ export default function EventsPage() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [showCreate, setShowCreate] = useState(false)
   const [editEvent, setEditEvent] = useState<Event | null>(null)
   const [formData, setFormData] = useState({
@@ -285,16 +286,107 @@ export default function EventsPage() {
             <option key={s.value} value={s.value}>{s.label}</option>
           ))}
         </select>
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          <button onClick={() => setViewMode('grid')} className={`p-2 rounded-md transition-colors ${viewMode === 'grid' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
+            <LayoutGrid className="w-4 h-4" />
+          </button>
+          <button onClick={() => setViewMode('list')} className={`p-2 rounded-md transition-colors ${viewMode === 'list' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
+            <List className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
-      {/* Events grid */}
+      {/* Events */}
       {events.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-xl border border-gray-200">
           <CalendarDays className="w-12 h-12 text-gray-300 mx-auto mb-3" />
           <p className="text-gray-500 font-medium">No hay eventos</p>
           <p className="text-gray-400 text-sm mt-1">Crea tu primer evento para empezar a hacer seguimiento</p>
         </div>
+      ) : viewMode === 'list' ? (
+        /* Table View */
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-gray-200 bg-gray-50">
+                <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Evento</th>
+                <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Fecha inicio</th>
+                <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Fecha fin</th>
+                <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Ubicación</th>
+                <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Estado</th>
+                <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Participantes</th>
+                <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Acciones</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {events.map(ev => {
+                const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
+                return (
+                  <tr key={ev.id} className="hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => router.push(`/dashboard/events/${ev.id}`)}>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ev.color }} />
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-900 truncate">{ev.name}</p>
+                          {ev.description && <p className="text-xs text-gray-500 truncate max-w-[250px]">{ev.description}</p>}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      {ev.event_date ? format(new Date(ev.event_date), "d MMM yyyy, HH:mm", { locale: es }) : '-'}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      {ev.event_end ? format(new Date(ev.event_end), "d MMM yyyy, HH:mm", { locale: es }) : '-'}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      {ev.location || '-'}
+                    </td>
+                    <td className="px-4 py-3">
+                      {statusOpt && (
+                        <span className={`${statusOpt.color} text-xs font-medium px-2 py-1 rounded-full`}>
+                          {statusOpt.label}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <Users className="w-3.5 h-3.5 text-gray-400" />
+                        <span className="text-sm text-gray-600">{ev.total_participants}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/events/${ev.id}`) }}
+                          className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                          title="Ver detalle"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); openEdit(ev) }}
+                          className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                          title="Editar"
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDelete(ev.id) }}
+                          className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                          title="Eliminar"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       ) : (
+        /* Grid View */
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {events.map(ev => {
             const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)

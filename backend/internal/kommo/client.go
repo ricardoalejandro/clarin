@@ -270,6 +270,19 @@ func (c *Client) GetLeads(page int) ([]KommoLead, bool, error) {
 	return resp.Embedded.Leads, hasMore, nil
 }
 
+// GetLeadByID returns a single lead by Kommo ID with embedded contacts.
+func (c *Client) GetLeadByID(leadID int) (*KommoLead, error) {
+	data, err := c.get(fmt.Sprintf("/leads/%d?with=contacts", leadID))
+	if err != nil {
+		return nil, err
+	}
+	var lead KommoLead
+	if err := json.Unmarshal(data, &lead); err != nil {
+		return nil, fmt.Errorf("kommo parse lead: %w", err)
+	}
+	return &lead, nil
+}
+
 // GetLeadsForPipeline returns leads filtered by pipeline ID and optionally updated since a timestamp.
 func (c *Client) GetLeadsForPipeline(pipelineID int, updatedSince int64, page int) ([]KommoLead, bool, error) {
 	limit := 250
@@ -624,6 +637,64 @@ func (c *Client) UpdateContactTags(kommoContactID int, tags []KommoTag) (int64, 
 	return resp.Embedded.Contacts[0].UpdatedAt, nil
 }
 
+// CreateLeadTag creates a single tag in Kommo under the leads scope.
+// Returns the Kommo tag ID.
+func (c *Client) CreateLeadTag(name string) (int, error) {
+	payload := []struct {
+		Name string `json:"name"`
+	}{{Name: name}}
+
+	data, err := c.doRequest("POST", "/leads/tags", payload)
+	if err != nil {
+		return 0, fmt.Errorf("create lead tag %q: %w", name, err)
+	}
+
+	var resp struct {
+		Embedded struct {
+			Tags []struct {
+				ID   int    `json:"id"`
+				Name string `json:"name"`
+			} `json:"tags"`
+		} `json:"_embedded"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("parse create lead tag response: %w", err)
+	}
+	if len(resp.Embedded.Tags) == 0 {
+		return 0, fmt.Errorf("no tag in create response for %q", name)
+	}
+	return resp.Embedded.Tags[0].ID, nil
+}
+
+// CreateContactTag creates a single tag in Kommo under the contacts scope.
+// Returns the Kommo tag ID.
+func (c *Client) CreateContactTag(name string) (int, error) {
+	payload := []struct {
+		Name string `json:"name"`
+	}{{Name: name}}
+
+	data, err := c.doRequest("POST", "/contacts/tags", payload)
+	if err != nil {
+		return 0, fmt.Errorf("create contact tag %q: %w", name, err)
+	}
+
+	var resp struct {
+		Embedded struct {
+			Tags []struct {
+				ID   int    `json:"id"`
+				Name string `json:"name"`
+			} `json:"tags"`
+		} `json:"_embedded"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("parse create contact tag response: %w", err)
+	}
+	if len(resp.Embedded.Tags) == 0 {
+		return 0, fmt.Errorf("no tag in create response for %q", name)
+	}
+	return resp.Embedded.Tags[0].ID, nil
+}
+
 // GetContactPhone extracts the first PHONE custom field value.
 func GetContactPhone(fields []KommoCustomField) string {
 	for _, f := range fields {
@@ -721,4 +792,36 @@ func (c *Client) UpdateLeadName(kommoLeadID int, name string) (int64, error) {
 		return 0, fmt.Errorf("no lead in update response")
 	}
 	return resp.Embedded.Leads[0].UpdatedAt, nil
+}
+
+// UpdateContactName updates the name of a contact in Kommo. Returns updated_at.
+func (c *Client) UpdateContactName(kommoContactID int, name string) (int64, error) {
+	payload := struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}{
+		ID:   kommoContactID,
+		Name: name,
+	}
+
+	data, err := c.doRequest("PATCH", "/contacts", []interface{}{payload})
+	if err != nil {
+		return 0, fmt.Errorf("update contact name: %w", err)
+	}
+
+	var resp struct {
+		Embedded struct {
+			Contacts []struct {
+				ID        int   `json:"id"`
+				UpdatedAt int64 `json:"updated_at"`
+			} `json:"contacts"`
+		} `json:"_embedded"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, fmt.Errorf("parse update contact name response: %w", err)
+	}
+	if len(resp.Embedded.Contacts) == 0 {
+		return 0, fmt.Errorf("no contact in update response")
+	}
+	return resp.Embedded.Contacts[0].UpdatedAt, nil
 }

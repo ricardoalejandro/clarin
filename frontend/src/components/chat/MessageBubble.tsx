@@ -67,7 +67,7 @@ const getProxyUrl = (url: string | undefined): string => {
   if (!url) return ''
   if (url.startsWith('/api/media/')) return url
   if (url.startsWith('blob:')) return url
-  
+
   const bucketMatch = url.match(/\/clarin-media\/(.+)$/)
   if (bucketMatch) {
     return `/api/media/file/${bucketMatch[1]}`
@@ -112,9 +112,9 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
 
   const formatTime = (timestamp: string) => {
     try {
-      return new Date(timestamp).toLocaleTimeString('es', { 
-        hour: '2-digit', 
-        minute: '2-digit' 
+      return new Date(timestamp).toLocaleTimeString('es', {
+        hour: '2-digit',
+        minute: '2-digit'
       })
     } catch {
       return ''
@@ -132,13 +132,13 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     if (!message.quoted_message_id || !message.quoted_body) return null
 
     return (
-      <div className={`border-l-4 ${message.is_from_me ? 'border-green-500 bg-green-50' : 'border-gray-400 bg-gray-50'} rounded px-2 py-1 mb-1 cursor-pointer`}>
+      <div className={`border-l-4 ${message.is_from_me ? 'border-emerald-500 bg-emerald-50/50' : 'border-slate-400 bg-slate-50'} rounded px-2 py-1 mb-1 cursor-pointer`}>
         {message.quoted_sender && (
-          <p className="text-xs font-semibold text-green-700 truncate">
+          <p className="text-xs font-semibold text-emerald-700 truncate">
             {formatQuotedSender(message.quoted_sender)}
           </p>
         )}
-        <p className="text-xs text-gray-600 truncate max-w-[250px]">
+        <p className="text-xs text-slate-600 truncate max-w-[250px]">
           {message.quoted_body}
         </p>
       </div>
@@ -163,8 +163,8 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     switch (message.message_type) {
       case 'image':
         return (
-          <div 
-            className="relative cursor-pointer rounded-lg overflow-hidden mb-1 max-w-[280px]"
+          <div
+            className="relative cursor-pointer overflow-hidden"
             onClick={() => onMediaClick?.(proxyUrl, 'image')}
           >
             {!imageLoaded && !imageError && (
@@ -180,7 +180,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
               <img
                 src={proxyUrl}
                 alt="Imagen"
-                className={`max-w-full rounded-lg ${imageLoaded ? 'block' : 'hidden'}`}
+                className={`w-full block ${imageLoaded ? '' : 'hidden'}`}
                 onLoad={() => setImageLoaded(true)}
                 onError={() => setImageError(true)}
               />
@@ -190,10 +190,10 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
 
       case 'video':
         return (
-          <div className="relative rounded-lg overflow-hidden mb-1 max-w-[300px] bg-black">
+          <div className="relative overflow-hidden bg-black">
             <video
               src={proxyUrl}
-              className="max-w-full rounded-lg"
+              className="w-full block"
               controls
               preload="metadata"
               playsInline
@@ -215,7 +215,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
 
       case 'document':
         return (
-          <div 
+          <div
             className="flex items-center gap-3 p-2 bg-gray-100 rounded-lg mb-1 cursor-pointer hover:bg-gray-200"
             onClick={() => window.open(proxyUrl, '_blank')}
           >
@@ -362,6 +362,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     }
   }
 
+  const hasVisualMedia = !!message.media_url && ['image', 'video'].includes(message.message_type || '')
   const isOptimistic = message.id.startsWith('optimistic-')
 
   return (
@@ -394,25 +395,35 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
       )}
 
       <div
-        className={`relative max-w-[85%] sm:max-w-[70%] ${
+        className={`relative ${
           message.message_type === 'sticker'
             ? 'p-1'
-            : `px-3 py-2 rounded-lg shadow-sm ${
-                message.is_from_me
-                  ? 'bg-green-100 rounded-br-none'
-                  : 'bg-white rounded-bl-none'
-              }`
+            : hasVisualMedia
+              ? `max-w-[330px] rounded-xl shadow-sm overflow-hidden ${
+                  message.is_from_me
+                    ? 'bg-[#d9fdd3] rounded-br-none'
+                    : 'bg-white rounded-bl-none'
+                }`
+              : `max-w-[85%] sm:max-w-[70%] px-3 py-1.5 rounded-xl shadow-sm ${
+                  message.is_from_me
+                    ? 'bg-[#d9fdd3] rounded-br-none'
+                    : 'bg-white rounded-bl-none'
+                }`
         }`}
       >
         {/* Sender name for incoming messages */}
         {!message.is_from_me && (senderDisplayName || message.from_name) && (
-          <p className="text-xs text-green-600 font-medium mb-1">
+          <p className={`text-xs text-emerald-700 font-medium mb-0.5 ${hasVisualMedia ? 'px-3 pt-1.5' : ''}`}>
             {senderDisplayName || message.from_name}
           </p>
         )}
 
         {/* Quoted message */}
-        {renderQuotedMessage()}
+        {message.quoted_message_id && message.quoted_body && (
+          <div className={hasVisualMedia ? 'px-2 pt-1' : ''}>
+            {renderQuotedMessage()}
+          </div>
+        )}
 
         {/* Media content */}
         {renderMedia()}
@@ -422,7 +433,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
 
         {/* Text body */}
         {message.body && message.message_type !== 'sticker' && message.message_type !== 'poll' && (
-          <p className="text-gray-800 whitespace-pre-wrap break-words">
+          <p className={`text-slate-900 whitespace-pre-wrap break-words text-[14.5px] leading-[19px] ${hasVisualMedia ? 'px-3 pt-1' : ''}`}>
             {renderFormattedText(message.body)}
           </p>
         )}
@@ -433,8 +444,12 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         )}
 
         {/* Timestamp and status */}
-        <div className={`flex items-center justify-end gap-1 mt-1 ${message.message_type === 'sticker' ? 'bg-black/30 rounded-full px-2 py-0.5' : ''}`}>
-          <span className={`text-xs ${message.message_type === 'sticker' ? 'text-white' : 'text-gray-500'}`}>
+        <div className={`flex items-center justify-end gap-1 mt-0.5 ${
+          message.message_type === 'sticker'
+            ? 'bg-black/30 rounded-full px-2 py-0.5'
+            : hasVisualMedia ? 'px-3 pb-1.5' : ''
+        }`}>
+          <span className={`text-[11px] ${message.message_type === 'sticker' ? 'text-white' : 'text-slate-500'}`}>
             {formatTime(message.timestamp)}
           </span>
           {renderStatus()}

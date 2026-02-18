@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -802,6 +803,17 @@ func (s *CampaignService) DeleteRecipient(ctx context.Context, campaignID, recip
 	return s.repos.Campaign.DeleteRecipient(ctx, campaignID, recipientID)
 }
 
+func (s *CampaignService) UpdateRecipientData(ctx context.Context, campaignID, recipientID uuid.UUID, name *string, phone *string, metadata map[string]interface{}) (*domain.CampaignRecipient, error) {
+	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
+	if err != nil {
+		return nil, fmt.Errorf("campaign not found")
+	}
+	if campaign.Status != domain.CampaignStatusDraft && campaign.Status != domain.CampaignStatusScheduled {
+		return nil, fmt.Errorf("can only edit recipients in draft or scheduled campaigns")
+	}
+	return s.repos.Campaign.UpdateRecipientData(ctx, campaignID, recipientID, name, phone, metadata)
+}
+
 func (s *CampaignService) Start(ctx context.Context, campaignID uuid.UUID) error {
 	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
 	if err != nil {
@@ -826,6 +838,22 @@ func (s *CampaignService) Pause(ctx context.Context, campaignID uuid.UUID) error
 	}
 	campaign.Status = domain.CampaignStatusPaused
 	return s.repos.Campaign.Update(ctx, campaign)
+}
+
+func (s *CampaignService) Cancel(ctx context.Context, campaignID uuid.UUID) error {
+	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
+	if err != nil {
+		return err
+	}
+	switch campaign.Status {
+	case domain.CampaignStatusDraft, domain.CampaignStatusScheduled, domain.CampaignStatusRunning, domain.CampaignStatusPaused:
+		campaign.Status = domain.CampaignStatusCancelled
+		now := time.Now()
+		campaign.CompletedAt = &now
+		return s.repos.Campaign.Update(ctx, campaign)
+	default:
+		return fmt.Errorf("campaign cannot be cancelled in status: %s", campaign.Status)
+	}
 }
 
 func (s *CampaignService) GetRunningCampaigns(ctx context.Context) ([]*domain.Campaign, error) {
@@ -901,7 +929,7 @@ func (s *CampaignService) Duplicate(ctx context.Context, campaignID uuid.UUID, n
 	return newCampaign, nil
 }
 
-func personalizeText(text string, rec *domain.CampaignRecipient, contact *domain.Contact) string {
+func personalizeText(text string, rec *domain.CampaignRecipient, contact *domain.Contact, lead *domain.Lead) string {
 	if text == "" {
 		return text
 	}
@@ -914,8 +942,30 @@ func personalizeText(text string, rec *domain.CampaignRecipient, contact *domain
 		text = strings.Replace(text, "{{phone}}", *rec.Phone, -1)
 		text = strings.Replace(text, "{{celular}}", *rec.Phone, -1)
 	}
+
+	// Resolve nombre_corto: check recipient metadata first (event participant override),
+	// then contact, then lead
+	shortName := ""
+	if rec.Metadata != nil {
+		if v, ok := rec.Metadata["nombre_corto"]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				shortName = s
+			}
+		}
+	}
+	if shortName == "" && contact != nil && contact.ShortName != nil && *contact.ShortName != "" {
+		shortName = *contact.ShortName
+	}
+	if shortName == "" && lead != nil && lead.ShortName != nil && *lead.ShortName != "" {
+		shortName = *lead.ShortName
+	}
+	if shortName != "" {
+		text = strings.Replace(text, "{{nombre_corto}}", shortName, -1)
+	}
+
+	// Resolve nombre_completo: try contact first, then lead
+	fullName := ""
 	if contact != nil {
-		fullName := ""
 		if contact.CustomName != nil && *contact.CustomName != "" {
 			fullName = *contact.CustomName
 		} else {
@@ -930,13 +980,23 @@ func personalizeText(text string, rec *domain.CampaignRecipient, contact *domain
 				fullName = strings.Join(parts, " ")
 			}
 		}
-		if fullName != "" {
-			text = strings.Replace(text, "{{nombre_completo}}", fullName, -1)
+	}
+	if fullName == "" && lead != nil {
+		parts := []string{}
+		if lead.Name != nil && *lead.Name != "" {
+			parts = append(parts, *lead.Name)
 		}
-		if contact.ShortName != nil && *contact.ShortName != "" {
-			text = strings.Replace(text, "{{nombre_corto}}", *contact.ShortName, -1)
+		if lead.LastName != nil && *lead.LastName != "" {
+			parts = append(parts, *lead.LastName)
+		}
+		if len(parts) > 0 {
+			fullName = strings.Join(parts, " ")
 		}
 	}
+	if fullName != "" {
+		text = strings.Replace(text, "{{nombre_completo}}", fullName, -1)
+	}
+
 	// Resolve custom metadata variables (e.g. {{empresa}}, {{ciudad}})
 	if rec.Metadata != nil {
 		for key, val := range rec.Metadata {
@@ -945,6 +1005,11 @@ func personalizeText(text string, rec *domain.CampaignRecipient, contact *domain
 			}
 		}
 	}
+
+	// Clean up any remaining unresolved placeholders (e.g. {{nombre_corto}} when no data exists)
+	re := regexp.MustCompile(`\{\{[a-zA-Z0-9_]+\}\}`)
+	text = re.ReplaceAllString(text, "")
+
 	return text
 }
 
@@ -973,8 +1038,14 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 		contact, _ = s.repos.Contact.GetByID(context.Background(), *rec.ContactID)
 	}
 
+	// Also look up lead for additional data (nombre_corto, nombre_completo fallback)
+	var lead *domain.Lead
+	if rec.JID != "" {
+		lead, _ = s.repos.Lead.GetByJID(ctx, campaign.AccountID, rec.JID)
+	}
+
 	// Personalize message
-	msg := personalizeText(campaign.MessageTemplate, rec, contact)
+	msg := personalizeText(campaign.MessageTemplate, rec, contact, lead)
 
 	// Send message
 	var sendErr error
@@ -991,7 +1062,7 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 				if sendErr == nil {
 					for _, att := range attachments {
 						time.Sleep(1500 * time.Millisecond)
-						caption := personalizeText(att.Caption, rec, contact)
+						caption := personalizeText(att.Caption, rec, contact, lead)
 						_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
 						if err != nil {
 							sendErr = err
@@ -1005,7 +1076,7 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 				if i > 0 {
 					time.Sleep(1500 * time.Millisecond)
 				}
-				caption := personalizeText(att.Caption, rec, contact)
+				caption := personalizeText(att.Caption, rec, contact, lead)
 				_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
 				if err != nil {
 					sendErr = err

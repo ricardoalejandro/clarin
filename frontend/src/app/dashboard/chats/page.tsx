@@ -242,7 +242,7 @@ export default function ChatsPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [devices, setDevices] = useState<Device[]>([])
   const [tags, setTags] = useState<{ id: string; name: string; color: string }[]>([])
-  const [quickReplies, setQuickReplies] = useState<{ id: string; shortcut: string; title: string; body: string }[]>([])
+  const [quickReplies, setQuickReplies] = useState<{ id: string; shortcut: string; title: string; body: string; media_url?: string; media_type?: string; media_filename?: string }[]>([])
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
   const [filterDevices, setFilterDevices] = useState<string[]>([])
   const [filterTags, setFilterTags] = useState<string[]>([])
@@ -716,12 +716,13 @@ export default function ChatsPage() {
     // Create optimistic message — appears instantly
     const tempId = `optimistic-${++optimisticIdRef.current}`
     const previewUrl = URL.createObjectURL(file)
+    const caption = mediaType === 'document' ? file.name : ''
     const optimisticMsg: Message = {
       id: tempId,
       message_id: tempId,
       from_jid: '',
       from_name: 'Me',
-      body: file.name,
+      body: caption,
       message_type: mediaType,
       media_url: previewUrl,
       is_from_me: true,
@@ -760,7 +761,7 @@ export default function ChatsPage() {
         body: JSON.stringify({
           device_id: selectedDevice,
           to: selectedChat.jid,
-          body: file.name,
+          body: caption,
           media_url: uploadData.proxy_url || uploadData.public_url,
           media_type: mediaType,
         }),
@@ -1022,38 +1023,6 @@ export default function ChatsPage() {
     }
   }
 
-  const deleteAllChats = async () => {
-    if (!confirm('¿Eliminar TODOS los chats y mensajes? Esta acción no se puede deshacer.')) return
-
-    setDeleting(true)
-    const token = localStorage.getItem('token')
-
-    try {
-      const res = await fetch('/api/chats/batch', {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ delete_all: true }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setSelectedChat(null)
-        setMessages([])
-        exitSelectionMode()
-        fetchChats()
-      } else {
-        alert(data.error || 'Error al eliminar chats')
-      }
-    } catch (err) {
-      console.error('Failed to delete all chats:', err)
-      alert('Error al eliminar chats')
-    } finally {
-      setDeleting(false)
-    }
-  }
-
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Quick reply picker intercepts Enter/Arrow keys when open
     if (showQuickReply) {
@@ -1080,15 +1049,60 @@ export default function ChatsPage() {
     }
   }
 
-  const handleQuickReplySelect = (reply: { id: string; shortcut: string; title: string; body: string }) => {
+  const handleQuickReplySelect = (reply: { id: string; shortcut: string; title: string; body: string; media_url?: string; media_type?: string; media_filename?: string }) => {
     setShowQuickReply(false)
     setQuickReplyFilter('')
-    setMessageText(reply.body)
+
+    // If quick reply has media, send it directly as a media message
+    if (reply.media_url && selectedChat && selectedDevice && isChatDeviceConnected) {
+      const token = localStorage.getItem('token')
+      const tempId = `optimistic-${++optimisticIdRef.current}`
+      const optimisticMsg: Message = {
+        id: tempId,
+        message_id: tempId,
+        from_jid: '', from_name: 'Me',
+        body: reply.body || reply.media_filename || '',
+        message_type: reply.media_type || 'document',
+        media_url: reply.media_url,
+        is_from_me: true, is_read: false, status: 'sending',
+        timestamp: new Date().toISOString(),
+      }
+      setMessages(prev => [...prev, optimisticMsg])
+      setMessageText('')
+      if (inputRef.current) {
+        inputRef.current.clear()
+        inputRef.current.focus()
+      }
+
+      fetch('/api/messages/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          device_id: selectedDevice,
+          to: selectedChat.jid,
+          body: reply.body || '',
+          media_url: reply.media_url,
+          media_type: reply.media_type || 'document',
+        }),
+      }).then(res => res.json()).then(data => {
+        if (data.success && data.message) {
+          setMessages(prev => prev.map(m => m.id === tempId ? { ...data.message, media_url: data.message.media_url || reply.media_url } : m))
+        } else {
+          setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        }
+      }).catch(() => {
+        setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+      })
+      return
+    }
+
+    // Text-only quick reply: clear "/" and insert body
     if (inputRef.current) {
       inputRef.current.clear()
       inputRef.current.insertAtCaret(reply.body)
       inputRef.current.focus()
     }
+    setMessageText(reply.body)
   }
 
   // Search is now done server-side via fetchChats
@@ -1153,14 +1167,6 @@ export default function ChatsPage() {
                   title="Eliminar seleccionados"
                 >
                   <Trash2 className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={deleteAllChats}
-                  disabled={chats.length === 0 || deleting}
-                  className="px-2.5 py-1.5 bg-red-800 text-white text-xs rounded-lg hover:bg-red-900 disabled:opacity-50"
-                  title="Eliminar todos"
-                >
-                  Borrar todos
                 </button>
               </div>
             </div>
@@ -1289,7 +1295,7 @@ export default function ChatsPage() {
         {selectedChat ? (
           <>
             {/* Chat header */}
-            <div className="h-14 px-4 flex items-center justify-between border-b border-slate-100 bg-slate-50/80 shrink-0">
+            <div className="h-14 px-4 flex items-center justify-between border-b border-slate-200 bg-white shrink-0">
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => setSelectedChat(null)}
@@ -1349,7 +1355,7 @@ export default function ChatsPage() {
               {/* Messages */}
               <div
                 ref={messagesContainerRef}
-                className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0 wa-chat-bg"
+                className="flex-1 overflow-y-auto p-4 space-y-1 min-h-0 wa-chat-bg"
               >
                 {messages.length === 0 ? (
                   <div className="flex items-center justify-center h-full text-slate-500 text-sm">
@@ -1364,8 +1370,8 @@ export default function ChatsPage() {
                     return (
                       <Fragment key={msg.id}>
                         {showDateSeparator && (
-                          <div className="flex justify-center my-2">
-                            <span className="bg-white px-3 py-1 rounded-lg text-xs text-gray-600 shadow-sm uppercase">
+                          <div className="flex justify-center my-3">
+                            <span className="bg-white/90 backdrop-blur-sm px-3 py-1 rounded-lg text-[11px] text-slate-600 shadow-sm font-medium uppercase tracking-wide">
                               {getDateLabel(msg.timestamp)}
                             </span>
                           </div>
@@ -1422,7 +1428,7 @@ export default function ChatsPage() {
             </div>
 
             {/* Message input */}
-            <div className="bg-slate-50 border-t border-slate-100 shrink-0 pb-[env(safe-area-inset-bottom)]">
+            <div className="bg-white border-t border-slate-200 shrink-0 pb-[env(safe-area-inset-bottom)]">
               {/* Reply preview bar */}
               {replyingTo && (
                 <div className="px-3 pt-2">

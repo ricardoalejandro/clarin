@@ -4,6 +4,9 @@ import './globals.css'
 export const metadata: Metadata = {
   title: 'Clarin CRM - WhatsApp Business',
   description: 'Sistema de gestión de comunicaciones por WhatsApp',
+  icons: {
+    icon: '/favicon.svg',
+  },
 }
 
 export default function RootLayout({
