@@ -310,7 +310,7 @@ export default function ChatsPage() {
                             if (selectionMode) toggleChatSelection(chat.id)
                             else setSelectedChat(chat)
                         }}
-                        className={`group px-3 py-3 flex items-start gap-3 cursor-pointer border-b border-fuchsia-50/50 hover:bg-slate-50 transition-all relative ${selectedChat?.id === chat.id ? 'bg-emerald-50/60 hover:bg-emerald-50' : ''}`}
+                        className={`group px-3 py-3 flex items-start gap-3 cursor-pointer border-b border-fuchsia-50/50 hover:bg-slate-50 transition-all relative ${selectedChat?.id === chat.id ? 'bg-emerald-100 border-l-4 border-l-emerald-500 hover:bg-emerald-100' : ''}`}
                     >
                         {selectionMode && (
                              <div className={`shrink-0 mt-2 ${selectedChats.has(chat.id) ? 'text-emerald-600' : 'text-slate-300'}`}>
