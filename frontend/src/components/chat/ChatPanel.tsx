@@ -424,7 +424,14 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
            })
 
            const data = await res.json()
-           if (!data.success) {
+           if (data.success) {
+               const realMsg = data.message
+               if (realMsg) {
+                   setMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+               } else {
+                   setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+               }
+           } else {
                setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
            }
       } catch (err) {
@@ -470,7 +477,14 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         })
 
         const data = await res.json()
-        if (!data.success) {
+        if (data.success) {
+            const realMsg = data.message
+            if (realMsg) {
+                setMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+            } else {
+                setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+            }
+        } else {
             setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
         }
     } catch (err) {
@@ -515,7 +529,14 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
               media_type: 'sticker'
           })
       }).then(res => res.json()).then(data => {
-          if (!data.success) {
+          if (data.success) {
+              const realMsg = data.message
+              if (realMsg) {
+                  setMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+              } else {
+                  setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+              }
+          } else {
               setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
           }
       })
