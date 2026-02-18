@@ -9,6 +9,9 @@ import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import { useRouter } from 'next/navigation'
 import { createWebSocket } from '@/lib/api'
+import ChatPanel from '@/components/chat/ChatPanel'
+import LeadDetailPanel from '@/components/LeadDetailPanel'
+import { Chat } from '@/types/chat'
 
 interface StructuredTag {
   id: string
@@ -143,11 +146,24 @@ export default function LeadsPage() {
   const [hiddenStageIds, setHiddenStageIds] = useState<Set<string>>(new Set())
   const [dragSrcIdx, setDragSrcIdx] = useState<number | null>(null)
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+  const [expandedPipelineId, setExpandedPipelineId] = useState<string | null>(null)
+
+  // Click outside to close dropdown
 
   // Device selector for WhatsApp
   const [showDeviceSelector, setShowDeviceSelector] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
   const [whatsappPhone, setWhatsappPhone] = useState('')
+
+  // Inline chat panel
+  const [showInlineChat, setShowInlineChat] = useState(false)
+  const [inlineChatId, setInlineChatId] = useState('')
+  const [inlineChat, setInlineChat] = useState<Chat | null>(null)
+  const [inlineChatDeviceId, setInlineChatDeviceId] = useState('')
+
+  // Device filter for leads
+  const [filterDeviceIds, setFilterDeviceIds] = useState<Set<string>>(new Set())
+  const [showDeviceFilter, setShowDeviceFilter] = useState(false)
 
   // Broadcast from leads
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
@@ -157,6 +173,19 @@ export default function LeadsPage() {
   const topScrollRef = useRef<HTMLDivElement>(null)
   const filterDropdownRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
+
+  // Click outside to close dropdown
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (filterDropdownRef.current && !filterDropdownRef.current.contains(event.target as Node)) {
+        setShowFilterDropdown(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside)
+    }
+  }, [filterDropdownRef])
 
   const fetchPipelines = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -190,7 +219,10 @@ export default function LeadsPage() {
   const fetchLeads = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/leads', {
+      const params = new URLSearchParams()
+      filterDeviceIds.forEach(id => params.append('device_ids', id))
+      const url = `/api/leads${params.toString() ? '?' + params.toString() : ''}`
+      const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
@@ -202,7 +234,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [filterDeviceIds])
 
   const fetchDevices = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -222,6 +254,7 @@ export default function LeadsPage() {
   useEffect(() => {
     fetchPipelines()
     fetchLeads()
+    fetchDevices()
     // Load hidden stages from localStorage
     try {
       const saved = localStorage.getItem('hiddenStageIds')
@@ -534,7 +567,19 @@ export default function LeadsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        const stage = stages.find(s => s.id === stageId)
+        // Find stage in current pipeline or look it up across all pipelines
+        let stage = stages.find(s => s.id === stageId)
+        if (!stage) {
+           // Fallback: look in all pipelines
+           for (const p of pipelines) {
+             const found = p.stages?.find(s => s.id === stageId)
+             if (found) {
+               stage = found
+               break
+             }
+           }
+        }
+
         setLeads(prev => prev.map(l => l.id === leadId ? {
           ...l,
           stage_id: stageId,
@@ -554,6 +599,36 @@ export default function LeadsPage() {
       }
     } catch (err) {
       console.error('Failed to update stage:', err)
+    }
+  }
+
+  const handleUpdateLeadPipeline = async (leadId: string, pipelineId: string) => {
+    const token = localStorage.getItem('token')
+    // Find first stage of new pipeline
+    const newPipeline = pipelines.find(p => p.id === pipelineId)
+    // If selecting "Unassigned" (pipelineId is empty string), stage should be null
+    const firstStageId = pipelineId ? (newPipeline?.stages?.[0]?.id || null) : null
+
+    try {
+      const res = await fetch(`/api/leads/${leadId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          pipeline_id: pipelineId || null,
+          stage_id: firstStageId
+        }),
+      })
+      const data = await res.json()
+      if (data.success && data.lead) {
+        const merged = { ...data.lead, structured_tags: data.lead.structured_tags || detailLead?.structured_tags }
+        setDetailLead(merged)
+        setLeads(prev => prev.map(l => l.id === data.lead.id ? merged : l))
+      }
+    } catch (err) {
+      console.error('Failed to update pipeline:', err)
     }
   }
 
@@ -772,7 +847,11 @@ export default function LeadsPage() {
       })
       const data = await res.json()
       if (data.success && data.chat) {
-        router.push(`/dashboard/chats?open=${data.chat.id}`)
+        // Open inline chat instead of navigating away
+        setInlineChatId(data.chat.id)
+        setInlineChat(data.chat)
+        setInlineChatDeviceId(device.id)
+        setShowInlineChat(true)
       } else {
         alert(data.error || 'Error al crear conversación')
       }
@@ -780,6 +859,21 @@ export default function LeadsPage() {
       alert('Error de conexión')
     }
   }
+
+  // Escape key closes inline chat or detail panel
+  useEffect(() => {
+    const handleEscapeKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (showInlineChat) {
+          setShowInlineChat(false)
+        } else if (showDetailPanel) {
+          setShowDetailPanel(false)
+        }
+      }
+    }
+    window.addEventListener('keydown', handleEscapeKey)
+    return () => window.removeEventListener('keydown', handleEscapeKey)
+  }, [showInlineChat, showDetailPanel])
 
   const filteredLeads = leads.filter((lead) => {
     const matchesSearch =
@@ -973,6 +1067,51 @@ export default function LeadsPage() {
                 <Radio className="w-3.5 h-3.5" />
                 Masivo
               </button>
+              {/* Device filter dropdown */}
+              {devices.length > 0 && (
+                <div className="relative">
+                  <button
+                    onClick={() => setShowDeviceFilter(!showDeviceFilter)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg hover:bg-slate-50 transition text-xs font-medium ${
+                      filterDeviceIds.size > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    <Phone className="w-3.5 h-3.5" />
+                    Dispositivos{filterDeviceIds.size > 0 ? ` (${filterDeviceIds.size})` : ''}
+                  </button>
+                  {showDeviceFilter && (
+                    <div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl p-2 z-50 min-w-52">
+                      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider px-2 py-1">Filtrar por dispositivo</p>
+                      {devices.map(d => (
+                        <label key={d.id} className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50 rounded-lg cursor-pointer text-sm">
+                          <input
+                            type="checkbox"
+                            checked={filterDeviceIds.has(d.id)}
+                            onChange={() => {
+                              setFilterDeviceIds(prev => {
+                                const next = new Set(prev)
+                                if (next.has(d.id)) next.delete(d.id)
+                                else next.add(d.id)
+                                return next
+                              })
+                            }}
+                            className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                          />
+                          <span className="text-slate-700">{d.name || d.phone || 'Dispositivo'}</span>
+                        </label>
+                      ))}
+                      {filterDeviceIds.size > 0 && (
+                        <button
+                          onClick={() => setFilterDeviceIds(new Set())}
+                          className="w-full mt-1 text-xs text-slate-500 hover:text-slate-700 py-1"
+                        >
+                          Limpiar filtro
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
               <button
                 onClick={() => setShowAddModal(true)}
                 className="inline-flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-700 transition text-xs font-medium shadow-sm shadow-emerald-600/20"
@@ -1199,7 +1338,9 @@ export default function LeadsPage() {
                     onDragStart={(e) => handleDragStart(e, lead.id)}
                     onDragEnd={handleDragEnd}
                     className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
-                      selectedIds.has(lead.id) ? 'border-emerald-500 ring-2 ring-emerald-100' : 'border-slate-100'
+                      selectedIds.has(lead.id) ? 'border-emerald-500 ring-2 ring-emerald-100'
+                      : detailLead?.id === lead.id ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
+                      : 'border-slate-100'
                     } ${draggedLeadId === lead.id ? 'opacity-50' : ''} ${!selectionMode ? 'cursor-grab active:cursor-grabbing' : ''}`}
                     onClick={() => selectionMode ? toggleSelection(lead.id) : openDetailPanel(lead)}
                   >
@@ -1308,7 +1449,9 @@ export default function LeadsPage() {
                     draggable={!selectionMode}
                     onDragStart={(e) => handleDragStart(e, lead.id)}
                     onDragEnd={handleDragEnd}
-                    className="bg-white p-3 rounded-xl shadow-sm border border-slate-100 hover:shadow-md transition cursor-pointer"
+                    className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
+                      detailLead?.id === lead.id ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50' : 'border-slate-100'
+                    }`}
                     onClick={() => selectionMode ? toggleSelection(lead.id) : openDetailPanel(lead)}
                   >
                     <p className="text-[13px] font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
@@ -1515,418 +1658,46 @@ export default function LeadsPage() {
         </div>
       )}
 
-      {/* Lead Detail Panel (Slide-over) */}
-      {showDetailPanel && detailLead && (
+      {/* Lead Detail Panel (Slide-over) with Inline Chat */}
+      {(showDetailPanel || showInlineChat) && detailLead && (
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
-          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setShowDetailPanel(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }} />
-          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200">
-            {/* Header */}
-            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
-              <h2 className="text-sm font-semibold text-slate-900">Detalle del Lead</h2>
-              <div className="flex items-center gap-1">
-                {detailLead.kommo_id && (
-                  <button
-                    onClick={handleSyncKommo}
-                    disabled={syncingKommo}
-                    title="Sincronizar desde Kommo"
-                    className="p-1.5 hover:bg-emerald-50 rounded-lg text-slate-400 hover:text-emerald-600 transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-4 h-4 ${syncingKommo ? 'animate-spin' : ''}`} />
-                  </button>
-                )}
-                <button onClick={() => { setShowDetailPanel(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
-                  <X className="w-4 h-4 text-slate-400" />
-                </button>
-              </div>
-            </div>
+          <div
+            className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
+            onClick={() => { setShowDetailPanel(false); setShowInlineChat(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
+          />
+          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
 
-            <div className="p-6 space-y-6">
-              {/* Lead Avatar & Name */}
-              <div className="text-center">
-                <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
-                  <span className="text-emerald-700 font-bold text-base">
-                    {(detailLead.name || '?').charAt(0).toUpperCase()}
-                  </span>
-                </div>
-                {editingField === 'name' ? (
-                  <input
-                    autoFocus
-                    value={editValues.name ?? ''}
-                    onChange={(e) => setEditValues({ ...editValues, name: e.target.value })}
-                    onKeyDown={(e) => handleFieldKeyDown(e, 'name')}
-                    onBlur={() => saveLeadField('name')}
-                    className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
-                    placeholder="Nombre"
-                  />
-                ) : (
-                  <h3
-                    className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
-                    onClick={() => startEditing('name', detailLead.name || '')}
-                    title="Clic para editar nombre"
-                  >
-                    {detailLead.name || 'Sin nombre'}
-                  </h3>
-                )}
-                {detailLead.stage_name && (
-                  <span
-                    className="inline-block px-2 py-0.5 text-xs rounded-full mt-1 text-white"
-                    style={{ backgroundColor: detailLead.stage_color || '#6b7280' }}
-                  >
-                    {detailLead.stage_name}
-                  </span>
-                )}
-              </div>
-
-              {/* Inline editable info fields */}
-              <div className="space-y-3">
-                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
-
-                {/* Phone */}
-                <div className="flex items-center gap-3 group">
-                  <Phone className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'phone' ? (
-                    <input autoFocus value={editValues.phone ?? ''} onChange={(e) => setEditValues({ ...editValues, phone: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'phone')} onBlur={() => saveLeadField('phone')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Teléfono" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.phone ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('phone', detailLead.phone || '')} title="Clic para editar">
-                      {detailLead.phone || 'Agregar teléfono'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Email */}
-                <div className="flex items-center gap-3 group">
-                  <Mail className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'email' ? (
-                    <input autoFocus value={editValues.email ?? ''} onChange={(e) => setEditValues({ ...editValues, email: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'email')} onBlur={() => saveLeadField('email')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="correo@ejemplo.com" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.email ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('email', detailLead.email || '')} title="Clic para editar">
-                      {detailLead.email || 'Agregar email'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Last Name */}
-                <div className="flex items-center gap-3 group">
-                  <User className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'last_name' ? (
-                    <input autoFocus value={editValues.last_name ?? ''} onChange={(e) => setEditValues({ ...editValues, last_name: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'last_name')} onBlur={() => saveLeadField('last_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Apellido" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.last_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('last_name', detailLead.last_name || '')} title="Clic para editar">
-                      {detailLead.last_name || 'Agregar apellido'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Short Name */}
-                <div className="flex items-center gap-3 group">
-                  <Edit2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'short_name' ? (
-                    <input autoFocus value={editValues.short_name ?? ''} onChange={(e) => setEditValues({ ...editValues, short_name: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'short_name')} onBlur={() => saveLeadField('short_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Nombre corto" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.short_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('short_name', detailLead.short_name || '')} title="Clic para editar">
-                      {detailLead.short_name || 'Agregar nombre corto'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Company */}
-                <div className="flex items-center gap-3 group">
-                  <Building2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'company' ? (
-                    <input autoFocus value={editValues.company ?? ''} onChange={(e) => setEditValues({ ...editValues, company: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'company')} onBlur={() => saveLeadField('company')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Empresa" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.company ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('company', detailLead.company || '')} title="Clic para editar">
-                      {detailLead.company || 'Agregar empresa'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Age */}
-                <div className="flex items-center gap-3 group">
-                  <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'age' ? (
-                    <input autoFocus type="number" value={editValues.age ?? ''} onChange={(e) => setEditValues({ ...editValues, age: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'age')} onBlur={() => saveLeadField('age')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Edad" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${detailLead.age ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('age', detailLead.age?.toString() || '')} title="Clic para editar">
-                      {detailLead.age ? `${detailLead.age} años` : 'Agregar edad'}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Tags */}
-              <div className="space-y-2">
-                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
-                <TagInput
-                  entityType="lead"
-                  entityId={detailLead.id}
-                  assignedTags={detailLead.structured_tags || []}
-                  onTagsChange={(newTags) => {
-                    const updated = { ...detailLead, structured_tags: newTags }
-                    setDetailLead(updated)
-                    setLeads(prev => prev.map(l => l.id === detailLead.id ? updated : l))
-                  }}
+            {/* Chat Panel - Left Side */}
+            {showInlineChat && inlineChatId && (
+              <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
+                <ChatPanel
+                  chatId={inlineChatId}
+                  deviceId={inlineChatDeviceId}
+                  initialChat={inlineChat || undefined}
+                  onClose={() => setShowInlineChat(false)}
+                  className="h-full"
                 />
               </div>
+            )}
 
-              {/* Pipeline Stage selector */}
-              {stages.length > 0 && (
-                <div className="border-t border-slate-100 pt-4">
-                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Etapa del Pipeline</h5>
-                  <div className="flex flex-wrap gap-2">
-                    {stages.map(stage => (
-                      <button
-                        key={stage.id}
-                        onClick={() => handleUpdateLeadStage(detailLead.id, stage.id)}
-                        className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${
-                          detailLead.stage_id === stage.id
-                            ? 'text-white shadow-sm'
-                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                        }`}
-                        style={detailLead.stage_id === stage.id ? { backgroundColor: stage.color } : {}}
-                      >
-                        {stage.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+            {/* Lead Details - Right Side */}
+            <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
+              <LeadDetailPanel
+                lead={detailLead}
+                onLeadChange={(updatedLead: Lead) => {
+                  setDetailLead(updatedLead as any)
+                  setLeads(prev => prev.map(l => l.id === updatedLead.id ? updatedLead as any : l))
+                }}
+                onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
+                onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                onDelete={(leadId: string) => {
+                  setLeads(prev => prev.filter(l => l.id !== leadId))
+                  setShowDetailPanel(false)
+                  setShowInlineChat(false)
+                }}
+                hideWhatsApp={showInlineChat}
+              />
 
-              {/* Notes */}
-              <div className="border-t border-slate-100 pt-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Notas</h5>
-                  {editingNotes ? (
-                    <button onClick={saveNotes} disabled={savingNotes} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
-                      <Save className="w-3.5 h-3.5" />
-                      {savingNotes ? 'Guardando...' : 'Guardar'}
-                    </button>
-                  ) : (
-                    <button onClick={() => { setEditingNotes(true); setNotesValue(detailLead.notes || '') }} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
-                      <Edit2 className="w-3.5 h-3.5" />
-                      Editar
-                    </button>
-                  )}
-                </div>
-                {editingNotes ? (
-                  <textarea
-                    value={notesValue}
-                    onChange={(e) => setNotesValue(e.target.value)}
-                    className="w-full h-28 p-3 text-sm text-slate-800 border-2 border-emerald-500 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent resize-none placeholder:text-slate-400"
-                    placeholder="Escribe notas sobre este lead..."
-                  />
-                ) : (
-                  <div className="text-sm text-slate-700 bg-slate-50 rounded-xl p-3 min-h-[50px] border border-slate-100">
-                    {detailLead.notes || <span className="text-slate-400 italic">Sin notas</span>}
-                  </div>
-                )}
-              </div>
-
-              {/* Actions */}
-              <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
-                {detailLead.phone && (
-                  <button
-                    onClick={() => handleSendWhatsApp(detailLead.phone)}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition text-sm font-medium shadow-sm"
-                  >
-                    <MessageCircle className="w-4 h-4" />
-                    Enviar WhatsApp
-                  </button>
-                )}
-                <button
-                  onClick={() => { handleDeleteLead(detailLead.id); setShowDetailPanel(false) }}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-sm"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  Eliminar
-                </button>
-              </div>
-
-              {/* Observations / History */}
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-xs font-semibold text-slate-500 flex items-center gap-2">
-                    <FileText className="w-3.5 h-3.5" />
-                    Historial de Observaciones
-                  </h4>
-                  {observations.length > 0 && (
-                    <button onClick={() => setShowHistoryModal(true)} className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Ver historial completo">
-                      <Maximize2 className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-
-                <div className="mb-3">
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <button
-                      onClick={() => setNewObservationType('note')}
-                      className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg transition font-medium ${
-                        newObservationType === 'note'
-                          ? 'bg-yellow-100 text-yellow-700 ring-1 ring-yellow-300'
-                          : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                      }`}
-                    >
-                      <FileText className="w-3 h-3" />
-                      Nota
-                    </button>
-                    <button
-                      onClick={() => setNewObservationType('call')}
-                      className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg transition font-medium ${
-                        newObservationType === 'call'
-                          ? 'bg-blue-100 text-blue-700 ring-1 ring-blue-300'
-                          : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                      }`}
-                    >
-                      <Phone className="w-3 h-3" />
-                      Llamada
-                    </button>
-                  </div>
-                  <textarea
-                    value={newObservation}
-                    onChange={(e) => setNewObservation(e.target.value)}
-                    placeholder={newObservationType === 'call' ? 'Registrar resultado de llamada...' : 'Escribir una observación...'}
-                    rows={2}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
-                  />
-                  <button
-                    onClick={handleAddObservation}
-                    disabled={!newObservation.trim() || savingObservation}
-                    className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs rounded-xl hover:bg-emerald-700 disabled:opacity-50 transition"
-                  >
-                    {savingObservation ? <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" /> : <Plus className="w-3.5 h-3.5" />}
-                    Agregar {newObservationType === 'call' ? 'Llamada' : 'Nota'}
-                  </button>
-                </div>
-
-                {loadingObservations ? (
-                  <div className="flex justify-center py-4">
-                    <div className="animate-spin rounded-full h-4 w-4 border-2 border-emerald-200 border-t-emerald-600" />
-                  </div>
-                ) : observations.length === 0 ? (
-                  <p className="text-xs text-slate-400 text-center py-3">Sin observaciones aún</p>
-                ) : (
-                  <div className="space-y-2">
-                    {observations.slice(0, obsDisplayCount).map((obs) => (
-                      <div key={obs.id} className="p-2.5 bg-slate-50 rounded-xl group relative border border-slate-100">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs text-slate-800 whitespace-pre-wrap break-words">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
-                            <div className="flex items-center gap-2 mt-1 flex-wrap">
-                              <Clock className="w-3 h-3 text-slate-300" />
-                              <span className="text-[10px] text-slate-400">{formatDistanceToNow(new Date(obs.created_at), { locale: es, addSuffix: true })}</span>
-                              {obs.created_by_name && <span className="text-[10px] text-slate-500">&mdash; {obs.created_by_name}</span>}
-                              {obs.type === 'call' && <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 text-[10px] rounded-full font-medium">📞 Llamada</span>}
-                              {obs.type !== 'note' && obs.type !== 'call' && <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 text-[10px] rounded-full">{obs.type}</span>}
-                              {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium">↕ Kommo</span>}
-                            </div>
-                          </div>
-                          <button onClick={() => handleDeleteObservation(obs.id)} className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" title="Eliminar">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                    {observations.length > obsDisplayCount && (
-                      <button onClick={() => setObsDisplayCount(prev => prev + 10)} className="w-full py-2 text-xs text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-xl transition font-medium">
-                        Mostrar más ({observations.length - obsDisplayCount} restantes)
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="text-[10px] text-slate-400 space-y-0.5">
-                <p>Creado: {new Date(detailLead.created_at).toLocaleDateString('es')}</p>
-                <p>Actualizado: {formatDistanceToNow(new Date(detailLead.updated_at), { locale: es, addSuffix: true })}</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Full History Modal */}
-      {showHistoryModal && detailLead && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col border border-slate-100">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900">Historial Completo</h2>
-                <p className="text-xs text-slate-500">{detailLead.name || 'Sin nombre'} &mdash; {observations.length} registros</p>
-              </div>
-              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
-              <div className="flex items-center gap-3 flex-wrap">
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Tipo</label>
-                  <select value={historyFilterType} onChange={(e) => setHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500">
-                    <option value="">Todos</option>
-                    <option value="note">Nota</option>
-                    <option value="call">Llamada</option>
-                    <option value="whatsapp">WhatsApp</option>
-                    <option value="email">Email</option>
-                    <option value="meeting">Reunión</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Desde</label>
-                  <input type="date" value={historyFilterFrom} onChange={(e) => setHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500" />
-                </div>
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Hasta</label>
-                  <input type="date" value={historyFilterTo} onChange={(e) => setHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500" />
-                </div>
-                {(historyFilterType || historyFilterFrom || historyFilterTo) && (
-                  <button onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1">
-                    <XCircle className="w-3.5 h-3.5" />Limpiar
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-6">
-              {(() => {
-                const filtered = observations.filter(obs => {
-                  if (historyFilterType && obs.type !== historyFilterType) return false
-                  if (historyFilterFrom && new Date(obs.created_at) < new Date(historyFilterFrom)) return false
-                  if (historyFilterTo) {
-                    const to = new Date(historyFilterTo)
-                    to.setDate(to.getDate() + 1)
-                    if (new Date(obs.created_at) >= to) return false
-                  }
-                  return true
-                })
-                if (filtered.length === 0) return <p className="text-xs text-slate-400 text-center py-8">No hay registros con los filtros seleccionados</p>
-                return (
-                  <div className="space-y-2">
-                    {filtered.map((obs) => (
-                      <div key={obs.id} className="p-3 bg-slate-50 rounded-xl group relative border border-slate-100">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className={`px-2 py-0.5 text-xs rounded font-medium ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
-                                {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
-                              </span>
-                              <span className="text-xs text-slate-400">{format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}</span>
-                            </div>
-                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
-                            <div className="flex items-center gap-2 mt-1">
-                              {obs.created_by_name && <span className="text-xs text-slate-400">por {obs.created_by_name}</span>}
-                              {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium">↕ Kommo</span>}
-                            </div>
-                          </div>
-                          <button onClick={() => handleDeleteObservation(obs.id)} className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" title="Eliminar">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )
-              })()}
             </div>
           </div>
         </div>
@@ -1934,6 +1705,7 @@ export default function LeadsPage() {
 
       {/* Device Selector Modal for WhatsApp */}
       {showDeviceSelector && (
+
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
             <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
@@ -1965,6 +1737,8 @@ export default function LeadsPage() {
           </div>
         </div>
       )}
+
+
 
       <ImportCSVModal
         open={showImportModal}

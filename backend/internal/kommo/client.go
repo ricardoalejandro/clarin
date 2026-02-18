@@ -243,9 +243,12 @@ func (c *Client) GetPipelines() ([]KommoPipeline, error) {
 }
 
 // GetLeads returns leads with pagination. page starts at 1.
-func (c *Client) GetLeads(page int) ([]KommoLead, bool, error) {
+func (c *Client) GetLeads(page int, updatedSince int64) ([]KommoLead, bool, error) {
 	limit := 250
 	path := fmt.Sprintf("/leads?page=%d&limit=%d&with=contacts", page, limit)
+	if updatedSince > 0 {
+		path += fmt.Sprintf("&filter[updated_at][from]=%d", updatedSince)
+	}
 	data, err := c.get(path)
 	if err != nil {
 		return nil, false, err
@@ -286,7 +289,13 @@ func (c *Client) GetLeadByID(leadID int) (*KommoLead, error) {
 // GetLeadsForPipeline returns leads filtered by pipeline ID and optionally updated since a timestamp.
 func (c *Client) GetLeadsForPipeline(pipelineID int, updatedSince int64, page int) ([]KommoLead, bool, error) {
 	limit := 250
-	path := fmt.Sprintf("/leads?page=%d&limit=%d&with=contacts&filter[pipeline_id][]=%d", page, limit, pipelineID)
+	path := fmt.Sprintf("/leads?page=%d&limit=%d&with=contacts", page, limit)
+
+	// Only filter by pipeline if ID > 0. If 0, fetch all (global sync).
+	if pipelineID > 0 {
+		path += fmt.Sprintf("&filter[pipeline_id][]=%d", pipelineID)
+	}
+
 	if updatedSince > 0 {
 		path += fmt.Sprintf("&filter[updated_at][from]=%d", updatedSince)
 	}

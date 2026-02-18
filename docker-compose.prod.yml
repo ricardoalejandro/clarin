@@ -89,6 +89,12 @@ services:
       MINIO_BUCKET: clarin-media
       MINIO_USE_SSL: "false"
       MINIO_PUBLIC_URL: https://media.clarin.naperu.cloud
+      # Kommo CRM
+      KOMMO_SUBDOMAIN: ${KOMMO_SUBDOMAIN}
+      KOMMO_CLIENT_ID: ${KOMMO_CLIENT_ID}
+      KOMMO_CLIENT_SECRET: ${KOMMO_CLIENT_SECRET}
+      KOMMO_ACCESS_TOKEN: ${KOMMO_ACCESS_TOKEN}
+      KOMMO_REDIRECT_URI: ${KOMMO_REDIRECT_URI}
     depends_on:
       postgres:
         condition: service_healthy

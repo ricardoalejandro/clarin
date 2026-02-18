@@ -710,7 +710,7 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 		       is_from_me, is_read, status, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender
 		FROM messages WHERE chat_id = $1
-		ORDER BY timestamp DESC
+		ORDER BY timestamp ASC
 		LIMIT $2 OFFSET $3
 	`, chatID, limit, offset)
 	if err != nil {

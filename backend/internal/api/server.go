@@ -1387,7 +1387,23 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 
 func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// Parse optional device_ids filter
+	deviceIDs := c.Context().QueryArgs().PeekMulti("device_ids")
+	var deviceUUIDs []uuid.UUID
+	for _, did := range deviceIDs {
+		if id, err := uuid.Parse(string(did)); err == nil {
+			deviceUUIDs = append(deviceUUIDs, id)
+		}
+	}
+
+	// Build cache key including device filter
 	cacheKey := "leads:" + accountID.String()
+	if len(deviceUUIDs) > 0 {
+		for _, d := range deviceUUIDs {
+			cacheKey += ":" + d.String()
+		}
+	}
 
 	// Try Redis cache first
 	if s.cache != nil {
@@ -1397,9 +1413,42 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 		}
 	}
 
-	leads, err := s.services.Lead.GetByAccountID(c.Context(), accountID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	var leads []*domain.Lead
+	var err error
+
+	if len(deviceUUIDs) > 0 {
+		// Filtered query: only leads whose JID matches a chat from one of the specified devices
+		rows, qErr := s.repos.DB().Query(c.Context(), `
+			SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
+			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
+			       ps.name, ps.color, ps.position
+			FROM leads l
+			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+			WHERE l.account_id = $1
+			  AND l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($2))
+			ORDER BY l.created_at DESC
+		`, accountID, deviceUUIDs)
+		if qErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": qErr.Error()})
+		}
+		defer rows.Close()
+		for rows.Next() {
+			lead := &domain.Lead{}
+			if scanErr := rows.Scan(
+				&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
+				&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+				&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
+				&lead.StageName, &lead.StageColor, &lead.StagePosition,
+			); scanErr != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": scanErr.Error()})
+			}
+			leads = append(leads, lead)
+		}
+	} else {
+		leads, err = s.services.Lead.GetByAccountID(c.Context(), accountID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
 	}
 
 	// Batch load structured tags for all leads in one query
@@ -1708,14 +1757,26 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	// Sync shared fields to linked contact
 	_ = s.services.Lead.SyncToContact(c.Context(), lead)
 
-	// Push name change to Kommo if name was updated
-	if s.kommoSync != nil && req.Name != nil {
-		newName := ""
-		if lead.Name != nil {
-			newName = *lead.Name
-		}
-		if newName != oldName {
-			go s.kommoSync.PushLeadName(lead.AccountID, lead.ID)
+	// Kommo Sync
+	if s.kommoSync != nil {
+		// If lead is not linked to Kommo yet, try to create it there (PushNewLead handles checks)
+		if lead.KommoID == nil || *lead.KommoID == 0 {
+			go s.kommoSync.PushNewLead(lead.AccountID, lead.ID)
+		} else {
+			// Already linked, push updates
+			if req.Name != nil {
+				newName := ""
+				if lead.Name != nil {
+					newName = *lead.Name
+				}
+				if newName != oldName {
+					go s.kommoSync.PushLeadName(lead.AccountID, lead.ID)
+				}
+			}
+			// Push pipeline/stage change
+			if req.PipelineID != nil || req.StageID != nil {
+				go s.kommoSync.PushPipelineStageChange(lead.AccountID, lead.ID)
+			}
 		}
 	}
 

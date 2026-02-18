@@ -3,52 +3,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3 } from 'lucide-react'
 import { renderFormattedText } from '@/lib/whatsappFormat'
-
-interface Reaction {
-  id: string
-  target_message_id: string
-  sender_jid: string
-  sender_name?: string
-  emoji: string
-  is_from_me: boolean
-}
-
-interface PollOption {
-  id: string
-  name: string
-  vote_count: number
-}
-
-interface PollVote {
-  id: string
-  voter_jid: string
-  selected_names: string[]
-}
-
-interface Message {
-  id: string
-  message_id: string
-  from_jid?: string
-  from_name?: string
-  body?: string
-  message_type?: string
-  media_url?: string
-  media_mimetype?: string
-  media_filename?: string
-  media_size?: number
-  is_from_me: boolean
-  is_read: boolean
-  status?: string
-  timestamp: string
-  quoted_message_id?: string
-  quoted_body?: string
-  quoted_sender?: string
-  reactions?: Reaction[]
-  poll_question?: string
-  poll_options?: PollOption[]
-  poll_votes?: PollVote[]
-  poll_max_selections?: number
-}
+import { Message, Reaction, PollOption } from '@/types/chat'
 
 interface MessageBubbleProps {
   message: Message
