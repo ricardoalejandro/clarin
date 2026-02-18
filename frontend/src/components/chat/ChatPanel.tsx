@@ -716,12 +716,15 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                       // Date separator between different days
                       let showDateSep = false
                       const msgDate = new Date(msg.timestamp)
-                      if (idx === 0) {
-                        showDateSep = true
-                      } else {
-                        const prevDate = new Date(messages[idx - 1].timestamp)
-                        if (msgDate.toDateString() !== prevDate.toDateString()) {
+                      const isValidDate = msg.timestamp && !isNaN(msgDate.getTime())
+                      if (isValidDate) {
+                        if (idx === 0) {
                           showDateSep = true
+                        } else {
+                          const prevDate = new Date(messages[idx - 1].timestamp)
+                          if (!isNaN(prevDate.getTime()) && msgDate.toDateString() !== prevDate.toDateString()) {
+                            showDateSep = true
+                          }
                         }
                       }
 
@@ -729,7 +732,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
                       return (
                           <div key={msg.id}>
-                              {showDateSep && (
+                              {showDateSep && isValidDate && (
                                 <div className="flex justify-center my-3">
                                   <span className="bg-white/90 text-slate-600 text-xs px-3 py-1 rounded-lg shadow-sm font-medium">
                                     {format(msgDate, "d 'de' MMMM, yyyy", { locale: es })}
