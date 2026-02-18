@@ -32,6 +32,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const [chat, setChat] = useState<Chat | null>(initialChat || null)
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMoreMessages, setHasMoreMessages] = useState(true)
   const [messageText, setMessageText] = useState('')
   const [sendingMessage, setSendingMessage] = useState(false)
   const [replyingTo, setReplyingTo] = useState<Message | null>(null)
@@ -128,6 +130,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     if (initialChat) {
         setChat(initialChat)
         setMessages([]) // Clear previous messages to avoid flash
+        setHasMoreMessages(true)
     }
   }, [initialChat])
 
@@ -212,6 +215,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       const msgData = await msgRes.json()
       if (msgData.success && msgData.messages) {
         setMessages(msgData.messages)
+        setHasMoreMessages(msgData.messages.length >= 50)
         scrollToBottom()
       }
     } catch (error) {
@@ -227,6 +231,48 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight
       }
     }, 100)
+  }
+
+  const loadOlderMessages = async () => {
+    if (loadingMore || !hasMoreMessages || !chatId) return
+    setLoadingMore(true)
+    const token = localStorage.getItem('token')
+    try {
+      const offset = messages.length
+      const res = await fetch(`/api/chats/${chatId}/messages?limit=50&offset=${offset}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (data.success && data.messages) {
+        if (data.messages.length === 0) {
+          setHasMoreMessages(false)
+        } else {
+          // Preserve scroll position
+          const container = messagesContainerRef.current
+          const prevHeight = container?.scrollHeight || 0
+          setMessages(prev => [...data.messages, ...prev])
+          setHasMoreMessages(data.messages.length >= 50)
+          // Restore scroll position after prepending
+          requestAnimationFrame(() => {
+            if (container) {
+              container.scrollTop = container.scrollHeight - prevHeight
+            }
+          })
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load older messages', err)
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
+  const handleMessagesScroll = () => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    if (container.scrollTop < 80 && hasMoreMessages && !loadingMore) {
+      loadOlderMessages()
+    }
   }
 
   const handleSendMessage = async () => {
@@ -659,9 +705,20 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
              {/* Messages */}
              <div
                 ref={messagesContainerRef}
+                onScroll={handleMessagesScroll}
                 className="flex-1 overflow-y-auto bg-[#efeae2] p-4 space-y-2 relative"
                 style={{ backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")', backgroundRepeat: 'repeat' }}
              >
+                  {loadingMore && (
+                    <div className="flex justify-center py-3">
+                      <div className="animate-spin rounded-full h-5 w-5 border-2 border-emerald-200 border-t-emerald-600" />
+                    </div>
+                  )}
+                  {!hasMoreMessages && messages.length > 0 && (
+                    <div className="flex justify-center py-2">
+                      <span className="text-xs text-slate-400 bg-white/80 px-3 py-1 rounded-full">Inicio de la conversación</span>
+                    </div>
+                  )}
                   {messages.map((msg, idx) => {
                       // Date separator between different days
                       let showDateSep = false
