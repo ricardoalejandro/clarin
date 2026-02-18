@@ -11,9 +11,10 @@ import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { Chat, Message } from '@/types/chat'
 import { createWebSocket } from '@/lib/api'
-import { renderFormattedText } from '@/lib/whatsappFormat'
+import { getChatDisplayName } from '@/utils/chat'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '../WhatsAppTextInput'
 import ImageViewer from './ImageViewer'
+import MessageBubble from './MessageBubble'
 import StickerPicker from './StickerPicker'
 import PollModal from './PollModal'
 import ContactPanel from './ContactPanel'
@@ -662,71 +663,37 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                 style={{ backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")', backgroundRepeat: 'repeat' }}
              >
                   {messages.map((msg, idx) => {
-                      const isMe = msg.is_from_me
+                      // Date separator between different days
+                      let showDateSep = false
+                      const msgDate = new Date(msg.timestamp)
+                      if (idx === 0) {
+                        showDateSep = true
+                      } else {
+                        const prevDate = new Date(messages[idx - 1].timestamp)
+                        if (msgDate.toDateString() !== prevDate.toDateString()) {
+                          showDateSep = true
+                        }
+                      }
+
+                      const contactName = chat ? getChatDisplayName(chat) : undefined
 
                       return (
-                          <div
-                             key={msg.id}
-                             className={`flex ${isMe ? 'justify-end' : 'justify-start'} group mb-1`}
-                          >
-                               <div className={`relative max-w-[80%] rounded-lg px-2 py-1 shadow-sm text-sm ${
-                                   isMe ? 'bg-[#d9fdd3] rounded-tr-none' : 'bg-white rounded-tl-none'
-                               }`}>
-                                    {/* Quoted Message */}
-                                    {msg.quoted_body && (
-                                        <div className="mb-1 p-1 bg-black/5 rounded border-l-4 border-emerald-500 text-xs">
-                                             <p className="font-bold text-emerald-600">{msg.quoted_sender?.split('@')[0]}</p>
-                                             <p className="line-clamp-2 opacity-80">{msg.quoted_body}</p>
-                                        </div>
-                                    )}
-
-                                    {/* Media */}
-                                    {msg.media_url && (
-                                        <div className="mb-1">
-                                            {msg.message_type === 'image' || msg.message_type === 'sticker' ? (
-                                                <img
-                                                  src={msg.media_url}
-                                                  alt="media"
-                                                  className={`max-w-full rounded-md cursor-pointer ${msg.message_type === 'sticker' ? 'w-32' : 'max-h-60'}`}
-                                                  onClick={() => setViewImage(msg.media_url || null)}
-                                                />
-                                            ) : msg.message_type === 'audio' || msg.message_type === 'voice' || msg.message_type === 'ptt' ? (
-                                               <audio controls src={msg.media_url} className="mt-1" />
-                                            ) : msg.message_type === 'video' ? (
-                                               <video controls src={msg.media_url} className="max-w-full max-h-60 rounded-md" />
-                                            ) : (
-                                               <a href={msg.media_url} target="_blank" rel="noreferrer" className="flex items-center gap-2 p-2 bg-slate-100 rounded-md hover:bg-slate-200 transition">
-                                                   <Download className="w-4 h-4 text-emerald-600" />
-                                                   <span>Documento</span>
-                                               </a>
-                                            )}
-                                        </div>
-                                    )}
-
-                                    {/* Body */}
-                                    {msg.body && <div className="whitespace-pre-wrap leading-relaxed">{renderFormattedText(msg.body)}</div>}
-
-                                    {/* Metadata */}
-                                    <div className="flex items-center justify-end gap-1 mt-0.5 select-none">
-                                         <span className="text-[10px] text-slate-500">
-                                            {format(new Date(msg.timestamp), 'HH:mm')}
-                                         </span>
-                                         {isMe && (
-                                             msg.status === 'read' ? <CheckCheck className="w-3 h-3 text-blue-500" /> :
-                                             msg.status === 'sent' || msg.status === 'delivered' ? <CheckCheck className="w-3 h-3 text-slate-400" /> :
-                                             msg.status === 'failed' ? <AlertCircle className="w-3 h-3 text-red-500 cursor-pointer" onClick={() => handleRetrySend(msg)} /> :
-                                             <Check className="w-3 h-3 text-slate-400" />
-                                         )}
-                                    </div>
-
-                                    {/* Context Menu (Hover) */}
-                                    <button
-                                      className="absolute top-0 right-0 p-1 opacity-0 group-hover:opacity-100 transition shadow bg-white rounded-full translate-x-1/2 -translate-y-1/2 z-10"
-                                      onClick={() => setReplyingTo(msg)}
-                                    >
-                                        <Reply className="w-3 h-3 text-slate-500" />
-                                    </button>
-                               </div>
+                          <div key={msg.id}>
+                              {showDateSep && (
+                                <div className="flex justify-center my-3">
+                                  <span className="bg-white/90 text-slate-600 text-xs px-3 py-1 rounded-lg shadow-sm font-medium">
+                                    {format(msgDate, "d 'de' MMMM, yyyy", { locale: es })}
+                                  </span>
+                                </div>
+                              )}
+                              <MessageBubble
+                                message={msg}
+                                contactName={contactName}
+                                onMediaClick={(url) => setViewImage(url)}
+                                onRetry={() => handleRetrySend(msg)}
+                                onReply={(m) => setReplyingTo(m)}
+                                onForward={(m) => setForwardingMsg(m)}
+                              />
                           </div>
                       )
                   })}
