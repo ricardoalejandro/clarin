@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { Search, Plus, X, Trash2, CheckSquare, Square } from 'lucide-react'
+import { Search, Plus, X, Trash2, CheckSquare, Square, MessageCircle } from 'lucide-react'
 import { formatTime } from '@/utils/format'
 import DeviceSelector from '@/components/chat/DeviceSelector'
 import TagSelector from '@/components/chat/TagSelector'
@@ -19,6 +19,7 @@ export default function ChatsPage() {
   // Filters & UI State
   const [filterDevices, setFilterDevices] = useState<string[]>([])
   const [filterTags, setFilterTags] = useState<string[]>([])
+  const [filterUnread, setFilterUnread] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [loading, setLoading] = useState(true)
@@ -52,6 +53,7 @@ export default function ChatsPage() {
       const params = new URLSearchParams()
       filterDevices.forEach(id => params.append('device_ids', id))
       filterTags.forEach(id => params.append('tag_ids', id))
+      if (filterUnread) params.append('unread_only', 'true')
       if (debouncedSearch) params.append('search', debouncedSearch)
 
       const res = await fetch(`/api/chats?${params.toString()}`, {
@@ -64,7 +66,7 @@ export default function ChatsPage() {
     } finally {
       setLoading(false)
     }
-  }, [filterDevices, filterTags, debouncedSearch])
+  }, [filterDevices, filterTags, filterUnread, debouncedSearch])
 
   const fetchDevices = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -277,12 +279,25 @@ export default function ChatsPage() {
                 />
             </div>
 
-            {/* Tags */}
-            <TagSelector
-                tags={tags}
-                selectedTagIds={filterTags}
-                onTagChange={setFilterTags}
-            />
+            {/* Tags + Unread filter */}
+            <div className="flex items-center gap-2">
+                <TagSelector
+                    tags={tags}
+                    selectedTagIds={filterTags}
+                    onTagChange={setFilterTags}
+                />
+                <button
+                    onClick={() => setFilterUnread(!filterUnread)}
+                    className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                        filterUnread
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm'
+                            : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 hover:text-slate-700'
+                    }`}
+                >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    No leídos
+                </button>
+            </div>
          </div>
 
          {/* Chat List Items */}
