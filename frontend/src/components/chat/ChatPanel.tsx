@@ -835,6 +835,18 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                     onToggle={() => setActivePopup(activePopup === 'emoji' ? null : 'emoji')}
                     buttonClassName={`p-2 transition ${activePopup === 'emoji' ? 'text-emerald-600' : 'text-slate-500 hover:text-emerald-600'}`}
                   />
+                  <StickerPicker
+                      onStickerSelect={handleSendSticker}
+                      isOpen={activePopup === 'sticker'}
+                      onToggle={() => setActivePopup(activePopup === 'sticker' ? null : 'sticker')}
+                  />
+                  <button
+                      onClick={() => setShowPollModal(true)}
+                      className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-slate-100 rounded-lg transition-colors"
+                      title="Crear encuesta"
+                  >
+                      <BarChart3 className="w-5 h-5" />
+                  </button>
               </div>
 
               <div className="flex-1 relative">
@@ -854,21 +866,6 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                       disabled={sendingMessage}
                       singleLine
                     />
-              </div>
-
-              <div className="flex gap-1 pb-1">
-                    <StickerPicker
-                      onStickerSelect={handleSendSticker}
-                      isOpen={activePopup === 'sticker'}
-                      onToggle={() => setActivePopup(activePopup === 'sticker' ? null : 'sticker')}
-                    />
-                    <button
-                      onClick={() => setShowPollModal(true)}
-                      className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-slate-100 rounded-lg transition-colors"
-                      title="Crear encuesta"
-                    >
-                      <BarChart3 className="w-5 h-5" />
-                    </button>
               </div>
 
               {messageText || forwardingMsg ? (
