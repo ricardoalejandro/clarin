@@ -1644,10 +1644,29 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 		return nil, fmt.Errorf("unsupported media type: %s", mediaType)
 	}
 
-	// Upload to WhatsApp with the correct media type
-	uploaded, err := instance.Client.Upload(ctx, data, waMediaType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to upload to WhatsApp: %w", err)
+	// Upload to WhatsApp with the correct media type (with retry for transient network errors)
+	var uploaded whatsmeow.UploadResponse
+	var uploadErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		uploaded, uploadErr = instance.Client.Upload(ctx, data, waMediaType)
+		if uploadErr == nil {
+			break
+		}
+		errStr := uploadErr.Error()
+		isTransient := strings.Contains(errStr, "connection reset by peer") ||
+			strings.Contains(errStr, "EOF") ||
+			strings.Contains(errStr, "timeout") ||
+			strings.Contains(errStr, "connection refused") ||
+			strings.Contains(errStr, "broken pipe")
+		if !isTransient {
+			break // Non-retryable error
+		}
+		backoff := time.Duration(2<<attempt) * time.Second // 2s, 4s, 8s
+		log.Printf("[SendMediaMessage] Upload attempt %d failed (retrying in %v): %v", attempt+1, backoff, uploadErr)
+		time.Sleep(backoff)
+	}
+	if uploadErr != nil {
+		return nil, fmt.Errorf("failed to upload to WhatsApp: %w", uploadErr)
 	}
 
 	var msg *waE2E.Message

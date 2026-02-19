@@ -726,6 +726,17 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		}
 	}
 	if err != nil {
+		// NEW lead — only create if the contact has a chat with one of this account's devices.
+		// This filters out leads from WhatsApp numbers not connected in Clarin.
+		if jid == "" || strings.HasPrefix(jid, "kommo_") {
+			return nil // No valid WhatsApp phone → skip
+		}
+		var chatExists bool
+		_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chats WHERE jid = $1 AND account_id = $2)`, jid, accountID).Scan(&chatExists)
+		if !chatExists {
+			return nil // No chat with any device in this account → lead is from another WhatsApp → skip
+		}
+
 		leadID = uuid.New()
 		_, err = s.db.Exec(ctx, `
 			INSERT INTO leads (id, account_id, contact_id, jid, name, phone, email, status, source, notes,
