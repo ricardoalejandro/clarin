@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Upload, FileText, X, AlertTriangle, CheckCircle2 } from 'lucide-react'
 
 interface ImportCSVModalProps {
@@ -15,6 +15,14 @@ export default function ImportCSVModal({ open, onClose, onSuccess }: ImportCSVMo
   const [uploading, setUploading] = useState(false)
   const [result, setResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Close on Escape
+  useEffect(() => {
+    if (!open) return
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [open, onClose])
 
   if (!open) return null
 

@@ -117,6 +117,19 @@ export default function AdminPage() {
     fetchUsers()
   }, [filterAccountId])
 
+  // Close modals on Escape (topmost first)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (showPasswordModal) { setShowPasswordModal(false); return }
+      if (showAssignModal) { setShowAssignModal(false); return }
+      if (showUserModal) { setShowUserModal(false); return }
+      if (showAccountModal) { setShowAccountModal(false); return }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [showPasswordModal, showAssignModal, showUserModal, showAccountModal])
+
   // Account CRUD
   function openCreateAccount() {
     setEditingAccount(null)

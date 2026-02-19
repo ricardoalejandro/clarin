@@ -219,6 +219,19 @@ export default function BroadcastsPage() {
     return () => clearInterval(interval)
   }, [fetchCampaigns, fetchDevices, fetchContacts, fetchTags])
 
+  // Close modals on Escape (topmost first)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (editingRecipient) { setEditingRecipient(null); return }
+      if (showDuplicateModal) { setShowDuplicateModal(false); setDuplicateMessage(''); setDuplicateCampaign(null); return }
+      if (showRecipientsModal) { setShowRecipientsModal(false); return }
+      if (showDetailModal) { setShowDetailModal(false); setRecipients([]); return }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [editingRecipient, showDuplicateModal, showRecipientsModal, showDetailModal])
+
   const handleCreateCampaign = async (formResult: CampaignFormResult) => {
     try {
       const res = await fetch('/api/campaigns', {

@@ -34,8 +34,13 @@ export default function DeviceSelector({
         setIsOpen(false)
       }
     }
+    function handleKey(e: KeyboardEvent) { if (e.key === 'Escape') setIsOpen(false) }
     document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleKey)
+    }
   }, [])
 
   const connectedDevices = devices.filter(d => d.status === 'connected')

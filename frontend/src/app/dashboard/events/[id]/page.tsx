@@ -182,6 +182,18 @@ export default function EventDetailPage() {
     }
   }, [selectedParticipant, fetchInteractions])
 
+  // Close modals on Escape (topmost first)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (showIntHistoryModal) { setShowIntHistoryModal(false); setIntHistoryFilterType(''); setIntHistoryFilterFrom(''); setIntHistoryFilterTo(''); return }
+      if (showAddModal) { setShowAddModal(false); return }
+      if (editingParticipant) { setEditingParticipant(null); setEditField(null); setEditNotes(false); return }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [showIntHistoryModal, showAddModal, editingParticipant])
+
   // Search contacts for adding
   const searchContacts = useCallback(async (q: string) => {
     if (!q || q.length < 2) { setContactResults([]); return }

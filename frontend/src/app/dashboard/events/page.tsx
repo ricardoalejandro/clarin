@@ -78,6 +78,15 @@ export default function EventsPage() {
 
   useEffect(() => { fetchEvents() }, [fetchEvents])
 
+  // Close modals on Escape
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && showCreate) { setShowCreate(false); setEditEvent(null); resetForm() }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [showCreate])
+
   const handleCreate = async () => {
     const body: Record<string, unknown> = { ...formData }
     if (formData.event_date) body.event_date = new Date(formData.event_date).toISOString()

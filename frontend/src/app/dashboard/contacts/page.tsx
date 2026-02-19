@@ -251,6 +251,20 @@ export default function ContactsPage() {
     return () => { document.body.style.overflow = '' }
   }, [showDetailPanel])
 
+  // Close modals on Escape (topmost first)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (showHistoryModal) { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo(''); return }
+      if (showSendMessage) { setShowSendMessage(false); setSendDeviceId(''); return }
+      if (showDuplicates) { setShowDuplicates(false); return }
+      if (showEditModal) { setShowEditModal(false); setSelectedContact(null); return }
+      if (showDetailPanel) { setShowDetailPanel(false); setEditingField(null); setEditingNotes(false); return }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [showHistoryModal, showSendMessage, showDuplicates, showEditModal, showDetailPanel])
+
   const openDetail = async (contact: Contact) => {
     // Fetch full contact with device names
     try {

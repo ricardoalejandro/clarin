@@ -36,9 +36,19 @@ export default function FileUploader({ onFileSelect, disabled, buttonClassName, 
         if (isOpen) close()
       }
     }
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (preview) { URL.revokeObjectURL(preview.url); setPreview(null) }
+        else if (isOpen) close()
+      }
+    }
     document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [isOpen])
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [isOpen, preview])
 
   const getMediaType = (mimeType: string): string => {
     if (ACCEPTED_TYPES.image.includes(mimeType)) return 'image'

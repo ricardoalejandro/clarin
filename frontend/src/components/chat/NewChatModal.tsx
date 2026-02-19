@@ -47,6 +47,14 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
 
   const connectedDevices = devices.filter(d => d.status === 'connected')
 
+  // Close on Escape
+  useEffect(() => {
+    if (!isOpen) return
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [isOpen, onClose])
+
   useEffect(() => {
     if (isOpen && connectedDevices.length > 0 && !selectedDevice) {
       setSelectedDevice(connectedDevices[0].id)

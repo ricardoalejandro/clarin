@@ -62,6 +62,14 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   const [loading, setLoading] = useState(true)
   const [showAvatarViewer, setShowAvatarViewer] = useState(false)
 
+  // Close on Escape
+  useEffect(() => {
+    if (!isOpen) return
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [isOpen, onClose])
+
   useEffect(() => {
     if (isOpen && chatId) {
       fetchDetails()

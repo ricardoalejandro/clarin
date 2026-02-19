@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { X, BarChart3 } from 'lucide-react'
 
 interface PollModalProps {
@@ -12,6 +12,13 @@ export default function PollModal({ onClose, onSend }: PollModalProps) {
   const [question, setQuestion] = useState('')
   const [options, setOptions] = useState<string[]>(['', ''])
   const [maxSelections, setMaxSelections] = useState(1)
+
+  // Close on Escape
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [onClose])
 
   const addOption = () => {
     if (options.length < 12) setOptions([...options, ''])

@@ -65,6 +65,14 @@ export default function ContactSelector({
   const searchRef = useRef<HTMLInputElement>(null)
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : ''
 
+  // Close on Escape
+  useEffect(() => {
+    if (!open) return
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [open, onClose])
+
   // Debounce search
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 500)

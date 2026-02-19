@@ -36,8 +36,13 @@ export default function EmojiPicker({ onEmojiSelect, buttonClassName, isOpen: co
         if (isOpen) close()
       }
     }
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && isOpen) close() }
     document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleKey)
+    }
   }, [isOpen])
 
   const handleEmojiClick = (emoji: string) => {

@@ -162,6 +162,18 @@ export default function LeadDetailPanel({
     fetchObservations(lead.id)
   }, [lead.id])
 
+  // ─── Close on Escape ───────────────────────────────────
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (showHistoryModal) { setShowHistoryModal(false); return }
+      if (showPipelineDropdown) { setShowPipelineDropdown(false); return }
+      onClose()
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [showHistoryModal, showPipelineDropdown, onClose])
+
   // ─── Click outside to close dropdown ───────────────────
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {

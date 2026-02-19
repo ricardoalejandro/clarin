@@ -44,6 +44,16 @@ export default function ChatsPage() {
     return () => window.removeEventListener('resize', checkScreen)
   }, [])
 
+  // Close panels on Escape
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (selectedChat) { setSelectedChat(null); return }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [selectedChat])
+
   // Auto-open logic
   const autoOpenProcessedRef = useRef(false)
 

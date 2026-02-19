@@ -860,20 +860,22 @@ export default function LeadsPage() {
     }
   }
 
-  // Escape key closes inline chat or detail panel
+  // Escape key closes modals/panels (topmost first)
   useEffect(() => {
     const handleEscapeKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (showInlineChat) {
-          setShowInlineChat(false)
-        } else if (showDetailPanel) {
-          setShowDetailPanel(false)
-        }
+        if (showDeviceSelector) { setShowDeviceSelector(false); return }
+        if (showStageModal) { setShowStageModal(false); return }
+        if (showAddModal) { setShowAddModal(false); return }
+        if (showEditModal) { setShowEditModal(false); return }
+        if (showFilterDropdown) { setShowFilterDropdown(false); return }
+        if (showInlineChat) { setShowInlineChat(false); return }
+        if (showDetailPanel) { setShowDetailPanel(false); return }
       }
     }
     window.addEventListener('keydown', handleEscapeKey)
     return () => window.removeEventListener('keydown', handleEscapeKey)
-  }, [showInlineChat, showDetailPanel])
+  }, [showDeviceSelector, showStageModal, showAddModal, showEditModal, showFilterDropdown, showInlineChat, showDetailPanel])
 
   const filteredLeads = leads.filter((lead) => {
     const matchesSearch =

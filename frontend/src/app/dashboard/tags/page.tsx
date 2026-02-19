@@ -50,6 +50,15 @@ export default function TagsPage() {
 
   useEffect(() => { fetchTags() }, [fetchTags])
 
+  // Close modals on Escape
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && (showCreateModal || editingTag)) { setShowCreateModal(false); setEditingTag(null); setCustomColor('') }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [showCreateModal, editingTag])
+
   const handleCreate = async () => {
     if (!formName.trim()) return
     try {

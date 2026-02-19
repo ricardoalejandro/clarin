@@ -132,6 +132,14 @@ export default function CreateCampaignModal({
 
   const [showEmoji, setShowEmoji] = useState(false)
 
+  // Close on Escape
+  useEffect(() => {
+    if (!open) return
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [open, onClose])
+
   // Reset form when modal opens
   useEffect(() => {
     if (open) {

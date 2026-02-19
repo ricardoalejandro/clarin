@@ -49,6 +49,18 @@ export default function DevicesPage() {
     return () => clearInterval(interval)
   }, [fetchDevices])
 
+  // Close modals on Escape
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (editingDevice) { setEditingDevice(null); return }
+      if (selectedDevice) { setSelectedDevice(null); return }
+      if (showCreate) { setShowCreate(false); return }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [editingDevice, selectedDevice, showCreate])
+
   // Setup WebSocket for real-time updates
   useEffect(() => {
     const ws = createWebSocket((data: unknown) => {
