@@ -2205,11 +2205,22 @@ func (r *ParticipantRepository) Add(ctx context.Context, p *domain.EventParticip
 		p.Status = domain.ParticipantStatusInvited
 	}
 	p.InvitedAt = &now
-	return r.db.QueryRow(ctx, `
+	if err := r.db.QueryRow(ctx, `
 		INSERT INTO event_participants (id, event_id, contact_id, name, last_name, short_name, phone, email, age, status, notes, next_action, next_action_date, invited_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		RETURNING id
-	`, p.ID, p.EventID, p.ContactID, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Status, p.Notes, p.NextAction, p.NextActionDate, p.InvitedAt, p.CreatedAt, p.UpdatedAt).Scan(&p.ID)
+	`, p.ID, p.EventID, p.ContactID, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Status, p.Notes, p.NextAction, p.NextActionDate, p.InvitedAt, p.CreatedAt, p.UpdatedAt).Scan(&p.ID); err != nil {
+		return err
+	}
+	// Copy contact tags to participant tags
+	if p.ContactID != nil {
+		_, _ = r.db.Exec(ctx, `
+			INSERT INTO participant_tags (participant_id, tag_id)
+			SELECT $1, ct.tag_id FROM contact_tags ct WHERE ct.contact_id = $2
+			ON CONFLICT DO NOTHING
+		`, p.ID, *p.ContactID)
+	}
+	return nil
 }
 
 func (r *ParticipantRepository) BulkAdd(ctx context.Context, eventID uuid.UUID, participants []*domain.EventParticipant) error {

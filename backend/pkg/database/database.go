@@ -534,6 +534,13 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_chats_device_id ON chats(device_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_contacts_jid ON contacts(jid)`,
 		`CREATE INDEX IF NOT EXISTS idx_leads_jid ON leads(account_id, jid)`,
+
+		// Backfill participant_tags from contact_tags for existing participants
+		`INSERT INTO participant_tags (participant_id, tag_id)
+		 SELECT ep.id, ct.tag_id FROM event_participants ep
+		 JOIN contact_tags ct ON ct.contact_id = ep.contact_id
+		 WHERE ep.contact_id IS NOT NULL
+		 ON CONFLICT DO NOTHING`,
 	}
 
 	for _, migration := range migrations {
