@@ -6,12 +6,13 @@ import {
   Search, Phone, Mail, Building2, Tag, Edit, Trash2, RefreshCw,
   ChevronDown, CheckSquare, Square, XCircle, MoreVertical,
   Users, Merge, Eye, X, Smartphone, AlertTriangle, MessageSquare, Send,
-  Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter
+  Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter, Radio
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import ImportCSVModal from '@/components/ImportCSVModal'
 import TagInput from '@/components/TagInput'
+import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 
 interface ContactDeviceName {
   id: string
@@ -134,6 +135,10 @@ export default function ContactsPage() {
   // Sync
   const [syncing, setSyncing] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
+
+  // Broadcast
+  const [showBroadcastModal, setShowBroadcastModal] = useState(false)
+  const [submittingBroadcast, setSubmittingBroadcast] = useState(false)
 
   // Send message
   const [showSendMessage, setShowSendMessage] = useState(false)
@@ -658,6 +663,77 @@ export default function ContactsPage() {
     }
   }
 
+  // Contacts with phone for broadcast
+  const broadcastableContacts = contacts.filter(c => c.phone)
+
+  const handleCreateBroadcastFromContacts = async (formResult: CampaignFormResult) => {
+    setSubmittingBroadcast(true)
+    try {
+      // 1. Create the campaign
+      const res = await fetch('/api/campaigns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          name: formResult.name,
+          device_id: formResult.device_id,
+          message_template: formResult.message_template,
+          attachments: formResult.attachments,
+          scheduled_at: formResult.scheduled_at || undefined,
+          settings: formResult.settings,
+        }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'Error al crear campaña')
+        return
+      }
+
+      const campaignId = data.campaign?.id
+      if (!campaignId) {
+        alert('Error: no se recibió el ID de la campaña')
+        return
+      }
+
+      // 2. Schedule if needed
+      if (formResult.scheduled_at) {
+        await fetch(`/api/campaigns/${campaignId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
+        })
+      }
+
+      // 3. Add filtered contacts as recipients
+      const recipientsList = broadcastableContacts.map(contact => {
+        const cleanPhone = (contact.phone || '').replace(/[^0-9]/g, '')
+        return {
+          jid: cleanPhone ? cleanPhone + '@s.whatsapp.net' : '',
+          name: getDisplayName(contact),
+          phone: cleanPhone,
+          metadata: {
+            ...(contact.short_name ? { nombre_corto: contact.short_name } : {}),
+            ...(contact.company ? { empresa: contact.company } : {}),
+          },
+        }
+      }).filter(r => r.jid)
+
+      if (recipientsList.length > 0) {
+        await fetch(`/api/campaigns/${campaignId}/recipients`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ recipients: recipientsList }),
+        })
+      }
+
+      setShowBroadcastModal(false)
+      router.push('/dashboard/broadcasts')
+    } catch {
+      alert('Error al crear campaña desde contactos')
+    } finally {
+      setSubmittingBroadcast(false)
+    }
+  }
+
   const totalPages = Math.ceil(total / pageSize)
 
   if (loading && contacts.length === 0) {
@@ -728,6 +804,14 @@ export default function ContactsPage() {
                 Duplicados
               </button>
               <button
+                onClick={() => { fetchDevices(); setShowBroadcastModal(true) }}
+                disabled={broadcastableContacts.length === 0}
+                className="inline-flex items-center gap-2 px-4 py-2 border border-emerald-200 rounded-lg hover:bg-emerald-50 transition text-emerald-700 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Radio className="w-4 h-4" />
+                Masivo
+              </button>
+              <button
                 onClick={() => setSelectionMode(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition text-sm"
               >
@@ -784,7 +868,7 @@ export default function ContactsPage() {
               <div className="p-3 border-b border-slate-100 flex items-center justify-between">
                 <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Etiquetas</span>
                 {filterTagIds.size > 0 && (
-                  <button onClick={() => setFilterTagIds(new Set())} className="text-xs text-red-500 hover:text-red-700">
+                  <button onClick={() => { setFilterTagIds(new Set()); setShowTagFilter(false) }} className="text-xs text-red-500 hover:text-red-700">
                     Limpiar
                   </button>
                 )}
@@ -841,6 +925,7 @@ export default function ContactsPage() {
                             const next = new Set(filterTagIds)
                             if (isActive) next.delete(tag.id); else next.add(tag.id)
                             setFilterTagIds(next)
+                            setShowTagFilter(false)
                           }}
                           className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
                         />
@@ -1146,6 +1231,10 @@ export default function ContactsPage() {
                   assignedTags={selectedContact.structured_tags || []}
                   onTagsChange={(newTags) => {
                     setSelectedContact({ ...selectedContact, structured_tags: newTags })
+                    // Update the contact in the grid immediately
+                    setContacts(prev => prev.map(c =>
+                      c.id === selectedContact.id ? { ...c, structured_tags: newTags } : c
+                    ))
                     fetchAllTags()
                   }}
                 />
@@ -1699,6 +1788,37 @@ export default function ContactsPage() {
         onClose={() => setShowImportModal(false)}
         onSuccess={fetchContacts}
         defaultType="contacts"
+      />
+
+      {/* Broadcast from Contacts Modal */}
+      <CreateCampaignModal
+        open={showBroadcastModal}
+        onClose={() => setShowBroadcastModal(false)}
+        onSubmit={handleCreateBroadcastFromContacts}
+        devices={devices.filter(d => d.status === 'connected')}
+        submitting={submittingBroadcast}
+        title="Envío Masivo desde Contactos"
+        subtitle={`Se incluirán ${broadcastableContacts.length} contactos con teléfono`}
+        submitLabel={submittingBroadcast ? 'Creando...' : 'Crear y agregar destinatarios'}
+        initialName={`Contactos - ${new Date().toLocaleDateString('es-PE', { day: 'numeric', month: 'short' })}`}
+        infoPanel={
+          <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-800">
+            <div className="flex items-center gap-2 mb-1">
+              <Radio className="w-3.5 h-3.5 text-emerald-600" />
+              <span className="font-medium">Destinatarios desde Contactos</span>
+            </div>
+            <p className="text-emerald-600">
+              Se agregarán automáticamente <strong>{broadcastableContacts.length}</strong> contactos
+              {filterTagIds.size > 0 || searchTerm || filterDevice
+                ? ' (filtrados)' : ''} como destinatarios de esta campaña.
+            </p>
+            {contacts.length !== broadcastableContacts.length && (
+              <p className="text-amber-600 mt-1">
+                {contacts.length - broadcastableContacts.length} contacto(s) sin teléfono serán excluidos.
+              </p>
+            )}
+          </div>
+        }
       />
     </div>
   )

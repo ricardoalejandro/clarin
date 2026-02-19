@@ -860,6 +860,90 @@ func (s *CampaignService) GetRunningCampaigns(ctx context.Context) ([]*domain.Ca
 	return s.repos.Campaign.GetRunningCampaigns(ctx)
 }
 
+func (s *CampaignService) RetryRecipient(ctx context.Context, campaignID uuid.UUID, recipientID uuid.UUID) error {
+	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
+	if err != nil {
+		return fmt.Errorf("campaign not found: %w", err)
+	}
+
+	rec, err := s.repos.Campaign.GetRecipientByID(ctx, recipientID)
+	if err != nil {
+		return fmt.Errorf("recipient not found: %w", err)
+	}
+	if rec.CampaignID != campaignID {
+		return fmt.Errorf("recipient does not belong to this campaign")
+	}
+	if rec.Status != "failed" {
+		return fmt.Errorf("recipient status is '%s', only 'failed' can be retried", rec.Status)
+	}
+
+	// Look up contact and lead for template personalization
+	var contact *domain.Contact
+	if rec.ContactID != nil {
+		contact, _ = s.repos.Contact.GetByID(ctx, *rec.ContactID)
+	}
+	var lead *domain.Lead
+	if rec.JID != "" {
+		lead, _ = s.repos.Lead.GetByJID(ctx, campaign.AccountID, rec.JID)
+	}
+
+	msg := personalizeText(campaign.MessageTemplate, rec, contact, lead)
+
+	var sendErr error
+	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(ctx, campaignID)
+
+	if len(attachments) > 0 {
+		if msg != "" {
+			if len(attachments) == 1 && attachments[0].Caption == "" {
+				_, sendErr = s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, attachments[0].MediaURL, attachments[0].MediaType)
+			} else {
+				_, sendErr = s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)
+				if sendErr == nil {
+					for _, att := range attachments {
+						time.Sleep(1500 * time.Millisecond)
+						caption := personalizeText(att.Caption, rec, contact, lead)
+						_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
+						if err != nil {
+							sendErr = err
+							break
+						}
+					}
+				}
+			}
+		} else {
+			for i, att := range attachments {
+				if i > 0 {
+					time.Sleep(1500 * time.Millisecond)
+				}
+				caption := personalizeText(att.Caption, rec, contact, lead)
+				_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
+				if err != nil {
+					sendErr = err
+					break
+				}
+			}
+		}
+	} else if campaign.MediaURL != nil && *campaign.MediaURL != "" && campaign.MediaType != nil {
+		_, sendErr = s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, *campaign.MediaURL, *campaign.MediaType)
+	} else {
+		_, sendErr = s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)
+	}
+
+	if sendErr != nil {
+		errMsg := sendErr.Error()
+		s.repos.Campaign.UpdateRecipientStatus(ctx, rec.ID, "failed", &errMsg, nil)
+		return fmt.Errorf("envío fallido: %s", errMsg)
+	}
+
+	// Mark as sent and update counters
+	s.repos.Campaign.UpdateRecipientStatus(ctx, rec.ID, "sent", nil, nil)
+	s.repos.Campaign.IncrementSentCount(ctx, campaignID)
+	// Decrement failed count
+	s.repos.Campaign.DecrementFailedCount(ctx, campaignID)
+
+	return nil
+}
+
 func (s *CampaignService) Duplicate(ctx context.Context, campaignID uuid.UUID, newMessage *string) (*domain.Campaign, error) {
 	original, err := s.repos.Campaign.GetByID(ctx, campaignID)
 	if err != nil {

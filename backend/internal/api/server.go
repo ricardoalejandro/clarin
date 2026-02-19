@@ -259,6 +259,7 @@ func (s *Server) setupRoutes() {
 	campaigns.Post("/:id/pause", s.handlePauseCampaign)
 	campaigns.Post("/:id/cancel", s.handleCancelCampaign)
 	campaigns.Post("/:id/duplicate", s.handleDuplicateCampaign)
+	campaigns.Post("/:id/recipients/:rid/retry", s.handleRetryCampaignRecipient)
 	campaigns.Put("/:id/attachments", s.handleUpdateCampaignAttachments)
 
 	// Import CSV route
@@ -3184,6 +3185,21 @@ func (s *Server) handleCancelCampaign(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "Campaign cancelled"})
+}
+
+func (s *Server) handleRetryCampaignRecipient(c *fiber.Ctx) error {
+	campaignID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	recipientID, err := uuid.Parse(c.Params("rid"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid recipient ID"})
+	}
+	if err := s.services.Campaign.RetryRecipient(c.Context(), campaignID, recipientID); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "Mensaje reenviado exitosamente"})
 }
 
 func (s *Server) handleDuplicateCampaign(c *fiber.Ctx) error {

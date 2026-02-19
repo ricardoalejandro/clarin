@@ -10,9 +10,12 @@ import React from 'react'
  */
 
 interface FormatToken {
-  type: 'text' | 'bold' | 'italic' | 'strike' | 'mono' | 'code_block'
+  type: 'text' | 'bold' | 'italic' | 'strike' | 'mono' | 'code_block' | 'url'
   content: string
 }
+
+// URL regex that matches http(s) URLs and common domain patterns
+const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`[\]]+|(?:www\.)[^\s<>"{}|\\^`[\]]+/gi
 
 function tokenize(text: string): FormatToken[] {
   const tokens: FormatToken[] = []
@@ -78,7 +81,36 @@ function tokenize(text: string): FormatToken[] {
     i = j
   }
 
-  return tokens
+  // Post-process: split text tokens that contain URLs
+  return splitUrlsInTokens(tokens)
+}
+
+function splitUrlsInTokens(tokens: FormatToken[]): FormatToken[] {
+  const result: FormatToken[] = []
+  for (const token of tokens) {
+    if (token.type !== 'text') {
+      result.push(token)
+      continue
+    }
+    const text = token.content
+    URL_REGEX.lastIndex = 0
+    let lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = URL_REGEX.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        result.push({ type: 'text', content: text.slice(lastIndex, match.index) })
+      }
+      result.push({ type: 'url', content: match[0] })
+      lastIndex = match.index + match[0].length
+    }
+    if (lastIndex < text.length && lastIndex > 0) {
+      result.push({ type: 'text', content: text.slice(lastIndex) })
+    }
+    if (lastIndex === 0) {
+      result.push(token)
+    }
+  }
+  return result
 }
 
 function findClosing(text: string, start: number, char: string): number {
@@ -121,6 +153,20 @@ export function renderFormattedText(text: string): React.ReactNode[] {
             <code>{token.content}</code>
           </pre>
         )
+      case 'url': {
+        const href = token.content.startsWith('http') ? token.content : `https://${token.content}`
+        return (
+          <a
+            key={i}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-600 underline hover:text-blue-800 break-all"
+          >
+            {token.content}
+          </a>
+        )
+      }
       default:
         return <React.Fragment key={i}>{token.content}</React.Fragment>
     }
@@ -155,6 +201,12 @@ export function formatToHtml(text: string): string {
 
   // Strikethrough
   html = html.replace(/~([^\s~](?:[^~]*[^\s~])?)~/g, '<del>$1</del>')
+
+  // URLs - detect and make clickable
+  html = html.replace(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|(?:www\.)[^\s<>"{}|\\^`[\]]+)/gi, (url) => {
+    const href = url.startsWith('http') ? url : `https://${url}`
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="text-blue-600 underline hover:text-blue-800 break-all">${url}</a>`
+  })
 
   // Newlines
   html = html.replace(/\n/g, '<br>')
@@ -193,6 +245,10 @@ export function formatToHtmlPreview(text: string): string {
   // Strikethrough: ~text~
   html = html.replace(/~([^\s~](?:[^~]*[^\s~])?)~/g,
     '<span class="opacity-40">~</span><del>$1</del><span class="opacity-40">~</span>')
+
+  // URLs - highlight in preview
+  html = html.replace(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|(?:www\.)[^\s<>"{}|\\^`[\]]+)/gi,
+    '<span class="text-blue-600 underline">$1</span>')
 
   // Newlines
   html = html.replace(/\n/g, '<br>')

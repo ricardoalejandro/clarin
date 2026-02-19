@@ -7,7 +7,7 @@ import {
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
   BarChart3, ZoomIn, ZoomOut, CalendarClock, X, Paperclip,
   MessageSquare, Upload, UserPlus, Download, CheckSquare, Square,
-  Phone, Mail, Save, Pencil, Ban
+  Phone, Mail, Save, Pencil, Ban, RotateCcw, Loader2
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -119,6 +119,7 @@ export default function BroadcastsPage() {
   const [showRecipientsModal, setShowRecipientsModal] = useState(false)
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null)
   const [recipients, setRecipients] = useState<Recipient[]>([])
+  const [retryingId, setRetryingId] = useState<string | null>(null)
   const [searchContacts, setSearchContacts] = useState('')
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set())
   const [detailTab, setDetailTab] = useState<'message' | 'recipients' | 'chart'>('message')
@@ -600,6 +601,47 @@ export default function BroadcastsPage() {
       console.error('Failed to fetch recipients:', err)
     }
     setShowDetailModal(true)
+  }
+
+  const handleDownloadRecipients = () => {
+    if (!selectedCampaign || recipients.length === 0) return
+    const rows = recipients.map((rec, idx) => ({
+      '#': idx + 1,
+      'Nombre': rec.name || '',
+      'Teléfono': rec.phone || rec.jid.replace('@s.whatsapp.net', ''),
+      'JID': rec.jid,
+      'Estado': rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente',
+      'Enviado a las': rec.sent_at ? format(new Date(rec.sent_at), 'dd/MM/yyyy HH:mm:ss', { locale: es }) : '',
+      'Tiempo espera (s)': rec.wait_time_ms != null ? (rec.wait_time_ms / 1000).toFixed(1) : '',
+      'Error': rec.error_message || '',
+    }))
+    const ws = XLSX.utils.json_to_sheet(rows)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Destinatarios')
+    XLSX.writeFile(wb, `${selectedCampaign.name.replace(/[^a-zA-Z0-9]/g, '_')}_destinatarios.xlsx`)
+  }
+
+  const handleRetryRecipient = async (recipientId: string) => {
+    if (!selectedCampaign || retryingId) return
+    setRetryingId(recipientId)
+    try {
+      const res = await fetch(`/api/campaigns/${selectedCampaign.id}/recipients/${recipientId}/retry`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setRecipients(prev => prev.map(r => r.id === recipientId ? { ...r, status: 'sent', error_message: null, sent_at: new Date().toISOString() } : r))
+        setSelectedCampaign(prev => prev ? { ...prev, sent_count: prev.sent_count + 1, failed_count: Math.max(prev.failed_count - 1, 0) } : prev)
+        fetchCampaigns()
+      } else {
+        alert(data.error || 'Error al reenviar')
+      }
+    } catch (err) {
+      alert('Error de conexión al reenviar')
+    } finally {
+      setRetryingId(null)
+    }
   }
 
   const handleDuplicate = async () => {
@@ -1384,71 +1426,100 @@ export default function BroadcastsPage() {
                 </div>
               </div>
             ) : detailTab === 'recipients' ? (
-              <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0 max-h-72">
-                {recipients.map((rec, idx) => (
-                  <div key={rec.id} className="flex items-center justify-between p-2.5 text-sm">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-gray-300 w-5 text-right shrink-0">{idx + 1}</span>
-                        <div className="min-w-0">
-                          <p className="font-medium text-gray-900 truncate">{rec.name || rec.jid.replace('@s.whatsapp.net', '')}</p>
-                          <div className="flex items-center gap-2 text-xs text-gray-400">
-                            <span>{rec.phone || rec.jid.replace('@s.whatsapp.net', '')}</span>
-                            {rec.sent_at && (
-                              <span className="text-green-600">
-                                {format(new Date(rec.sent_at), 'HH:mm:ss', { locale: es })}
-                              </span>
-                            )}
-                            {rec.wait_time_ms != null && rec.wait_time_ms > 0 && (
-                              <span className="text-blue-500">
-                                espera: {(rec.wait_time_ms / 1000).toFixed(1)}s
-                              </span>
-                            )}
-                            {rec.metadata && Object.keys(rec.metadata).length > 0 && (
-                              <span className="text-purple-500">
-                                {Object.entries(rec.metadata).map(([k, v]) => `${k}=${v}`).join(', ')}
-                              </span>
+              <div className="flex-1 flex flex-col min-h-0 max-h-72">
+                {/* Header con botón de descarga */}
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-3 text-xs text-gray-500">
+                    <span className="flex items-center gap-1"><CheckCircle2 className="w-3 h-3 text-green-500" />{recipients.filter(r => r.status === 'sent').length} enviados</span>
+                    <span className="flex items-center gap-1"><XCircle className="w-3 h-3 text-red-500" />{recipients.filter(r => r.status === 'failed').length} fallidos</span>
+                    <span className="flex items-center gap-1"><Clock className="w-3 h-3 text-gray-400" />{recipients.filter(r => r.status === 'pending').length} pendientes</span>
+                  </div>
+                  <button
+                    onClick={handleDownloadRecipients}
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md transition"
+                    title="Descargar detalle de destinatarios"
+                  >
+                    <Download className="w-3.5 h-3.5" /> Exportar
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                  {recipients.map((rec, idx) => (
+                    <div key={rec.id} className="flex items-center justify-between p-2.5 text-sm">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-300 w-5 text-right shrink-0">{idx + 1}</span>
+                          <div className="min-w-0">
+                            <p className="font-medium text-gray-900 truncate">{rec.name || rec.jid.replace('@s.whatsapp.net', '')}</p>
+                            <div className="flex items-center gap-2 text-xs text-gray-400">
+                              <span>{rec.phone || rec.jid.replace('@s.whatsapp.net', '')}</span>
+                              {rec.sent_at && (
+                                <span className="text-green-600">
+                                  {format(new Date(rec.sent_at), 'HH:mm:ss', { locale: es })}
+                                </span>
+                              )}
+                              {rec.wait_time_ms != null && rec.wait_time_ms > 0 && (
+                                <span className="text-blue-500">
+                                  espera: {(rec.wait_time_ms / 1000).toFixed(1)}s
+                                </span>
+                              )}
+                              {rec.metadata && Object.keys(rec.metadata).length > 0 && (
+                                <span className="text-purple-500">
+                                  {Object.entries(rec.metadata).map(([k, v]) => `${k}=${v}`).join(', ')}
+                                </span>
+                              )}
+                            </div>
+                            {rec.status === 'failed' && rec.error_message && (
+                              <p className="text-xs text-red-500 mt-0.5 truncate" title={rec.error_message}>
+                                {rec.error_message}
+                              </p>
                             )}
                           </div>
                         </div>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                      {rec.status === 'sent' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
-                      {rec.status === 'failed' && (
-                        <span title={rec.error_message || ''}>
-                          <XCircle className="w-4 h-4 text-red-500" />
+                      <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                        {rec.status === 'sent' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
+                        {rec.status === 'failed' && <XCircle className="w-4 h-4 text-red-500" />}
+                        {rec.status === 'pending' && <Clock className="w-4 h-4 text-gray-400" />}
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${
+                          rec.status === 'sent' ? 'bg-green-100 text-green-700' :
+                          rec.status === 'failed' ? 'bg-red-100 text-red-700' :
+                          'bg-gray-100 text-gray-600'
+                        }`}>
+                          {rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente'}
                         </span>
-                      )}
-                      {rec.status === 'pending' && <Clock className="w-4 h-4 text-gray-400" />}
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${
-                        rec.status === 'sent' ? 'bg-green-100 text-green-700' :
-                        rec.status === 'failed' ? 'bg-red-100 text-red-700' :
-                        'bg-gray-100 text-gray-600'
-                      }`}>
-                        {rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente'}
-                      </span>
-                      {rec.status === 'pending' && (selectedCampaign.status === 'draft' || selectedCampaign.status === 'scheduled') && (
-                        <>
+                        {rec.status === 'failed' && (
                           <button
-                            onClick={() => openEditRecipient(rec)}
-                            className="p-1 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded transition"
-                            title="Editar destinatario"
+                            onClick={() => handleRetryRecipient(rec.id)}
+                            disabled={retryingId !== null}
+                            className="flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 disabled:opacity-50 rounded transition"
+                            title="Reenviar a este destinatario"
                           >
-                            <Edit className="w-3.5 h-3.5" />
+                            {retryingId === rec.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                            Reenviar
                           </button>
-                          <button
-                            onClick={() => handleDeleteRecipient(rec.id)}
-                            className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition"
-                            title="Eliminar destinatario"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </>
-                      )}
+                        )}
+                        {rec.status === 'pending' && (selectedCampaign.status === 'draft' || selectedCampaign.status === 'scheduled') && (
+                          <>
+                            <button
+                              onClick={() => openEditRecipient(rec)}
+                              className="p-1 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded transition"
+                              title="Editar destinatario"
+                            >
+                              <Edit className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteRecipient(rec.id)}
+                              className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition"
+                              title="Eliminar destinatario"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             ) : (
               <div className="flex-1 min-h-0 overflow-y-auto max-h-72">

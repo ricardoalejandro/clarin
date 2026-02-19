@@ -1876,6 +1876,22 @@ func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.
 	return recipients, nil
 }
 
+func (r *CampaignRepository) GetRecipientByID(ctx context.Context, recipientID uuid.UUID) (*domain.CampaignRecipient, error) {
+	rec := &domain.CampaignRecipient{}
+	var metaJSON []byte
+	err := r.db.QueryRow(ctx, `
+		SELECT id, campaign_id, contact_id, jid, name, phone, status, sent_at, error_message, wait_time_ms, COALESCE(metadata, '{}')
+		FROM campaign_recipients WHERE id = $1
+	`, recipientID).Scan(&rec.ID, &rec.CampaignID, &rec.ContactID, &rec.JID, &rec.Name, &rec.Phone, &rec.Status, &rec.SentAt, &rec.ErrorMessage, &rec.WaitTimeMs, &metaJSON)
+	if err != nil {
+		return nil, err
+	}
+	if len(metaJSON) > 2 {
+		json.Unmarshal(metaJSON, &rec.Metadata)
+	}
+	return rec, nil
+}
+
 func (r *CampaignRepository) GetNextPendingRecipient(ctx context.Context, campaignID uuid.UUID) (*domain.CampaignRecipient, error) {
 	rec := &domain.CampaignRecipient{}
 	var metaJSON []byte
@@ -1914,6 +1930,11 @@ func (r *CampaignRepository) IncrementSentCount(ctx context.Context, campaignID 
 
 func (r *CampaignRepository) IncrementFailedCount(ctx context.Context, campaignID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `UPDATE campaigns SET failed_count = failed_count + 1, updated_at = NOW() WHERE id = $1`, campaignID)
+	return err
+}
+
+func (r *CampaignRepository) DecrementFailedCount(ctx context.Context, campaignID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE campaigns SET failed_count = GREATEST(failed_count - 1, 0), updated_at = NOW() WHERE id = $1`, campaignID)
 	return err
 }
 
