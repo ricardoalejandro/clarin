@@ -6,11 +6,12 @@ import {
   Search, Phone, Mail, Building2, Tag, Edit, Trash2, RefreshCw,
   ChevronDown, CheckSquare, Square, XCircle, MoreVertical,
   Users, Merge, Eye, X, Smartphone, AlertTriangle, MessageSquare, Send,
-  Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2
+  Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import ImportCSVModal from '@/components/ImportCSVModal'
+import TagInput from '@/components/TagInput'
 
 interface ContactDeviceName {
   id: string
@@ -21,6 +22,13 @@ interface ContactDeviceName {
   business_name: string | null
   device_name: string | null
   synced_at: string
+}
+
+interface StructuredTag {
+  id: string
+  account_id: string
+  name: string
+  color: string
 }
 
 interface Contact {
@@ -39,6 +47,7 @@ interface Contact {
   company: string | null
   age: number | null
   tags: string[] | null
+  structured_tags: StructuredTag[] | null
   notes: string | null
   source: string | null
   is_group: boolean
@@ -89,6 +98,10 @@ export default function ContactsPage() {
   const [total, setTotal] = useState(0)
   const [searchTerm, setSearchTerm] = useState('')
   const [filterDevice, setFilterDevice] = useState('')
+  const [filterTagIds, setFilterTagIds] = useState<Set<string>>(new Set())
+  const [showTagFilter, setShowTagFilter] = useState(false)
+  const [tagSearchTerm, setTagSearchTerm] = useState('')
+  const [allTags, setAllTags] = useState<StructuredTag[]>([])
   const [page, setPage] = useState(0)
   const pageSize = 50
 
@@ -155,6 +168,7 @@ export default function ContactsPage() {
       const params = new URLSearchParams()
       if (searchTerm) params.set('search', searchTerm)
       if (filterDevice) params.set('device_id', filterDevice)
+      if (filterTagIds.size > 0) params.set('tag_ids', Array.from(filterTagIds).join(','))
       params.set('limit', String(pageSize))
       params.set('offset', String(page * pageSize))
       params.set('has_phone', 'false')
@@ -172,7 +186,7 @@ export default function ContactsPage() {
     } finally {
       setLoading(false)
     }
-  }, [token, searchTerm, filterDevice, page])
+  }, [token, searchTerm, filterDevice, filterTagIds, page])
 
   const fetchDevices = useCallback(async () => {
     if (!token) return
@@ -189,9 +203,25 @@ export default function ContactsPage() {
     }
   }, [token])
 
+  const fetchAllTags = useCallback(async () => {
+    if (!token) return
+    try {
+      const res = await fetch('/api/tags', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setAllTags(data.tags || [])
+      }
+    } catch (err) {
+      console.error('Failed to fetch tags:', err)
+    }
+  }, [token])
+
   useEffect(() => {
     fetchDevices()
-  }, [fetchDevices])
+    fetchAllTags()
+  }, [fetchDevices, fetchAllTags])
 
   useEffect(() => {
     setLoading(true)
@@ -204,7 +234,7 @@ export default function ContactsPage() {
   // Reset page on filter change
   useEffect(() => {
     setPage(0)
-  }, [searchTerm, filterDevice])
+  }, [searchTerm, filterDevice, filterTagIds])
 
   // Lock body scroll when detail panel is open
   useEffect(() => {
@@ -633,7 +663,7 @@ export default function ContactsPage() {
   if (loading && contacts.length === 0) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600" />
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600" />
       </div>
     )
   }
@@ -643,18 +673,18 @@ export default function ContactsPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Contactos</h1>
-          <p className="text-gray-600 mt-1">{total} contactos en total</p>
+          <h1 className="text-2xl font-bold text-slate-900">Contactos</h1>
+          <p className="text-slate-500 text-sm mt-1">{total} contactos en total</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {selectionMode ? (
             <>
-              <span className="flex items-center px-3 py-2 text-sm text-gray-600">
+              <span className="flex items-center px-3 py-2 text-sm text-slate-600">
                 {selectedIds.size} seleccionado(s)
               </span>
               <button
                 onClick={() => setSelectedIds(new Set(contacts.map(c => c.id)))}
-                className="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                className="px-3 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50"
               >
                 Seleccionar todos
               </button>
@@ -667,7 +697,7 @@ export default function ContactsPage() {
               </button>
               <button
                 onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
-                className="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                className="px-3 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50"
               >
                 <XCircle className="w-4 h-4" />
               </button>
@@ -677,14 +707,14 @@ export default function ContactsPage() {
               <button
                 onClick={handleSyncAll}
                 disabled={syncing}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-50"
+                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition disabled:opacity-50 text-sm"
               >
                 <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
                 {syncing ? 'Sincronizando...' : 'Sincronizar'}
               </button>
               <button
                 onClick={() => setShowImportModal(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition text-sm"
               >
                 <Upload className="w-4 h-4" />
                 Importar CSV
@@ -692,14 +722,14 @@ export default function ContactsPage() {
               <button
                 onClick={handleFindDuplicates}
                 disabled={loadingDuplicates}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition disabled:opacity-50"
+                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition disabled:opacity-50 text-sm"
               >
                 <Merge className="w-4 h-4" />
                 Duplicados
               </button>
               <button
                 onClick={() => setSelectionMode(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition text-sm"
               >
                 <CheckSquare className="w-4 h-4" />
                 Seleccionar
@@ -712,61 +742,150 @@ export default function ContactsPage() {
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
           <input
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             placeholder="Buscar por nombre, teléfono, email, empresa..."
-            className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+            className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
           />
         </div>
         <div className="relative">
-          <Smartphone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+          <Smartphone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
           <select
             value={filterDevice}
             onChange={(e) => setFilterDevice(e.target.value)}
-            className="pl-10 pr-8 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 appearance-none cursor-pointer text-gray-900"
+            className="pl-10 pr-8 py-2.5 bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 appearance-none cursor-pointer text-slate-900 text-sm"
           >
             <option value="">Todos los dispositivos</option>
             {devices.map(d => (
               <option key={d.id} value={d.id}>{d.name} {d.phone ? `(${d.phone})` : ''}</option>
             ))}
           </select>
-          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+        </div>
+        {/* Tag Filter */}
+        <div className="relative">
+          <button
+            onClick={() => setShowTagFilter(!showTagFilter)}
+            className={`flex items-center gap-2 px-3 py-2.5 bg-white border rounded-lg hover:border-emerald-500 focus:ring-2 focus:ring-emerald-500 min-w-[170px] text-sm ${
+              filterTagIds.size > 0 ? 'border-emerald-500' : 'border-slate-300'
+            }`}
+          >
+            <Tag className="w-4 h-4 text-emerald-600" />
+            <span className="flex-1 text-left font-medium text-slate-800 truncate">
+              {filterTagIds.size === 0 ? 'Todas las etiquetas' : `${filterTagIds.size} etiqueta${filterTagIds.size > 1 ? 's' : ''}`}
+            </span>
+            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showTagFilter ? 'rotate-180' : ''}`} />
+          </button>
+          {showTagFilter && (
+            <div className="absolute top-full left-0 mt-1 w-64 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-[350px] overflow-hidden flex flex-col">
+              <div className="p-3 border-b border-slate-100 flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Etiquetas</span>
+                {filterTagIds.size > 0 && (
+                  <button onClick={() => setFilterTagIds(new Set())} className="text-xs text-red-500 hover:text-red-700">
+                    Limpiar
+                  </button>
+                )}
+              </div>
+              <div className="px-3 py-2 border-b border-slate-100">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                  <input
+                    type="text"
+                    value={tagSearchTerm}
+                    onChange={(e) => setTagSearchTerm(e.target.value)}
+                    placeholder="Buscar etiqueta..."
+                    className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+              {filterTagIds.size > 0 && (
+                <div className="px-3 py-2 border-b border-slate-100 flex flex-wrap gap-1">
+                  {Array.from(filterTagIds).map(id => {
+                    const tag = allTags.find(t => t.id === id)
+                    if (!tag) return null
+                    return (
+                      <span
+                        key={id}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-white"
+                        style={{ backgroundColor: tag.color || '#6b7280' }}
+                      >
+                        {tag.name}
+                        <button onClick={() => { const next = new Set(filterTagIds); next.delete(id); setFilterTagIds(next) }} className="hover:opacity-75">
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
+              <div className="flex-1 overflow-y-auto max-h-[200px]">
+                {(() => {
+                  const filtered = allTags.filter(t =>
+                    !tagSearchTerm.trim() || t.name.toLowerCase().includes(tagSearchTerm.trim().toLowerCase())
+                  )
+                  if (filtered.length === 0) return <p className="text-xs text-slate-400 text-center py-4">Sin etiquetas</p>
+                  return filtered.map(tag => {
+                    const isActive = filterTagIds.has(tag.id)
+                    return (
+                      <label
+                        key={tag.id}
+                        className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50 cursor-pointer transition"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isActive}
+                          onChange={() => {
+                            const next = new Set(filterTagIds)
+                            if (isActive) next.delete(tag.id); else next.add(tag.id)
+                            setFilterTagIds(next)
+                          }}
+                          className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                        />
+                        <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
+                        <span className="flex-1 text-xs text-slate-700">{tag.name}</span>
+                      </label>
+                    )
+                  })
+                })()}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Contacts Table */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
+            <thead className="bg-slate-50 border-b border-slate-200">
               <tr>
                 {selectionMode && <th className="w-10 px-4 py-3" />}
-                <th className="text-left px-4 py-3 text-sm font-semibold text-gray-600">Contacto</th>
-                <th className="text-left px-4 py-3 text-sm font-semibold text-gray-600">Teléfono</th>
-                <th className="text-left px-4 py-3 text-sm font-semibold text-gray-600 hidden md:table-cell">Email</th>
-                <th className="text-left px-4 py-3 text-sm font-semibold text-gray-600 hidden lg:table-cell">Empresa</th>
-                <th className="text-left px-4 py-3 text-sm font-semibold text-gray-600 hidden lg:table-cell">Etiquetas</th>
-                <th className="text-left px-4 py-3 text-sm font-semibold text-gray-600 hidden md:table-cell">Fuente</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Contacto</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Teléfono</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden md:table-cell">Email</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell">Empresa</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell">Etiquetas</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden md:table-cell">Fuente</th>
                 <th className="w-10 px-4 py-3" />
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-slate-100">
               {contacts.length === 0 ? (
                 <tr>
-                  <td colSpan={selectionMode ? 8 : 7} className="text-center py-12 text-gray-500">
-                    <Users className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-                    <p className="text-lg font-medium">No hay contactos</p>
+                  <td colSpan={selectionMode ? 8 : 7} className="text-center py-12 text-slate-500">
+                    <Users className="w-12 h-12 mx-auto mb-3 text-slate-300" />
+                    <p className="text-base font-medium">No hay contactos</p>
                     <p className="text-sm mt-1">Los contactos se sincronizan automáticamente desde tus dispositivos WhatsApp</p>
                   </td>
                 </tr>
               ) : contacts.map((contact) => (
                 <tr
                   key={contact.id}
-                  className={`hover:bg-gray-50 cursor-pointer transition ${
-                    selectedIds.has(contact.id) ? 'bg-green-50' : ''
+                  className={`hover:bg-slate-50 cursor-pointer transition ${
+                    selectedIds.has(contact.id) ? 'bg-emerald-50' : ''
                   }`}
                   onClick={() => selectionMode ? toggleSelection(contact.id) : openDetail(contact)}
                 >
@@ -774,9 +893,9 @@ export default function ContactsPage() {
                     <td className="px-4 py-3">
                       <button onClick={(e) => { e.stopPropagation(); toggleSelection(contact.id) }}>
                         {selectedIds.has(contact.id) ? (
-                          <CheckSquare className="w-5 h-5 text-green-600" />
+                          <CheckSquare className="w-5 h-5 text-emerald-600" />
                         ) : (
-                          <Square className="w-5 h-5 text-gray-400" />
+                          <Square className="w-5 h-5 text-slate-400" />
                         )}
                       </button>
                     </td>
@@ -790,52 +909,61 @@ export default function ContactsPage() {
                           className="w-10 h-10 rounded-full object-cover"
                         />
                       ) : (
-                        <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden">
-                          <span className="text-green-700 font-medium text-sm">
+                        <div className="w-10 h-10 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden">
+                          <span className="text-emerald-700 font-medium text-sm">
                             {getInitials(contact)}
                           </span>
                         </div>
                       )}
                       <div className="min-w-0">
-                        <p className="font-medium text-gray-900 truncate">
+                        <p className="text-sm font-medium text-slate-900 truncate">
                           {getDisplayName(contact)}
                         </p>
                         {contact.custom_name && contact.name && (
-                          <p className="text-xs text-gray-400 truncate">
+                          <p className="text-xs text-slate-400 truncate">
                             WA: {contact.name}
                           </p>
                         )}
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700">
-                    {contact.phone || <span className="text-gray-400">-</span>}
+                  <td className="px-4 py-3 text-sm text-slate-700">
+                    {contact.phone || <span className="text-slate-400">-</span>}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700 hidden md:table-cell">
-                    {contact.email || <span className="text-gray-400">-</span>}
+                  <td className="px-4 py-3 text-sm text-slate-700 hidden md:table-cell">
+                    {contact.email || <span className="text-slate-400">-</span>}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-700 hidden lg:table-cell">
-                    {contact.company || <span className="text-gray-400">-</span>}
+                  <td className="px-4 py-3 text-sm text-slate-700 hidden lg:table-cell">
+                    {contact.company || <span className="text-slate-400">-</span>}
                   </td>
                   <td className="px-4 py-3 hidden lg:table-cell">
                     <div className="flex flex-wrap gap-1">
-                      {(contact.tags || []).slice(0, 2).map((tag, i) => (
-                        <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded">
+                      {(contact.structured_tags || []).slice(0, 2).map((tag) => (
+                        <span
+                          key={tag.id}
+                          className="px-2 py-0.5 text-xs rounded-full font-medium text-white"
+                          style={{ backgroundColor: tag.color || '#6b7280' }}
+                        >
+                          {tag.name}
+                        </span>
+                      ))}
+                      {(contact.structured_tags || []).length > 2 && (
+                        <span className="text-xs text-slate-400">+{(contact.structured_tags || []).length - 2}</span>
+                      )}
+                      {(!contact.structured_tags || contact.structured_tags.length === 0) && (contact.tags || []).slice(0, 2).map((tag, i) => (
+                        <span key={i} className="px-2 py-0.5 bg-slate-100 text-slate-600 text-xs rounded-full">
                           {tag}
                         </span>
                       ))}
-                      {(contact.tags || []).length > 2 && (
-                        <span className="text-xs text-gray-400">+{(contact.tags || []).length - 2}</span>
-                      )}
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-500 hidden md:table-cell">
+                  <td className="px-4 py-3 text-sm text-slate-500 hidden md:table-cell">
                     {contact.source || 'whatsapp'}
                   </td>
                   <td className="px-4 py-3">
                     <button
                       onClick={(e) => { e.stopPropagation(); openEditModal(contact) }}
-                      className="p-1 text-gray-400 hover:text-gray-600 rounded"
+                      className="p-1 text-slate-400 hover:text-slate-600 rounded"
                     >
                       <MoreVertical className="w-4 h-4" />
                     </button>
@@ -848,22 +976,22 @@ export default function ContactsPage() {
 
         {/* Pagination */}
         {totalPages > 1 && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 bg-gray-50">
-            <p className="text-sm text-gray-600">
+          <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 bg-slate-50">
+            <p className="text-sm text-slate-600">
               Mostrando {page * pageSize + 1}-{Math.min((page + 1) * pageSize, total)} de {total}
             </p>
             <div className="flex gap-2">
               <button
                 onClick={() => setPage(p => Math.max(0, p - 1))}
                 disabled={page === 0}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-white disabled:opacity-50"
+                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-white disabled:opacity-50"
               >
                 Anterior
               </button>
               <button
                 onClick={() => setPage(p => p + 1)}
                 disabled={page >= totalPages - 1}
-                className="px-3 py-1 text-sm border border-gray-300 rounded hover:bg-white disabled:opacity-50"
+                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-white disabled:opacity-50"
               >
                 Siguiente
               </button>
@@ -1009,19 +1137,19 @@ export default function ContactsPage() {
                 </div>
               </div>
 
-              {/* Tags */}
-              {selectedContact.tags && selectedContact.tags.length > 0 && (
-                <div className="space-y-2">
-                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
-                  <div className="flex flex-wrap gap-1.5">
-                    {selectedContact.tags.map((tag, i) => (
-                      <span key={i} className="px-2 py-0.5 bg-emerald-50 text-emerald-700 text-xs rounded-full font-medium">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* Tags — Editable with TagInput */}
+              <div className="space-y-2">
+                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
+                <TagInput
+                  entityType="contact"
+                  entityId={selectedContact.id}
+                  assignedTags={selectedContact.structured_tags || []}
+                  onTagsChange={(newTags) => {
+                    setSelectedContact({ ...selectedContact, structured_tags: newTags })
+                    fetchAllTags()
+                  }}
+                />
+              </div>
 
               {/* Notes */}
               <div className="border-t border-slate-100 pt-4">
@@ -1118,14 +1246,14 @@ export default function ContactsPage() {
               {/* Observations / History */}
               <div>
                 <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-sm font-semibold text-gray-600 flex items-center gap-2">
+                  <h4 className="text-sm font-semibold text-slate-600 flex items-center gap-2">
                     <FileText className="w-4 h-4" />
                     Historial de Observaciones
                   </h4>
                   {observations.length > 0 && (
                     <button
                       onClick={() => setShowHistoryModal(true)}
-                      className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition"
+                      className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition"
                       title="Ver historial completo"
                     >
                       <Maximize2 className="w-4 h-4" />
@@ -1140,12 +1268,12 @@ export default function ContactsPage() {
                     onChange={(e) => setNewObservation(e.target.value)}
                     placeholder="Escribir una observación..."
                     rows={2}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-sm text-gray-900 placeholder:text-gray-400 resize-none"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
                   />
                   <button
                     onClick={handleAddObservation}
                     disabled={!newObservation.trim() || savingObservation}
-                    className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:opacity-50 transition"
+                    className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition"
                   >
                     {savingObservation ? (
                       <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" />
@@ -1159,26 +1287,26 @@ export default function ContactsPage() {
                 {/* Observations list */}
                 {loadingObservations ? (
                   <div className="flex justify-center py-4">
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-green-600" />
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-emerald-600" />
                   </div>
                 ) : observations.length === 0 ? (
-                  <p className="text-sm text-gray-400 text-center py-3">Sin observaciones aún</p>
+                  <p className="text-sm text-slate-400 text-center py-3">Sin observaciones aún</p>
                 ) : (
                   <div className="space-y-2">
                     {observations.slice(0, obsDisplayCount).map((obs) => (
-                      <div key={obs.id} className="p-3 bg-gray-50 rounded-lg group relative">
+                      <div key={obs.id} className="p-3 bg-slate-50 rounded-lg group relative">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
-                            <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">
+                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words">
                               {obs.notes || '(sin contenido)'}
                             </p>
                             <div className="flex items-center gap-2 mt-1.5">
-                              <Clock className="w-3 h-3 text-gray-400" />
-                              <span className="text-xs text-gray-400">
+                              <Clock className="w-3 h-3 text-slate-400" />
+                              <span className="text-xs text-slate-400">
                                 {formatDistanceToNow(new Date(obs.created_at), { locale: es, addSuffix: true })}
                               </span>
                               {obs.created_by_name && (
-                                <span className="text-xs text-gray-500">
+                                <span className="text-xs text-slate-500">
                                   &mdash; {obs.created_by_name}
                                 </span>
                               )}
@@ -1191,7 +1319,7 @@ export default function ContactsPage() {
                           </div>
                           <button
                             onClick={() => handleDeleteObservation(obs.id)}
-                            className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
+                            className="p-1 text-slate-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
                             title="Eliminar"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -1202,7 +1330,7 @@ export default function ContactsPage() {
                     {observations.length > obsDisplayCount && (
                       <button
                         onClick={() => setObsDisplayCount(prev => prev + 10)}
-                        className="w-full py-2 text-sm text-green-600 hover:text-green-700 hover:bg-green-50 rounded-lg transition font-medium"
+                        className="w-full py-2 text-sm text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition font-medium"
                       >
                         Mostrar más ({observations.length - obsDisplayCount} restantes)
                       </button>
@@ -1211,7 +1339,7 @@ export default function ContactsPage() {
                 )}
               </div>
 
-              <div className="text-xs text-gray-400 space-y-1">
+              <div className="text-xs text-slate-400 space-y-1">
                 <p>Creado: {new Date(selectedContact.created_at).toLocaleDateString('es')}</p>
                 <p>Actualizado: {formatDistanceToNow(new Date(selectedContact.updated_at), { locale: es, addSuffix: true })}</p>
               </div>
@@ -1224,100 +1352,100 @@ export default function ContactsPage() {
       {showEditModal && selectedContact && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
-            <h2 className="text-xl font-bold text-gray-900 mb-4">Editar Contacto</h2>
+            <h2 className="text-xl font-bold text-slate-900 mb-4">Editar Contacto</h2>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre personalizado</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Nombre personalizado</label>
                 <input
                   type="text"
                   value={editForm.custom_name}
                   onChange={(e) => setEditForm({ ...editForm, custom_name: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                   placeholder={selectedContact.name || selectedContact.push_name || 'Nombre del contacto'}
                 />
-                <p className="text-xs text-gray-400 mt-1">
+                <p className="text-xs text-slate-400 mt-1">
                   Nombre original: {selectedContact.name || selectedContact.push_name || '-'}
                 </p>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Apellido</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Apellido</label>
                   <input
                     type="text"
                     value={editForm.last_name}
                     onChange={(e) => setEditForm({ ...editForm, last_name: e.target.value })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Nombre Corto</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Nombre Corto</label>
                   <input
                     type="text"
                     value={editForm.short_name}
                     onChange={(e) => setEditForm({ ...editForm, short_name: e.target.value })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                     placeholder="Apodo o nombre corto"
                   />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Teléfono</label>
                 <input
                   type="tel"
                   value={editForm.phone}
                   onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                   placeholder="+51 999 888 777"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
                 <input
                   type="email"
                   value={editForm.email}
                   onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                   placeholder="correo@ejemplo.com"
                 />
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Empresa</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Empresa</label>
                   <input
                     type="text"
                     value={editForm.company}
                     onChange={(e) => setEditForm({ ...editForm, company: e.target.value })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                     placeholder="Nombre de la empresa"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Edad</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Edad</label>
                   <input
                     type="number"
                     value={editForm.age}
                     onChange={(e) => setEditForm({ ...editForm, age: e.target.value })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                   />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Etiquetas</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Etiquetas</label>
                 <input
                   type="text"
                   value={editForm.tags}
                   onChange={(e) => setEditForm({ ...editForm, tags: e.target.value })}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                   placeholder="cliente, vip, urgente (separadas por coma)"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notas</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Notas</label>
                 <textarea
                   value={editForm.notes}
                   onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
                   rows={3}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-gray-900 placeholder:text-gray-400"
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
                   placeholder="Notas sobre este contacto..."
                 />
               </div>
@@ -1325,13 +1453,13 @@ export default function ContactsPage() {
             <div className="flex gap-3 mt-6">
               <button
                 onClick={() => { setShowEditModal(false); setSelectedContact(null) }}
-                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 text-sm"
               >
                 Cancelar
               </button>
               <button
                 onClick={handleUpdateContact}
-                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm"
               >
                 Guardar
               </button>
@@ -1344,27 +1472,27 @@ export default function ContactsPage() {
       {showDuplicates && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between p-4 border-b border-gray-200">
+            <div className="flex items-center justify-between p-4 border-b border-slate-200">
               <div className="flex items-center gap-2">
                 <AlertTriangle className="w-5 h-5 text-yellow-500" />
-                <h2 className="text-lg font-semibold text-gray-900">
+                <h2 className="text-lg font-semibold text-slate-900">
                   Contactos Duplicados ({duplicateGroups.length} grupos)
                 </h2>
               </div>
-              <button onClick={() => setShowDuplicates(false)} className="p-1 hover:bg-gray-100 rounded">
+              <button onClick={() => setShowDuplicates(false)} className="p-1 hover:bg-slate-100 rounded">
                 <X className="w-5 h-5" />
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               {duplicateGroups.length === 0 ? (
-                <div className="text-center py-8 text-gray-500">
-                  <CheckSquare className="w-12 h-12 mx-auto mb-3 text-green-500" />
+                <div className="text-center py-8 text-slate-500">
+                  <CheckSquare className="w-12 h-12 mx-auto mb-3 text-emerald-500" />
                   <p className="font-medium">No se encontraron duplicados</p>
                 </div>
               ) : duplicateGroups.map((group, gi) => (
                 <div key={gi} className="border border-yellow-200 rounded-lg p-4 bg-yellow-50/50">
                   <div className="flex items-center justify-between mb-3">
-                    <p className="text-sm font-medium text-gray-700">
+                    <p className="text-sm font-medium text-slate-700">
                       Teléfono: {group[0]?.phone || 'desconocido'} ({group.length} contactos)
                     </p>
                     <button
@@ -1378,15 +1506,15 @@ export default function ContactsPage() {
                   <div className="space-y-2">
                     {group.map((contact, ci) => (
                       <div key={contact.id} className="flex items-center gap-3 p-2 bg-white rounded-lg">
-                        <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center flex-shrink-0">
-                          <span className="text-green-700 text-xs font-medium">{getInitials(contact)}</span>
+                        <div className="w-8 h-8 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0">
+                          <span className="text-emerald-700 text-xs font-medium">{getInitials(contact)}</span>
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium text-gray-900 truncate">{getDisplayName(contact)}</p>
-                          <p className="text-xs text-gray-500">{contact.jid}</p>
+                          <p className="text-sm font-medium text-slate-900 truncate">{getDisplayName(contact)}</p>
+                          <p className="text-xs text-slate-500">{contact.jid}</p>
                         </div>
                         {ci === 0 && (
-                          <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded font-medium">
+                          <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs rounded font-medium">
                             Se mantiene
                           </span>
                         )}
@@ -1405,19 +1533,19 @@ export default function ContactsPage() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
           <div className="bg-white rounded-xl p-6 w-full max-w-sm">
             <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                <Send className="w-5 h-5 text-green-600" />
+              <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">
+                <Send className="w-5 h-5 text-emerald-600" />
               </div>
               <div>
-                <h3 className="text-lg font-bold text-gray-900">Enviar Mensaje</h3>
-                <p className="text-sm text-gray-500">{getDisplayName(selectedContact)}</p>
+                <h3 className="text-lg font-bold text-slate-900">Enviar Mensaje</h3>
+                <p className="text-sm text-slate-500">{getDisplayName(selectedContact)}</p>
               </div>
             </div>
-            <p className="text-sm text-gray-600 mb-4">
+            <p className="text-sm text-slate-600 mb-4">
               Selecciona el dispositivo para iniciar la conversación:
             </p>
             {devices.filter(d => d.status === 'connected').length === 0 ? (
-              <p className="text-sm text-gray-400 text-center py-4">No hay dispositivos conectados</p>
+              <p className="text-sm text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
               <div className="space-y-2">
                 {devices.filter(d => d.status === 'connected').map((device) => (
@@ -1425,17 +1553,17 @@ export default function ContactsPage() {
                     key={device.id}
                     onClick={() => handleSendMessageToContact(device.id)}
                     disabled={sendLoading}
-                    className="w-full flex items-center gap-3 p-3 border border-gray-200 rounded-lg hover:bg-green-50 hover:border-green-300 transition text-left disabled:opacity-50"
+                    className="w-full flex items-center gap-3 p-3 border border-slate-200 rounded-lg hover:bg-emerald-50 hover:border-emerald-300 transition text-left disabled:opacity-50"
                   >
-                    <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                      <Smartphone className="w-5 h-5 text-green-600" />
+                    <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">
+                      <Smartphone className="w-5 h-5 text-emerald-600" />
                     </div>
                     <div className="flex-1">
-                      <p className="font-medium text-gray-900">{device.name || 'Dispositivo'}</p>
-                      <p className="text-xs text-gray-500">{device.phone || ''}</p>
+                      <p className="font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                      <p className="text-xs text-slate-500">{device.phone || ''}</p>
                     </div>
                     {sendLoading && sendDeviceId === device.id && (
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-600" />
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-emerald-600" />
                     )}
                   </button>
                 ))}
@@ -1443,7 +1571,7 @@ export default function ContactsPage() {
             )}
             <button
               onClick={() => { setShowSendMessage(false); setSendDeviceId('') }}
-              className="w-full mt-4 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+              className="w-full mt-4 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 text-sm"
             >
               Cancelar
             </button>
@@ -1455,25 +1583,25 @@ export default function ContactsPage() {
       {showHistoryModal && selectedContact && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">Historial Completo</h2>
-                <p className="text-sm text-gray-500">{getDisplayName(selectedContact)} &mdash; {observations.length} registros</p>
+                <h2 className="text-lg font-semibold text-slate-900">Historial Completo</h2>
+                <p className="text-sm text-slate-500">{getDisplayName(selectedContact)} &mdash; {observations.length} registros</p>
               </div>
-              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-1 text-gray-400 hover:text-gray-600 rounded">
+              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-1 text-slate-400 hover:text-slate-600 rounded">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {/* Filters */}
-            <div className="px-6 py-3 border-b border-gray-100 bg-gray-50">
+            <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
               <div className="flex items-center gap-3 flex-wrap">
                 <div>
-                  <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Tipo</label>
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Tipo</label>
                   <select
                     value={historyFilterType}
                     onChange={(e) => setHistoryFilterType(e.target.value)}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-green-500"
+                    className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500"
                   >
                     <option value="">Todos</option>
                     <option value="note">Nota</option>
@@ -1484,27 +1612,27 @@ export default function ContactsPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Desde</label>
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Desde</label>
                   <input
                     type="date"
                     value={historyFilterFrom}
                     onChange={(e) => setHistoryFilterFrom(e.target.value)}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-green-500"
+                    className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500"
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-500 uppercase tracking-wider mb-1 block">Hasta</label>
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Hasta</label>
                   <input
                     type="date"
                     value={historyFilterTo}
                     onChange={(e) => setHistoryFilterTo(e.target.value)}
-                    className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm text-gray-700 focus:ring-2 focus:ring-green-500"
+                    className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500"
                   />
                 </div>
                 {(historyFilterType || historyFilterFrom || historyFilterTo) && (
                   <button
                     onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }}
-                    className="mt-4 text-xs text-gray-500 hover:text-red-600 flex items-center gap-1"
+                    className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1"
                   >
                     <XCircle className="w-3.5 h-3.5" />
                     Limpiar
@@ -1526,31 +1654,31 @@ export default function ContactsPage() {
                   }
                   return true
                 })
-                if (filtered.length === 0) return <p className="text-sm text-gray-400 text-center py-8">No hay registros con los filtros seleccionados</p>
+                if (filtered.length === 0) return <p className="text-sm text-slate-400 text-center py-8">No hay registros con los filtros seleccionados</p>
                 return (
                   <div className="space-y-3">
                     {filtered.map((obs) => (
-                      <div key={obs.id} className="p-4 bg-gray-50 rounded-lg group relative border border-gray-100">
+                      <div key={obs.id} className="p-4 bg-slate-50 rounded-lg group relative border border-slate-100">
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-1">
                               <span className={`px-2 py-0.5 text-xs rounded font-medium ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
                                 {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
                               </span>
-                              <span className="text-xs text-gray-400">
+                              <span className="text-xs text-slate-400">
                                 {format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}
                               </span>
                             </div>
-                            <p className="text-sm text-gray-800 whitespace-pre-wrap break-words">
+                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words">
                               {obs.notes || '(sin contenido)'}
                             </p>
                             {obs.created_by_name && (
-                              <p className="text-xs text-gray-400 mt-1.5">por {obs.created_by_name}</p>
+                              <p className="text-xs text-slate-400 mt-1.5">por {obs.created_by_name}</p>
                             )}
                           </div>
                           <button
                             onClick={() => handleDeleteObservation(obs.id)}
-                            className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
+                            className="p-1 text-slate-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
                             title="Eliminar"
                           >
                             <Trash2 className="w-3.5 h-3.5" />

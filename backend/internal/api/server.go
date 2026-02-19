@@ -2770,14 +2770,12 @@ func (s *Server) handleAssignTag(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Push tag change to Kommo (async)
+	// Push tag change to Kommo (async) — only for leads, NOT contacts
 	if s.kommoSync != nil {
 		accountID := c.Locals("account_id").(uuid.UUID)
 		switch req.EntityType {
 		case "lead":
 			go s.kommoSync.PushLeadTagsChange(accountID, entityID)
-		case "contact":
-			go s.kommoSync.PushContactTagsChange(accountID, entityID)
 		}
 	}
 
@@ -2805,14 +2803,12 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Push tag change to Kommo (async)
+	// Push tag change to Kommo (async) — only for leads, NOT contacts
 	if s.kommoSync != nil {
 		accountID := c.Locals("account_id").(uuid.UUID)
 		switch req.EntityType {
 		case "lead":
 			go s.kommoSync.PushLeadTagsChange(accountID, entityID)
-		case "contact":
-			go s.kommoSync.PushContactTagsChange(accountID, entityID)
 		}
 	}
 
