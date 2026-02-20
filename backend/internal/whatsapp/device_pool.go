@@ -3,10 +3,12 @@ package whatsapp
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -184,6 +186,33 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 	client := whatsmeow.NewClient(waDevice, clientLog)
 	client.EnableAutoReconnect = true
 	client.AutoTrustIdentity = true
+
+	// Configure media HTTP client to force IPv6 (WhatsApp CDN blocks large uploads on IPv4)
+	ipv6Dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	client.SetMediaHTTPClient(&http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Force IPv6 for WhatsApp CDN to avoid IPv4 upload blocks
+				conn, err := ipv6Dialer.DialContext(ctx, "tcp6", addr)
+				if err != nil {
+					// Fallback to default (IPv4) if IPv6 fails
+					log.Printf("[MediaHTTP] IPv6 dial failed for %s, falling back to IPv4: %v", addr, err)
+					return ipv6Dialer.DialContext(ctx, "tcp4", addr)
+				}
+				return conn, nil
+			},
+			TLSClientConfig:       &tls.Config{},
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	})
 
 	// Create device instance
 	instance := &DeviceInstance{
@@ -1162,15 +1191,16 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 		return nil, fmt.Errorf("device not connected: %s", deviceID)
 	}
 
-	// Parse recipient JID
-	jid, err := types.ParseJID(to)
-	if err != nil {
-		// Try to construct JID from phone number
-		if !strings.Contains(to, "@") {
-			jid = types.NewJID(to, types.DefaultUserServer)
-		} else {
+	// Parse recipient JID - construct directly for phone numbers to avoid ParseJID misparse
+	var jid types.JID
+	if strings.Contains(to, "@") {
+		var err error
+		jid, err = types.ParseJID(to)
+		if err != nil {
 			return nil, fmt.Errorf("invalid JID: %s", to)
 		}
+	} else {
+		jid = types.NewJID(to, types.DefaultUserServer)
 	}
 
 	// Create message
@@ -1239,14 +1269,16 @@ func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, t
 		return nil, fmt.Errorf("device not connected: %s", deviceID)
 	}
 
-	// Parse recipient JID
-	jid, err := types.ParseJID(to)
-	if err != nil {
-		if !strings.Contains(to, "@") {
-			jid = types.NewJID(to, types.DefaultUserServer)
-		} else {
+	// Parse recipient JID - construct directly for phone numbers to avoid ParseJID misparse
+	var jid types.JID
+	if strings.Contains(to, "@") {
+		var err error
+		jid, err = types.ParseJID(to)
+		if err != nil {
 			return nil, fmt.Errorf("invalid JID: %s", to)
 		}
+	} else {
+		jid = types.NewJID(to, types.DefaultUserServer)
 	}
 
 	// Build the quoted sender JID for ContextInfo
@@ -1352,13 +1384,15 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 		return fmt.Errorf("device not connected: %s", deviceID)
 	}
 
-	jid, err := types.ParseJID(to)
-	if err != nil {
-		if !strings.Contains(to, "@") {
-			jid = types.NewJID(to, types.DefaultUserServer)
-		} else {
+	var jid types.JID
+	if strings.Contains(to, "@") {
+		var err error
+		jid, err = types.ParseJID(to)
+		if err != nil {
 			return fmt.Errorf("invalid JID: %s", to)
 		}
+	} else {
+		jid = types.NewJID(to, types.DefaultUserServer)
 	}
 
 	msg := &waE2E.Message{
@@ -1373,7 +1407,7 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 		},
 	}
 
-	_, err = instance.Client.SendMessage(ctx, jid, msg)
+	_, err := instance.Client.SendMessage(ctx, jid, msg)
 	if err != nil {
 		return fmt.Errorf("failed to send reaction: %w", err)
 	}
@@ -1432,13 +1466,15 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 		return nil, fmt.Errorf("device not connected: %s", deviceID)
 	}
 
-	jid, err := types.ParseJID(to)
-	if err != nil {
-		if !strings.Contains(to, "@") {
-			jid = types.NewJID(to, types.DefaultUserServer)
-		} else {
+	var jid types.JID
+	if strings.Contains(to, "@") {
+		var err error
+		jid, err = types.ParseJID(to)
+		if err != nil {
 			return nil, fmt.Errorf("invalid JID: %s", to)
 		}
+	} else {
+		jid = types.NewJID(to, types.DefaultUserServer)
 	}
 
 	if maxSelections <= 0 {
@@ -1551,14 +1587,16 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 		return nil, fmt.Errorf("device not connected: %s", deviceID)
 	}
 
-	// Parse recipient JID
-	jid, err := types.ParseJID(to)
-	if err != nil {
-		if !strings.Contains(to, "@") {
-			jid = types.NewJID(to, types.DefaultUserServer)
-		} else {
+	// Parse recipient JID - construct directly for phone numbers to avoid ParseJID misparse
+	var jid types.JID
+	if strings.Contains(to, "@") {
+		var err error
+		jid, err = types.ParseJID(to)
+		if err != nil {
 			return nil, fmt.Errorf("invalid JID: %s", to)
 		}
+	} else {
+		jid = types.NewJID(to, types.DefaultUserServer)
 	}
 
 	// Download media - handle proxy URLs and public URLs
@@ -1645,6 +1683,7 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 	}
 
 	// Upload to WhatsApp with the correct media type (with retry for transient network errors)
+	log.Printf("[SendMediaMessage] Uploading %s (%d bytes)", mediaType, len(data))
 	var uploaded whatsmeow.UploadResponse
 	var uploadErr error
 	for attempt := 0; attempt < 3; attempt++ {
