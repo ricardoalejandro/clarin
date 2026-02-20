@@ -67,7 +67,7 @@ export default function FileUploader({ onFileSelect, disabled, buttonClassName, 
     }
 
     const mediaType = getMediaType(file.type)
-    
+
     if (mediaType === 'image' || mediaType === 'video') {
       const url = URL.createObjectURL(file)
       setPreview({ url, type: mediaType, file })

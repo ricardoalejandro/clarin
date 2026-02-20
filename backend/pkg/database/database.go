@@ -398,6 +398,59 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_accounts_unique ON user_accounts(user_id, account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_user_accounts_user ON user_accounts(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_user_accounts_account ON user_accounts(account_id)`,
+
+		// Programs (Courses, Workshops, etc.)
+		`CREATE TABLE IF NOT EXISTS programs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			description TEXT,
+			status VARCHAR(50) DEFAULT 'active',
+			color VARCHAR(20) DEFAULT '#10b981',
+			created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_programs_account ON programs(account_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_programs_status ON programs(status)`,
+
+		// Program Participants
+		`CREATE TABLE IF NOT EXISTS program_participants (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			program_id UUID NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+			contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+			status VARCHAR(50) DEFAULT 'enrolled',
+			enrolled_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE(program_id, contact_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_participants_program ON program_participants(program_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_participants_contact ON program_participants(contact_id)`,
+
+		// Program Sessions (Classes)
+		`CREATE TABLE IF NOT EXISTS program_sessions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			program_id UUID NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+			date TIMESTAMPTZ NOT NULL,
+			topic VARCHAR(255),
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_sessions_program ON program_sessions(program_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_sessions_date ON program_sessions(date)`,
+
+		// Program Attendance
+		`CREATE TABLE IF NOT EXISTS program_attendance (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			session_id UUID NOT NULL REFERENCES program_sessions(id) ON DELETE CASCADE,
+			participant_id UUID NOT NULL REFERENCES program_participants(id) ON DELETE CASCADE,
+			status VARCHAR(50) NOT NULL, -- present, absent, late, excused
+			notes TEXT,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE(session_id, participant_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_attendance_session ON program_attendance(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_attendance_participant ON program_attendance(participant_id)`,
 		// Seed existing user-account relationships into junction table
 		`INSERT INTO user_accounts (user_id, account_id, role, is_default)
 		 SELECT id, account_id, role, TRUE FROM users

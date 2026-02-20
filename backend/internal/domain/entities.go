@@ -609,3 +609,71 @@ func DefaultCampaignSettings() map[string]interface{} {
 		"simulate_typing":      true,
 	}
 }
+
+// --- Programs (Courses, Workshops, etc.) ---
+
+// Program represents an educational program, course, or workshop
+type Program struct {
+	ID          uuid.UUID  `json:"id"`
+	AccountID   uuid.UUID  `json:"account_id"`
+	Name        string     `json:"name"`
+	Description *string    `json:"description,omitempty"`
+	Status      string     `json:"status"` // active, completed, archived
+	Color       string     `json:"color"`
+	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+
+	// Populated on demand
+	ParticipantCount int `json:"participant_count"`
+	SessionCount     int `json:"session_count"`
+}
+
+// ProgramParticipant represents a contact enrolled in a program
+type ProgramParticipant struct {
+	ID         uuid.UUID `json:"id"`
+	ProgramID  uuid.UUID `json:"program_id"`
+	ContactID  uuid.UUID `json:"contact_id"`
+	Status     string    `json:"status"` // enrolled, dropped, completed
+	EnrolledAt time.Time `json:"enrolled_at"`
+
+	// Populated on demand
+	ContactName  string  `json:"contact_name,omitempty"`
+	ContactPhone *string `json:"contact_phone,omitempty"`
+}
+
+// ProgramSession represents a single class or session within a program
+type ProgramSession struct {
+	ID        uuid.UUID  `json:"id"`
+	ProgramID uuid.UUID  `json:"program_id"`
+	Date      time.Time  `json:"date"`
+	Topic     *string    `json:"topic,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+
+	// Populated on demand
+	AttendanceStats map[string]int `json:"attendance_stats,omitempty"`
+}
+
+// ProgramAttendance represents a participant's attendance record for a session
+type ProgramAttendance struct {
+	ID            uuid.UUID `json:"id"`
+	SessionID     uuid.UUID `json:"session_id"`
+	ParticipantID uuid.UUID `json:"participant_id"`
+	Status        string    `json:"status"` // present, absent, late, excused
+	Notes         *string   `json:"notes,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+
+	// Populated on demand
+	ParticipantName  string  `json:"participant_name,omitempty"`
+	ParticipantPhone *string `json:"participant_phone,omitempty"`
+}
+
+// Attendance status constants
+const (
+	AttendanceStatusPresent = "present"
+	AttendanceStatusAbsent  = "absent"
+	AttendanceStatusLate    = "late"
+	AttendanceStatusExcused = "excused"
+)

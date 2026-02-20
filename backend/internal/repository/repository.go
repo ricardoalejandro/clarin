@@ -34,6 +34,7 @@ type Repositories struct {
 	Poll              *PollRepository
 	CampaignAttachment *CampaignAttachmentRepository
 	QuickReply         *QuickReplyRepository
+	Program           *ProgramRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -59,6 +60,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Poll:              &PollRepository{db: db},
 		CampaignAttachment: &CampaignAttachmentRepository{db: db},
 		QuickReply:         &QuickReplyRepository{db: db},
+		Program:           &ProgramRepository{db: db},
 	}
 }
 

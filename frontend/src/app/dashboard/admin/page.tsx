@@ -1,9 +1,9 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { 
-  Building2, Users, Plus, Pencil, Trash2, Power, KeyRound, 
-  Search, X, Shield, ChevronDown, Link2 
+import {
+  Building2, Users, Plus, Pencil, Trash2, Power, KeyRound,
+  Search, X, Shield, ChevronDown, Link2
 } from 'lucide-react'
 
 interface Account {
@@ -97,8 +97,8 @@ export default function AdminPage() {
 
   async function fetchUsers() {
     try {
-      const url = filterAccountId 
-        ? `/api/admin/users?account_id=${filterAccountId}` 
+      const url = filterAccountId
+        ? `/api/admin/users?account_id=${filterAccountId}`
         : '/api/admin/users'
       const res = await fetch(url, { headers })
       const data = await res.json()
@@ -145,8 +145,8 @@ export default function AdminPage() {
 
   async function saveAccount() {
     const method = editingAccount ? 'PUT' : 'POST'
-    const url = editingAccount 
-      ? `/api/admin/accounts/${editingAccount.id}` 
+    const url = editingAccount
+      ? `/api/admin/accounts/${editingAccount.id}`
       : '/api/admin/accounts'
 
     const res = await fetch(url, { method, headers, body: JSON.stringify(accountForm) })
@@ -302,7 +302,7 @@ export default function AdminPage() {
     }
   }
 
-  const filteredAccounts = accounts.filter(a => 
+  const filteredAccounts = accounts.filter(a =>
     a.name.toLowerCase().includes(search.toLowerCase()) ||
     a.plan.toLowerCase().includes(search.toLowerCase())
   )

@@ -248,6 +248,27 @@ func (s *Server) setupRoutes() {
 	campaigns.Get("/", s.handleGetCampaigns)
 	campaigns.Post("/", s.handleCreateCampaign)
 	campaigns.Get("/:id", s.handleGetCampaign)
+
+	// Program routes
+	programs := protected.Group("/programs")
+	programs.Get("/", s.handleListPrograms)
+	programs.Post("/", s.handleCreateProgram)
+	programs.Get("/:id", s.handleGetProgram)
+	programs.Put("/:id", s.handleUpdateProgram)
+	programs.Delete("/:id", s.handleDeleteProgram)
+	
+	programs.Get("/:id/participants", s.handleListParticipants)
+	programs.Post("/:id/participants", s.handleAddParticipant)
+	programs.Delete("/:id/participants/:participantId", s.handleRemoveParticipant)
+	
+	programs.Get("/:id/sessions", s.handleListSessions)
+	programs.Post("/:id/sessions", s.handleCreateSession)
+	programs.Put("/:id/sessions/:sessionId", s.handleUpdateSession)
+	programs.Delete("/:id/sessions/:sessionId", s.handleDeleteSession)
+	
+	programs.Get("/:id/sessions/:sessionId/attendance", s.handleGetAttendance)
+	programs.Post("/:id/sessions/:sessionId/attendance", s.handleMarkAttendance)
+	programs.Get("/:id/sessions/:sessionId/attendance/filter", s.handleGetParticipantsByAttendanceStatus)
 	campaigns.Put("/:id", s.handleUpdateCampaign)
 	campaigns.Delete("/:id", s.handleDeleteCampaign)
 	campaigns.Post("/batch-delete", s.handleBatchDeleteCampaigns)

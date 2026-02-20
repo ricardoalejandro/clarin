@@ -9,8 +9,8 @@ description: WhatsApp Business CRM Multi-tenant
 # Compose Configuration
 compose:
   file: docker-compose.yml
-  
-# Domain Configuration  
+
+# Domain Configuration
 domains:
   - host: clarin.naperu.cloud
     https: true

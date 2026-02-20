@@ -30,6 +30,7 @@ type Services struct {
 	Event       *EventService
 	Interaction *InteractionService
 	QuickReply  *QuickReplyService
+	Program     *ProgramService
 }
 
 func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub *ws.Hub) *Services {
@@ -46,6 +47,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Event:       &EventService{repos: repos, hub: hub},
 		Interaction: &InteractionService{repos: repos, hub: hub},
 		QuickReply:  &QuickReplyService{repos: repos},
+		Program:     NewProgramService(repos),
 	}
 }
 

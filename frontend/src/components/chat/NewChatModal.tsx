@@ -110,7 +110,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    
+
     if (!selectedDevice) {
       setError('Selecciona un dispositivo')
       return
@@ -121,7 +121,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
     }
 
     const cleanPhone = phone.replace(/[^0-9+]/g, '')
-    
+
     setLoading(true)
     setError('')
 
@@ -140,7 +140,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
         }),
       })
       const data = await res.json()
-      
+
       if (data.success) {
         onChatCreated(data.chat.id)
         onClose()

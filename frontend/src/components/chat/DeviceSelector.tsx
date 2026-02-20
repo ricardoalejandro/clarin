@@ -104,7 +104,7 @@ export default function DeviceSelector({
               ) : null}
             </div>
           )}
-          
+
           <div className="max-h-48 overflow-y-auto">
             {connectedDevices.map(device => (
               <div
