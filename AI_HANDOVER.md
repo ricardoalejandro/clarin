@@ -24,14 +24,14 @@
   - Reset passwords for `ernesto`, `ricardo`, `kelly` to standard format (`username` + `123`) to resolve login issues.
 
 ### Deployment Status
-- **Production**: Running via `docker-compose.prod.yml`.
-- **Rebuild Procedure**: `docker-compose -f docker-compose.prod.yml up -d --build` (Required for frontend changes).
+- **Production**: Running via `docker-compose.yml` (single unified compose file).
+- **Rebuild Procedure**: `docker compose up -d --build` (Required for frontend changes).
 
 ## 3. Development & Operations
 ### Running the Project
 ```bash
 # Start Production (Rebuilds images)
-docker-compose -f docker-compose.prod.yml up -d --build
+docker compose up -d --build
 ```
 ### Key File Locations
 - **Backend Entry**: `backend/cmd/api/main.go` -> `backend/internal/api/server.go`.

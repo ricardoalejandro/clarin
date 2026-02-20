@@ -8,7 +8,7 @@ description: WhatsApp Business CRM Multi-tenant
 
 # Compose Configuration
 compose:
-  file: docker-compose.prod.yml
+  file: docker-compose.yml
   
 # Domain Configuration  
 domains:
