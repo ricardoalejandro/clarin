@@ -38,21 +38,83 @@ export default function PasteFromExcelModal({ open, onClose, onSuccess }: Props)
     Object.fromEntries(COLUMNS.map(c => [c.key, '']))
 
   const parseTSV = useCallback((text: string) => {
-    const lines = text.split('\n').filter(l => l.trim())
+    // Normalize line endings (Google Sheets uses \r\n)
+    const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const lines = normalized.split('\n').filter(l => l.trim())
     if (lines.length === 0) return []
 
-    // Check if first line looks like a header (no digits in first cell or matches known column names)
-    const firstCells = lines[0].split('\t')
-    const phoneKeywords = /teléfono|telefono|phone|celular|móvil|movil/i
-    const isHeader = phoneKeywords.test(firstCells[0]) ||
-      (firstCells[0] && !/\d{7,}/.test(firstCells[0].replace(/\D/g, '')))
+    // Detect separator: prefer tab (Excel/Sheets copy), fallback to comma, then semicolon
+    const sample = lines[0]
+    const tabCount = (sample.match(/\t/g) || []).length
+    const commaCount = (sample.match(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/g) || []).length // commas outside quotes
+    const semiCount = (sample.match(/;/g) || []).length
+    const sep = tabCount >= commaCount && tabCount >= semiCount ? '\t'
+      : commaCount >= semiCount ? ',' : ';'
+
+    // Split a line respecting quoted fields
+    const splitLine = (line: string): string[] => {
+      const cells: string[] = []
+      let cur = ''
+      let inQuote = false
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i]
+        if (ch === '"') {
+          inQuote = !inQuote
+        } else if (ch === sep && !inQuote) {
+          cells.push(cur.trim().replace(/^["']|["']$/g, ''))
+          cur = ''
+        } else {
+          cur += ch
+        }
+      }
+      cells.push(cur.trim().replace(/^["']|["']$/g, ''))
+      return cells
+    }
+
+    const firstCells = splitLine(lines[0])
+
+    // Known EXACT header names — anchored with ^ $ so "email@ej.com" or "Empresa SA" DON'T match
+    const headerSynonyms: Record<string, RegExp> = {
+      phone:     /^(teléfono|telefono|phone|celular|móvil|movil|cel|numero|número)$/i,
+      name:      /^(nombre|name|first.?name|nombres)$/i,
+      last_name: /^(apellido|apellidos|last.?name)$/i,
+      email:     /^(email|correo|e-?mail|correo electr[oó]nico)$/i,
+      company:   /^(empresa|company|compañ[ií]a)$/i,
+      tags:      /^(etiquetas?|tags?)$/i,
+      notes:     /^(notas?|notes?|observaciones?)$/i,
+    }
+
+    // Count how many cells match known EXACT header names
+    const headerColIndex: Record<string, number> = {}
+    firstCells.forEach((cell, i) => {
+      const trimmed = cell.trim()
+      for (const [key, re] of Object.entries(headerSynonyms)) {
+        if (re.test(trimmed) && !(key in headerColIndex)) {
+          headerColIndex[key] = i
+        }
+      }
+    })
+
+    // Only consider it a header row if at least 2 cells are exact header matches
+    const isHeader = Object.keys(headerColIndex).length >= 2
+
+    let colIndex: Record<string, number>
+    if (isHeader) {
+      colIndex = headerColIndex
+    } else {
+      // No headers detected → positional mapping (columns in expected order)
+      colIndex = {}
+      COLUMNS.forEach((col, i) => { colIndex[col.key] = i })
+    }
+
     const dataStart = isHeader ? 1 : 0
 
     return lines.slice(dataStart).map(line => {
-      const cells = line.split('\t').map(c => c.trim().replace(/^["']|["']$/g, ''))
+      const cells = splitLine(line)
       const row: Row = emptyRow()
-      COLUMNS.forEach((col, i) => {
-        row[col.key] = cells[i] ?? ''
+      COLUMNS.forEach(col => {
+        const idx = colIndex[col.key]
+        row[col.key] = idx !== undefined ? (cells[idx] ?? '') : ''
       })
       return row
     }).filter(row => row.phone || row.name)
@@ -276,16 +338,16 @@ export default function PasteFromExcelModal({ open, onClose, onSuccess }: Props)
                     >
                       <td className="py-1.5 px-3 text-slate-600 font-mono">{ri + 1}</td>
                       {COLUMNS.map(col => (
-                        <td key={col.key} className="py-1.5 px-1">
+                        <td key={col.key} className="py-1 px-1">
                           <input
                             type="text"
                             value={row[col.key]}
                             placeholder={col.placeholder}
                             onChange={e => updateCell(ri, col.key, e.target.value)}
-                            className={`w-full px-2 py-1.5 bg-transparent border rounded text-slate-200 placeholder-slate-700 focus:outline-none focus:border-emerald-500/50 transition-colors ${
+                            className={`w-full px-2 py-1.5 rounded text-sm text-white placeholder-slate-600 focus:outline-none transition-colors ${
                               col.required && !row[col.key]
-                                ? 'border-red-500/30'
-                                : 'border-transparent hover:border-slate-700 focus:border-emerald-500/50'
+                                ? 'bg-red-950/40 border border-red-500/40 focus:border-emerald-500/60 focus:bg-slate-700'
+                                : 'bg-slate-700/60 border border-transparent hover:bg-slate-700 hover:border-slate-600 focus:bg-slate-700 focus:border-emerald-500/60'
                             }`}
                           />
                         </td>
