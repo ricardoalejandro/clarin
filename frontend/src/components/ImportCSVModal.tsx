@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Upload, FileText, X, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { Upload, FileText, X, AlertTriangle, CheckCircle2, Download } from 'lucide-react'
 
 interface ImportCSVModalProps {
   open: boolean
@@ -10,7 +10,7 @@ interface ImportCSVModalProps {
   defaultType?: 'leads' | 'contacts' | 'both'
 }
 
-export default function ImportCSVModal({ open, onClose, onSuccess }: ImportCSVModalProps) {
+export default function ImportCSVModal({ open, onClose, onSuccess, defaultType = 'leads' }: ImportCSVModalProps) {
   const [file, setFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [result, setResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null)
@@ -34,7 +34,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess }: ImportCSVMo
     const token = localStorage.getItem('token')
     const formData = new FormData()
     formData.append('file', file)
-    formData.append('import_type', 'leads')
+    formData.append('import_type', defaultType)
 
     try {
       const res = await fetch('/api/import/csv', {
@@ -68,7 +68,9 @@ export default function ImportCSVModal({ open, onClose, onSuccess }: ImportCSVMo
       <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md border border-gray-100">
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">Importar Leads</h2>
+            <h2 className="text-lg font-semibold text-gray-900">
+              {defaultType === 'contacts' ? 'Importar Contactos' : defaultType === 'both' ? 'Importar Leads y Contactos' : 'Importar Leads'}
+            </h2>
             <p className="text-sm text-gray-500 mt-0.5">Sube un archivo CSV con los datos</p>
           </div>
           <button onClick={handleClose} className="p-1.5 hover:bg-gray-100 rounded-lg transition">
@@ -113,9 +115,28 @@ export default function ImportCSVModal({ open, onClose, onSuccess }: ImportCSVMo
               </button>
             </div>
 
-            {/* Column guide */}
+            {/* Column guide + Template download */}
             <div className="bg-gray-50 rounded-xl p-3.5 text-xs text-gray-600 space-y-1">
-              <p className="font-medium text-gray-700">Columnas reconocidas:</p>
+              <div className="flex items-center justify-between mb-1">
+                <p className="font-medium text-gray-700">Columnas reconocidas:</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const csv = 'telefono,nombre,apellido,email,empresa,notas,tags\n987654321,Juan,Pérez,juan@ejemplo.com,Empresa SA,Nota de ejemplo,"cliente, vip"'
+                    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = 'plantilla_contactos.csv'
+                    a.click()
+                    URL.revokeObjectURL(url)
+                  }}
+                  className="flex items-center gap-1 text-green-600 hover:text-green-700 font-medium transition-colors"
+                >
+                  <Download className="w-3 h-3" />
+                  Descargar plantilla
+                </button>
+              </div>
               <p><span className="text-green-600 font-medium">Requerida:</span> phone / telefono / celular</p>
               <p><span className="text-gray-500 font-medium">Opcionales:</span> name, email, apellido, empresa, notas, tags</p>
             </div>
@@ -151,7 +172,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess }: ImportCSVMo
                   <CheckCircle2 className="w-5 h-5 text-green-600" />
                 </div>
                 <div>
-                  <p className="font-medium text-green-800">{result.imported} leads importados</p>
+                  <p className="font-medium text-green-800">{result.imported} {defaultType === 'contacts' ? 'contactos' : 'leads'} importados</p>
                   {result.skipped > 0 && (
                     <p className="text-sm text-green-600">{result.skipped} filas omitidas</p>
                   )}

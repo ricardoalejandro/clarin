@@ -294,6 +294,8 @@ func (s *Server) setupRoutes() {
 	// Contact routes
 	contacts := protected.Group("/contacts", s.requirePermission(domain.PermContacts))
 	contacts.Get("/", s.handleGetContacts)
+	contacts.Post("/", s.handleCreateContact)
+	contacts.Post("/bulk", s.handleCreateContactsBulk)
 	contacts.Get("/duplicates", s.handleGetContactDuplicates)
 	contacts.Post("/merge", s.handleMergeContacts)
 	contacts.Delete("/batch", s.handleDeleteContactsBatch)
@@ -2767,6 +2769,141 @@ func (s *Server) handleSyncDeviceContacts(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "sync started"})
+}
+
+func (s *Server) handleCreateContact(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	var body struct {
+		Phone    string   `json:"phone"`
+		Name     string   `json:"name"`
+		LastName string   `json:"last_name"`
+		Email    string   `json:"email"`
+		Company  string   `json:"company"`
+		Notes    string   `json:"notes"`
+		Tags     []string `json:"tags"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
+	}
+
+	normalizedPhone := kommo.NormalizePhone(body.Phone)
+	if normalizedPhone == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "phone is required"})
+	}
+
+	jid := normalizedPhone + "@s.whatsapp.net"
+
+	contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, normalizedPhone, body.Name, "", false)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	updated := false
+	if body.LastName != "" {
+		contact.LastName = &body.LastName
+		updated = true
+	}
+	if body.Email != "" {
+		contact.Email = &body.Email
+		updated = true
+	}
+	if body.Company != "" {
+		contact.Company = &body.Company
+		updated = true
+	}
+	if body.Notes != "" {
+		contact.Notes = &body.Notes
+		updated = true
+	}
+	if len(body.Tags) > 0 {
+		contact.Tags = body.Tags
+		updated = true
+	}
+	if updated {
+		_ = s.services.Contact.Update(c.Context(), contact)
+	}
+
+	tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID)
+	contact.StructuredTags = tags
+
+	return c.Status(201).JSON(fiber.Map{"success": true, "contact": contact})
+}
+
+func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	var body struct {
+		Contacts []struct {
+			Phone    string   `json:"phone"`
+			Name     string   `json:"name"`
+			LastName string   `json:"last_name"`
+			Email    string   `json:"email"`
+			Company  string   `json:"company"`
+			Notes    string   `json:"notes"`
+			Tags     []string `json:"tags"`
+		} `json:"contacts"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
+	}
+	if len(body.Contacts) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "contacts array is empty"})
+	}
+
+	created := 0
+	skipped := 0
+	var importErrors []string
+
+	for i, row := range body.Contacts {
+		normalizedPhone := kommo.NormalizePhone(row.Phone)
+		if normalizedPhone == "" {
+			skipped++
+			importErrors = append(importErrors, fmt.Sprintf("fila %d: teléfono inválido (%q)", i+1, row.Phone))
+			continue
+		}
+
+		jid := normalizedPhone + "@s.whatsapp.net"
+		contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, normalizedPhone, row.Name, "", false)
+		if err != nil {
+			skipped++
+			importErrors = append(importErrors, fmt.Sprintf("fila %d: %s", i+1, err.Error()))
+			continue
+		}
+
+		updated := false
+		if row.LastName != "" {
+			contact.LastName = &row.LastName
+			updated = true
+		}
+		if row.Email != "" {
+			contact.Email = &row.Email
+			updated = true
+		}
+		if row.Company != "" {
+			contact.Company = &row.Company
+			updated = true
+		}
+		if row.Notes != "" {
+			contact.Notes = &row.Notes
+			updated = true
+		}
+		if len(row.Tags) > 0 {
+			contact.Tags = row.Tags
+			updated = true
+		}
+		if updated {
+			_ = s.services.Contact.Update(c.Context(), contact)
+		}
+		created++
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"created": created,
+		"skipped": skipped,
+		"errors":  importErrors,
+	})
 }
 
 // --- Tag Handlers ---

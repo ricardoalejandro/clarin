@@ -6,13 +6,16 @@ import {
   Search, Phone, Mail, Building2, Tag, Edit, Trash2, RefreshCw,
   ChevronDown, CheckSquare, Square, XCircle, MoreVertical,
   Users, Merge, Eye, X, Smartphone, AlertTriangle, MessageSquare, Send,
-  Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter, Radio
+  Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter, Radio,
+  UserPlus, ClipboardPaste
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import ImportCSVModal from '@/components/ImportCSVModal'
 import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
+import CreateContactModal from '@/components/CreateContactModal'
+import PasteFromExcelModal from '@/components/PasteFromExcelModal'
 
 interface ContactDeviceName {
   id: string
@@ -135,6 +138,8 @@ export default function ContactsPage() {
   // Sync
   const [syncing, setSyncing] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
+  const [showCreateContact, setShowCreateContact] = useState(false)
+  const [showPasteExcel, setShowPasteExcel] = useState(false)
 
   // Broadcast
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
@@ -801,6 +806,20 @@ export default function ContactsPage() {
               >
                 <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
                 {syncing ? 'Sincronizando...' : 'Sincronizar'}
+              </button>
+              <button
+                onClick={() => setShowCreateContact(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition text-sm font-medium"
+              >
+                <UserPlus className="w-4 h-4" />
+                Nuevo contacto
+              </button>
+              <button
+                onClick={() => setShowPasteExcel(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition text-sm"
+              >
+                <ClipboardPaste className="w-4 h-4" />
+                Pegar Excel
               </button>
               <button
                 onClick={() => setShowImportModal(true)}
@@ -1802,6 +1821,18 @@ export default function ContactsPage() {
         onClose={() => setShowImportModal(false)}
         onSuccess={fetchContacts}
         defaultType="contacts"
+      />
+
+      <CreateContactModal
+        open={showCreateContact}
+        onClose={() => setShowCreateContact(false)}
+        onSuccess={fetchContacts}
+      />
+
+      <PasteFromExcelModal
+        open={showPasteExcel}
+        onClose={() => setShowPasteExcel(false)}
+        onSuccess={fetchContacts}
       />
 
       {/* Broadcast from Contacts Modal */}
