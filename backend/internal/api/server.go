@@ -172,8 +172,11 @@ func (s *Server) setupRoutes() {
 	protected.Put("/settings/incoming-stage", s.handleSetIncomingStage)
 
 	// Device routes
-	devices := protected.Group("/devices")
-	devices.Get("/", s.handleGetDevices)
+	// GET /devices — list available devices for sending; accessible by any authenticated user
+	// (needed by chats, contacts, leads, broadcasts, events, programs pages to populate device pickers)
+	protected.Get("/devices", s.handleGetDevices)
+	// Device management — requires PermDevices (add, edit, delete, connect, disconnect)
+	devices := protected.Group("/devices", s.requirePermission(domain.PermDevices))
 	devices.Post("/", s.handleCreateDevice)
 	devices.Get("/:id", s.handleGetDevice)
 	devices.Put("/:id", s.handleUpdateDevice)
@@ -182,7 +185,7 @@ func (s *Server) setupRoutes() {
 	devices.Delete("/:id", s.handleDeleteDevice)
 
 	// Chat routes
-	chats := protected.Group("/chats")
+	chats := protected.Group("/chats", s.requirePermission(domain.PermChats))
 	chats.Get("/", s.handleGetChats)
 	chats.Post("/new", s.handleCreateNewChat)
 	chats.Delete("/batch", s.handleDeleteChatsBatch)
@@ -192,7 +195,7 @@ func (s *Server) setupRoutes() {
 	chats.Delete("/:id", s.handleDeleteChat)
 
 	// Message routes
-	messages := protected.Group("/messages")
+	messages := protected.Group("/messages", s.requirePermission(domain.PermChats))
 	messages.Post("/send", s.handleSendMessage)
 	messages.Post("/forward", s.handleForwardMessage)
 	messages.Post("/react", s.handleSendReaction)
@@ -210,7 +213,7 @@ func (s *Server) setupRoutes() {
 	media.Post("/upload", s.handleDirectUpload)
 
 	// Lead routes
-	leads := protected.Group("/leads")
+	leads := protected.Group("/leads", s.requirePermission(domain.PermLeads))
 	leads.Get("/", s.handleGetLeads)
 	leads.Post("/", s.handleCreateLead)
 	leads.Delete("/batch", s.handleDeleteLeadsBatch)
@@ -223,7 +226,7 @@ func (s *Server) setupRoutes() {
 	leads.Post("/:id/sync-kommo", s.handleSyncLeadFromKommo)
 
 	// Pipeline routes
-	pipelines := protected.Group("/pipelines")
+	pipelines := protected.Group("/pipelines", s.requirePermission(domain.PermLeads))
 	pipelines.Get("/", s.handleGetPipelines)
 	pipelines.Post("/", s.handleCreatePipeline)
 	pipelines.Put("/:id", s.handleUpdatePipeline)
@@ -234,7 +237,7 @@ func (s *Server) setupRoutes() {
 	pipelines.Delete("/:id/stages/:stageId", s.handleDeletePipelineStage)
 
 	// Tag routes
-	tags := protected.Group("/tags")
+	tags := protected.Group("/tags", s.requirePermission(domain.PermTags))
 	tags.Get("/", s.handleGetTags)
 	tags.Post("/", s.handleCreateTag)
 	tags.Put("/:id", s.handleUpdateTag)
@@ -244,31 +247,33 @@ func (s *Server) setupRoutes() {
 	tags.Get("/entity/:type/:id", s.handleGetEntityTags)
 
 	// Campaign routes
-	campaigns := protected.Group("/campaigns")
+	campaigns := protected.Group("/campaigns", s.requirePermission(domain.PermBroadcasts))
 	campaigns.Get("/", s.handleGetCampaigns)
 	campaigns.Post("/", s.handleCreateCampaign)
 	campaigns.Get("/:id", s.handleGetCampaign)
 
 	// Program routes
-	programs := protected.Group("/programs")
+	programs := protected.Group("/programs", s.requirePermission(domain.PermPrograms))
 	programs.Get("/", s.handleListPrograms)
 	programs.Post("/", s.handleCreateProgram)
 	programs.Get("/:id", s.handleGetProgram)
 	programs.Put("/:id", s.handleUpdateProgram)
 	programs.Delete("/:id", s.handleDeleteProgram)
-	
+
 	programs.Get("/:id/participants", s.handleListParticipants)
 	programs.Post("/:id/participants", s.handleAddParticipant)
 	programs.Delete("/:id/participants/:participantId", s.handleRemoveParticipant)
-	
+
 	programs.Get("/:id/sessions", s.handleListSessions)
 	programs.Post("/:id/sessions", s.handleCreateSession)
 	programs.Put("/:id/sessions/:sessionId", s.handleUpdateSession)
 	programs.Delete("/:id/sessions/:sessionId", s.handleDeleteSession)
-	
+
 	programs.Get("/:id/sessions/:sessionId/attendance", s.handleGetAttendance)
 	programs.Post("/:id/sessions/:sessionId/attendance", s.handleMarkAttendance)
 	programs.Get("/:id/sessions/:sessionId/attendance/filter", s.handleGetParticipantsByAttendanceStatus)
+	programs.Post("/:id/sessions/generate", s.handleGenerateSessions)
+	programs.Post("/:id/campaign", s.handleCreateCampaignFromProgram)
 	campaigns.Put("/:id", s.handleUpdateCampaign)
 	campaigns.Delete("/:id", s.handleDeleteCampaign)
 	campaigns.Post("/batch-delete", s.handleBatchDeleteCampaigns)
@@ -287,7 +292,7 @@ func (s *Server) setupRoutes() {
 	protected.Post("/import/csv", s.handleImportCSV)
 
 	// Contact routes
-	contacts := protected.Group("/contacts")
+	contacts := protected.Group("/contacts", s.requirePermission(domain.PermContacts))
 	contacts.Get("/", s.handleGetContacts)
 	contacts.Get("/duplicates", s.handleGetContactDuplicates)
 	contacts.Post("/merge", s.handleMergeContacts)
@@ -305,23 +310,30 @@ func (s *Server) setupRoutes() {
 	protected.Get("/people/search", s.handleSearchPeople)
 
 	// Event routes
-	events := protected.Group("/events")
+	events := protected.Group("/events", s.requirePermission(domain.PermEvents))
 	events.Get("/", s.handleGetEvents)
 	events.Post("/", s.handleCreateEvent)
 	events.Get("/upcoming-actions", s.handleGetUpcomingActions)
+	// Folder routes — must be declared BEFORE /:id to avoid param collision
+	events.Get("/folders", s.handleGetEventFolders)
+	events.Post("/folders", s.handleCreateEventFolder)
+	events.Put("/folders/:fid", s.handleUpdateEventFolder)
+	events.Delete("/folders/:fid", s.handleDeleteEventFolder)
 	events.Get("/:id", s.handleGetEvent)
 	events.Put("/:id", s.handleUpdateEvent)
 	events.Delete("/:id", s.handleDeleteEvent)
+	events.Patch("/:id/move-folder", s.handleMoveEventToFolder)
 	events.Get("/:id/participants", s.handleGetEventParticipants)
 	events.Post("/:id/participants", s.handleAddEventParticipant)
 	events.Post("/:id/participants/bulk", s.handleBulkAddEventParticipants)
+	events.Patch("/:id/participants/bulk-status", s.handleBulkUpdateEventParticipantStatus)
 	events.Put("/:id/participants/:pid", s.handleUpdateEventParticipant)
 	events.Patch("/:id/participants/:pid/status", s.handleUpdateEventParticipantStatus)
 	events.Delete("/:id/participants/:pid", s.handleDeleteEventParticipant)
 	events.Post("/:id/campaign", s.handleCreateCampaignFromEvent)
 
 	// Interaction routes
-	interactions := protected.Group("/interactions")
+	interactions := protected.Group("/interactions", s.requirePermission(domain.PermLeads))
 	interactions.Post("/", s.handleLogInteraction)
 	interactions.Get("/", s.handleGetInteractions)
 	interactions.Delete("/:id", s.handleDeleteInteraction)
@@ -331,7 +343,7 @@ func (s *Server) setupRoutes() {
 	contacts.Get("/:id/events", s.handleGetContactEvents)
 
 	// Quick replies (canned responses)
-	quickReplies := protected.Group("/quick-replies")
+	quickReplies := protected.Group("/quick-replies", s.requirePermission(domain.PermChats))
 	quickReplies.Get("/", s.handleGetQuickReplies)
 	quickReplies.Post("/", s.handleCreateQuickReply)
 	quickReplies.Put("/:id", s.handleUpdateQuickReply)
@@ -380,6 +392,13 @@ func (s *Server) setupRoutes() {
 	adminUsers.Get("/:id/accounts", s.handleAdminGetUserAccounts)
 	adminUsers.Post("/:id/accounts", s.handleAdminAssignUserAccount)
 	adminUsers.Delete("/:id/accounts/:account_id", s.handleAdminRemoveUserAccount)
+
+	// Role management
+	adminRoles := admin.Group("/roles")
+	adminRoles.Get("/", s.handleAdminGetRoles)
+	adminRoles.Post("/", s.handleAdminCreateRole)
+	adminRoles.Put("/:id", s.handleAdminUpdateRole)
+	adminRoles.Delete("/:id", s.handleAdminDeleteRole)
 }
 
 // Auth middleware
@@ -422,6 +441,31 @@ func (s *Server) superAdminMiddleware(c *fiber.Ctx) error {
 		})
 	}
 	return c.Next()
+}
+
+// requirePermission returns a middleware that checks if the caller has the given module permission.
+// Admins and super_admins bypass this check entirely.
+func (s *Server) requirePermission(module string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := c.Locals("claims").(*service.JWTClaims)
+		if !ok {
+			return c.Status(401).JSON(fiber.Map{"success": false, "error": "Unauthorized"})
+		}
+		// Admins always have full access
+		if claims.IsAdmin || claims.IsSuperAdmin {
+			return c.Next()
+		}
+		// Check permissions slice
+		for _, p := range claims.Permissions {
+			if p == domain.PermAll || p == module {
+				return c.Next()
+			}
+		}
+		return c.Status(403).JSON(fiber.Map{
+			"success": false,
+			"error":   "No tienes permiso para acceder a este módulo",
+		})
+	}
 }
 
 // WebSocket upgrade middleware
@@ -482,6 +526,21 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		})
 	}
 
+	// Build permissions for response
+	permissions := []string{domain.PermAll}
+	if !user.IsAdmin && !user.IsSuperAdmin {
+		for _, ua := range userAccounts {
+			if ua.AccountID == user.AccountID {
+				if ua.Permissions != nil {
+					permissions = ua.Permissions
+				} else {
+					permissions = []string{}
+				}
+				break
+			}
+		}
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"token":   token,
@@ -495,6 +554,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 			"role":           user.Role,
 			"account_id":     user.AccountID,
 			"account_name":   user.AccountName,
+			"permissions":    permissions,
 		},
 		"accounts": accountsList,
 	})
@@ -534,6 +594,9 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 		}
 	}
 
+	// Extract permissions from JWT claims (already computed and embedded)
+	claims := c.Locals("claims").(*service.JWTClaims)
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"user": fiber.Map{
@@ -546,6 +609,7 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 			"role":           user.Role,
 			"account_id":     accountID,
 			"account_name":   activeAccountName,
+			"permissions":    claims.Permissions,
 		},
 		"accounts": accountsList,
 	})
@@ -1443,7 +1507,7 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 		rows, qErr := s.repos.DB().Query(c.Context(), `
 			SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
 			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-			       ps.name, ps.color, ps.position
+			       ps.name, ps.color, ps.position, l.kommo_id
 			FROM leads l
 			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 			WHERE l.account_id = $1
@@ -1460,7 +1524,7 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 				&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
 				&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 				&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
-				&lead.StageName, &lead.StageColor, &lead.StagePosition,
+				&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 			); scanErr != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": scanErr.Error()})
 			}
@@ -3458,10 +3522,11 @@ func (s *Server) handleSearchPeople(c *fiber.Ctx) error {
 func (s *Server) handleGetEvents(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	filter := domain.EventFilter{
-		Search: c.Query("search"),
-		Status: c.Query("status"),
-		Limit:  c.QueryInt("limit", 50),
-		Offset: c.QueryInt("offset", 0),
+		Search:       c.Query("search"),
+		Status:       c.Query("status"),
+		FolderFilter: c.Query("folder"),
+		Limit:        c.QueryInt("limit", 50),
+		Offset:       c.QueryInt("offset", 0),
 	}
 	events, total, err := s.services.Event.GetByAccountID(c.Context(), accountID, filter)
 	if err != nil {
@@ -3807,6 +3872,38 @@ func (s *Server) handleUpdateEventParticipantStatus(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true})
 }
 
+func (s *Server) handleBulkUpdateEventParticipantStatus(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	// Verify event belongs to account
+	ev, err := s.services.Event.GetByID(c.Context(), eventID)
+	if err != nil || ev == nil || ev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
+	var req struct {
+		ParticipantIDs []string `json:"participant_ids"`
+		Status         string   `json:"status"`
+	}
+	if err := c.BodyParser(&req); err != nil || len(req.ParticipantIDs) == 0 || req.Status == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	ids := make([]uuid.UUID, 0, len(req.ParticipantIDs))
+	for _, s := range req.ParticipantIDs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID: " + s})
+		}
+		ids = append(ids, id)
+	}
+	if err := s.services.Event.BulkUpdateParticipantStatus(c.Context(), ids, req.Status); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "updated": len(ids)})
+}
+
 func (s *Server) handleDeleteEventParticipant(c *fiber.Ctx) error {
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
@@ -3968,6 +4065,121 @@ func (s *Server) handleGetUpcomingActions(c *fiber.Ctx) error {
 		actions = make([]*domain.EventParticipant, 0)
 	}
 	return c.JSON(fiber.Map{"success": true, "actions": actions})
+}
+
+// --- Event Folder Handlers ---
+
+func (s *Server) handleGetEventFolders(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	folders, err := s.services.Event.GetFolders(c.Context(), accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if folders == nil {
+		folders = make([]*domain.EventFolder, 0)
+	}
+	return c.JSON(fiber.Map{"success": true, "folders": folders})
+}
+
+func (s *Server) handleCreateEventFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	var req struct {
+		ParentID *string `json:"parent_id"`
+		Name     string  `json:"name"`
+		Color    string  `json:"color"`
+		Icon     string  `json:"icon"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	folder := &domain.EventFolder{
+		AccountID: accountID,
+		Name:      req.Name,
+		Color:     req.Color,
+		Icon:      req.Icon,
+	}
+	if req.ParentID != nil && *req.ParentID != "" {
+		pid, err := uuid.Parse(*req.ParentID)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid parent folder ID"})
+		}
+		folder.ParentID = &pid
+	}
+	if err := s.services.Event.CreateFolder(c.Context(), folder); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "folder": folder})
+}
+
+func (s *Server) handleUpdateEventFolder(c *fiber.Ctx) error {
+	fid, err := uuid.Parse(c.Params("fid"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
+	}
+	folder, err := s.services.Event.GetFolderByID(c.Context(), fid)
+	if err != nil || folder == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Folder not found"})
+	}
+	var req struct {
+		Name  *string `json:"name"`
+		Color *string `json:"color"`
+		Icon  *string `json:"icon"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name != nil {
+		folder.Name = *req.Name
+	}
+	if req.Color != nil {
+		folder.Color = *req.Color
+	}
+	if req.Icon != nil {
+		folder.Icon = *req.Icon
+	}
+	if err := s.services.Event.UpdateFolder(c.Context(), folder); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "folder": folder})
+}
+
+func (s *Server) handleDeleteEventFolder(c *fiber.Ctx) error {
+	fid, err := uuid.Parse(c.Params("fid"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
+	}
+	if err := s.services.Event.DeleteFolder(c.Context(), fid); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleMoveEventToFolder(c *fiber.Ctx) error {
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	var req struct {
+		FolderID *string `json:"folder_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	var folderID *uuid.UUID
+	if req.FolderID != nil && *req.FolderID != "" {
+		fid, err := uuid.Parse(*req.FolderID)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
+		}
+		folderID = &fid
+	}
+	if err := s.services.Event.MoveEventToFolder(c.Context(), eventID, folderID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
 }
 
 // --- Interaction Handlers ---
@@ -4612,6 +4824,12 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 		SameSite: "Lax",
 	})
 
+	// Compute permissions for response
+	perms := []string{domain.PermAll}
+	if !user.IsAdmin && !user.IsSuperAdmin {
+		perms, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), userID, targetAccountID)
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"token":   token,
@@ -4625,6 +4843,7 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 			"role":           user.Role,
 			"account_id":     user.AccountID,
 			"account_name":   user.AccountName,
+			"permissions":    perms,
 		},
 	})
 }
@@ -4671,6 +4890,9 @@ func (s *Server) handleAdminGetUserAccounts(c *fiber.Ctx) error {
 			"account_id":   ua.AccountID,
 			"account_name": ua.AccountName,
 			"role":         ua.Role,
+			"role_id":      ua.RoleID,
+			"role_name":    ua.RoleName,
+			"permissions":  ua.Permissions,
 			"is_default":   ua.IsDefault,
 		})
 	}
@@ -4685,9 +4907,10 @@ func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		AccountID string `json:"account_id"`
-		Role      string `json:"role"`
-		IsDefault bool   `json:"is_default"`
+		AccountID string  `json:"account_id"`
+		Role      string  `json:"role"`
+		RoleID    *string `json:"role_id"`
+		IsDefault bool    `json:"is_default"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -4707,6 +4930,14 @@ func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
 		AccountID: accountID,
 		Role:      req.Role,
 		IsDefault: req.IsDefault,
+	}
+
+	// Parse optional role_id
+	if req.RoleID != nil && *req.RoleID != "" {
+		parsed, err := uuid.Parse(*req.RoleID)
+		if err == nil {
+			ua.RoleID = &parsed
+		}
 	}
 
 	if err := s.services.Account.AssignUserAccount(c.Context(), ua); err != nil {
@@ -4962,3 +5193,89 @@ func (s *Server) handleKommoSyncStatus(c *fiber.Ctx) error {
 	status := s.kommoSync.GetStatus()
 	return c.JSON(fiber.Map{"success": true, "status": status})
 }
+
+// --- Admin Role Handlers ---
+
+func (s *Server) handleAdminGetRoles(c *fiber.Ctx) error {
+	roles, err := s.services.Role.GetAll(c.Context())
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if roles == nil {
+		roles = make([]*domain.Role, 0)
+	}
+	return c.JSON(fiber.Map{"success": true, "roles": roles})
+}
+
+func (s *Server) handleAdminCreateRole(c *fiber.Ctx) error {
+	var req struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Permissions []string `json:"permissions"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	if req.Permissions == nil {
+		req.Permissions = []string{}
+	}
+
+	role := &domain.Role{
+		Name:        req.Name,
+		Description: req.Description,
+		Permissions: req.Permissions,
+	}
+	if err := s.services.Role.Create(c.Context(), role); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "role": role})
+}
+
+func (s *Server) handleAdminUpdateRole(c *fiber.Ctx) error {
+	roleID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid role ID"})
+	}
+
+	var req struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Permissions []string `json:"permissions"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	if req.Permissions == nil {
+		req.Permissions = []string{}
+	}
+
+	role := &domain.Role{
+		ID:          roleID,
+		Name:        req.Name,
+		Description: req.Description,
+		Permissions: req.Permissions,
+	}
+	if err := s.services.Role.Update(c.Context(), role); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "role": role})
+}
+
+func (s *Server) handleAdminDeleteRole(c *fiber.Ctx) error {
+	roleID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid role ID"})
+	}
+
+	if err := s.services.Role.Delete(c.Context(), roleID); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+

@@ -3,6 +3,8 @@ package service
 import (
 "context"
 "errors"
+"fmt"
+"time"
 
 "github.com/google/uuid"
 "github.com/naperu/clarin/internal/domain"
@@ -104,4 +106,56 @@ return s.repo.Program.GetAttendanceBySession(ctx, sessionID)
 
 func (s *ProgramService) GetParticipantsByAttendanceStatus(ctx context.Context, sessionID uuid.UUID, status string) ([]*domain.ProgramParticipant, error) {
 return s.repo.Program.GetParticipantsByAttendanceStatus(ctx, sessionID, status)
+}
+
+// GenerateSessions creates recurring sessions based on a schedule configuration
+func (s *ProgramService) GenerateSessions(ctx context.Context, programID uuid.UUID, startDate, endDate time.Time, daysOfWeek []int, startTime, endTime, topicPrefix string, location *string) ([]*domain.ProgramSession, error) {
+	if startDate.After(endDate) {
+		return nil, errors.New("start date must be before end date")
+	}
+	if len(daysOfWeek) == 0 {
+		return nil, errors.New("at least one day of week is required")
+	}
+
+	// Build a set of valid weekdays
+	daySet := make(map[time.Weekday]bool)
+	for _, d := range daysOfWeek {
+		if d < 0 || d > 6 {
+			return nil, fmt.Errorf("invalid day of week: %d", d)
+		}
+		daySet[time.Weekday(d)] = true
+	}
+
+	var sessions []*domain.ProgramSession
+	sessionNum := 1
+	current := startDate
+
+	for !current.After(endDate) {
+		if daySet[current.Weekday()] {
+			topic := fmt.Sprintf("%s %d", topicPrefix, sessionNum)
+			var st, et *string
+			if startTime != "" {
+				st = &startTime
+			}
+			if endTime != "" {
+				et = &endTime
+			}
+			sessions = append(sessions, &domain.ProgramSession{
+				ProgramID: programID,
+				Date:      current,
+				Topic:     &topic,
+				StartTime: st,
+				EndTime:   et,
+				Location:  location,
+			})
+			sessionNum++
+		}
+		current = current.AddDate(0, 0, 1)
+	}
+
+	if len(sessions) == 0 {
+		return nil, errors.New("no sessions generated for the given date range and days")
+	}
+
+	return s.repo.Program.GenerateSessions(ctx, sessions)
 }

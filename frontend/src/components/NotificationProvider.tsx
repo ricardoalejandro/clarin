@@ -1,7 +1,7 @@
 'use client'
 
 import { createContext, useContext, useEffect, useRef, useCallback, useState } from 'react'
-import { createWebSocket } from '@/lib/api'
+import { subscribeWebSocket } from '@/lib/api'
 import {
   getNotificationSettings,
   playNotificationSound,
@@ -31,8 +31,6 @@ interface Props {
 
 export default function NotificationProvider({ accountId, children }: Props) {
   const [settings, setSettings] = useState<NotificationSettings | null>(null)
-  const wsRef = useRef<ReturnType<typeof createWebSocket>>(null)
-
   // Load / refresh settings
   const refreshSettings = useCallback(() => {
     if (accountId) {
@@ -59,19 +57,17 @@ export default function NotificationProvider({ accountId, children }: Props) {
   const settingsRef = useRef(settings)
   useEffect(() => { settingsRef.current = settings }, [settings])
 
-  // WebSocket connection for notifications
+  // Subscribe to shared WebSocket for notifications
   useEffect(() => {
-    const ws = createWebSocket((data: unknown) => {
+    const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string; data?: { is_from_me?: boolean } }
       if (msg.event === 'new_message' && !msg.data?.is_from_me) {
         handleIncomingMessage(msg.data as Parameters<typeof handleIncomingMessage>[0])
       }
     })
-    wsRef.current = ws
 
     return () => {
-      wsRef.current?.close()
-      wsRef.current = null
+      unsubscribe()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId])

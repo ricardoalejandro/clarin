@@ -93,6 +93,8 @@ services:
       KOMMO_CLIENT_SECRET: ${KOMMO_CLIENT_SECRET}
       KOMMO_ACCESS_TOKEN: ${KOMMO_ACCESS_TOKEN}
       KOMMO_REDIRECT_URI: ${KOMMO_REDIRECT_URI}
+      # SOCKS5 proxy for WhatsApp CDN media uploads (Cloudflare WARP)
+      MEDIA_SOCKS5_PROXY: socks5://172.23.0.1:40001
     depends_on:
       postgres:
         condition: service_healthy

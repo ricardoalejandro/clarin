@@ -1,18 +1,22 @@
 'use client'
 
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import {
   ArrowLeft, Users, UserPlus, Search, Phone, MessageSquare, StickyNote, Mail,
   Handshake, CheckCircle2, XCircle, Voicemail, Clock, PhoneOff, CalendarClock,
   PhoneCall, GripVertical, List, LayoutGrid, X, Plus, Trash2,
   Save, Tag, Filter, Send, Pencil, Maximize2,
-  MapPin, CalendarDays
+  MapPin, CalendarDays, Download, FileSpreadsheet, FileText, FileDown, Loader2
 } from 'lucide-react'
 import { format, formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
+import ChatPanel from '@/components/chat/ChatPanel'
+import { Chat } from '@/types/chat'
+import { exportToExcel, exportToCSV } from '@/utils/eventExport'
+import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/eventWordReport'
 
 const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
 
@@ -85,6 +89,8 @@ export default function EventDetailPage() {
   const [interactions, setInteractions] = useState<Interaction[]>([])
   const [draggedParticipant, setDraggedParticipant] = useState<string | null>(null)
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkMoving, setBulkMoving] = useState(false)
 
   // Tags
   const [allTags, setAllTags] = useState<TagItem[]>([])
@@ -101,6 +107,24 @@ export default function EventDetailPage() {
   const [devices, setDevices] = useState<Device[]>([])
   const [creatingCampaign, setCreatingCampaign] = useState(false)
   const [campaignInitialName, setCampaignInitialName] = useState('')
+
+  // Inline WhatsApp chat
+  const [showInlineChat, setShowInlineChat] = useState(false)
+  const [chatPanelMounted, setChatPanelMounted] = useState(false)
+  const [chatPanelVisible, setChatPanelVisible] = useState(false)
+  const chatPanelTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const [inlineChatId, setInlineChatId] = useState('')
+  const [inlineChat, setInlineChat] = useState<Chat | null>(null)
+  const [inlineChatDeviceId, setInlineChatDeviceId] = useState('')
+  const [showDeviceSelector, setShowDeviceSelector] = useState(false)
+  const [whatsappPhone, setWhatsappPhone] = useState('')
+
+  // Export
+  const [showExportModal, setShowExportModal] = useState(false)
+  const [exportFormat, setExportFormat] = useState<'excel' | 'csv' | 'word'>('excel')
+  const [exportStyle, setExportStyle] = useState<ReportStyle>('gerencia')
+  const [exportDetail, setExportDetail] = useState<DetailLevel>('detallado')
+  const [exporting, setExporting] = useState(false)
 
   // Add participant form
   const [addTab, setAddTab] = useState<'search' | 'manual'>('search')
@@ -163,6 +187,44 @@ export default function EventDetailPage() {
     } catch (e) { console.error(e) }
   }, [])
 
+  // WhatsApp inline chat handlers
+  const handleOpenWhatsApp = async (phone: string) => {
+    setWhatsappPhone(phone)
+    await fetchDevices()
+    // Auto-select if only one device
+    const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${token()}` } })
+    const data = await res.json()
+    const connected = (data.devices || []).filter((d: Device) => d.status === 'connected')
+    if (connected.length === 1) {
+      handleDeviceSelectedForChat(connected[0], phone)
+    } else {
+      setShowDeviceSelector(true)
+    }
+  }
+
+  const handleDeviceSelectedForChat = async (device: Device, phone?: string) => {
+    setShowDeviceSelector(false)
+    const cleanPhone = (phone || whatsappPhone).replace(/[^0-9]/g, '')
+    try {
+      const res = await fetch('/api/chats/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
+        body: JSON.stringify({ device_id: device.id, phone: cleanPhone }),
+      })
+      const data = await res.json()
+      if (data.success && data.chat) {
+        setInlineChatId(data.chat.id)
+        setInlineChat(data.chat)
+        setInlineChatDeviceId(device.id)
+        setShowInlineChat(true)
+      } else {
+        alert(data.error || 'Error al crear conversación')
+      }
+    } catch {
+      alert('Error de conexión')
+    }
+  }
+
   const fetchInteractions = useCallback(async (participantId: string) => {
     try {
       const res = await fetch(`/api/interactions?participant_id=${participantId}`, { headers: { Authorization: `Bearer ${token()}` } })
@@ -170,6 +232,54 @@ export default function EventDetailPage() {
       if (data.success) setInteractions(data.interactions || [])
     } catch (e) { console.error(e) }
   }, [])
+
+  // Export handler
+  const handleExport = async () => {
+    if (!event) return
+    setExporting(true)
+    try {
+      if (exportFormat === 'excel') {
+        exportToExcel(event, participants)
+      } else if (exportFormat === 'csv') {
+        exportToCSV(event, participants)
+      } else if (exportFormat === 'word') {
+        let interactionsMap: Record<string, any[]> | undefined
+        if (exportDetail === 'completo') {
+          // Fetch interactions for all participants
+          interactionsMap = {}
+          const batchSize = 10
+          for (let i = 0; i < participants.length; i += batchSize) {
+            const batch = participants.slice(i, i + batchSize)
+            const results = await Promise.all(
+              batch.map(async (p) => {
+                try {
+                  const res = await fetch(`/api/interactions?participant_id=${p.id}`, { headers: { Authorization: `Bearer ${token()}` } })
+                  const data = await res.json()
+                  return { id: p.id, interactions: data.success ? data.interactions || [] : [] }
+                } catch { return { id: p.id, interactions: [] } }
+              })
+            )
+            for (const r of results) {
+              interactionsMap![r.id] = r.interactions
+            }
+          }
+        }
+        await generateWordReport({
+          style: exportStyle,
+          detail: exportDetail,
+          event,
+          participants,
+          interactions: interactionsMap,
+        })
+      }
+      setShowExportModal(false)
+    } catch (e) {
+      console.error('Export error:', e)
+      alert('Error al exportar. Intenta de nuevo.')
+    } finally {
+      setExporting(false)
+    }
+  }
 
   useEffect(() => {
     Promise.all([fetchEvent(), fetchParticipants(), fetchTags()]).then(() => setLoading(false))
@@ -182,17 +292,35 @@ export default function EventDetailPage() {
     }
   }, [selectedParticipant, fetchInteractions])
 
+  // Animate chat panel open/close
+  useEffect(() => {
+    if (chatPanelTimerRef.current) clearTimeout(chatPanelTimerRef.current)
+    if (showInlineChat && inlineChatId && selectedParticipant) {
+      setChatPanelMounted(true)
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => setChatPanelVisible(true))
+      })
+    } else {
+      setChatPanelVisible(false)
+      chatPanelTimerRef.current = setTimeout(() => setChatPanelMounted(false), 350)
+    }
+    return () => { if (chatPanelTimerRef.current) clearTimeout(chatPanelTimerRef.current) }
+  }, [showInlineChat, inlineChatId, selectedParticipant])
+
   // Close modals on Escape (topmost first)
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (showExportModal) { setShowExportModal(false); return }
+      if (showDeviceSelector) { setShowDeviceSelector(false); return }
+      if (showInlineChat) { setShowInlineChat(false); return }
       if (showIntHistoryModal) { setShowIntHistoryModal(false); setIntHistoryFilterType(''); setIntHistoryFilterFrom(''); setIntHistoryFilterTo(''); return }
       if (showAddModal) { setShowAddModal(false); return }
       if (editingParticipant) { setEditingParticipant(null); setEditField(null); setEditNotes(false); return }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showIntHistoryModal, showAddModal, editingParticipant])
+  }, [showExportModal, showDeviceSelector, showInlineChat, showIntHistoryModal, showAddModal, editingParticipant])
 
   // Search contacts for adding
   const searchContacts = useCallback(async (q: string) => {
@@ -229,14 +357,62 @@ export default function EventDetailPage() {
     fetchParticipants()
   }
 
+  // Selection helpers
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const selectAllInColumn = (statusKey: string) => {
+    const ids = (grouped[statusKey] || []).map((p: Participant) => p.id)
+    const allSelected = ids.length > 0 && ids.every((id: string) => selectedIds.has(id))
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (allSelected) ids.forEach((id: string) => next.delete(id))
+      else ids.forEach((id: string) => next.add(id))
+      return next
+    })
+  }
+
+  const handleBulkMove = async (targetStatus: string) => {
+    if (selectedIds.size === 0) return
+    setBulkMoving(true)
+    const ids = Array.from(selectedIds)
+    setParticipants(prev => prev.map(p => ids.includes(p.id) ? { ...p, status: targetStatus } : p))
+    setSelectedIds(new Set())
+    try {
+      await fetch(`/api/events/${eventId}/participants/bulk-status`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participant_ids: ids, status: targetStatus }),
+      })
+      fetchEvent()
+    } catch (e) { console.error(e); fetchParticipants() }
+    finally { setBulkMoving(false) }
+  }
+
   // Drag and drop handlers
-  const handleDragStart = (participantId: string) => setDraggedParticipant(participantId)
+  const handleDragStart = (participantId: string) => {
+    setDraggedParticipant(participantId)
+    // If the dragged card is not in the current selection, clear selection so only this one drags
+    if (!selectedIds.has(participantId)) setSelectedIds(new Set())
+  }
   const handleDragOver = (e: React.DragEvent, status: string) => { e.preventDefault(); setDragOverColumn(status) }
   const handleDragLeave = () => setDragOverColumn(null)
   const handleDrop = async (e: React.DragEvent, newStatus: string) => {
     e.preventDefault()
     setDragOverColumn(null)
     if (!draggedParticipant) return
+    // Multi-drag: if dragged card belongs to a multi-selection, bulk move all selected
+    if (selectedIds.has(draggedParticipant) && selectedIds.size > 1) {
+      setDraggedParticipant(null)
+      await handleBulkMove(newStatus)
+      return
+    }
+    // Single drag (original behaviour)
     const participant = participants.find(p => p.id === draggedParticipant)
     if (!participant || participant.status === newStatus) { setDraggedParticipant(null); return }
     setParticipants(prev => prev.map(p => p.id === draggedParticipant ? { ...p, status: newStatus } : p))
@@ -630,6 +806,14 @@ export default function EventDetailPage() {
           </div>
 
           <button
+            onClick={() => setShowExportModal(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 text-sm font-medium shadow-sm"
+          >
+            <Download className="w-4 h-4" />
+            Exportar
+          </button>
+
+          <button
             onClick={async () => {
               fetchDevices()
               try {
@@ -739,6 +923,19 @@ export default function EventDetailPage() {
                   onDrop={e => handleDrop(e, status.key)}
                 >
                   <div className={`flex items-center gap-2 px-4 py-3 border-b ${status.border}`}>
+                    <input
+                      type="checkbox"
+                      className="w-3.5 h-3.5 rounded border-gray-300 text-emerald-600 cursor-pointer flex-shrink-0"
+                      checked={(grouped[status.key] || []).length > 0 && (grouped[status.key] || []).every((p: Participant) => selectedIds.has(p.id))}
+                      ref={(el) => {
+                        if (el) {
+                          const ids = (grouped[status.key] || []).map((p: Participant) => p.id)
+                          el.indeterminate = ids.some((id: string) => selectedIds.has(id)) && !ids.every((id: string) => selectedIds.has(id))
+                        }
+                      }}
+                      onChange={() => selectAllInColumn(status.key)}
+                      onClick={e => e.stopPropagation()}
+                    />
                     <span className={`w-2.5 h-2.5 rounded-full ${status.color}`} />
                     <span className="text-sm font-semibold text-gray-700">{status.label}</span>
                     <span className="text-xs text-gray-400 ml-auto bg-white px-2 py-0.5 rounded-full">{grouped[status.key]?.length || 0}</span>
@@ -750,9 +947,19 @@ export default function EventDetailPage() {
                         draggable
                         onDragStart={() => handleDragStart(p.id)}
                         onClick={() => setSelectedParticipant(p)}
-                        className={`bg-white rounded-lg border border-gray-200 p-3 cursor-pointer hover:shadow-md transition-all relative ${selectedParticipant?.id === p.id ? 'ring-2 ring-green-500' : ''} ${draggedParticipant === p.id ? 'opacity-50' : ''}`}
+                        className={`bg-white rounded-lg border p-3 cursor-pointer hover:shadow-md transition-all relative ${
+                          selectedIds.has(p.id) ? 'border-emerald-400 ring-1 ring-emerald-300 bg-emerald-50/40' :
+                          selectedParticipant?.id === p.id ? 'border-gray-200 ring-2 ring-green-500' : 'border-gray-200'
+                        } ${draggedParticipant === p.id ? 'opacity-50' : ''}`}
                       >
                         <div className="flex items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(p.id)}
+                            onChange={() => toggleSelect(p.id)}
+                            onClick={e => e.stopPropagation()}
+                            className="mt-0.5 w-3.5 h-3.5 rounded border-gray-300 text-emerald-600 cursor-pointer flex-shrink-0"
+                          />
                           <GripVertical className="w-4 h-4 text-gray-300 mt-0.5 flex-shrink-0 cursor-grab" />
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-1">
@@ -808,6 +1015,20 @@ export default function EventDetailPage() {
                 <table className="w-full">
                   <thead>
                     <tr className="border-b border-gray-200 bg-gray-50">
+                      <th className="px-4 py-3 w-10">
+                        <input
+                          type="checkbox"
+                          className="rounded border-gray-300 text-emerald-600 cursor-pointer"
+                          checked={participants.length > 0 && participants.every(p => selectedIds.has(p.id))}
+                          ref={(el) => {
+                            if (el) el.indeterminate = participants.some(p => selectedIds.has(p.id)) && !participants.every(p => selectedIds.has(p.id))
+                          }}
+                          onChange={() => {
+                            if (participants.every(p => selectedIds.has(p.id))) setSelectedIds(new Set())
+                            else setSelectedIds(new Set(participants.map(p => p.id)))
+                          }}
+                        />
+                      </th>
                       <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Nombre</th>
                       <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">N. Corto</th>
                       <th className="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider px-4 py-3">Teléfono</th>
@@ -823,7 +1044,18 @@ export default function EventDetailPage() {
                     {participants.map(p => {
                       const si = statusInfo(p.status)
                       return (
-                        <tr key={p.id} className={`hover:bg-gray-50 cursor-pointer ${selectedParticipant?.id === p.id ? 'bg-green-50' : ''}`} onClick={() => setSelectedParticipant(p)}>
+                        <tr key={p.id} className={`cursor-pointer transition-colors ${
+                          selectedIds.has(p.id) ? 'bg-emerald-50' :
+                          selectedParticipant?.id === p.id ? 'bg-green-50' : 'hover:bg-gray-50'
+                        }`} onClick={() => setSelectedParticipant(p)}>
+                          <td className="px-4 py-3 w-10" onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(p.id)}
+                              onChange={() => toggleSelect(p.id)}
+                              className="rounded border-gray-300 text-emerald-600 cursor-pointer"
+                            />
+                          </td>
                           <td className="px-4 py-3">
                             <span className="text-sm font-medium text-gray-900">{p.name} {p.last_name || ''}</span>
                           </td>
@@ -873,7 +1105,7 @@ export default function EventDetailPage() {
                     })}
                     {participants.length === 0 && (
                       <tr>
-                        <td colSpan={9} className="px-4 py-12 text-center text-gray-400">
+                        <td colSpan={10} className="px-4 py-12 text-center text-gray-400">
                           No hay participantes aún
                         </td>
                       </tr>
@@ -894,6 +1126,15 @@ export default function EventDetailPage() {
                 {selectedParticipant.short_name && <span className="text-xs text-gray-400 font-normal ml-1">({selectedParticipant.short_name})</span>}
               </h3>
               <div className="flex items-center gap-1">
+                {selectedParticipant.phone && (
+                  <button
+                    onClick={() => handleOpenWhatsApp(selectedParticipant.phone!)}
+                    className="p-1 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors"
+                    title="Abrir chat de WhatsApp"
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                  </button>
+                )}
                 <button onClick={() => openEditParticipant(selectedParticipant)} className="p-1 text-gray-400 hover:text-blue-600 rounded" title="Editar">
                   <Pencil className="w-4 h-4" />
                 </button>
@@ -1337,6 +1578,174 @@ export default function EventDetailPage() {
         </div>
       )}
 
+      {/* Inline WhatsApp Chat Overlay */}
+      {chatPanelMounted && inlineChatId && selectedParticipant && (
+        <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+          <div
+            className={`absolute inset-0 transition-all duration-300 ease-out ${
+              chatPanelVisible ? 'bg-black/30 backdrop-blur-[2px]' : 'bg-transparent backdrop-blur-0'
+            }`}
+            onClick={() => setShowInlineChat(false)}
+          />
+          <div className={`relative h-full bg-white shadow-2xl flex w-[85vw] max-w-6xl border-l border-slate-200 transition-transform duration-300 ease-out ${
+            chatPanelVisible ? 'translate-x-0' : 'translate-x-full'
+          }`}>
+            {/* Chat Panel - Left Side */}
+            <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
+              <ChatPanel
+                chatId={inlineChatId}
+                deviceId={inlineChatDeviceId}
+                initialChat={inlineChat || undefined}
+                onClose={() => setShowInlineChat(false)}
+                className="h-full"
+              />
+            </div>
+
+            {/* Participant Summary - Right Side */}
+            <div className="w-[320px] shrink-0 flex flex-col h-full bg-white">
+              <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-slate-900 text-sm truncate">
+                    {selectedParticipant.name} {selectedParticipant.last_name || ''}
+                  </h3>
+                  <button
+                    onClick={() => setShowInlineChat(false)}
+                    className="p-1 text-slate-400 hover:text-slate-600 rounded"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                {selectedParticipant.phone && (
+                  <p className="text-xs text-slate-500 mt-0.5 font-mono">{selectedParticipant.phone}</p>
+                )}
+              </div>
+              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                {/* Status */}
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-medium px-2 py-1 rounded-full ${statusInfo(selectedParticipant.status)?.bgLight} ${statusInfo(selectedParticipant.status)?.text}`}>
+                    {statusInfo(selectedParticipant.status)?.label}
+                  </span>
+                  {selectedParticipant.invited_at && (
+                    <span className="text-xs text-slate-400">
+                      {formatDistanceToNow(new Date(selectedParticipant.invited_at), { addSuffix: true, locale: es })}
+                    </span>
+                  )}
+                </div>
+
+                {/* Info */}
+                <div className="space-y-2">
+                  {selectedParticipant.email && (
+                    <div className="flex items-center gap-2 text-sm">
+                      <Mail className="w-3.5 h-3.5 text-slate-400" />
+                      <span className="text-slate-700 text-xs">{selectedParticipant.email}</span>
+                    </div>
+                  )}
+                  {selectedParticipant.age && (
+                    <div className="text-xs text-slate-500">Edad: {selectedParticipant.age}</div>
+                  )}
+                </div>
+
+                {/* Notes */}
+                {selectedParticipant.notes && (
+                  <div>
+                    <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Notas</h5>
+                    <div className="text-xs text-slate-600 bg-slate-50 rounded-lg p-3 border border-slate-100">
+                      {selectedParticipant.notes}
+                    </div>
+                  </div>
+                )}
+
+                {/* Tags */}
+                {selectedParticipant.tags && selectedParticipant.tags.length > 0 && (
+                  <div>
+                    <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Etiquetas</h5>
+                    <div className="flex flex-wrap gap-1">
+                      {selectedParticipant.tags.map(t => (
+                        <span key={t.id} className="text-xs px-2 py-0.5 rounded-full text-white" style={{ backgroundColor: t.color || '#6b7280' }}>
+                          {t.name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Recent Interactions */}
+                <div>
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Interacciones recientes</h5>
+                  {interactions.length === 0 ? (
+                    <p className="text-xs text-slate-400 text-center py-3">Sin interacciones</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {interactions.slice(0, 3).map(int => {
+                        const typeInfo = INTERACTION_TYPES.find(t => t.key === int.type)
+                        const TypeIcon = typeInfo?.icon || StickyNote
+                        return (
+                          <div key={int.id} className="flex items-start gap-2 text-xs">
+                            <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${typeInfo?.color.split(' ')[0] || 'bg-gray-100'}`}>
+                              <TypeIcon className={`w-2.5 h-2.5 ${typeInfo?.color.split(' ')[1] || 'text-gray-500'}`} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <span className="font-medium text-slate-700">{typeInfo?.label}</span>
+                              {int.notes && <p className="text-slate-500 truncate">{int.notes}</p>}
+                              <span className="text-slate-400">{format(new Date(int.created_at), 'd MMM, HH:mm', { locale: es })}</span>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Quick Actions */}
+                <div className="pt-2 border-t border-slate-100 space-y-2">
+                  <button
+                    onClick={() => { setShowInlineChat(false); openEditParticipant(selectedParticipant) }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 rounded-lg transition"
+                  >
+                    <Pencil className="w-3.5 h-3.5 text-slate-400" />
+                    Editar participante
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Device Selector Modal for WhatsApp */}
+      {showDeviceSelector && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
+            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
+            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para el chat con {whatsappPhone}</p>
+            {devices.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
+            ) : (
+              <div className="space-y-2">
+                {devices.map((device) => (
+                  <button
+                    key={device.id}
+                    onClick={() => handleDeviceSelectedForChat(device)}
+                    className="w-full flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
+                  >
+                    <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center">
+                      <Phone className="w-4 h-4 text-emerald-600" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                      <p className="text-xs text-slate-500">{device.phone_number || ''}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setShowDeviceSelector(false)} className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Mass Messaging / Campaign Modal */}
       <CreateCampaignModal
         open={showCampaignModal}
@@ -1503,6 +1912,210 @@ export default function EventDetailPage() {
               })()}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Export Modal */}
+      {showExportModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4" onClick={() => !exporting && setShowExportModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="px-6 py-5 border-b border-gray-100 bg-gradient-to-r from-slate-50 to-gray-50">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-slate-600 flex items-center justify-center">
+                    <FileDown className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold text-gray-900">Exportar Evento</h2>
+                    <p className="text-sm text-gray-500">{participants.length} participantes</p>
+                  </div>
+                </div>
+                <button onClick={() => !exporting && setShowExportModal(false)} className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Format Selection */}
+              <div>
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 block">Formato</label>
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { key: 'excel' as const, label: 'Excel', desc: 'Hoja de cálculo', icon: FileSpreadsheet, color: 'emerald' },
+                    { key: 'csv' as const, label: 'CSV', desc: 'Texto plano', icon: FileText, color: 'blue' },
+                    { key: 'word' as const, label: 'Word', desc: 'Informe detallado', icon: FileDown, color: 'indigo' },
+                  ].map(f => (
+                    <button
+                      key={f.key}
+                      onClick={() => setExportFormat(f.key)}
+                      className={`relative flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all ${
+                        exportFormat === f.key
+                          ? f.color === 'emerald' ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-200'
+                          : f.color === 'blue' ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-200'
+                          : 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-200'
+                          : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      <f.icon className={`w-8 h-8 ${
+                        exportFormat === f.key
+                          ? f.color === 'emerald' ? 'text-emerald-600'
+                          : f.color === 'blue' ? 'text-blue-600'
+                          : 'text-indigo-600'
+                          : 'text-gray-400'
+                      }`} />
+                      <span className={`text-sm font-semibold ${exportFormat === f.key ? 'text-gray-900' : 'text-gray-600'}`}>{f.label}</span>
+                      <span className="text-[11px] text-gray-400">{f.desc}</span>
+                      {exportFormat === f.key && (
+                        <div className={`absolute top-2 right-2 w-5 h-5 rounded-full flex items-center justify-center ${
+                          f.color === 'emerald' ? 'bg-emerald-500' : f.color === 'blue' ? 'bg-blue-500' : 'bg-indigo-500'
+                        }`}>
+                          <CheckCircle2 className="w-3.5 h-3.5 text-white" />
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Word Options */}
+              {exportFormat === 'word' && (
+                <div className="space-y-5 animate-in fade-in duration-200">
+                  {/* Style Selection */}
+                  <div>
+                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 block">Estilo del Informe</label>
+                    <div className="space-y-2">
+                      {[
+                        { key: 'gerencia' as ReportStyle, label: 'Ejecutivo', desc: 'Formal, profesional, limpio. Ideal para presentar a directivos.', emoji: '📊', color: 'blue' },
+                        { key: 'informal' as ReportStyle, label: 'Informal', desc: 'Amigable, relajado, con toques personales. Para el equipo.', emoji: '😊', color: 'green' },
+                        { key: 'divertido' as ReportStyle, label: 'Divertido', desc: 'Colorido, con emojis, lenguaje festivo. Para compartir en grupo.', emoji: '🎉', color: 'purple' },
+                      ].map(s => (
+                        <button
+                          key={s.key}
+                          onClick={() => setExportStyle(s.key)}
+                          className={`w-full flex items-center gap-4 p-3.5 rounded-xl border-2 text-left transition-all ${
+                            exportStyle === s.key
+                              ? s.color === 'blue' ? 'border-blue-500 bg-blue-50'
+                              : s.color === 'green' ? 'border-green-500 bg-green-50'
+                              : 'border-purple-500 bg-purple-50'
+                              : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                          }`}
+                        >
+                          <span className="text-2xl">{s.emoji}</span>
+                          <div className="flex-1 min-w-0">
+                            <span className={`text-sm font-semibold ${exportStyle === s.key ? 'text-gray-900' : 'text-gray-700'}`}>{s.label}</span>
+                            <p className="text-xs text-gray-500 mt-0.5">{s.desc}</p>
+                          </div>
+                          {exportStyle === s.key && (
+                            <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${
+                              s.color === 'blue' ? 'bg-blue-500' : s.color === 'green' ? 'bg-green-500' : 'bg-purple-500'
+                            }`}>
+                              <CheckCircle2 className="w-3.5 h-3.5 text-white" />
+                            </div>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Detail Level */}
+                  <div>
+                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3 block">Nivel de Detalle</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { key: 'basico' as DetailLevel, label: 'Básico', desc: 'Resumen y lista' },
+                        { key: 'detallado' as DetailLevel, label: 'Detallado', desc: 'Datos completos' },
+                        { key: 'completo' as DetailLevel, label: 'Completo', desc: 'Con interacciones' },
+                      ].map(d => (
+                        <button
+                          key={d.key}
+                          onClick={() => setExportDetail(d.key)}
+                          className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${
+                            exportDetail === d.key
+                              ? 'border-slate-500 bg-slate-50 ring-1 ring-slate-200'
+                              : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                          }`}
+                        >
+                          <span className={`text-sm font-semibold ${exportDetail === d.key ? 'text-gray-900' : 'text-gray-600'}`}>{d.label}</span>
+                          <span className="text-[11px] text-gray-400 text-center">{d.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {exportDetail === 'completo' && (
+                      <p className="text-xs text-amber-600 mt-2 flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        Cargará las interacciones de cada participante. Puede tomar unos segundos.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
+              <button
+                onClick={() => !exporting && setShowExportModal(false)}
+                disabled={exporting}
+                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-100 transition disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleExport}
+                disabled={exporting}
+                className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm transition-all ${
+                  exportFormat === 'excel' ? 'bg-emerald-600 hover:bg-emerald-700'
+                  : exportFormat === 'csv' ? 'bg-blue-600 hover:bg-blue-700'
+                  : 'bg-indigo-600 hover:bg-indigo-700'
+                } disabled:opacity-50`}
+              >
+                {exporting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Generando...
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4" />
+                    {exportFormat === 'excel' ? 'Descargar Excel' : exportFormat === 'csv' ? 'Descargar CSV' : 'Generar Informe'}
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating bulk action bar — appears when one or more participants are selected */}
+      {selectedIds.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-white border border-slate-200 px-4 py-2.5 rounded-2xl shadow-2xl shadow-slate-300/40 max-w-[95vw] flex-wrap">
+          <span className="text-sm font-semibold text-slate-800 tabular-nums whitespace-nowrap">
+            {selectedIds.size} seleccionado{selectedIds.size !== 1 ? 's' : ''}
+          </span>
+          <div className="w-px h-5 bg-slate-200 mx-1 flex-shrink-0" />
+          <span className="text-xs text-slate-400 whitespace-nowrap">Mover a:</span>
+          {STATUSES.map(s => (
+            <button
+              key={s.key}
+              onClick={() => handleBulkMove(s.key)}
+              disabled={bulkMoving}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-50 ${s.bgLight} ${s.text} hover:opacity-80`}
+            >
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${s.color}`} />
+              {s.label}
+              {bulkMoving && <Loader2 className="w-3 h-3 animate-spin ml-1" />}
+            </button>
+          ))}
+          <div className="w-px h-5 bg-slate-200 mx-1 flex-shrink-0" />
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+            title="Deseleccionar todo"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
     </div>

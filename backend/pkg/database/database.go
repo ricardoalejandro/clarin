@@ -594,6 +594,57 @@ func Migrate(db *pgxpool.Pool) error {
 		 JOIN contact_tags ct ON ct.contact_id = ep.contact_id
 		 WHERE ep.contact_id IS NOT NULL
 		 ON CONFLICT DO NOTHING`,
+
+		// Program schedule fields
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS schedule_start_date TIMESTAMPTZ`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS schedule_end_date TIMESTAMPTZ`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS schedule_days INT[] DEFAULT '{}'`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS schedule_start_time VARCHAR(10)`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS schedule_end_time VARCHAR(10)`,
+
+		// Program session time/location fields
+		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS start_time VARCHAR(10)`,
+		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS end_time VARCHAR(10)`,
+		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS location TEXT`,
+
+		// RBAC: Custom roles with granular module permissions
+		`CREATE TABLE IF NOT EXISTS roles (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			name VARCHAR(255) UNIQUE NOT NULL,
+			description TEXT DEFAULT '',
+			is_system BOOLEAN DEFAULT FALSE,
+			permissions TEXT[] DEFAULT '{}',
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+
+		// Link user_accounts to a role
+		`ALTER TABLE user_accounts ADD COLUMN IF NOT EXISTS role_id UUID REFERENCES roles(id) ON DELETE SET NULL`,
+
+		// Seed system roles (idempotent)
+		`INSERT INTO roles (name, description, is_system, permissions) VALUES
+			('Administrador', 'Acceso total a todos los módulos', TRUE, ARRAY['chats','contacts','programs','devices','leads','events','broadcasts','tags','settings'])
+		 ON CONFLICT (name) DO NOTHING`,
+		`INSERT INTO roles (name, description, is_system, permissions) VALUES
+			('Supervisor', 'Acceso a chats, leads, contactos y eventos', TRUE, ARRAY['chats','contacts','leads','events','tags'])
+		 ON CONFLICT (name) DO NOTHING`,
+		`INSERT INTO roles (name, description, is_system, permissions) VALUES
+			('Agente Básico', 'Acceso solo a chats y contactos', TRUE, ARRAY['chats','contacts','tags'])
+		 ON CONFLICT (name) DO NOTHING`,
+
+		// Event folders – Windows Explorer style folder organisation
+		`CREATE TABLE IF NOT EXISTS event_folders (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			parent_id UUID REFERENCES event_folders(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			color VARCHAR(20) DEFAULT '#3b82f6',
+			icon VARCHAR(50) DEFAULT '📁',
+			position INT DEFAULT 0,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`ALTER TABLE events ADD COLUMN IF NOT EXISTS folder_id UUID REFERENCES event_folders(id) ON DELETE SET NULL`,
 	}
 
 	for _, migration := range migrations {

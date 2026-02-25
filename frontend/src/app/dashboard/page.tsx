@@ -42,6 +42,7 @@ export default function DashboardPage() {
   const [devices, setDevices] = useState<Device[]>([])
   const [chats, setChats] = useState<Chat[]>([])
   const [loading, setLoading] = useState(true)
+  const [devicesAccessDenied, setDevicesAccessDenied] = useState(false)
 
   useEffect(() => {
     const fetchData = async () => {
@@ -62,7 +63,11 @@ export default function DashboardPage() {
         ])
 
         if (statsData.success) setStats(statsData.stats)
-        if (devicesData.success) setDevices(devicesData.devices || [])
+        if (devicesRes.status === 403) {
+          setDevicesAccessDenied(true)
+        } else if (devicesData.success) {
+          setDevices(devicesData.devices || [])
+        }
         if (chatsData.success) setChats(chatsData.chats || [])
       } catch (err) {
         console.error('Failed to fetch data:', err)
@@ -100,6 +105,7 @@ export default function DashboardPage() {
 
   const totalUnread = chats.reduce((sum, c) => sum + (c.unread_count || 0), 0)
   const connectedDevices = devices.filter(d => d.status === 'connected').length
+  const showDevices = !devicesAccessDenied
 
   return (
     <div className="space-y-5 overflow-y-auto flex-1 min-h-0">
@@ -111,6 +117,7 @@ export default function DashboardPage() {
 
       {/* Stats cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {showDevices && (
         <div className="bg-white rounded-xl p-4 border border-slate-200/80 hover:shadow-sm transition-shadow">
           <div className="flex items-center justify-between mb-3">
             <div className="w-9 h-9 bg-emerald-50 rounded-lg flex items-center justify-center">
@@ -121,6 +128,7 @@ export default function DashboardPage() {
           <p className="text-2xl font-bold text-slate-900">{devices.length}</p>
           <p className="text-xs text-slate-500 mt-0.5">Dispositivos</p>
         </div>
+        )}
 
         <div className="bg-white rounded-xl p-4 border border-slate-200/80 hover:shadow-sm transition-shadow">
           <div className="flex items-center justify-between mb-3">
@@ -154,8 +162,9 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className={`grid gap-4 ${showDevices ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
         {/* Devices section */}
+        {showDevices && (
         <div className="bg-white rounded-xl border border-slate-200/80 overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
             <h2 className="font-semibold text-slate-800 text-sm">Dispositivos</h2>
@@ -189,6 +198,7 @@ export default function DashboardPage() {
             )}
           </div>
         </div>
+        )}
 
         {/* Recent chats */}
         <div className="bg-white rounded-xl border border-slate-200/80 overflow-hidden">
@@ -205,8 +215,8 @@ export default function DashboardPage() {
               </div>
             ) : (
               chats.slice(0, 5).map((chat) => (
-                <a 
-                  key={chat.id} 
+                <a
+                  key={chat.id}
                   href={`/dashboard/chats?id=${chat.id}`}
                   className="px-4 py-3 flex items-center gap-3 hover:bg-slate-50/50 transition-colors cursor-pointer"
                 >

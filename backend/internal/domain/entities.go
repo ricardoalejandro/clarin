@@ -50,18 +50,52 @@ const (
 	RoleAgent      = "agent"
 )
 
+// Permission module constants
+const (
+	PermChats      = "chats"
+	PermContacts   = "contacts"
+	PermPrograms   = "programs"
+	PermDevices    = "devices"
+	PermLeads      = "leads"
+	PermEvents     = "events"
+	PermBroadcasts = "broadcasts"
+	PermTags       = "tags"
+	PermSettings   = "settings"
+	PermAll        = "*"
+)
+
+// AllPermissions contains all available permission modules in display order
+var AllPermissions = []string{
+	PermChats, PermContacts, PermLeads, PermPrograms,
+	PermDevices, PermEvents, PermBroadcasts, PermTags, PermSettings,
+}
+
+// Role represents a named set of module permissions
+type Role struct {
+	ID          uuid.UUID `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	IsSystem    bool      `json:"is_system"`
+	Permissions []string  `json:"permissions"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 // UserAccount represents a user's assignment to an account (many-to-many)
 type UserAccount struct {
-	ID          uuid.UUID `json:"id"`
-	UserID      uuid.UUID `json:"user_id"`
-	AccountID   uuid.UUID `json:"account_id"`
-	Role        string    `json:"role"`
-	IsDefault   bool      `json:"is_default"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID        uuid.UUID  `json:"id"`
+	UserID    uuid.UUID  `json:"user_id"`
+	AccountID uuid.UUID  `json:"account_id"`
+	Role      string     `json:"role"`
+	RoleID    *uuid.UUID `json:"role_id,omitempty"`
+	IsDefault bool       `json:"is_default"`
+	CreatedAt time.Time  `json:"created_at"`
 
 	// Populated on demand
-	AccountName string `json:"account_name,omitempty"`
-	AccountSlug string `json:"account_slug,omitempty"`
+	AccountName string   `json:"account_name,omitempty"`
+	AccountSlug string   `json:"account_slug,omitempty"`
+	RoleName    string   `json:"role_name,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
 }
 
 // Device represents a WhatsApp connection
@@ -457,6 +491,7 @@ const (
 type Event struct {
 	ID          uuid.UUID  `json:"id"`
 	AccountID   uuid.UUID  `json:"account_id"`
+	FolderID    *uuid.UUID `json:"folder_id,omitempty"`
 	Name        string     `json:"name"`
 	Description *string    `json:"description,omitempty"`
 	EventDate   *time.Time `json:"event_date,omitempty"`
@@ -471,6 +506,22 @@ type Event struct {
 	// Populated on demand
 	ParticipantCounts map[string]int `json:"participant_counts,omitempty"`
 	TotalParticipants int            `json:"total_participants"`
+}
+
+// EventFolder represents a folder for organising events (Windows Explorer style)
+type EventFolder struct {
+	ID        uuid.UUID  `json:"id"`
+	AccountID uuid.UUID  `json:"account_id"`
+	ParentID  *uuid.UUID `json:"parent_id,omitempty"`
+	Name      string     `json:"name"`
+	Color     string     `json:"color"`
+	Icon      string     `json:"icon"`
+	Position  int        `json:"position"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+
+	// Populated on demand
+	EventCount int `json:"event_count,omitempty"`
 }
 
 // Event status constants
@@ -563,12 +614,13 @@ const (
 
 // EventFilter defines filter options for listing events
 type EventFilter struct {
-	Search   string
-	Status   string
-	DateFrom *time.Time
-	DateTo   *time.Time
-	Limit    int
-	Offset   int
+	Search       string
+	Status       string
+	FolderFilter string // "": all events, "root": folder_id IS NULL, "<uuid>": specific folder
+	DateFrom     *time.Time
+	DateTo       *time.Time
+	Limit        int
+	Offset       int
 }
 
 // InteractionFilter defines filter options for listing interactions
@@ -624,6 +676,13 @@ type Program struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 
+	// Schedule fields for recurring sessions
+	ScheduleStartDate *time.Time `json:"schedule_start_date,omitempty"`
+	ScheduleEndDate   *time.Time `json:"schedule_end_date,omitempty"`
+	ScheduleDays      []int      `json:"schedule_days,omitempty"`      // 0=Sun, 1=Mon, ..., 6=Sat
+	ScheduleStartTime *string    `json:"schedule_start_time,omitempty"` // "HH:MM" format
+	ScheduleEndTime   *string    `json:"schedule_end_time,omitempty"`   // "HH:MM" format
+
 	// Populated on demand
 	ParticipantCount int `json:"participant_count"`
 	SessionCount     int `json:"session_count"`
@@ -648,6 +707,9 @@ type ProgramSession struct {
 	ProgramID uuid.UUID  `json:"program_id"`
 	Date      time.Time  `json:"date"`
 	Topic     *string    `json:"topic,omitempty"`
+	StartTime *string    `json:"start_time,omitempty"` // "HH:MM" format
+	EndTime   *string    `json:"end_time,omitempty"`   // "HH:MM" format
+	Location  *string    `json:"location,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 

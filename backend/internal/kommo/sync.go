@@ -104,18 +104,23 @@ type SyncService struct {
 	running bool
 	fullSyncMu sync.RWMutex
 	fullSync   map[uuid.UUID]*FullSyncStatus
+	// Cache of unsorted lead IDs that failed to sync (no phone on contact).
+	// Prevents wasting API calls every cycle on leads that can never sync.
+	unsortedSkipCache   map[int]int64 // kommo lead ID → timestamp when cached
+	unsortedSkipCacheMu sync.Mutex
 }
 
 // NewSyncService creates a new sync service with a background queue.
 func NewSyncService(client *Client, db *pgxpool.Pool, hub *ws.Hub) *SyncService {
 	return &SyncService{
-		client:   client,
-		db:       db,
-		hub:     hub,
-		queue:    make(chan SyncTask, 100),
-		stopCh:   make(chan struct{}),
-		stopped:  make(chan struct{}),
-		fullSync: make(map[uuid.UUID]*FullSyncStatus),
+		client:            client,
+		db:                db,
+		hub:               hub,
+		queue:             make(chan SyncTask, 100),
+		stopCh:            make(chan struct{}),
+		stopped:           make(chan struct{}),
+		fullSync:          make(map[uuid.UUID]*FullSyncStatus),
+		unsortedSkipCache: make(map[int]int64),
 	}
 }
 
@@ -589,6 +594,114 @@ func (s *SyncService) syncGlobalLeads(ctx context.Context, accountID uuid.UUID, 
 		page++
 	}
 
+	// Also sync unsorted (incoming) leads — these are NOT returned by /leads endpoint.
+	// Only fetch first 2 pages (up to 500 leads) ordered by newest first.
+	unsortedCount, err := s.syncUnsortedLeads(ctx, accountID)
+	if err != nil {
+		log.Printf("[Kommo Sync] unsorted leads error: %v", err)
+	} else {
+		count += unsortedCount
+	}
+
+	return count, nil
+}
+
+// syncUnsortedLeads fetches leads from Kommo's "Incoming" bucket (unsorted)
+// and syncs them. These leads have status_id = first status of the pipeline
+// and are invisible to the standard /leads endpoint.
+// Only processes first page (newest first) and skips leads older than 24h
+// to avoid re-processing historical duplicates every cycle.
+func (s *SyncService) syncUnsortedLeads(ctx context.Context, accountID uuid.UUID) (int, error) {
+	// Get connected pipeline IDs for this account
+	connected, err := s.GetConnectedPipelines(ctx, accountID)
+	if err != nil {
+		return 0, err
+	}
+	enabledPipelines := make(map[int64]bool)
+	for _, cp := range connected {
+		if cp.Enabled {
+			enabledPipelines[cp.KommoPipelineID] = true
+		}
+	}
+	if len(enabledPipelines) == 0 {
+		return 0, nil
+	}
+
+	count := 0
+	// Cutoff: only process unsorted leads created in the last 24 hours
+	cutoff := time.Now().Unix() - 86400
+
+	unsorted, _, err := s.client.GetUnsortedLeads(1, 250)
+	if err != nil {
+		if strings.Contains(err.Error(), "204") || strings.Contains(err.Error(), "No content") {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	for _, ul := range unsorted {
+		// Results are ordered by created_at desc; stop when we hit old leads
+		if ul.CreatedAt < cutoff {
+			break
+		}
+
+		// Only process unsorted leads from enabled pipelines
+		if !enabledPipelines[int64(ul.PipelineID)] {
+			continue
+		}
+
+		// Extract lead ID from embedded
+		if ul.Embedded == nil || len(ul.Embedded.Leads) == 0 {
+			continue
+		}
+		leadID := ul.Embedded.Leads[0].ID
+
+		// Skip leads we already know can't be synced (e.g., contact has no phone)
+		// Cache expires after 1 hour to allow retry if contact gets a phone later
+		s.unsortedSkipCacheMu.Lock()
+		if cachedAt, ok := s.unsortedSkipCache[leadID]; ok && time.Now().Unix()-cachedAt < 3600 {
+			s.unsortedSkipCacheMu.Unlock()
+			continue
+		}
+		s.unsortedSkipCacheMu.Unlock()
+
+		// Check if we already have this lead synced (by kommo_id)
+		var exists bool
+		_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM leads WHERE account_id = $1 AND kommo_id = $2)`,
+			accountID, int64(leadID)).Scan(&exists)
+		if exists {
+			continue // Already synced
+		}
+
+		// Fetch full lead details via individual endpoint
+		kl, err := s.client.GetLeadByID(leadID)
+		if err != nil {
+			log.Printf("[Kommo Sync] unsorted lead %d fetch error: %v", leadID, err)
+			continue
+		}
+
+		if err := s.upsertLead(ctx, accountID, *kl); err != nil {
+			log.Printf("[Kommo Sync] unsorted lead %d upsert error: %v", leadID, err)
+			continue
+		}
+
+		// Verify the lead was actually created/linked (upsertLead may return nil for skipped leads)
+		var synced bool
+		_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM leads WHERE account_id = $1 AND kommo_id = $2)`,
+			accountID, int64(leadID)).Scan(&synced)
+		if synced {
+			count++
+		} else {
+			// Lead couldn't be synced (likely contact has no phone) — cache to avoid retrying
+			s.unsortedSkipCacheMu.Lock()
+			s.unsortedSkipCache[leadID] = time.Now().Unix()
+			s.unsortedSkipCacheMu.Unlock()
+		}
+	}
+
+	if count > 0 {
+		log.Printf("[Kommo Sync] Synced %d unsorted (incoming) leads for account %s", count, accountID)
+	}
 	return count, nil
 }
 
@@ -726,15 +839,13 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		}
 	}
 	if err != nil {
-		// NEW lead — only create if the contact has a chat with one of this account's devices.
-		// This filters out leads from WhatsApp numbers not connected in Clarin.
+		// NEW lead — only import if it belongs to a synced pipeline.
+		// Leads from non-synced pipelines are completely ignored.
+		if pipelineID == nil {
+			return nil // Pipeline not synced in Clarin → skip
+		}
 		if jid == "" || strings.HasPrefix(jid, "kommo_") {
 			return nil // No valid WhatsApp phone → skip
-		}
-		var chatExists bool
-		_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chats WHERE jid = $1 AND account_id = $2)`, jid, accountID).Scan(&chatExists)
-		if !chatExists {
-			return nil // No chat with any device in this account → lead is from another WhatsApp → skip
 		}
 
 		leadID = uuid.New()
@@ -754,6 +865,12 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 			return nil
 		}
 
+		// Only update if the lead is in a synced pipeline.
+		// If moved to a non-synced pipeline in Kommo, don't touch the local lead.
+		if pipelineID == nil {
+			return nil
+		}
+
 		if foundByKommoID {
 			// Already linked — full bidirectional update from Kommo
 			_, err = s.db.Exec(ctx, `
@@ -762,8 +879,8 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 					phone = COALESCE($2, phone),
 					email = COALESCE($3, email),
 					contact_id = COALESCE($4, contact_id),
-					pipeline_id = COALESCE($5, pipeline_id),
-					stage_id = COALESCE($6, stage_id),
+					pipeline_id = $5,
+					stage_id = $6,
 					tags = COALESCE($7, tags),
 					updated_at = NOW()
 				WHERE id = $8
@@ -776,8 +893,8 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 				UPDATE leads SET
 					kommo_id = $1,
 					contact_id = COALESCE($2, contact_id),
-					pipeline_id = COALESCE($3, pipeline_id),
-					stage_id = COALESCE($4, stage_id),
+					pipeline_id = $3,
+					stage_id = $4,
 					tags = COALESCE($5, tags),
 					updated_at = NOW()
 				WHERE id = $6
@@ -896,6 +1013,9 @@ func (s *SyncService) upsertContact(ctx context.Context, accountID uuid.UUID, kc
 	jid := ""
 	if cleanPhone != "" {
 		jid = cleanPhone + "@s.whatsapp.net"
+	} else {
+		// Contacts without phone get a unique kommo-based JID to avoid duplicates
+		jid = fmt.Sprintf("kommo_contact_%d@kommo.contact", kc.ID)
 	}
 
 	name := cleanQuotes(kc.Name)

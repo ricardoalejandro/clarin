@@ -35,6 +35,7 @@ interface User {
   role: string
   account_id: string
   account_name: string
+  permissions?: string[]
 }
 
 interface UserAccount {
@@ -144,6 +145,28 @@ export default function DashboardLayout({
     }
   }
 
+  // Module permission map: route prefix → permission key
+  const MODULE_PERMS: Record<string, string> = {
+    '/dashboard/chats': 'chats',
+    '/dashboard/contacts': 'contacts',
+    '/dashboard/programs': 'programs',
+    '/dashboard/devices': 'devices',
+    '/dashboard/leads': 'leads',
+    '/dashboard/events': 'events',
+    '/dashboard/broadcasts': 'broadcasts',
+    '/dashboard/tags': 'tags',
+    '/dashboard/settings': 'settings',
+  }
+
+  function hasPermission(href: string): boolean {
+    if (!user) return false
+    if (user.is_admin || user.is_super_admin) return true
+    const module = MODULE_PERMS[href]
+    if (!module) return true // Dashboard and Admin (no module restriction)
+    const perms = user.permissions || []
+    return perms.includes('*') || perms.includes(module)
+  }
+
   const navItems = [
     { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
     { href: '/dashboard/chats', icon: MessageSquare, label: 'Chats' },
@@ -156,7 +179,7 @@ export default function DashboardLayout({
     { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas' },
     { href: '/dashboard/settings', icon: Settings, label: 'Configuración' },
     ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin' }] : []),
-  ]
+  ].filter(item => hasPermission(item.href))
 
   // When mobile overlay is open, always show expanded (not collapsed)
   const isCollapsed = sidebarCollapsed && !sidebarOpen
@@ -247,22 +270,34 @@ export default function DashboardLayout({
           })}
         </nav>
 
-        {/* Account switcher */}
-        {accounts.length > 1 && (
+        {/* Account name / switcher */}
+        {accounts.length >= 1 && (
           <div ref={accountSwitcherRef} className={`shrink-0 border-t border-slate-100 ${isCollapsed ? 'p-2' : 'px-3 py-2'} relative`}>
-            <button
-              onClick={() => setShowAccountSwitcher(!showAccountSwitcher)}
-              title={isCollapsed ? (user.account_name || 'Cambiar cuenta') : undefined}
-              className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} rounded-lg hover:bg-slate-50 transition-colors text-slate-600`}
-            >
-              <Building2 className="w-4 h-4 shrink-0 text-slate-400" />
-              {!isCollapsed && (
-                <>
+            {accounts.length > 1 ? (
+              <button
+                onClick={() => setShowAccountSwitcher(!showAccountSwitcher)}
+                title={isCollapsed ? (user.account_name || 'Cambiar cuenta') : undefined}
+                className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} rounded-lg hover:bg-slate-50 transition-colors text-slate-600`}
+              >
+                <Building2 className="w-4 h-4 shrink-0 text-slate-400" />
+                {!isCollapsed && (
+                  <>
+                    <span className="flex-1 text-left text-xs truncate font-medium">{user.account_name || 'Cuenta'}</span>
+                    <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-slate-300" />
+                  </>
+                )}
+              </button>
+            ) : (
+              <div
+                title={isCollapsed ? (user.account_name || 'Cuenta') : undefined}
+                className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} text-slate-500`}
+              >
+                <Building2 className="w-4 h-4 shrink-0 text-slate-400" />
+                {!isCollapsed && (
                   <span className="flex-1 text-left text-xs truncate font-medium">{user.account_name || 'Cuenta'}</span>
-                  <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-slate-300" />
-                </>
-              )}
-            </button>
+                )}
+              </div>
+            )}
             {showAccountSwitcher && (
               <div className={`absolute ${isCollapsed ? 'left-full ml-2 bottom-0' : 'left-3 right-3 bottom-full mb-1'} bg-white border border-slate-200 rounded-xl shadow-lg shadow-slate-200/50 z-50 py-1 min-w-[180px]`}>
                 <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Cambiar cuenta</div>

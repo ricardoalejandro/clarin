@@ -27,6 +27,7 @@ type Repositories struct {
 	Tag               *TagRepository
 	Campaign          *CampaignRepository
 	Event             *EventRepository
+	EventFolder       *EventFolderRepository
 	Participant       *ParticipantRepository
 	Interaction       *InteractionRepository
 	SavedSticker      *SavedStickerRepository
@@ -35,6 +36,7 @@ type Repositories struct {
 	CampaignAttachment *CampaignAttachmentRepository
 	QuickReply         *QuickReplyRepository
 	Program           *ProgramRepository
+	Role              *RoleRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -53,6 +55,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Tag:               &TagRepository{db: db},
 		Campaign:          &CampaignRepository{db: db},
 		Event:             &EventRepository{db: db},
+		EventFolder:       &EventFolderRepository{db: db},
 		Participant:       &ParticipantRepository{db: db},
 		Interaction:       &InteractionRepository{db: db},
 		SavedSticker:      &SavedStickerRepository{db: db},
@@ -61,6 +64,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		CampaignAttachment: &CampaignAttachmentRepository{db: db},
 		QuickReply:         &QuickReplyRepository{db: db},
 		Program:           &ProgramRepository{db: db},
+		Role:              &RoleRepository{db: db},
 	}
 }
 
@@ -197,9 +201,11 @@ type UserAccountRepository struct {
 func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
-		       a.name, COALESCE(a.slug, '')
+		       a.name, COALESCE(a.slug, ''),
+		       ua.role_id, COALESCE(ro.name, ''), COALESCE(ro.permissions, '{}')
 		FROM user_accounts ua
 		JOIN accounts a ON a.id = ua.account_id
+		LEFT JOIN roles ro ON ro.id = ua.role_id
 		WHERE ua.user_id = $1
 		ORDER BY ua.is_default DESC, a.name ASC
 	`, userID)
@@ -212,7 +218,7 @@ func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUI
 	for rows.Next() {
 		ua := &domain.UserAccount{}
 		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
-			&ua.AccountName, &ua.AccountSlug); err != nil {
+			&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, ua)
@@ -223,9 +229,11 @@ func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUI
 func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.UserAccount, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
-		       a.name, COALESCE(a.slug, '')
+		       a.name, COALESCE(a.slug, ''),
+		       ua.role_id, COALESCE(ro.name, ''), COALESCE(ro.permissions, '{}')
 		FROM user_accounts ua
 		JOIN accounts a ON a.id = ua.account_id
+		LEFT JOIN roles ro ON ro.id = ua.role_id
 		WHERE ua.account_id = $1
 		ORDER BY ua.created_at ASC
 	`, accountID)
@@ -238,7 +246,7 @@ func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uu
 	for rows.Next() {
 		ua := &domain.UserAccount{}
 		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
-			&ua.AccountName, &ua.AccountSlug); err != nil {
+			&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, ua)
@@ -254,11 +262,35 @@ func (r *UserAccountRepository) Exists(ctx context.Context, userID, accountID uu
 
 func (r *UserAccountRepository) Assign(ctx context.Context, ua *domain.UserAccount) error {
 	return r.db.QueryRow(ctx, `
-		INSERT INTO user_accounts (user_id, account_id, role, is_default)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (user_id, account_id) DO UPDATE SET role = EXCLUDED.role
+		INSERT INTO user_accounts (user_id, account_id, role, role_id, is_default)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id, account_id) DO UPDATE SET role = EXCLUDED.role, role_id = EXCLUDED.role_id
 		RETURNING id, created_at
-	`, ua.UserID, ua.AccountID, ua.Role, ua.IsDefault).Scan(&ua.ID, &ua.CreatedAt)
+	`, ua.UserID, ua.AccountID, ua.Role, ua.RoleID, ua.IsDefault).Scan(&ua.ID, &ua.CreatedAt)
+}
+
+func (r *UserAccountRepository) UpdateRoleID(ctx context.Context, userID, accountID uuid.UUID, roleID *uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE user_accounts SET role_id = $3 WHERE user_id = $1 AND account_id = $2`, userID, accountID, roleID)
+	return err
+}
+
+// GetUserPermissions returns the permissions slice for a user in a given account
+// Returns empty slice if no role is assigned
+func (r *UserAccountRepository) GetUserPermissions(ctx context.Context, userID, accountID uuid.UUID) ([]string, error) {
+	var permissions []string
+	err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(ro.permissions, '{}')
+		FROM user_accounts ua
+		LEFT JOIN roles ro ON ro.id = ua.role_id
+		WHERE ua.user_id = $1 AND ua.account_id = $2
+	`, userID, accountID).Scan(&permissions)
+	if err != nil {
+		return []string{}, nil
+	}
+	if permissions == nil {
+		permissions = []string{}
+	}
+	return permissions, nil
 }
 
 func (r *UserAccountRepository) UpdateRole(ctx context.Context, userID, accountID uuid.UUID, role string) error {
@@ -711,9 +743,11 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 		       message_type, media_url, media_mimetype, media_filename, media_size,
 		       is_from_me, is_read, status, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender
-		FROM messages WHERE chat_id = $1
-		ORDER BY timestamp ASC
-		LIMIT $2 OFFSET $3
+		FROM (
+			SELECT * FROM messages WHERE chat_id = $1
+			ORDER BY timestamp DESC
+			LIMIT $2 OFFSET $3
+		) sub ORDER BY timestamp ASC
 	`, chatID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -1194,7 +1228,7 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 	rows, err := r.db.Query(ctx, `
 		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-		       ps.name, ps.color, ps.position
+		       ps.name, ps.color, ps.position, l.kommo_id
 		FROM leads l
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.account_id = $1 ORDER BY l.created_at DESC
@@ -1211,7 +1245,7 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 			&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
 			&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 			&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
-			&lead.StageName, &lead.StageColor, &lead.StagePosition,
+			&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 		); err != nil {
 			return nil, err
 		}
@@ -1225,7 +1259,7 @@ func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid 
 	err := r.db.QueryRow(ctx, `
 		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-		       ps.name, ps.color, ps.position
+		       ps.name, ps.color, ps.position, l.kommo_id
 		FROM leads l
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.account_id = $1 AND l.jid = $2
@@ -1233,7 +1267,7 @@ func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid 
 		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
 		&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
-		&lead.StageName, &lead.StageColor, &lead.StagePosition,
+		&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1251,7 +1285,7 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 	err := r.db.QueryRow(ctx, `
 		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-		       ps.name, ps.color, ps.position
+		       ps.name, ps.color, ps.position, l.kommo_id
 		FROM leads l
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.id = $1
@@ -1259,7 +1293,7 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
 		&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
-		&lead.StageName, &lead.StageColor, &lead.StagePosition,
+		&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -2032,9 +2066,9 @@ func (r *EventRepository) Create(ctx context.Context, e *domain.Event) error {
 		e.Color = "#3b82f6"
 	}
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO events (id, account_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-	`, e.ID, e.AccountID, e.Name, e.Description, e.EventDate, e.EventEnd, e.Location, e.Status, e.Color, e.CreatedBy, e.CreatedAt, e.UpdatedAt)
+		INSERT INTO events (id, account_id, folder_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	`, e.ID, e.AccountID, e.FolderID, e.Name, e.Description, e.EventDate, e.EventEnd, e.Location, e.Status, e.Color, e.CreatedBy, e.CreatedAt, e.UpdatedAt)
 	return err
 }
 
@@ -2063,13 +2097,25 @@ func (r *EventRepository) GetByAccountID(ctx context.Context, accountID uuid.UUI
 		args = append(args, *filter.DateTo)
 		argNum++
 	}
+	switch filter.FolderFilter {
+	case "root":
+		baseQuery += " AND folder_id IS NULL"
+	case "":
+		// no filter – return all
+	default:
+		// assume it's a UUID
+		baseQuery += fmt.Sprintf(" AND folder_id = $%d", argNum)
+		args = append(args, filter.FolderFilter)
+		argNum++
+	}
+	_ = argNum // suppress unused warning
 
 	var total int
 	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) "+baseQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	selectQuery := `SELECT id, account_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at` + baseQuery + ` ORDER BY COALESCE(event_date, created_at) DESC`
+	selectQuery := `SELECT id, account_id, folder_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at` + baseQuery + ` ORDER BY COALESCE(event_date, created_at) DESC`
 	if filter.Limit > 0 {
 		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
 		if filter.Offset > 0 {
@@ -2086,7 +2132,7 @@ func (r *EventRepository) GetByAccountID(ctx context.Context, accountID uuid.UUI
 	var events []*domain.Event
 	for rows.Next() {
 		ev := &domain.Event{}
-		if err := rows.Scan(&ev.ID, &ev.AccountID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
+		if err := rows.Scan(&ev.ID, &ev.AccountID, &ev.FolderID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
 			return nil, 0, err
 		}
 		events = append(events, ev)
@@ -2105,9 +2151,9 @@ func (r *EventRepository) GetByAccountID(ctx context.Context, accountID uuid.UUI
 func (r *EventRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
 	ev := &domain.Event{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at
+		SELECT id, account_id, folder_id, name, description, event_date, event_end, location, status, color, created_by, created_at, updated_at
 		FROM events WHERE id = $1
-	`, id).Scan(&ev.ID, &ev.AccountID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt)
+	`, id).Scan(&ev.ID, &ev.AccountID, &ev.FolderID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -2168,7 +2214,7 @@ func (r *EventRepository) GetParticipantCounts(ctx context.Context, eventID uuid
 
 func (r *EventRepository) GetByContactID(ctx context.Context, accountID, contactID uuid.UUID) ([]*domain.Event, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT DISTINCT e.id, e.account_id, e.name, e.description, e.event_date, e.event_end, e.location, e.status, e.color, e.created_by, e.created_at, e.updated_at
+		SELECT DISTINCT e.id, e.account_id, e.folder_id, e.name, e.description, e.event_date, e.event_end, e.location, e.status, e.color, e.created_by, e.created_at, e.updated_at
 		FROM events e
 		JOIN event_participants ep ON ep.event_id = e.id
 		WHERE e.account_id = $1 AND ep.contact_id = $2
@@ -2182,12 +2228,101 @@ func (r *EventRepository) GetByContactID(ctx context.Context, accountID, contact
 	var events []*domain.Event
 	for rows.Next() {
 		ev := &domain.Event{}
-		if err := rows.Scan(&ev.ID, &ev.AccountID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
+		if err := rows.Scan(&ev.ID, &ev.AccountID, &ev.FolderID, &ev.Name, &ev.Description, &ev.EventDate, &ev.EventEnd, &ev.Location, &ev.Status, &ev.Color, &ev.CreatedBy, &ev.CreatedAt, &ev.UpdatedAt); err != nil {
 			return nil, err
 		}
 		events = append(events, ev)
 	}
 	return events, nil
+}
+
+// ============================================================
+// EventFolderRepository handles event folder data access
+// ============================================================
+
+type EventFolderRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *EventFolderRepository) Create(ctx context.Context, f *domain.EventFolder) error {
+	f.ID = uuid.New()
+	now := time.Now()
+	f.CreatedAt = now
+	f.UpdatedAt = now
+	if f.Color == "" {
+		f.Color = "#3b82f6"
+	}
+	if f.Icon == "" {
+		f.Icon = "📁"
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO event_folders (id, account_id, parent_id, name, color, icon, position, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+	`, f.ID, f.AccountID, f.ParentID, f.Name, f.Color, f.Icon, f.Position, f.CreatedAt, f.UpdatedAt)
+	return err
+}
+
+func (r *EventFolderRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.EventFolder, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT ef.id, ef.account_id, ef.parent_id, ef.name, ef.color, ef.icon, ef.position, ef.created_at, ef.updated_at,
+		       COUNT(e.id) AS event_count
+		FROM event_folders ef
+		LEFT JOIN events e ON e.folder_id = ef.id
+		WHERE ef.account_id = $1
+		GROUP BY ef.id
+		ORDER BY ef.position, ef.name
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var folders []*domain.EventFolder
+	for rows.Next() {
+		f := &domain.EventFolder{}
+		if err := rows.Scan(&f.ID, &f.AccountID, &f.ParentID, &f.Name, &f.Color, &f.Icon, &f.Position, &f.CreatedAt, &f.UpdatedAt, &f.EventCount); err != nil {
+			return nil, err
+		}
+		folders = append(folders, f)
+	}
+	return folders, nil
+}
+
+func (r *EventFolderRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.EventFolder, error) {
+	f := &domain.EventFolder{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, parent_id, name, color, icon, position, created_at, updated_at
+		FROM event_folders WHERE id = $1
+	`, id).Scan(&f.ID, &f.AccountID, &f.ParentID, &f.Name, &f.Color, &f.Icon, &f.Position, &f.CreatedAt, &f.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return f, err
+}
+
+func (r *EventFolderRepository) Update(ctx context.Context, f *domain.EventFolder) error {
+	f.UpdatedAt = time.Now()
+	_, err := r.db.Exec(ctx, `
+		UPDATE event_folders SET name=$1, color=$2, icon=$3, position=$4, updated_at=$5 WHERE id=$6
+	`, f.Name, f.Color, f.Icon, f.Position, f.UpdatedAt, f.ID)
+	return err
+}
+
+func (r *EventFolderRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	// Determine parent so we can re-home children and events
+	var parentID *uuid.UUID
+	_ = r.db.QueryRow(ctx, `SELECT parent_id FROM event_folders WHERE id = $1`, id).Scan(&parentID)
+	// Move events in this folder to parent (or root)
+	_, _ = r.db.Exec(ctx, `UPDATE events SET folder_id = $1 WHERE folder_id = $2`, parentID, id)
+	// Move sub-folders to parent
+	_, _ = r.db.Exec(ctx, `UPDATE event_folders SET parent_id = $1 WHERE parent_id = $2`, parentID, id)
+	_, err := r.db.Exec(ctx, `DELETE FROM event_folders WHERE id = $1`, id)
+	return err
+}
+
+func (r *EventFolderRepository) MoveEvent(ctx context.Context, eventID uuid.UUID, folderID *uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE events SET folder_id = $1, updated_at = NOW() WHERE id = $2`, folderID, eventID)
+	return err
 }
 
 // ============================================================
@@ -2347,6 +2482,32 @@ func (r *ParticipantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, 
 	}
 	query += fmt.Sprintf(" WHERE id = $%d", argNum)
 	args = append(args, id)
+
+	_, err := r.db.Exec(ctx, query, args...)
+	return err
+}
+
+func (r *ParticipantRepository) BulkUpdateStatus(ctx context.Context, ids []uuid.UUID, status string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	now := time.Now()
+	query := `UPDATE event_participants SET status = $1, updated_at = $2`
+	args := []interface{}{status, now}
+	argNum := 3
+
+	switch status {
+	case domain.ParticipantStatusConfirmed:
+		query += fmt.Sprintf(", confirmed_at = $%d", argNum)
+		args = append(args, now)
+		argNum++
+	case domain.ParticipantStatusAttended:
+		query += fmt.Sprintf(", attended_at = $%d", argNum)
+		args = append(args, now)
+		argNum++
+	}
+	query += fmt.Sprintf(" WHERE id = ANY($%d::uuid[])", argNum)
+	args = append(args, ids)
 
 	_, err := r.db.Exec(ctx, query, args...)
 	return err
@@ -2893,4 +3054,91 @@ func (r *QuickReplyRepository) Update(ctx context.Context, qr *domain.QuickReply
 func (r *QuickReplyRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM quick_replies WHERE id = $1`, id)
 	return err
+}
+// RoleRepository handles RBAC role and permission management
+type RoleRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *RoleRepository) GetAll(ctx context.Context) ([]*domain.Role, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, name, description, is_system, COALESCE(permissions, '{}'), created_at, updated_at
+		FROM roles ORDER BY is_system DESC, name ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var roles []*domain.Role
+	for rows.Next() {
+		role := &domain.Role{}
+		if err := rows.Scan(&role.ID, &role.Name, &role.Description, &role.IsSystem,
+			&role.Permissions, &role.CreatedAt, &role.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if role.Permissions == nil {
+			role.Permissions = []string{}
+		}
+		roles = append(roles, role)
+	}
+	return roles, nil
+}
+
+func (r *RoleRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Role, error) {
+	role := &domain.Role{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, name, description, is_system, COALESCE(permissions, '{}'), created_at, updated_at
+		FROM roles WHERE id = $1
+	`, id).Scan(&role.ID, &role.Name, &role.Description, &role.IsSystem,
+		&role.Permissions, &role.CreatedAt, &role.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if role.Permissions == nil {
+		role.Permissions = []string{}
+	}
+	return role, nil
+}
+
+func (r *RoleRepository) Create(ctx context.Context, role *domain.Role) error {
+	if role.Permissions == nil {
+		role.Permissions = []string{}
+	}
+	return r.db.QueryRow(ctx, `
+		INSERT INTO roles (name, description, is_system, permissions)
+		VALUES ($1, $2, FALSE, $3)
+		RETURNING id, created_at, updated_at
+	`, role.Name, role.Description, role.Permissions).Scan(&role.ID, &role.CreatedAt, &role.UpdatedAt)
+}
+
+func (r *RoleRepository) Update(ctx context.Context, role *domain.Role) error {
+	if role.Permissions == nil {
+		role.Permissions = []string{}
+	}
+	result, err := r.db.Exec(ctx, `
+		UPDATE roles SET name = $2, description = $3, permissions = $4, updated_at = NOW()
+		WHERE id = $1
+	`, role.ID, role.Name, role.Description, role.Permissions)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("role not found")
+	}
+	return nil
+}
+
+func (r *RoleRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	result, err := r.db.Exec(ctx, `DELETE FROM roles WHERE id = $1 AND is_system = FALSE`, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("role not found or cannot delete system role")
+	}
+	return nil
 }

@@ -8,7 +8,7 @@ import ImportCSVModal from '@/components/ImportCSVModal'
 import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import { useRouter } from 'next/navigation'
-import { createWebSocket } from '@/lib/api'
+import { subscribeWebSocket } from '@/lib/api'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import { Chat } from '@/types/chat'
@@ -264,15 +264,13 @@ export default function LeadsPage() {
 
   // WebSocket: listen for lead_update events for real-time refresh
   useEffect(() => {
-    const ws = createWebSocket((data: unknown) => {
+    const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string }
       if (msg.event === 'lead_update') {
         fetchLeads()
       }
     })
-    return () => {
-      if (ws) ws.close()
-    }
+    return () => unsubscribe()
   }, [fetchLeads])
 
   // Debounce search term (500ms)
@@ -1369,6 +1367,12 @@ export default function LeadsPage() {
                         <p className="text-[13px] font-medium text-slate-900 truncate max-w-[150px]">
                           {lead.name || 'Sin nombre'}
                         </p>
+                        {lead.kommo_id && (
+                          <span title={`Vinculado a Kommo #${lead.kommo_id}`} className="flex-shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-50 rounded-full text-[10px] font-medium text-emerald-600 leading-none">
+                            <RefreshCw className="w-2.5 h-2.5" />
+                            K
+                          </span>
+                        )}
                       </div>
                       {!selectionMode && (
                         <button

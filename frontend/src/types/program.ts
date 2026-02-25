@@ -10,6 +10,12 @@ export interface Program {
   updated_at: string;
   participant_count?: number;
   session_count?: number;
+  // Schedule fields
+  schedule_start_date?: string;
+  schedule_end_date?: string;
+  schedule_days?: number[]; // 0=Sun, 1=Mon, ..., 6=Sat
+  schedule_start_time?: string; // "HH:MM"
+  schedule_end_time?: string;   // "HH:MM"
 }
 
 export interface ProgramParticipant {
@@ -27,6 +33,9 @@ export interface ProgramSession {
   program_id: string;
   date: string;
   topic: string;
+  start_time?: string; // "HH:MM"
+  end_time?: string;   // "HH:MM"
+  location?: string;
   created_at: string;
   updated_at: string;
   attendance_stats?: Record<string, number>;

@@ -139,6 +139,126 @@ export function createWebSocket(
   }
 }
 
+// ─── Shared WebSocket Singleton ───────────────────────────────────────────────
+// A single WS connection shared across all components. Components subscribe to
+// events via callbacks and unsubscribe on unmount. This prevents the
+// "WebSocket closed before the connection is established" error caused by
+// multiple components each opening/closing their own WS rapidly during navigation.
+
+type WSListener = (data: unknown) => void
+type WSConnectListener = (send: (data: string) => void) => void
+
+let _sharedWS: WebSocket | null = null
+let _sharedReconnectTimer: ReturnType<typeof setTimeout> | null = null
+let _sharedReconnectAttempts = 0
+let _sharedIntentionallyClosed = false
+let _sharedRefCount = 0
+const _sharedListeners = new Set<WSListener>()
+const _sharedConnectListeners = new Set<WSConnectListener>()
+
+function _sharedSend(data: string) {
+  if (_sharedWS && _sharedWS.readyState === WebSocket.OPEN) {
+    _sharedWS.send(data)
+  }
+}
+
+function _sharedConnect() {
+  if (typeof window === 'undefined') return
+
+  const token = localStorage.getItem('token')
+  if (!token) return
+
+  // Don't create a new connection if one is already open/connecting
+  if (_sharedWS && (_sharedWS.readyState === WebSocket.OPEN || _sharedWS.readyState === WebSocket.CONNECTING)) {
+    return
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const wsUrl = `${protocol}//${window.location.host}/ws?token=${token}`
+
+  _sharedWS = new WebSocket(wsUrl)
+
+  _sharedWS.onopen = () => {
+    console.log('WebSocket connected')
+    _sharedReconnectAttempts = 0
+    _sharedConnectListeners.forEach(cb => {
+      try { cb(_sharedSend) } catch (e) { console.error('WS connect listener error:', e) }
+    })
+  }
+
+  _sharedWS.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      _sharedListeners.forEach(cb => {
+        try { cb(data) } catch (e) { console.error('WS listener error:', e) }
+      })
+    } catch (err) {
+      console.error('WebSocket parse error:', err)
+    }
+  }
+
+  _sharedWS.onerror = () => {
+    // Logged natively by the browser
+  }
+
+  _sharedWS.onclose = () => {
+    _sharedWS = null
+    if (_sharedIntentionallyClosed || _sharedRefCount <= 0) return
+    const delay = Math.min(1000 * Math.pow(2, _sharedReconnectAttempts), 30000)
+    _sharedReconnectAttempts++
+    console.log(`WebSocket reconnecting in ${delay / 1000}s...`)
+    _sharedReconnectTimer = setTimeout(_sharedConnect, delay)
+  }
+}
+
+/**
+ * Subscribe to the shared WebSocket. Returns an unsubscribe function.
+ * The WS connection is opened on first subscribe, closed when all unsubscribe.
+ */
+export function subscribeWebSocket(
+  onMessage: WSListener,
+  onConnect?: WSConnectListener
+): () => void {
+  _sharedListeners.add(onMessage)
+  if (onConnect) _sharedConnectListeners.add(onConnect)
+
+  _sharedRefCount++
+  _sharedIntentionallyClosed = false
+
+  // Ensure connection is alive
+  _sharedConnect()
+
+  // If already connected, fire onConnect immediately
+  if (onConnect && _sharedWS && _sharedWS.readyState === WebSocket.OPEN) {
+    try { onConnect(_sharedSend) } catch (e) { console.error('WS connect listener error:', e) }
+  }
+
+  // Return unsubscribe function
+  return () => {
+    _sharedListeners.delete(onMessage)
+    if (onConnect) _sharedConnectListeners.delete(onConnect)
+    _sharedRefCount--
+
+    if (_sharedRefCount <= 0) {
+      _sharedRefCount = 0
+      _sharedIntentionallyClosed = true
+      if (_sharedReconnectTimer) {
+        clearTimeout(_sharedReconnectTimer)
+        _sharedReconnectTimer = null
+      }
+      if (_sharedWS) {
+        _sharedWS.close()
+        _sharedWS = null
+      }
+    }
+  }
+}
+
+/** Send a message through the shared WebSocket */
+export function sendSharedWS(data: string) {
+  _sharedSend(data)
+}
+
 // Type definitions for API responses
 export interface ApiResponse<T> {
   success: boolean

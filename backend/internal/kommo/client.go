@@ -286,6 +286,45 @@ func (c *Client) GetLeadByID(leadID int) (*KommoLead, error) {
 	return &lead, nil
 }
 
+// KommoUnsortedLead represents an unsorted lead from the /leads/unsorted endpoint.
+type KommoUnsortedLead struct {
+	UID        string `json:"uid"`
+	PipelineID int    `json:"pipeline_id"`
+	CreatedAt  int64  `json:"created_at"`
+	Embedded   *struct {
+		Leads    []struct{ ID int `json:"id"` } `json:"leads"`
+		Contacts []struct{ ID int `json:"id"` } `json:"contacts"`
+	} `json:"_embedded"`
+}
+
+// GetUnsortedLeads returns unsorted (incoming) leads ordered by creation date desc.
+// These leads do NOT appear in the standard /leads endpoint.
+// Returns lead IDs that need to be fetched individually via GetLeadByID.
+func (c *Client) GetUnsortedLeads(page int, limit int) ([]KommoUnsortedLead, bool, error) {
+	path := fmt.Sprintf("/leads/unsorted?page=%d&limit=%d&order[created_at]=desc", page, limit)
+	data, err := c.get(path)
+	if err != nil {
+		return nil, false, err
+	}
+
+	var resp struct {
+		Embedded struct {
+			Unsorted []KommoUnsortedLead `json:"unsorted"`
+		} `json:"_embedded"`
+		Links struct {
+			Next *struct {
+				Href string `json:"href"`
+			} `json:"next"`
+		} `json:"_links"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, false, fmt.Errorf("kommo parse unsorted leads: %w", err)
+	}
+
+	hasMore := resp.Links.Next != nil
+	return resp.Embedded.Unsorted, hasMore, nil
+}
+
 // GetLeadsForPipeline returns leads filtered by pipeline ID and optionally updated since a timestamp.
 func (c *Client) GetLeadsForPipeline(pipelineID int, updatedSince int64, page int) ([]KommoLead, bool, error) {
 	limit := 250

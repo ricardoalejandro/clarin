@@ -405,16 +405,6 @@ export default function LeadDetailPanel({
         <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10 shrink-0">
           <h2 className="text-sm font-semibold text-slate-900">Detalle del Lead</h2>
           <div className="flex items-center gap-1">
-            {lead.kommo_id && (
-              <button
-                onClick={handleSyncKommo}
-                disabled={syncingKommo}
-                title="Sincronizar desde Kommo"
-                className="p-1.5 hover:bg-emerald-50 rounded-lg text-slate-400 hover:text-emerald-600 transition-colors disabled:opacity-50"
-              >
-                <RefreshCw className={`w-4 h-4 ${syncingKommo ? 'animate-spin' : ''}`} />
-              </button>
-            )}
             <button onClick={onClose} className="p-1.5 hover:bg-slate-100 rounded-lg">
               <X className="w-4 h-4 text-slate-400" />
             </button>
@@ -457,6 +447,32 @@ export default function LeadDetailPanel({
               {lead.stage_name}
             </span>
           )}
+
+          {/* Kommo sync status */}
+          <div className="flex items-center justify-center gap-2 mt-3">
+            {lead.kommo_id ? (
+              <>
+                <span className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 border border-emerald-200 rounded-full text-xs font-medium text-emerald-700">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
+                  Kommo #{lead.kommo_id}
+                </span>
+                <button
+                  onClick={handleSyncKommo}
+                  disabled={syncingKommo}
+                  title="Sincronizar desde Kommo ahora"
+                  className="flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50 rounded-full text-xs font-medium text-slate-500 hover:text-emerald-700 transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${syncingKommo ? 'animate-spin text-emerald-600' : ''}`} />
+                  {syncingKommo ? 'Sincronizando…' : 'Sincronizar'}
+                </button>
+              </>
+            ) : (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-full text-xs text-slate-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-slate-300 flex-shrink-0" />
+                Sin vínculo Kommo
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Inline editable info fields */}

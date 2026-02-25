@@ -19,6 +19,10 @@ const (
 
 	// Send pings to peer with this interval (must be < pongWait)
 	pingInterval = 30 * time.Second
+
+	// Maximum WebSocket connections allowed per account
+	// Prevents memory/goroutine exhaustion from too many open tabs
+	maxConnectionsPerAccount = 20
 )
 
 // Event types for WebSocket communication
@@ -93,13 +97,24 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.mu.Lock()
-			h.clients[client] = true
 			if _, ok := h.accountClients[client.AccountID]; !ok {
 				h.accountClients[client.AccountID] = make(map[*Client]bool)
 			}
+			// Enforce connection limit per account — evict oldest if at capacity
+			for len(h.accountClients[client.AccountID]) >= maxConnectionsPerAccount {
+				for old := range h.accountClients[client.AccountID] {
+					delete(h.clients, old)
+					delete(h.accountClients[client.AccountID], old)
+					close(old.Send)
+					log.Printf("[WS Hub] Evicted client %s (account %s): connection limit %d reached", old.ID, client.AccountID, maxConnectionsPerAccount)
+					break
+				}
+			}
+			h.clients[client] = true
 			h.accountClients[client.AccountID][client] = true
+			count := len(h.accountClients[client.AccountID])
 			h.mu.Unlock()
-			log.Printf("[WS Hub] Client registered: %s (Account: %s)", client.ID, client.AccountID)
+			log.Printf("[WS Hub] Client registered: %s (Account: %s, connections: %d/%d)", client.ID, client.AccountID, count, maxConnectionsPerAccount)
 
 		case client := <-h.unregister:
 			h.mu.Lock()
@@ -305,6 +320,10 @@ func (c *Client) handleMessage(msg *Message) {
 	case "ping":
 		// Respond to ping with pong
 		c.Send <- []byte(`{"event":"pong"}`)
+	case "subscribe_chat", "unsubscribe_chat":
+		// Acknowledged — with shared WS singleton, server-side filtering
+		// is not applied (one connection serves multiple UI components).
+		// Client-side filtering handles chat-specific messages.
 	default:
 		log.Printf("[WS Client] Unknown event: %s", msg.Event)
 	}

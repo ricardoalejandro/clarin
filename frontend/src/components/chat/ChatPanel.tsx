@@ -10,7 +10,7 @@ import {
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { Chat, Message } from '@/types/chat'
-import { createWebSocket } from '@/lib/api'
+import { subscribeWebSocket } from '@/lib/api'
 import { getChatDisplayName } from '@/utils/chat'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '../WhatsAppTextInput'
 import ImageViewer from './ImageViewer'
@@ -74,7 +74,6 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<WhatsAppTextInputHandle>(null)
-  const wsRef = useRef<ReturnType<typeof createWebSocket>>(null)
   const optimisticIdRef = useRef(0)
 
   // Fetch quick replies
@@ -147,45 +146,41 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   useEffect(() => {
     if (!chatId || !deviceId) return
 
-    // Close previous WS if any
-    if (wsRef.current) {
-      wsRef.current.close()
-    }
-
-    const ws = createWebSocket(
+    const unsubscribe = subscribeWebSocket(
       (data: unknown) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const msg = data as any
         const eventType = msg.type || msg.event
-        const payload = msg.message || msg.data
+        const payload = msg.data || msg.message
 
-        if ((eventType === 'new_message') && payload) {
-          if (payload.chat_id === chatId ||
-              (chat && payload.from_jid === chat?.jid) ||
-              (chat && payload.to === chat?.jid)) {
+        if ((eventType === 'new_message' || eventType === 'message_sent') && payload) {
+          // The actual message object is nested inside payload.message
+          const actualMsg = payload.message || payload
+          const matchChatId = payload.chat_id || actualMsg.chat_id
+          if (matchChatId === chatId ||
+              (chat && actualMsg.from_jid === chat?.jid) ||
+              (chat && actualMsg.to === chat?.jid)) {
             setMessages(prev => {
-              if (prev.some(m => m.id === payload.id)) return prev
-              return [...prev, payload as Message]
+              if (prev.some(m => m.id === actualMsg.id)) return prev
+              return [...prev, actualMsg as Message]
             })
             scrollToBottom()
           }
         } else if ((eventType === 'message_update') && payload) {
-          setMessages(prev => prev.map(m => m.id === payload.id ? (payload as Message) : m))
+          const actualMsg = payload.message || payload
+          setMessages(prev => prev.map(m => m.id === actualMsg.id ? (actualMsg as Message) : m))
         }
       },
       (send) => {
         send(JSON.stringify({
-          type: 'subscribe_chat',
-          chat_id: chatId,
-          device_id: deviceId
+          event: 'subscribe_chat',
+          data: { chat_id: chatId, device_id: deviceId }
         }))
       }
     )
-    if (!ws) return
-    wsRef.current = ws
 
     return () => {
-      ws.close()
+      unsubscribe()
     }
   }, [chatId, deviceId, chat])
 

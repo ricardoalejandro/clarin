@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { Search, Plus, X, Trash2, CheckSquare, Square, MessageCircle } from 'lucide-react'
 import { formatTime } from '@/utils/format'
-import { createWebSocket } from '@/lib/api'
+import { subscribeWebSocket } from '@/lib/api'
 import DeviceSelector from '@/components/chat/DeviceSelector'
 import TagSelector from '@/components/chat/TagSelector'
 import NewChatModal from '@/components/chat/NewChatModal'
@@ -149,14 +149,13 @@ export default function ChatsPage() {
 
   // WebSocket for List Updates
   useEffect(() => {
-    const ws = createWebSocket((data: unknown) => {
+    const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string }
       if (msg.event && ['new_message', 'message_sent'].includes(msg.event)) {
         fetchChats()
       }
     })
-    if (!ws) return
-    return () => ws.close()
+    return () => unsubscribe()
   }, [fetchChats])
 
   // Resize Handlers

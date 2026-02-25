@@ -180,8 +180,8 @@ func main() {
 							w := int(time.Since(lastSendTime).Milliseconds())
 							waitTimeMs = &w
 						}
-						hasMore, err := services.Campaign.ProcessNextRecipient(context.Background(), c.ID, waitTimeMs)
-						if err != nil || !hasMore {
+						hasMore, sendErr := services.Campaign.ProcessNextRecipient(context.Background(), c.ID, waitTimeMs)
+						if !hasMore {
 							break
 						}
 						lastSendTime = time.Now()
@@ -192,7 +192,11 @@ func main() {
 							delayRange = 0
 						}
 						delay := time.Duration(minDelay+rand.Intn(delayRange+1)) * time.Second
-						log.Printf("[Campaign %s] Sent msg %d, waiting %v", c.ID, sentInBatch, delay)
+						if sendErr != nil {
+							log.Printf("[Campaign %s] ❌ Failed msg %d: %v, waiting %v", c.ID, sentInBatch, sendErr, delay)
+						} else {
+							log.Printf("[Campaign %s] ✅ Sent msg %d, waiting %v", c.ID, sentInBatch, delay)
+						}
 						time.Sleep(delay)
 					}
 					// Pause between batches to avoid detection

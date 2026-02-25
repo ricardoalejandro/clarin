@@ -10,6 +10,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -187,31 +189,35 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 	client.EnableAutoReconnect = true
 	client.AutoTrustIdentity = true
 
-	// Configure media HTTP client to force IPv6 (WhatsApp CDN blocks large uploads on IPv4)
-	ipv6Dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
+	// Configure media HTTP client with SOCKS5 proxy to bypass CDN throttling.
+	// WhatsApp CDN rate-limits/blocks large uploads (>100KB) from certain IPs.
+	// Route media uploads through Cloudflare WARP SOCKS5 proxy for a clean IP.
+	mediaTransport := &http.Transport{
+		DisableKeepAlives:     true,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:         make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:  15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: -1,
+		}).DialContext,
+		TLSClientConfig: &tls.Config{
+			NextProtos: []string{"http/1.1"},
+		},
+	}
+	// If MEDIA_SOCKS5_PROXY is set (e.g. socks5://172.23.0.1:40001), route CDN uploads through it
+	if proxyURL := os.Getenv("MEDIA_SOCKS5_PROXY"); proxyURL != "" {
+		if parsed, err := url.Parse(proxyURL); err == nil {
+			mediaTransport.Proxy = http.ProxyURL(parsed)
+			log.Printf("[DevicePool] Media uploads will use SOCKS5 proxy: %s", proxyURL)
+		} else {
+			log.Printf("[DevicePool] WARNING: Invalid MEDIA_SOCKS5_PROXY URL: %s (%v)", proxyURL, err)
+		}
 	}
 	client.SetMediaHTTPClient(&http.Client{
-		Timeout: 60 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				// Force IPv6 for WhatsApp CDN to avoid IPv4 upload blocks
-				conn, err := ipv6Dialer.DialContext(ctx, "tcp6", addr)
-				if err != nil {
-					// Fallback to default (IPv4) if IPv6 fails
-					log.Printf("[MediaHTTP] IPv6 dial failed for %s, falling back to IPv4: %v", addr, err)
-					return ipv6Dialer.DialContext(ctx, "tcp4", addr)
-				}
-				return conn, nil
-			},
-			TLSClientConfig:       &tls.Config{},
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          10,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+		Timeout:   120 * time.Second,
+		Transport: mediaTransport,
 	})
 
 	// Create device instance
@@ -1578,7 +1584,23 @@ func (p *DevicePool) publicToProxyURL(publicURL string) string {
 }
 
 // SendMediaMessage sends a media message (image, video, audio, document)
-func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType string) (*domain.Message, error) {
+// PreUploadedMedia contains the WhatsApp upload metadata for reuse across multiple recipients.
+// Upload once, send many — avoids re-uploading the same file per recipient during campaigns.
+type PreUploadedMedia struct {
+	URL           string
+	DirectPath    string
+	MediaKey      []byte
+	FileEncSHA256 []byte
+	FileSHA256    []byte
+	FileLength    uint64
+	Mimetype      string
+	MediaType     string // domain.MessageType*
+	OriginalURL   string // original media URL for proxy URL resolution
+}
+
+// UploadMedia downloads a file from storage/URL and uploads it to WhatsApp ONCE.
+// Returns a PreUploadedMedia that can be reused with SendPreUploadedMediaMessage for many recipients.
+func (p *DevicePool) UploadMedia(ctx context.Context, deviceID uuid.UUID, mediaURL, mediaType string) (*PreUploadedMedia, error) {
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -1587,32 +1609,18 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 		return nil, fmt.Errorf("device not connected: %s", deviceID)
 	}
 
-	// Parse recipient JID - construct directly for phone numbers to avoid ParseJID misparse
-	var jid types.JID
-	if strings.Contains(to, "@") {
-		var err error
-		jid, err = types.ParseJID(to)
-		if err != nil {
-			return nil, fmt.Errorf("invalid JID: %s", to)
-		}
-	} else {
-		jid = types.NewJID(to, types.DefaultUserServer)
-	}
-
 	// Download media - handle proxy URLs and public URLs
 	var data []byte
 	var mimetype string
 
 	if strings.HasPrefix(mediaURL, "/api/media/file/") {
-		// Proxy URL: read directly from MinIO storage
 		objectKey := strings.TrimPrefix(mediaURL, "/api/media/file/")
-		log.Printf("[SendMediaMessage] Reading from storage: %s", objectKey)
+		log.Printf("[UploadMedia] Reading from storage: %s", objectKey)
 		var err2 error
 		data, err2 = p.storage.GetFile(ctx, objectKey)
 		if err2 != nil {
 			return nil, fmt.Errorf("failed to read media from storage: %w", err2)
 		}
-		// Detect mimetype from extension
 		mimetype = "application/octet-stream"
 		if dotIdx := strings.LastIndex(objectKey, "."); dotIdx >= 0 {
 			ext := strings.ToLower(objectKey[dotIdx:])
@@ -1638,7 +1646,6 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 			}
 		}
 	} else {
-		// Public or external URL: download via HTTP
 		downloadURL := mediaURL
 		if p.cfg.MinioPublicURL != "" && p.cfg.MinioEndpoint != "" {
 			scheme := "http"
@@ -1647,7 +1654,7 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 			}
 			internalURL := fmt.Sprintf("%s://%s", scheme, p.cfg.MinioEndpoint)
 			downloadURL = strings.Replace(mediaURL, p.cfg.MinioPublicURL, internalURL, 1)
-			log.Printf("[SendMediaMessage] Converted URL: %s -> %s", mediaURL, downloadURL)
+			log.Printf("[UploadMedia] Converted URL: %s -> %s", mediaURL, downloadURL)
 		}
 		resp, err := http.Get(downloadURL)
 		if err != nil {
@@ -1682,11 +1689,11 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 		return nil, fmt.Errorf("unsupported media type: %s", mediaType)
 	}
 
-	// Upload to WhatsApp with the correct media type (with retry for transient network errors)
-	log.Printf("[SendMediaMessage] Uploading %s (%d bytes)", mediaType, len(data))
+	// Upload to WhatsApp with retry for transient network errors
+	log.Printf("[UploadMedia] Uploading %s (%d bytes)", mediaType, len(data))
 	var uploaded whatsmeow.UploadResponse
 	var uploadErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		uploaded, uploadErr = instance.Client.Upload(ctx, data, waMediaType)
 		if uploadErr == nil {
 			break
@@ -1698,69 +1705,111 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 			strings.Contains(errStr, "connection refused") ||
 			strings.Contains(errStr, "broken pipe")
 		if !isTransient {
-			break // Non-retryable error
+			break
 		}
-		backoff := time.Duration(2<<attempt) * time.Second // 2s, 4s, 8s
-		log.Printf("[SendMediaMessage] Upload attempt %d failed (retrying in %v): %v", attempt+1, backoff, uploadErr)
+		backoff := time.Duration(2<<attempt) * time.Second
+		log.Printf("[UploadMedia] Upload attempt %d failed (retrying in %v): %v", attempt+1, backoff, uploadErr)
 		time.Sleep(backoff)
+		if _, err := instance.Client.DangerousInternals().RefreshMediaConn(ctx, true); err != nil {
+			log.Printf("[UploadMedia] Failed to refresh media connection: %v", err)
+		} else {
+			log.Printf("[UploadMedia] Refreshed media connection for retry %d", attempt+2)
+		}
 	}
 	if uploadErr != nil {
 		return nil, fmt.Errorf("failed to upload to WhatsApp: %w", uploadErr)
 	}
 
-	var msg *waE2E.Message
+	log.Printf("[UploadMedia] Upload complete: %s (%d bytes) -> %s", mediaType, len(data), uploaded.URL)
+	return &PreUploadedMedia{
+		URL:           uploaded.URL,
+		DirectPath:    uploaded.DirectPath,
+		MediaKey:      uploaded.MediaKey,
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    uint64(len(data)),
+		Mimetype:      mimetype,
+		MediaType:     mediaType,
+		OriginalURL:   mediaURL,
+	}, nil
+}
 
-	switch mediaType {
+// SendPreUploadedMediaMessage sends a pre-uploaded media to a recipient, without re-downloading/re-uploading.
+// Used by campaign worker to send the same media to many recipients efficiently.
+func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption string, media *PreUploadedMedia) (*domain.Message, error) {
+	p.mu.RLock()
+	instance, exists := p.devices[deviceID]
+	p.mu.RUnlock()
+
+	if !exists || instance.Client == nil {
+		return nil, fmt.Errorf("device not connected: %s", deviceID)
+	}
+
+	// Parse recipient JID
+	var jid types.JID
+	if strings.Contains(to, "@") {
+		var err error
+		jid, err = types.ParseJID(to)
+		if err != nil {
+			return nil, fmt.Errorf("invalid JID: %s", to)
+		}
+	} else {
+		jid = types.NewJID(to, types.DefaultUserServer)
+	}
+
+	// Build message from pre-uploaded metadata
+	var msg *waE2E.Message
+	switch media.MediaType {
 	case domain.MessageTypeImage:
 		msg = &waE2E.Message{
 			ImageMessage: &waE2E.ImageMessage{
-				URL:           proto.String(uploaded.URL),
-				DirectPath:    proto.String(uploaded.DirectPath),
-				MediaKey:      uploaded.MediaKey,
-				Mimetype:      proto.String(mimetype),
-				FileEncSHA256: uploaded.FileEncSHA256,
-				FileSHA256:    uploaded.FileSHA256,
-				FileLength:    proto.Uint64(uint64(len(data))),
+				URL:           proto.String(media.URL),
+				DirectPath:    proto.String(media.DirectPath),
+				MediaKey:      media.MediaKey,
+				Mimetype:      proto.String(media.Mimetype),
+				FileEncSHA256: media.FileEncSHA256,
+				FileSHA256:    media.FileSHA256,
+				FileLength:    proto.Uint64(media.FileLength),
 				Caption:       proto.String(caption),
 			},
 		}
 	case domain.MessageTypeVideo:
 		msg = &waE2E.Message{
 			VideoMessage: &waE2E.VideoMessage{
-				URL:           proto.String(uploaded.URL),
-				DirectPath:    proto.String(uploaded.DirectPath),
-				MediaKey:      uploaded.MediaKey,
-				Mimetype:      proto.String(mimetype),
-				FileEncSHA256: uploaded.FileEncSHA256,
-				FileSHA256:    uploaded.FileSHA256,
-				FileLength:    proto.Uint64(uint64(len(data))),
+				URL:           proto.String(media.URL),
+				DirectPath:    proto.String(media.DirectPath),
+				MediaKey:      media.MediaKey,
+				Mimetype:      proto.String(media.Mimetype),
+				FileEncSHA256: media.FileEncSHA256,
+				FileSHA256:    media.FileSHA256,
+				FileLength:    proto.Uint64(media.FileLength),
 				Caption:       proto.String(caption),
 			},
 		}
 	case domain.MessageTypeAudio:
 		msg = &waE2E.Message{
 			AudioMessage: &waE2E.AudioMessage{
-				URL:           proto.String(uploaded.URL),
-				DirectPath:    proto.String(uploaded.DirectPath),
-				MediaKey:      uploaded.MediaKey,
-				Mimetype:      proto.String(mimetype),
-				FileEncSHA256: uploaded.FileEncSHA256,
-				FileSHA256:    uploaded.FileSHA256,
-				FileLength:    proto.Uint64(uint64(len(data))),
+				URL:           proto.String(media.URL),
+				DirectPath:    proto.String(media.DirectPath),
+				MediaKey:      media.MediaKey,
+				Mimetype:      proto.String(media.Mimetype),
+				FileEncSHA256: media.FileEncSHA256,
+				FileSHA256:    media.FileSHA256,
+				FileLength:    proto.Uint64(media.FileLength),
 				PTT:           proto.Bool(true),
 			},
 		}
 	case domain.MessageTypeDocument:
-		filename := filepath.Base(mediaURL)
+		filename := filepath.Base(media.OriginalURL)
 		msg = &waE2E.Message{
 			DocumentMessage: &waE2E.DocumentMessage{
-				URL:           proto.String(uploaded.URL),
-				DirectPath:    proto.String(uploaded.DirectPath),
-				MediaKey:      uploaded.MediaKey,
-				Mimetype:      proto.String(mimetype),
-				FileEncSHA256: uploaded.FileEncSHA256,
-				FileSHA256:    uploaded.FileSHA256,
-				FileLength:    proto.Uint64(uint64(len(data))),
+				URL:           proto.String(media.URL),
+				DirectPath:    proto.String(media.DirectPath),
+				MediaKey:      media.MediaKey,
+				Mimetype:      proto.String(media.Mimetype),
+				FileEncSHA256: media.FileEncSHA256,
+				FileSHA256:    media.FileSHA256,
+				FileLength:    proto.Uint64(media.FileLength),
 				FileName:      proto.String(filename),
 				Caption:       proto.String(caption),
 			},
@@ -1768,13 +1817,13 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 	case domain.MessageTypeSticker:
 		msg = &waE2E.Message{
 			StickerMessage: &waE2E.StickerMessage{
-				URL:           proto.String(uploaded.URL),
-				DirectPath:    proto.String(uploaded.DirectPath),
-				MediaKey:      uploaded.MediaKey,
+				URL:           proto.String(media.URL),
+				DirectPath:    proto.String(media.DirectPath),
+				MediaKey:      media.MediaKey,
 				Mimetype:      proto.String("image/webp"),
-				FileEncSHA256: uploaded.FileEncSHA256,
-				FileSHA256:    uploaded.FileSHA256,
-				FileLength:    proto.Uint64(uint64(len(data))),
+				FileEncSHA256: media.FileEncSHA256,
+				FileSHA256:    media.FileSHA256,
+				FileLength:    proto.Uint64(media.FileLength),
 			},
 		}
 	}
@@ -1785,13 +1834,12 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Get or create chat using normalized JID (without device suffix)
-	// Resolve @lid to @s.whatsapp.net for consistent chat identity
+	// Get or create chat using normalized JID
 	normalizedJID := jid.ToNonAD().String()
 	if jid.Server == types.HiddenUserServer {
 		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 			normalizedJID = pnJID.User + "@s.whatsapp.net"
-			log.Printf("[SendMediaMessage] Resolved LID %s -> %s", jid.ToNonAD().String(), normalizedJID)
+			log.Printf("[SendPreUploadedMedia] Resolved LID %s -> %s", jid.ToNonAD().String(), normalizedJID)
 		}
 	}
 	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
@@ -1799,9 +1847,9 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
 
-	// Create message record - store proxy URL for reliable frontend display
-	proxyMediaURL := p.publicToProxyURL(mediaURL)
-	size := int64(len(data))
+	// Create message record
+	proxyMediaURL := p.publicToProxyURL(media.OriginalURL)
+	size := int64(media.FileLength)
 	message := &domain.Message{
 		AccountID:     instance.AccountID,
 		DeviceID:      &instance.ID,
@@ -1810,9 +1858,9 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 		FromJID:       strPtr(instance.JID),
 		FromName:      strPtr("Me"),
 		Body:          strPtr(caption),
-		MessageType:   strPtr(mediaType),
+		MessageType:   strPtr(media.MediaType),
 		MediaURL:      strPtr(proxyMediaURL),
-		MediaMimetype: strPtr(mimetype),
+		MediaMimetype: strPtr(media.Mimetype),
 		MediaSize:     &size,
 		IsFromMe:      true,
 		Status:        strPtr("sent"),
@@ -1820,24 +1868,32 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 	}
 
 	if err := p.repos.Message.Create(ctx, message); err != nil {
-		log.Printf("[SendMediaMessage] Failed to save message: %v", err)
+		log.Printf("[SendPreUploadedMedia] Failed to save message: %v", err)
 	}
 
-	// Update chat
 	lastMsg := caption
 	if lastMsg == "" {
-		lastMsg = fmt.Sprintf("[%s]", mediaType)
+		lastMsg = fmt.Sprintf("[%s]", media.MediaType)
 	}
 	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, lastMsg, sendResp.Timestamp, false)
 
-	// Broadcast to frontend
 	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
 		"chat_id": chat.ID.String(),
 		"message": message,
 	})
 
-	log.Printf("[SendMediaMessage] %s -> %s: [%s]", instance.JID, jid.String(), mediaType)
+	log.Printf("[SendPreUploadedMedia] %s -> %s: [%s]", instance.JID, jid.String(), media.MediaType)
 	return message, nil
+}
+
+// SendMediaMessage sends a media message (downloads, uploads, and sends in one call).
+// For bulk sends, prefer UploadMedia + SendPreUploadedMediaMessage to avoid redundant uploads.
+func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType string) (*domain.Message, error) {
+	media, err := p.UploadMedia(ctx, deviceID, mediaURL, mediaType)
+	if err != nil {
+		return nil, err
+	}
+	return p.SendPreUploadedMediaMessage(ctx, deviceID, to, caption, media)
 }
 
 // GetDevice returns a device instance by ID

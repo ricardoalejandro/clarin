@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import {
   Building2, Users, Plus, Pencil, Trash2, Power, KeyRound,
-  Search, X, Shield, ChevronDown, Link2
+  Search, X, Shield, ChevronDown, Link2, Lock, CheckSquare, Square
 } from 'lucide-react'
 
 interface Account {
@@ -38,10 +38,34 @@ interface UserAccountAssignment {
   account_name: string
   account_slug: string
   role: string
+  role_id?: string
+  role_name?: string
+  permissions?: string[]
   is_default: boolean
 }
 
-type Tab = 'accounts' | 'users'
+interface Role {
+  id: string
+  name: string
+  description: string
+  is_system: boolean
+  permissions: string[]
+  created_at: string
+}
+
+const ALL_MODULES = [
+  { key: 'chats', label: 'Chats', color: 'emerald' },
+  { key: 'contacts', label: 'Contactos', color: 'blue' },
+  { key: 'leads', label: 'Leads', color: 'violet' },
+  { key: 'programs', label: 'Programas', color: 'orange' },
+  { key: 'devices', label: 'Dispositivos', color: 'cyan' },
+  { key: 'events', label: 'Eventos', color: 'pink' },
+  { key: 'broadcasts', label: 'Difusión', color: 'yellow' },
+  { key: 'tags', label: 'Etiquetas', color: 'teal' },
+  { key: 'settings', label: 'Configuración', color: 'slate' },
+]
+
+type Tab = 'accounts' | 'users' | 'roles'
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>('accounts')
@@ -67,6 +91,13 @@ export default function AdminPage() {
   const [userAssignments, setUserAssignments] = useState<UserAccountAssignment[]>([])
   const [assignAccountId, setAssignAccountId] = useState('')
   const [assignRole, setAssignRole] = useState('agent')
+  const [assignRoleId, setAssignRoleId] = useState('')
+
+  // Roles
+  const [roles, setRoles] = useState<Role[]>([])
+  const [showRoleModal, setShowRoleModal] = useState(false)
+  const [editingRole, setEditingRole] = useState<Role | null>(null)
+  const [roleForm, setRoleForm] = useState({ name: '', description: '', permissions: [] as string[] })
 
   // Account form
   const [accountForm, setAccountForm] = useState({
@@ -108,9 +139,19 @@ export default function AdminPage() {
     }
   }
 
+  async function fetchRoles() {
+    try {
+      const res = await fetch('/api/admin/roles', { headers })
+      const data = await res.json()
+      if (data.success) setRoles(data.roles || [])
+    } catch (e) {
+      console.error('Failed to fetch roles:', e)
+    }
+  }
+
   useEffect(() => {
     setLoading(true)
-    Promise.all([fetchAccounts(), fetchUsers()]).finally(() => setLoading(false))
+    Promise.all([fetchAccounts(), fetchUsers(), fetchRoles()]).finally(() => setLoading(false))
   }, [])
 
   useEffect(() => {
@@ -122,13 +163,14 @@ export default function AdminPage() {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (showPasswordModal) { setShowPasswordModal(false); return }
+      if (showRoleModal) { setShowRoleModal(false); return }
       if (showAssignModal) { setShowAssignModal(false); return }
       if (showUserModal) { setShowUserModal(false); return }
       if (showAccountModal) { setShowAccountModal(false); return }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showPasswordModal, showAssignModal, showUserModal, showAccountModal])
+  }, [showPasswordModal, showRoleModal, showAssignModal, showUserModal, showAccountModal])
 
   // Account CRUD
   function openCreateAccount() {
@@ -259,6 +301,7 @@ export default function AdminPage() {
     setAssignUserName(u.display_name || u.username)
     setAssignAccountId('')
     setAssignRole('agent')
+    setAssignRoleId('')
     setShowAssignModal(true)
     await fetchUserAssignments(u.id)
   }
@@ -275,14 +318,17 @@ export default function AdminPage() {
 
   async function assignAccount() {
     if (!assignAccountId) return
+    const body: Record<string, unknown> = { account_id: assignAccountId, role: assignRole }
+    if (assignRoleId) body.role_id = assignRoleId
     const res = await fetch(`/api/admin/users/${assignUserId}/accounts`, {
       method: 'POST', headers,
-      body: JSON.stringify({ account_id: assignAccountId, role: assignRole })
+      body: JSON.stringify(body)
     })
     const data = await res.json()
     if (data.success) {
       setAssignAccountId('')
       setAssignRole('agent')
+      setAssignRoleId('')
       await fetchUserAssignments(assignUserId)
     } else {
       alert(data.error || 'Error al asignar')
@@ -312,6 +358,58 @@ export default function AdminPage() {
     u.email.toLowerCase().includes(search.toLowerCase()) ||
     (u.display_name || '').toLowerCase().includes(search.toLowerCase())
   )
+
+  const filteredRoles = roles.filter(r =>
+    r.name.toLowerCase().includes(search.toLowerCase()) ||
+    r.description.toLowerCase().includes(search.toLowerCase())
+  )
+
+  // Role CRUD
+  function openCreateRole() {
+    setEditingRole(null)
+    setRoleForm({ name: '', description: '', permissions: [] })
+    setShowRoleModal(true)
+  }
+
+  function openEditRole(r: Role) {
+    setEditingRole(r)
+    setRoleForm({ name: r.name, description: r.description, permissions: [...r.permissions] })
+    setShowRoleModal(true)
+  }
+
+  function toggleModulePermission(module: string) {
+    setRoleForm(f => ({
+      ...f,
+      permissions: f.permissions.includes(module)
+        ? f.permissions.filter(p => p !== module)
+        : [...f.permissions, module]
+    }))
+  }
+
+  async function saveRole() {
+    if (!roleForm.name.trim()) { alert('El nombre del rol es requerido'); return }
+    const method = editingRole ? 'PUT' : 'POST'
+    const url = editingRole ? `/api/admin/roles/${editingRole.id}` : '/api/admin/roles'
+    const res = await fetch(url, { method, headers, body: JSON.stringify(roleForm) })
+    const data = await res.json()
+    if (data.success) {
+      setShowRoleModal(false)
+      fetchRoles()
+    } else {
+      alert(data.error || 'Error al guardar rol')
+    }
+  }
+
+  async function deleteRole(id: string) {
+    const role = roles.find(r => r.id === id)
+    if (!role) return
+    if (role.is_system) { alert('Los roles del sistema no pueden eliminarse'); return }
+    if (!confirm(`¿Eliminar el rol "${role.name}"? Los usuarios asignados a este rol perderán sus permisos.`)) return
+    const res = await fetch(`/api/admin/roles/${id}`, { method: 'DELETE', headers })
+    const data = await res.json()
+    if (!data.success) { alert(data.error || 'Error al eliminar'); return }
+    fetchRoles()
+  }
 
   const planColors: Record<string, string> = {
     basic: 'bg-gray-100 text-gray-700',
@@ -372,6 +470,15 @@ export default function AdminPage() {
           <Users className="w-4 h-4" /> Usuarios
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{users.length}</span>
         </button>
+        <button
+          onClick={() => { setTab('roles'); setSearch('') }}
+          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            tab === 'roles' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Lock className="w-4 h-4" /> Roles
+          <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{roles.length}</span>
+        </button>
       </div>
 
       {/* Search & Actions */}
@@ -380,7 +487,7 @@ export default function AdminPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder={tab === 'accounts' ? 'Buscar cuentas...' : 'Buscar usuarios...'}
+            placeholder={tab === 'accounts' ? 'Buscar cuentas...' : tab === 'users' ? 'Buscar usuarios...' : 'Buscar roles...'}
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent"
@@ -405,13 +512,22 @@ export default function AdminPage() {
           </select>
         )}
 
-        <button
-          onClick={tab === 'accounts' ? openCreateAccount : openCreateUser}
-          className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium whitespace-nowrap"
-        >
-          <Plus className="w-4 h-4" />
-          {tab === 'accounts' ? 'Nueva Cuenta' : 'Nuevo Usuario'}
-        </button>
+        {tab !== 'roles' ? (
+          <button
+            onClick={tab === 'accounts' ? openCreateAccount : openCreateUser}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium whitespace-nowrap"
+          >
+            <Plus className="w-4 h-4" />
+            {tab === 'accounts' ? 'Nueva Cuenta' : 'Nuevo Usuario'}
+          </button>
+        ) : (
+          <button
+            onClick={openCreateRole}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium whitespace-nowrap"
+          >
+            <Plus className="w-4 h-4" /> Nuevo Rol
+          </button>
+        )}
       </div>
 
       {/* Content */}
@@ -468,7 +584,7 @@ export default function AdminPage() {
               ))}
             </tbody>
           </table>
-        ) : (
+        ) : tab === 'users' ? (
           <table className="w-full text-sm">
             <thead className="bg-gray-50 sticky top-0">
               <tr>
@@ -526,8 +642,151 @@ export default function AdminPage() {
               ))}
             </tbody>
           </table>
+        ) : (
+          /* Roles Table */
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 sticky top-0">
+              <tr>
+                <th className="text-left px-4 py-3 font-medium text-gray-500">Rol</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-500">Permisos</th>
+                <th className="text-center px-4 py-3 font-medium text-gray-500">Tipo</th>
+                <th className="text-right px-4 py-3 font-medium text-gray-500">Acciones</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {filteredRoles.length === 0 ? (
+                <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">No se encontraron roles</td></tr>
+              ) : filteredRoles.map(r => (
+                <tr key={r.id} className="hover:bg-gray-50">
+                  <td className="px-4 py-3">
+                    <div className="font-medium text-gray-900">{r.name}</div>
+                    {r.description && <div className="text-xs text-gray-400 mt-0.5">{r.description}</div>}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-1">
+                      {r.permissions.length === 0 ? (
+                        <span className="text-xs text-gray-400 italic">Sin permisos</span>
+                      ) : r.permissions.map(p => {
+                        const mod = ALL_MODULES.find(m => m.key === p)
+                        return (
+                          <span key={p} className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+                            {mod?.label || p}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-center">
+                    {r.is_system ? (
+                      <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">Sistema</span>
+                    ) : (
+                      <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Custom</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <button onClick={() => openEditRole(r)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded" title="Editar">
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      {!r.is_system && (
+                        <button onClick={() => deleteRole(r.id)} className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded" title="Eliminar">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
+
+      {/* Role Modal */}
+      {showRoleModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg">
+            <div className="p-6 border-b border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-900">
+                {editingRole ? 'Editar Rol' : 'Nuevo Rol'}
+              </h2>
+              <p className="text-sm text-gray-500 mt-1">Define qué módulos pueden acceder los usuarios con este rol</p>
+            </div>
+            <div className="p-6 space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre del rol</label>
+                <input
+                  type="text"
+                  value={roleForm.name}
+                  onChange={e => setRoleForm(f => ({ ...f, name: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  placeholder="Ej: Vendedor, Soporte, Supervisor..."
+                  disabled={editingRole?.is_system}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Descripción (opcional)</label>
+                <input
+                  type="text"
+                  value={roleForm.description}
+                  onChange={e => setRoleForm(f => ({ ...f, description: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  placeholder="Breve descripción del rol..."
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-3">
+                  Módulos accesibles
+                  <span className="ml-2 text-xs font-normal text-gray-400">
+                    ({roleForm.permissions.length} de {ALL_MODULES.length} seleccionados)
+                  </span>
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {ALL_MODULES.map(mod => {
+                    const active = roleForm.permissions.includes(mod.key)
+                    return (
+                      <button
+                        key={mod.key}
+                        type="button"
+                        onClick={() => toggleModulePermission(mod.key)}
+                        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
+                          active
+                            ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                            : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        {active
+                          ? <CheckSquare className="w-4 h-4 shrink-0 text-emerald-500" />
+                          : <Square className="w-4 h-4 shrink-0 text-gray-300" />
+                        }
+                        {mod.label}
+                      </button>
+                    )
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRoleForm(f => ({
+                    ...f,
+                    permissions: f.permissions.length === ALL_MODULES.length ? [] : ALL_MODULES.map(m => m.key)
+                  }))}
+                  className="mt-3 text-xs text-emerald-600 hover:underline"
+                >
+                  {roleForm.permissions.length === ALL_MODULES.length ? 'Quitar todos' : 'Seleccionar todos'}
+                </button>
+              </div>
+            </div>
+            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+              <button onClick={() => setShowRoleModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
+                Cancelar
+              </button>
+              <button onClick={saveRole} className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
+                {editingRole ? 'Guardar' : 'Crear Rol'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Account Modal */}
       {showAccountModal && (
@@ -735,12 +994,17 @@ export default function AdminPage() {
                   <div className="space-y-2">
                     {userAssignments.map(ua => (
                       <div key={ua.account_id} className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
-                        <div className="flex items-center gap-2">
-                          <Building2 className="w-4 h-4 text-gray-400" />
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Building2 className="w-4 h-4 text-gray-400 shrink-0" />
                           <span className="text-sm font-medium text-gray-900">{ua.account_name}</span>
                           <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${roleColors[ua.role] || 'bg-gray-100 text-gray-700'}`}>
                             {roleLabels[ua.role] || ua.role}
                           </span>
+                          {ua.role_name && (
+                            <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+                              {ua.role_name}
+                            </span>
+                          )}
                           {ua.is_default && (
                             <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
                               Principal
@@ -763,11 +1027,11 @@ export default function AdminPage() {
               {/* Add new assignment */}
               <div className="border-t border-gray-200 pt-4">
                 <label className="block text-sm font-medium text-gray-700 mb-2">Agregar cuenta</label>
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   <select
                     value={assignAccountId}
                     onChange={e => setAssignAccountId(e.target.value)}
-                    className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                    className="flex-1 min-w-[140px] px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
                   >
                     <option value="">Seleccionar cuenta...</option>
                     {accounts.filter(a => a.is_active && !userAssignments.some(ua => ua.account_id === a.id)).map(a => (
@@ -783,6 +1047,18 @@ export default function AdminPage() {
                     <option value="admin">Admin</option>
                     <option value="super_admin">Super Admin</option>
                   </select>
+                  {assignRole === 'agent' && roles.length > 0 && (
+                    <select
+                      value={assignRoleId}
+                      onChange={e => setAssignRoleId(e.target.value)}
+                      className="flex-1 min-w-[140px] px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                    >
+                      <option value="">Sin rol de permisos</option>
+                      {roles.map(r => (
+                        <option key={r.id} value={r.id}>{r.name}</option>
+                      ))}
+                    </select>
+                  )}
                   <button
                     onClick={assignAccount}
                     disabled={!assignAccountId}
@@ -791,6 +1067,11 @@ export default function AdminPage() {
                     <Plus className="w-4 h-4" />
                   </button>
                 </div>
+                {assignRole === 'agent' && assignRoleId && (
+                  <p className="text-xs text-emerald-600 mt-1.5">
+                    ✓ Permisos del rol: {roles.find(r => r.id === assignRoleId)?.permissions.map(p => ALL_MODULES.find(m => m.key === p)?.label || p).join(', ')}
+                  </p>
+                )}
               </div>
             </div>
             <div className="p-6 border-t border-gray-200 flex justify-end">

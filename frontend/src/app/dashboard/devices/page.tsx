@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { Smartphone, Plus, Wifi, WifiOff, Signal, Trash2, Power, RefreshCw, QrCode, Edit } from 'lucide-react'
-import { createWebSocket } from '@/lib/api'
+import { subscribeWebSocket } from '@/lib/api'
 
 interface Device {
   id: string
@@ -63,7 +63,7 @@ export default function DevicesPage() {
 
   // Setup WebSocket for real-time updates
   useEffect(() => {
-    const ws = createWebSocket((data: unknown) => {
+    const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string; data?: { status?: string; device_id?: string } }
       if (msg.event === 'device_status') {
         if (msg.data?.status === 'connected' && selectedDevice?.id === msg.data?.device_id) {
@@ -74,8 +74,7 @@ export default function DevicesPage() {
         fetchDevices()
       }
     })
-    if (!ws) return
-    return () => ws.close()
+    return () => unsubscribe()
   }, [fetchDevices, selectedDevice])
 
   // Close QR modal when device status changes to connected (polling fallback)

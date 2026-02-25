@@ -17,10 +17,10 @@ db *pgxpool.Pool
 
 func (r *ProgramRepository) Create(ctx context.Context, p *domain.Program) error {
 err := r.db.QueryRow(ctx, `
-INSERT INTO programs (account_id, name, description, status, color, created_by)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO programs (account_id, name, description, status, color, created_by, schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING id, created_at, updated_at
-`, p.AccountID, p.Name, p.Description, p.Status, p.Color, p.CreatedBy).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
+`, p.AccountID, p.Name, p.Description, p.Status, p.Color, p.CreatedBy, p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 return err
 }
 
@@ -28,12 +28,14 @@ func (r *ProgramRepository) GetByID(ctx context.Context, accountID, id uuid.UUID
 p := &domain.Program{}
 err := r.db.QueryRow(ctx, `
 SELECT id, account_id, name, description, status, color, created_by, created_at, updated_at,
+schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time,
 (SELECT COUNT(*) FROM program_participants WHERE program_id = programs.id) as participant_count,
 (SELECT COUNT(*) FROM program_sessions WHERE program_id = programs.id) as session_count
 FROM programs
 WHERE id = $1 AND account_id = $2
 `, id, accountID).Scan(
 &p.ID, &p.AccountID, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
+&p.ScheduleStartDate, &p.ScheduleEndDate, &p.ScheduleDays, &p.ScheduleStartTime, &p.ScheduleEndTime,
 &p.ParticipantCount, &p.SessionCount,
 )
 if err == pgx.ErrNoRows {
@@ -45,6 +47,7 @@ return p, err
 func (r *ProgramRepository) List(ctx context.Context, accountID uuid.UUID) ([]*domain.Program, error) {
 rows, err := r.db.Query(ctx, `
 SELECT id, account_id, name, description, status, color, created_by, created_at, updated_at,
+schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time,
 (SELECT COUNT(*) FROM program_participants WHERE program_id = programs.id) as participant_count,
 (SELECT COUNT(*) FROM program_sessions WHERE program_id = programs.id) as session_count
 FROM programs
@@ -61,6 +64,7 @@ for rows.Next() {
 p := &domain.Program{}
 err := rows.Scan(
 &p.ID, &p.AccountID, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.CreatedAt, &p.UpdatedAt,
+&p.ScheduleStartDate, &p.ScheduleEndDate, &p.ScheduleDays, &p.ScheduleStartTime, &p.ScheduleEndTime,
 &p.ParticipantCount, &p.SessionCount,
 )
 if err != nil {
@@ -74,9 +78,11 @@ return programs, nil
 func (r *ProgramRepository) Update(ctx context.Context, p *domain.Program) error {
 _, err := r.db.Exec(ctx, `
 UPDATE programs
-SET name = $1, description = $2, status = $3, color = $4, updated_at = NOW()
-WHERE id = $5 AND account_id = $6
-`, p.Name, p.Description, p.Status, p.Color, p.ID, p.AccountID)
+SET name = $1, description = $2, status = $3, color = $4,
+schedule_start_date = $5, schedule_end_date = $6, schedule_days = $7, schedule_start_time = $8, schedule_end_time = $9,
+updated_at = NOW()
+WHERE id = $10 AND account_id = $11
+`, p.Name, p.Description, p.Status, p.Color, p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime, p.ID, p.AccountID)
 return err
 }
 
@@ -135,16 +141,16 @@ return err
 
 func (r *ProgramRepository) CreateSession(ctx context.Context, s *domain.ProgramSession) error {
 err := r.db.QueryRow(ctx, `
-INSERT INTO program_sessions (program_id, date, topic)
-VALUES ($1, $2, $3)
+INSERT INTO program_sessions (program_id, date, topic, start_time, end_time, location)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, created_at, updated_at
-`, s.ProgramID, s.Date, s.Topic).Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt)
+`, s.ProgramID, s.Date, s.Topic, s.StartTime, s.EndTime, s.Location).Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt)
 return err
 }
 
 func (r *ProgramRepository) ListSessions(ctx context.Context, programID uuid.UUID) ([]*domain.ProgramSession, error) {
 rows, err := r.db.Query(ctx, `
-SELECT id, program_id, date, topic, created_at, updated_at
+SELECT id, program_id, date, topic, start_time, end_time, location, created_at, updated_at
 FROM program_sessions
 WHERE program_id = $1
 ORDER BY date ASC
@@ -157,7 +163,7 @@ defer rows.Close()
 var sessions []*domain.ProgramSession
 for rows.Next() {
 s := &domain.ProgramSession{}
-err := rows.Scan(&s.ID, &s.ProgramID, &s.Date, &s.Topic, &s.CreatedAt, &s.UpdatedAt)
+err := rows.Scan(&s.ID, &s.ProgramID, &s.Date, &s.Topic, &s.StartTime, &s.EndTime, &s.Location, &s.CreatedAt, &s.UpdatedAt)
 if err != nil {
 return nil, err
 }
@@ -186,9 +192,9 @@ return sessions, nil
 func (r *ProgramRepository) UpdateSession(ctx context.Context, s *domain.ProgramSession) error {
 _, err := r.db.Exec(ctx, `
 UPDATE program_sessions
-SET date = $1, topic = $2, updated_at = NOW()
-WHERE id = $3 AND program_id = $4
-`, s.Date, s.Topic, s.ID, s.ProgramID)
+SET date = $1, topic = $2, start_time = $3, end_time = $4, location = $5, updated_at = NOW()
+WHERE id = $6 AND program_id = $7
+`, s.Date, s.Topic, s.StartTime, s.EndTime, s.Location, s.ID, s.ProgramID)
 return err
 }
 
@@ -203,7 +209,7 @@ func (r *ProgramRepository) MarkAttendance(ctx context.Context, a *domain.Progra
 err := r.db.QueryRow(ctx, `
 INSERT INTO program_attendance (session_id, participant_id, status, notes)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (session_id, participant_id) DO UPDATE 
+ON CONFLICT (session_id, participant_id) DO UPDATE
 SET status = EXCLUDED.status, notes = EXCLUDED.notes, updated_at = NOW()
 RETURNING id, created_at, updated_at
 `, a.SessionID, a.ParticipantID, a.Status, a.Notes).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
@@ -290,4 +296,33 @@ return nil, err
 participants = append(participants, pp)
 }
 return participants, nil
+}
+// GenerateSessions bulk-inserts multiple sessions for a program and returns them
+func (r *ProgramRepository) GenerateSessions(ctx context.Context, sessions []*domain.ProgramSession) ([]*domain.ProgramSession, error) {
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var result []*domain.ProgramSession
+	for _, s := range sessions {
+		err := tx.QueryRow(ctx, `
+			INSERT INTO program_sessions (program_id, date, topic, start_time, end_time, location)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			RETURNING id, created_at, updated_at
+		`, s.ProgramID, s.Date, s.Topic, s.StartTime, s.EndTime, s.Location).Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, s)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -31,6 +33,7 @@ type Services struct {
 	Interaction *InteractionService
 	QuickReply  *QuickReplyService
 	Program     *ProgramService
+	Role        *RoleService
 }
 
 func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub *ws.Hub) *Services {
@@ -48,6 +51,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Interaction: &InteractionService{repos: repos, hub: hub},
 		QuickReply:  &QuickReplyService{repos: repos},
 		Program:     NewProgramService(repos),
+		Role:        &RoleService{repos: repos},
 	}
 }
 
@@ -63,6 +67,7 @@ type JWTClaims struct {
 	IsAdmin      bool      `json:"is_admin"`
 	IsSuperAdmin bool      `json:"is_super_admin"`
 	Role         string    `json:"role"`
+	Permissions  []string  `json:"permissions"`
 	jwt.RegisteredClaims
 }
 
@@ -96,6 +101,14 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	}
 
 	// Generate JWT with default account
+	// Admins/super_admins get wildcard; agents get their role's permissions
+	var permissions []string
+	if user.IsAdmin || user.IsSuperAdmin {
+		permissions = []string{domain.PermAll}
+	} else {
+		permissions, _ = s.repos.UserAccount.GetUserPermissions(ctx, user.ID, activeAccountID)
+	}
+
 	claims := &JWTClaims{
 		UserID:       user.ID,
 		AccountID:    activeAccountID,
@@ -103,6 +116,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 		IsAdmin:      user.IsAdmin,
 		IsSuperAdmin: user.IsSuperAdmin,
 		Role:         activeRole,
+		Permissions:  permissions,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)), // 7 days
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -158,6 +172,13 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 	}
 
 	// Generate new JWT for the target account
+	var permissions []string
+	if user.IsAdmin || user.IsSuperAdmin {
+		permissions = []string{domain.PermAll}
+	} else {
+		permissions, _ = s.repos.UserAccount.GetUserPermissions(ctx, userID, targetAccountID)
+	}
+
 	claims := &JWTClaims{
 		UserID:       user.ID,
 		AccountID:    targetAccountID,
@@ -165,6 +186,7 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 		IsAdmin:      user.IsAdmin,
 		IsSuperAdmin: user.IsSuperAdmin,
 		Role:         accountRole,
+		Permissions:  permissions,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -761,9 +783,10 @@ func (s *TagService) GetByEntity(ctx context.Context, entityType string, entityI
 
 // CampaignService handles campaign operations
 type CampaignService struct {
-	repos *repository.Repositories
-	pool  *whatsapp.DevicePool
-	hub   *ws.Hub
+	repos      *repository.Repositories
+	pool       *whatsapp.DevicePool
+	hub        *ws.Hub
+	mediaCache sync.Map // map[string]*whatsapp.PreUploadedMedia — keyed by mediaURL
 }
 
 func (s *CampaignService) Create(ctx context.Context, campaign *domain.Campaign) error {
@@ -1099,6 +1122,42 @@ func personalizeText(text string, rec *domain.CampaignRecipient, contact *domain
 	return text
 }
 
+// getOrUploadMedia returns cached pre-uploaded media or uploads it once.
+func (s *CampaignService) getOrUploadMedia(ctx context.Context, deviceID uuid.UUID, mediaURL, mediaType string) (*whatsapp.PreUploadedMedia, error) {
+	if val, ok := s.mediaCache.Load(mediaURL); ok {
+		return val.(*whatsapp.PreUploadedMedia), nil
+	}
+	media, err := s.pool.UploadMedia(ctx, deviceID, mediaURL, mediaType)
+	if err != nil {
+		return nil, err
+	}
+	s.mediaCache.Store(mediaURL, media)
+	log.Printf("[Campaign] Cached media upload: %s (%s)", mediaURL, mediaType)
+	return media, nil
+}
+
+// sendWithRetry wraps a send function with retry logic for WhatsApp error 475 (anti-spam).
+// Retries up to 3 times with exponential backoff: 10s, 20s, 40s.
+func sendWithRetry(campaignID uuid.UUID, recipientJID string, sendFunc func() error) error {
+	var err error
+	for attempt := 0; attempt < 4; attempt++ { // 1 initial + 3 retries
+		err = sendFunc()
+		if err == nil {
+			return nil
+		}
+		// Only retry on error 475 (WhatsApp anti-spam rate limit)
+		if !strings.Contains(err.Error(), "475") {
+			return err
+		}
+		if attempt < 3 {
+			backoff := time.Duration(10*(1<<attempt)) * time.Second // 10s, 20s, 40s
+			log.Printf("[Campaign %s] Error 475 for %s, retrying in %v (attempt %d/3)", campaignID, recipientJID, backoff, attempt+1)
+			time.Sleep(backoff)
+		}
+	}
+	return err
+}
+
 func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID uuid.UUID, waitTimeMs *int) (bool, error) {
 	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
 	if err != nil {
@@ -1133,7 +1192,7 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 	// Personalize message
 	msg := personalizeText(campaign.MessageTemplate, rec, contact, lead)
 
-	// Send message
+	// Send message with retry on error 475 and pre-uploaded media cache
 	var sendErr error
 
 	// Load attachments for this campaign
@@ -1142,50 +1201,93 @@ func (s *CampaignService) ProcessNextRecipient(ctx context.Context, campaignID u
 	if len(attachments) > 0 {
 		if msg != "" {
 			if len(attachments) == 1 && attachments[0].Caption == "" {
-				_, sendErr = s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, attachments[0].MediaURL, attachments[0].MediaType)
+				// Single attachment with text as caption — use pre-uploaded media
+				media, uploadErr := s.getOrUploadMedia(ctx, campaign.DeviceID, attachments[0].MediaURL, attachments[0].MediaType)
+				if uploadErr != nil {
+					sendErr = uploadErr
+				} else {
+					sendErr = sendWithRetry(campaignID, rec.JID, func() error {
+						_, err := s.pool.SendPreUploadedMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, media)
+						return err
+					})
+				}
 			} else {
-				_, sendErr = s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)
+				// Text + multiple attachments: send text first, then each attachment
+				sendErr = sendWithRetry(campaignID, rec.JID, func() error {
+					_, err := s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)
+					return err
+				})
 				if sendErr == nil {
 					for _, att := range attachments {
 						time.Sleep(1500 * time.Millisecond)
 						caption := personalizeText(att.Caption, rec, contact, lead)
-						_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
-						if err != nil {
-							sendErr = err
+						media, uploadErr := s.getOrUploadMedia(ctx, campaign.DeviceID, att.MediaURL, att.MediaType)
+						if uploadErr != nil {
+							sendErr = uploadErr
+							break
+						}
+						sendErr = sendWithRetry(campaignID, rec.JID, func() error {
+							_, err := s.pool.SendPreUploadedMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, media)
+							return err
+						})
+						if sendErr != nil {
 							break
 						}
 					}
 				}
 			}
 		} else {
+			// No text, only attachments
 			for i, att := range attachments {
 				if i > 0 {
 					time.Sleep(1500 * time.Millisecond)
 				}
 				caption := personalizeText(att.Caption, rec, contact, lead)
-				_, err := s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, att.MediaURL, att.MediaType)
-				if err != nil {
-					sendErr = err
+				media, uploadErr := s.getOrUploadMedia(ctx, campaign.DeviceID, att.MediaURL, att.MediaType)
+				if uploadErr != nil {
+					sendErr = uploadErr
+					break
+				}
+				sendErr = sendWithRetry(campaignID, rec.JID, func() error {
+					_, err := s.pool.SendPreUploadedMediaMessage(ctx, campaign.DeviceID, rec.JID, caption, media)
+					return err
+				})
+				if sendErr != nil {
 					break
 				}
 			}
 		}
 	} else if campaign.MediaURL != nil && *campaign.MediaURL != "" && campaign.MediaType != nil {
-		_, sendErr = s.pool.SendMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, *campaign.MediaURL, *campaign.MediaType)
+		// Legacy media field — also use cached upload
+		media, uploadErr := s.getOrUploadMedia(ctx, campaign.DeviceID, *campaign.MediaURL, *campaign.MediaType)
+		if uploadErr != nil {
+			sendErr = uploadErr
+		} else {
+			sendErr = sendWithRetry(campaignID, rec.JID, func() error {
+				_, err := s.pool.SendPreUploadedMediaMessage(ctx, campaign.DeviceID, rec.JID, msg, media)
+				return err
+			})
+		}
 	} else {
-		_, sendErr = s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)
+		// Text-only message
+		sendErr = sendWithRetry(campaignID, rec.JID, func() error {
+			_, err := s.pool.SendMessage(ctx, campaign.DeviceID, rec.JID, msg)
+			return err
+		})
 	}
 
 	if sendErr != nil {
 		errMsg := sendErr.Error()
+		log.Printf("[Campaign %s] FAILED %s: %s", campaignID, rec.JID, errMsg)
 		s.repos.Campaign.UpdateRecipientStatus(ctx, rec.ID, "failed", &errMsg, waitTimeMs)
 		s.repos.Campaign.IncrementFailedCount(ctx, campaignID)
 	} else {
+		log.Printf("[Campaign %s] SENT to %s", campaignID, rec.JID)
 		s.repos.Campaign.UpdateRecipientStatus(ctx, rec.ID, "sent", nil, waitTimeMs)
 		s.repos.Campaign.IncrementSentCount(ctx, campaignID)
 	}
 
-	return true, nil
+	return true, sendErr
 }
 
 // EventService handles event operations
@@ -1246,12 +1348,40 @@ func (s *EventService) UpdateParticipantStatus(ctx context.Context, id uuid.UUID
 	return s.repos.Participant.UpdateStatus(ctx, id, status)
 }
 
+func (s *EventService) BulkUpdateParticipantStatus(ctx context.Context, ids []uuid.UUID, status string) error {
+	return s.repos.Participant.BulkUpdateStatus(ctx, ids, status)
+}
+
 func (s *EventService) DeleteParticipant(ctx context.Context, id uuid.UUID) error {
 	return s.repos.Participant.Delete(ctx, id)
 }
 
 func (s *EventService) GetUpcomingActions(ctx context.Context, accountID uuid.UUID, limit int) ([]*domain.EventParticipant, error) {
 	return s.repos.Participant.GetUpcomingActions(ctx, accountID, limit)
+}
+
+func (s *EventService) GetFolders(ctx context.Context, accountID uuid.UUID) ([]*domain.EventFolder, error) {
+	return s.repos.EventFolder.GetByAccountID(ctx, accountID)
+}
+
+func (s *EventService) GetFolderByID(ctx context.Context, id uuid.UUID) (*domain.EventFolder, error) {
+	return s.repos.EventFolder.GetByID(ctx, id)
+}
+
+func (s *EventService) CreateFolder(ctx context.Context, folder *domain.EventFolder) error {
+	return s.repos.EventFolder.Create(ctx, folder)
+}
+
+func (s *EventService) UpdateFolder(ctx context.Context, folder *domain.EventFolder) error {
+	return s.repos.EventFolder.Update(ctx, folder)
+}
+
+func (s *EventService) DeleteFolder(ctx context.Context, id uuid.UUID) error {
+	return s.repos.EventFolder.Delete(ctx, id)
+}
+
+func (s *EventService) MoveEventToFolder(ctx context.Context, eventID uuid.UUID, folderID *uuid.UUID) error {
+	return s.repos.EventFolder.MoveEvent(ctx, eventID, folderID)
 }
 
 // InteractionService handles interaction operations
@@ -1337,4 +1467,28 @@ func (s *QuickReplyService) Update(ctx context.Context, qr *domain.QuickReply) e
 
 func (s *QuickReplyService) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repos.QuickReply.Delete(ctx, id)
+}
+// RoleService handles RBAC role management
+type RoleService struct {
+	repos *repository.Repositories
+}
+
+func (s *RoleService) GetAll(ctx context.Context) ([]*domain.Role, error) {
+	return s.repos.Role.GetAll(ctx)
+}
+
+func (s *RoleService) GetByID(ctx context.Context, id uuid.UUID) (*domain.Role, error) {
+	return s.repos.Role.GetByID(ctx, id)
+}
+
+func (s *RoleService) Create(ctx context.Context, role *domain.Role) error {
+	return s.repos.Role.Create(ctx, role)
+}
+
+func (s *RoleService) Update(ctx context.Context, role *domain.Role) error {
+	return s.repos.Role.Update(ctx, role)
+}
+
+func (s *RoleService) Delete(ctx context.Context, id uuid.UUID) error {
+	return s.repos.Role.Delete(ctx, id)
 }
