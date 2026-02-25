@@ -161,7 +161,24 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
               (chat && actualMsg.from_jid === chat?.jid) ||
               (chat && actualMsg.to === chat?.jid)) {
             setMessages(prev => {
-              if (prev.some(m => m.id === actualMsg.id)) return prev
+              // Already in list by real ID → update in place (no duplicate)
+              if (prev.some(m => m.id === actualMsg.id)) {
+                return prev.map(m => m.id === actualMsg.id ? (actualMsg as Message) : m)
+              }
+              // Outgoing message (is_from_me) → replace the most recent optimistic
+              // message that is still in 'sending' state to avoid duplicates
+              if (actualMsg.is_from_me) {
+                const sendingIdx = [...prev].reverse().findIndex(m => m.status === 'sending' && m.is_from_me)
+                if (sendingIdx !== -1) {
+                  const realIdx = prev.length - 1 - sendingIdx
+                  const next = [...prev]
+                  next[realIdx] = actualMsg as Message
+                  return next
+                }
+                // No optimistic message pending → safe to add (e.g. sent from another device)
+                return [...prev, actualMsg as Message]
+              }
+              // Incoming message → always add
               return [...prev, actualMsg as Message]
             })
             scrollToBottom()
