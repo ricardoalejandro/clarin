@@ -208,6 +208,9 @@ export function formatToHtml(text: string): string {
     return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="text-blue-600 underline hover:text-blue-800 break-all">${url}</a>`
   })
 
+  // Normalize CR/CRLF to LF before converting to <br>
+  html = html.replace(/\r\n?/g, '\n')
+
   // Newlines
   html = html.replace(/\n/g, '<br>')
 
@@ -249,6 +252,9 @@ export function formatToHtmlPreview(text: string): string {
   // URLs - highlight in preview
   html = html.replace(/(https?:\/\/[^\s<>"{}|\\^`[\]]+|(?:www\.)[^\s<>"{}|\\^`[\]]+)/gi,
     '<span class="text-blue-600 underline">$1</span>')
+
+  // Normalize CR/CRLF to LF before converting to <br>
+  html = html.replace(/\r\n?/g, '\n')
 
   // Newlines
   html = html.replace(/\n/g, '<br>')

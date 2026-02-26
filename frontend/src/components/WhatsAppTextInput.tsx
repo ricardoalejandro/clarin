@@ -82,7 +82,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
 
   const handleInput = useCallback(() => {
     if (!editorRef.current) return
-    const text = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n')
+    const text = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n')
     const caretPos = getCaretOffset(editorRef.current)
     onChange(text)
     const html = formatToHtmlPreview(text)
@@ -93,11 +93,11 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     e.preventDefault()
     if (!editorRef.current) return
-    const pastedText = e.clipboardData.getData('text/plain')
+    const pastedText = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n')
     if (!pastedText) return
 
     // Read current text from the clean DOM (innerHTML set by formatToHtmlPreview uses <br>)
-    const currentText = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n')
+    const currentText = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n')
 
     // Get caret start and selection end
     const sel = window.getSelection()
