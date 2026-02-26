@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import ImportCSVModal from '@/components/ImportCSVModal'
@@ -169,16 +169,31 @@ export default function LeadsPage() {
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
   const [submittingBroadcast, setSubmittingBroadcast] = useState(false)
 
+  // View mode: kanban vs list
+  const [viewMode, setViewMode] = useState<'kanban' | 'list'>('kanban')
+
+  // "Más" dropdown menu
+  const [showMoreMenu, setShowMoreMenu] = useState(false)
+  const moreMenuRef = useRef<HTMLDivElement>(null)
+
+  // List view observations cache
+  const [listObservations, setListObservations] = useState<Map<string, Observation[]>>(new Map())
+  const [loadingListObs, setLoadingListObs] = useState<Set<string>>(new Set())
+  const [expandedListLeadId, setExpandedListLeadId] = useState<string | null>(null)
+
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
   const filterDropdownRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
 
-  // Click outside to close dropdown
+  // Click outside to close dropdowns
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (filterDropdownRef.current && !filterDropdownRef.current.contains(event.target as Node)) {
         setShowFilterDropdown(false)
+      }
+      if (moreMenuRef.current && !moreMenuRef.current.contains(event.target as Node)) {
+        setShowMoreMenu(false)
       }
     }
     document.addEventListener("mousedown", handleClickOutside)
@@ -648,6 +663,26 @@ export default function LeadsPage() {
     }
   }
 
+  // Fetch observations for a single lead in list view (with cache)
+  const fetchListLeadObservations = async (leadId: string) => {
+    if (listObservations.has(leadId) || loadingListObs.has(leadId)) return
+    setLoadingListObs(prev => new Set(prev).add(leadId))
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${leadId}/interactions?limit=20`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setListObservations(prev => new Map(prev).set(leadId, data.interactions || []))
+      }
+    } catch (err) {
+      console.error('Failed to fetch list observations:', err)
+    } finally {
+      setLoadingListObs(prev => { const next = new Set(prev); next.delete(leadId); return next })
+    }
+  }
+
   const handleSyncKommo = async () => {
     if (!detailLead) return
     setSyncingKommo(true)
@@ -1038,27 +1073,28 @@ export default function LeadsPage() {
             </>
           ) : (
             <>
-              <button
-                onClick={() => setSelectionMode(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition text-slate-600 text-xs font-medium"
-              >
-                <CheckSquare className="w-3.5 h-3.5" />
-                Seleccionar
-              </button>
-              <button
-                onClick={() => setShowStageModal(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition text-slate-600 text-xs font-medium"
-              >
-                <Settings className="w-3.5 h-3.5" />
-                Etapas
-              </button>
-              <button
-                onClick={() => setShowImportModal(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 transition text-slate-600 text-xs font-medium"
-              >
-                <Upload className="w-3.5 h-3.5" />
-                CSV
-              </button>
+              {/* View toggle */}
+              <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden">
+                <button
+                  onClick={() => setViewMode('kanban')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${
+                    viewMode === 'kanban' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'
+                  }`}
+                  title="Vista Kanban"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => setViewMode('list')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${
+                    viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'
+                  }`}
+                  title="Vista Lista"
+                >
+                  <List className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
               <button
                 onClick={() => { fetchDevices(); setShowBroadcastModal(true) }}
                 disabled={filteredLeads.filter(l => l.phone).length === 0}
@@ -1067,51 +1103,81 @@ export default function LeadsPage() {
                 <Radio className="w-3.5 h-3.5" />
                 Masivo
               </button>
-              {/* Device filter dropdown */}
-              {devices.length > 0 && (
-                <div className="relative">
-                  <button
-                    onClick={() => setShowDeviceFilter(!showDeviceFilter)}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg hover:bg-slate-50 transition text-xs font-medium ${
-                      filterDeviceIds.size > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600'
-                    }`}
-                  >
-                    <Phone className="w-3.5 h-3.5" />
-                    Dispositivos{filterDeviceIds.size > 0 ? ` (${filterDeviceIds.size})` : ''}
-                  </button>
-                  {showDeviceFilter && (
-                    <div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl p-2 z-50 min-w-52">
-                      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider px-2 py-1">Filtrar por dispositivo</p>
-                      {devices.map(d => (
-                        <label key={d.id} className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50 rounded-lg cursor-pointer text-sm">
-                          <input
-                            type="checkbox"
-                            checked={filterDeviceIds.has(d.id)}
-                            onChange={() => {
-                              setFilterDeviceIds(prev => {
-                                const next = new Set(prev)
-                                if (next.has(d.id)) next.delete(d.id)
-                                else next.add(d.id)
-                                return next
-                              })
-                            }}
-                            className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                          />
-                          <span className="text-slate-700">{d.name || d.phone || 'Dispositivo'}</span>
-                        </label>
-                      ))}
-                      {filterDeviceIds.size > 0 && (
-                        <button
-                          onClick={() => setFilterDeviceIds(new Set())}
-                          className="w-full mt-1 text-xs text-slate-500 hover:text-slate-700 py-1"
-                        >
-                          Limpiar filtro
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
+
+              {/* ··· More dropdown */}
+              <div ref={moreMenuRef} className="relative">
+                <button
+                  onClick={() => setShowMoreMenu(v => !v)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-xs font-medium transition ${
+                    showMoreMenu ? 'border-slate-400 bg-slate-100 text-slate-700' : 'border-slate-200 hover:bg-slate-50 text-slate-600'
+                  }`}
+                  title="Más acciones"
+                >
+                  <MoreHorizontal className="w-4 h-4" />
+                  <span className="hidden sm:inline">Más</span>
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMoreMenu ? 'rotate-180' : ''}`} />
+                </button>
+                {showMoreMenu && (
+                  <div className="absolute right-0 top-full mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+                    <button
+                      onClick={() => { setSelectionMode(true); setShowMoreMenu(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                    >
+                      <CheckSquare className="w-4 h-4 text-slate-400" />
+                      Seleccionar
+                    </button>
+                    <button
+                      onClick={() => { setShowStageModal(true); setShowMoreMenu(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                    >
+                      <Settings className="w-4 h-4 text-slate-400" />
+                      Etapas
+                    </button>
+                    <button
+                      onClick={() => { setShowImportModal(true); setShowMoreMenu(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                    >
+                      <Upload className="w-4 h-4 text-slate-400" />
+                      Importar CSV
+                    </button>
+                    {devices.length > 0 && (
+                      <>
+                        <div className="my-1 border-t border-slate-100" />
+                        <div className="px-4 py-2">
+                          <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Filtrar por dispositivo</p>
+                          {devices.map(d => (
+                            <label key={d.id} className="flex items-center gap-2 py-1 cursor-pointer text-sm">
+                              <input
+                                type="checkbox"
+                                checked={filterDeviceIds.has(d.id)}
+                                onChange={() => {
+                                  setFilterDeviceIds(prev => {
+                                    const next = new Set(prev)
+                                    if (next.has(d.id)) next.delete(d.id)
+                                    else next.add(d.id)
+                                    return next
+                                  })
+                                }}
+                                className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                              />
+                              <span className="text-slate-700 text-xs">{d.name || d.phone || 'Dispositivo'}</span>
+                            </label>
+                          ))}
+                          {filterDeviceIds.size > 0 && (
+                            <button
+                              onClick={() => setFilterDeviceIds(new Set())}
+                              className="w-full mt-1 text-xs text-slate-500 hover:text-slate-700 py-0.5"
+                            >
+                              Limpiar filtro
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <button
                 onClick={() => setShowAddModal(true)}
                 className="inline-flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-700 transition text-xs font-medium shadow-sm shadow-emerald-600/20"
@@ -1296,6 +1362,7 @@ export default function LeadsPage() {
       </div>
 
       {/* Pipeline Kanban */}
+      {viewMode === 'kanban' && (
       <div className="flex-1 min-h-0 flex flex-col">
       {/* Top synced scrollbar */}
       <div
@@ -1474,6 +1541,163 @@ export default function LeadsPage() {
         </div>
       </div>
       </div>
+      )}
+
+      {/* List View */}
+      {viewMode === 'list' && (
+        <div className="flex-1 min-h-0 overflow-auto">
+          <table className="w-full text-left">
+            <thead className="sticky top-0 z-10 bg-slate-50">
+              <tr className="border-b border-slate-200">
+                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[220px]">Lead</th>
+                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[110px]">Etapa</th>
+                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[180px]">Etiquetas</th>
+                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Últimas observaciones</th>
+                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[40px]"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredLeads
+                .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+                .map((lead) => {
+                  const stageName = lead.stage_name || stages.find(s => s.id === lead.stage_id)?.name
+                  const stageColor = lead.stage_color || stages.find(s => s.id === lead.stage_id)?.color || '#94a3b8'
+                  const obs = listObservations.get(lead.id)
+                  const isExpanded = expandedListLeadId === lead.id
+
+                  // Trigger lazy fetch when row renders
+                  if (!obs && !loadingListObs.has(lead.id)) {
+                    // Schedule non-blocking fetch
+                    setTimeout(() => fetchListLeadObservations(lead.id), 0)
+                  }
+
+                  return (
+                    <tr
+                      key={lead.id}
+                      className={`group hover:bg-slate-50/80 transition cursor-pointer ${
+                        detailLead?.id === lead.id ? 'bg-emerald-50/50' : ''
+                      }`}
+                      onClick={() => openDetailPanel(lead)}
+                    >
+                      {/* Lead info */}
+                      <td className="px-3 py-2.5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 bg-emerald-50 rounded-full flex items-center justify-center shrink-0">
+                            <span className="text-emerald-700 text-xs font-semibold">
+                              {(lead.name || '?').charAt(0).toUpperCase()}
+                            </span>
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[13px] font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
+                            {lead.phone && (
+                              <p className="text-[11px] text-slate-500 mt-0.5">{lead.phone}</p>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Stage */}
+                      <td className="px-3 py-2.5">
+                        {stageName ? (
+                          <span
+                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white"
+                            style={{ backgroundColor: stageColor }}
+                          >
+                            {stageName}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-400 italic">Sin etapa</span>
+                        )}
+                      </td>
+
+                      {/* Tags */}
+                      <td className="px-3 py-2.5">
+                        {lead.structured_tags && lead.structured_tags.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {lead.structured_tags.slice(0, 3).map(tag => (
+                              <span
+                                key={tag.id}
+                                className="px-1.5 py-0.5 text-[10px] rounded-full text-white font-medium"
+                                style={{ backgroundColor: tag.color || '#6b7280' }}
+                              >
+                                {tag.name}
+                              </span>
+                            ))}
+                            {lead.structured_tags.length > 3 && (
+                              <span className="text-[10px] text-slate-400">+{lead.structured_tags.length - 3}</span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-slate-300">—</span>
+                        )}
+                      </td>
+
+                      {/* Observations preview */}
+                      <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+                        {loadingListObs.has(lead.id) ? (
+                          <div className="flex items-center gap-2">
+                            <div className="animate-spin rounded-full h-3 w-3 border border-slate-200 border-t-emerald-500" />
+                            <span className="text-[10px] text-slate-400">Cargando...</span>
+                          </div>
+                        ) : obs && obs.length > 0 ? (
+                          <div className="space-y-1">
+                            {obs.slice(0, isExpanded ? 10 : 3).map(o => (
+                              <div key={o.id} className="flex items-start gap-1.5">
+                                <span className="shrink-0 mt-0.5 text-[10px]">
+                                  {o.type === 'call' ? '📞' : o.type === 'note' ? '📝' : '↕'}
+                                </span>
+                                <p className="text-[11px] text-slate-600 leading-tight line-clamp-1">
+                                  {(o.notes || '').replace(/^\(sinc\)\s*/i, '')}
+                                </p>
+                                <span className="shrink-0 text-[9px] text-slate-400 mt-0.5 whitespace-nowrap">
+                                  {formatDistanceToNow(new Date(o.created_at), { locale: es, addSuffix: false })}
+                                </span>
+                              </div>
+                            ))}
+                            {obs.length > 3 && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setExpandedListLeadId(isExpanded ? null : lead.id)
+                                }}
+                                className="text-[10px] text-emerald-600 hover:text-emerald-700 font-medium mt-0.5"
+                              >
+                                {isExpanded ? (
+                                  <span className="inline-flex items-center gap-0.5"><ChevronUp className="w-3 h-3" /> Menos</span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-0.5"><ChevronDown className="w-3 h-3" /> +{obs.length - 3} más</span>
+                                )}
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-slate-300 italic">Sin observaciones</span>
+                        )}
+                      </td>
+
+                      {/* Actions */}
+                      <td className="px-3 py-2.5">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteLead(lead.id) }}
+                          className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Eliminar"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+            </tbody>
+          </table>
+          {filteredLeads.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+              <FileText className="w-10 h-10 mb-2 text-slate-300" />
+              <p className="text-sm">No se encontraron leads</p>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Add Lead Modal */}
       {showAddModal && (
