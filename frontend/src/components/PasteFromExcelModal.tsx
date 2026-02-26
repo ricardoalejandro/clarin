@@ -344,10 +344,10 @@ export default function PasteFromExcelModal({ open, onClose, onSuccess }: Props)
                             value={row[col.key]}
                             placeholder={col.placeholder}
                             onChange={e => updateCell(ri, col.key, e.target.value)}
-                            className={`w-full px-2 py-1.5 rounded text-sm text-white placeholder-slate-600 focus:outline-none transition-colors ${
+                            className={`w-full px-2 py-1.5 rounded text-sm font-medium text-slate-50 placeholder-slate-500 focus:outline-none transition-colors ${
                               col.required && !row[col.key]
-                                ? 'bg-red-950/40 border border-red-500/40 focus:border-emerald-500/60 focus:bg-slate-700'
-                                : 'bg-slate-700/60 border border-transparent hover:bg-slate-700 hover:border-slate-600 focus:bg-slate-700 focus:border-emerald-500/60'
+                                ? 'bg-red-950/50 border border-red-500/40 focus:border-emerald-500/60 focus:bg-slate-600'
+                                : 'bg-slate-600 border border-slate-500/50 hover:bg-slate-500 focus:bg-slate-600 focus:border-emerald-500/60'
                             }`}
                           />
                         </td>
