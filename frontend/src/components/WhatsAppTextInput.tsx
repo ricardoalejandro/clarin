@@ -92,9 +92,36 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     e.preventDefault()
-    const text = e.clipboardData.getData('text/plain')
-    document.execCommand('insertText', false, text)
-  }, [])
+    if (!editorRef.current) return
+    const pastedText = e.clipboardData.getData('text/plain')
+    if (!pastedText) return
+
+    // Read current text from the clean DOM (innerHTML set by formatToHtmlPreview uses <br>)
+    const currentText = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n')
+
+    // Get caret start and selection end
+    const sel = window.getSelection()
+    const caretStart = getCaretOffset(editorRef.current)
+    let caretEnd = caretStart
+
+    if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0)
+      const endRange = document.createRange()
+      endRange.selectNodeContents(editorRef.current)
+      endRange.setEnd(range.endContainer, range.endOffset)
+      const frag = endRange.cloneContents()
+      frag.querySelectorAll('br').forEach(br => br.parentNode?.replaceChild(document.createTextNode('\n'), br))
+      caretEnd = (frag.textContent || '').length
+    }
+
+    // Splice pasted text at caret/selection position
+    const newText = currentText.slice(0, caretStart) + pastedText + currentText.slice(caretEnd)
+
+    onChange(newText)
+    const html = formatToHtmlPreview(newText)
+    editorRef.current.innerHTML = html || ''
+    setCaretOffset(editorRef.current, caretStart + pastedText.length)
+  }, [onChange])
 
   // Show toolbar on text selection
   const checkSelection = useCallback(() => {
