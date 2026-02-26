@@ -158,7 +158,7 @@ networks:
     enable_ipv6: true
     ipam:
       config:
-        - subnet: "172.23.0.0/16"
-        - subnet: "fd00:dead:beef::/48"
+        - subnet: "172.29.0.0/16"
+        - subnet: "fd00:cafe:babe::/48"
   dokploy-network:
     external: true

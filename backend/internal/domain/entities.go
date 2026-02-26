@@ -136,6 +136,8 @@ type Contact struct {
 	Email      *string    `json:"email,omitempty"`
 	Company    *string    `json:"company,omitempty"`
 	Age        *int       `json:"age,omitempty"`
+	DNI        *string    `json:"dni,omitempty"`
+	BirthDate  *time.Time `json:"birth_date,omitempty"`
 	Tags       []string   `json:"tags,omitempty"`
 	Notes      *string    `json:"notes,omitempty"`
 	Source     *string    `json:"source,omitempty"`

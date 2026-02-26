@@ -19,6 +19,7 @@ import StickerPicker from './StickerPicker'
 import EmojiPicker from './EmojiPicker'
 import PollModal from './PollModal'
 import ContactPanel from './ContactPanel'
+import ForwardMessageModal from './ForwardMessageModal'
 import QuickReplyPicker from './QuickReplyPicker'
 
 interface ChatPanelProps {
@@ -42,6 +43,10 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   // Attachments
   const [showAttachments, setShowAttachments] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Media preview with caption
+  const [pendingMedia, setPendingMedia] = useState<{ file: File; type: string; previewUrl: string } | null>(null)
+  const [mediaCaption, setMediaCaption] = useState('')
 
   // Audio recording
   const [isRecording, setIsRecording] = useState(false)
@@ -383,19 +388,19 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     }
   }
 
-  const handleSendMedia = async (file: File, mediaType: string) => {
+  const handleSendMedia = async (file: File, mediaType: string, caption?: string) => {
       if (!chat || !deviceId) return
 
       const tempId = `optimistic-${++optimisticIdRef.current}`
       const previewUrl = URL.createObjectURL(file)
-      const caption = mediaType === 'document' ? file.name : ''
+      const finalCaption = caption ?? (mediaType === 'document' ? file.name : '')
 
       const optimisticMsg: Message = {
         id: tempId,
         message_id: tempId,
         from_jid: '',
         from_name: 'Me',
-        body: caption,
+        body: finalCaption,
         message_type: mediaType,
         media_url: previewUrl,
         is_from_me: true,
@@ -429,7 +434,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
              body: JSON.stringify({
                device_id: deviceId,
                to: chat.jid,
-               body: caption,
+               body: finalCaption,
                media_url: uploadData.proxy_url || uploadData.public_url,
                media_type: mediaType
              })
@@ -560,8 +565,33 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
          const type = file.type.startsWith('image/') ? 'image' :
                       file.type.startsWith('video/') ? 'video' :
                       file.type.startsWith('audio/') ? 'audio' : 'document'
-         handleSendMedia(file, type)
+         if (type === 'image' || type === 'video') {
+           const previewUrl = URL.createObjectURL(file)
+           setPendingMedia({ file, type, previewUrl })
+           setMediaCaption('')
+           setShowAttachments(false)
+         } else {
+           handleSendMedia(file, type)
+         }
      }
+     // Reset input so same file can be selected again
+     if (e.target) e.target.value = ''
+  }
+
+  const handleSendPendingMedia = () => {
+    if (!pendingMedia) return
+    handleSendMedia(pendingMedia.file, pendingMedia.type, mediaCaption.trim())
+    URL.revokeObjectURL(pendingMedia.previewUrl)
+    setPendingMedia(null)
+    setMediaCaption('')
+  }
+
+  const handleCancelPendingMedia = () => {
+    if (pendingMedia) {
+      URL.revokeObjectURL(pendingMedia.previewUrl)
+      setPendingMedia(null)
+      setMediaCaption('')
+    }
   }
 
   const startRecording = async () => {
@@ -809,6 +839,46 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
              )}
          </div>
 
+         {/* Media Preview Overlay */}
+         {pendingMedia && (
+           <div className="absolute inset-0 z-40 bg-white flex flex-col">
+             {/* Close */}
+             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+               <button onClick={handleCancelPendingMedia} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-full transition">
+                 <X className="w-6 h-6" />
+               </button>
+               <span className="text-slate-600 text-sm font-medium">{pendingMedia.type === 'image' ? 'Imagen' : 'Video'}</span>
+               <div className="w-10" />
+             </div>
+             {/* Preview */}
+             <div className="flex-1 flex items-center justify-center p-4 min-h-0 bg-slate-50">
+               {pendingMedia.type === 'image' ? (
+                 <img src={pendingMedia.previewUrl} className="max-h-full max-w-full object-contain rounded-lg shadow-md" alt="Preview" />
+               ) : (
+                 <video src={pendingMedia.previewUrl} className="max-h-full max-w-full rounded-lg shadow-md" controls />
+               )}
+             </div>
+             {/* Caption + Send */}
+             <div className="px-4 py-3 flex items-center gap-3 border-t border-slate-200 bg-white">
+               <input
+                 type="text"
+                 placeholder="Agregar pie de foto..."
+                 value={mediaCaption}
+                 onChange={e => setMediaCaption(e.target.value)}
+                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendPendingMedia() } }}
+                 className="flex-1 bg-slate-100 text-slate-800 placeholder-slate-400 px-4 py-2.5 rounded-full text-sm border border-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition"
+                 autoFocus
+               />
+               <button
+                 onClick={handleSendPendingMedia}
+                 className="p-3 bg-emerald-600 text-white rounded-full hover:bg-emerald-700 transition shadow-md"
+               >
+                 <Send className="w-5 h-5" />
+               </button>
+             </div>
+           </div>
+         )}
+
          {/* Footer / Input */}
          <div className="px-3 py-2 bg-slate-50 border-t border-slate-200 flex items-end gap-2 relative z-30 shrink-0">
               {replyingTo && (
@@ -915,6 +985,17 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
          {/* Image Viewer */}
          {viewImage && (
              <ImageViewer src={viewImage} isOpen={!!viewImage} onClose={() => setViewImage(null)} />
+         )}
+
+         {/* Forward Modal */}
+         {forwardingMsg && chat && deviceId && (
+             <ForwardMessageModal
+               message={forwardingMsg}
+               deviceId={deviceId}
+               chatId={chat.id}
+               onClose={() => setForwardingMsg(null)}
+               onSuccess={() => setForwardingMsg(null)}
+             />
          )}
     </div>
   )

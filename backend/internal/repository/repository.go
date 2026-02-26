@@ -833,11 +833,11 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 			phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
 			updated_at = NOW()
 		RETURNING id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		          email, company, age, tags, notes, source, is_group, created_at, updated_at
+		          email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at
 	`, accountID, deviceID, jid, phone, name, pushName, isGroup).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
-		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 	)
 	return contact, err
@@ -846,7 +846,7 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 func (r *ContactRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Contact, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at
 		FROM contacts WHERE account_id = $1 ORDER BY COALESCE(custom_name, name, push_name, phone) ASC
 	`, accountID)
 	if err != nil {
@@ -860,7 +860,7 @@ func (r *ContactRepository) GetByAccountID(ctx context.Context, accountID uuid.U
 		if err := rows.Scan(
 			&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
-			&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 		); err != nil {
 			return nil, err
@@ -918,7 +918,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 	// Select
 	selectQuery := `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at
 	` + baseQuery + " ORDER BY COALESCE(custom_name, name, push_name, phone) ASC NULLS LAST"
 
 	if filter.Limit > 0 {
@@ -940,7 +940,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		if err := rows.Scan(
 			&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
-			&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 		); err != nil {
 			return nil, 0, err
@@ -954,12 +954,12 @@ func (r *ContactRepository) GetByJID(ctx context.Context, accountID uuid.UUID, j
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at
 		FROM contacts WHERE account_id = $1 AND jid = $2
 	`, accountID, jid).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
-		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -972,13 +972,13 @@ func (r *ContactRepository) GetByPhone(ctx context.Context, accountID uuid.UUID,
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at
 		FROM contacts WHERE account_id = $1 AND phone = $2
 		LIMIT 1
 	`, accountID, phone).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
-		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -991,12 +991,12 @@ func (r *ContactRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at
 		FROM contacts WHERE id = $1
 	`, id).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
-		&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -1010,10 +1010,10 @@ func (r *ContactRepository) Update(ctx context.Context, contact *domain.Contact)
 		UPDATE contacts SET
 			name = $1, last_name = $2, short_name = $3, custom_name = $4, push_name = $5,
 			email = $6, company = $7, age = $8,
-			tags = $9, notes = $10, phone = $11, updated_at = NOW()
-		WHERE id = $12
+			tags = $9, notes = $10, phone = $11, dni = $12, birth_date = $13, updated_at = NOW()
+		WHERE id = $14
 	`, contact.Name, contact.LastName, contact.ShortName, contact.CustomName, contact.PushName, contact.Email, contact.Company,
-		contact.Age, contact.Tags, contact.Notes, contact.Phone, contact.ID)
+		contact.Age, contact.Tags, contact.Notes, contact.Phone, contact.DNI, contact.BirthDate, contact.ID)
 	return err
 }
 
@@ -1073,7 +1073,7 @@ func (r *ContactRepository) FindDuplicates(ctx context.Context, accountID uuid.U
 	// Find contacts with the same phone number
 	rows, err := r.db.Query(ctx, `
 		SELECT c.id, c.account_id, c.device_id, c.jid, c.phone, c.name, c.last_name, c.short_name, c.custom_name, c.push_name,
-		       c.avatar_url, c.email, c.company, c.age, c.tags, c.notes, c.source, c.is_group, c.created_at, c.updated_at
+		       c.avatar_url, c.email, c.company, c.age, c.dni, c.birth_date, c.tags, c.notes, c.source, c.is_group, c.created_at, c.updated_at
 		FROM contacts c
 		INNER JOIN (
 			SELECT phone FROM contacts
@@ -1095,7 +1095,7 @@ func (r *ContactRepository) FindDuplicates(ctx context.Context, accountID uuid.U
 		if err := rows.Scan(
 			&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
-			&contact.Email, &contact.Company, &contact.Age, &contact.Tags, &contact.Notes, &contact.Source,
+			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 		); err != nil {
 			return nil, err

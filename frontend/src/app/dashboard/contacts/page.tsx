@@ -1,13 +1,13 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   Search, Phone, Mail, Building2, Tag, Edit, Trash2, RefreshCw,
-  ChevronDown, CheckSquare, Square, XCircle, MoreVertical,
+  ChevronDown, CheckSquare, Square, XCircle, MoreVertical, MoreHorizontal,
   Users, Merge, Eye, X, Smartphone, AlertTriangle, MessageSquare, Send,
   Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter, Radio,
-  UserPlus, ClipboardPaste
+  UserPlus, ClipboardPaste, Hash
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -50,6 +50,8 @@ interface Contact {
   email: string | null
   company: string | null
   age: number | null
+  dni: string | null
+  birth_date: string | null
   tags: string[] | null
   structured_tags: StructuredTag[] | null
   notes: string | null
@@ -140,6 +142,21 @@ export default function ContactsPage() {
   const [showImportModal, setShowImportModal] = useState(false)
   const [showCreateContact, setShowCreateContact] = useState(false)
   const [showPasteExcel, setShowPasteExcel] = useState(false)
+
+  // Toolbar dropdown
+  const [showMoreMenu, setShowMoreMenu] = useState(false)
+  const moreMenuRef = useRef<HTMLDivElement>(null)
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setShowMoreMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
 
   // Broadcast
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
@@ -769,88 +786,119 @@ export default function ContactsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Contactos</h1>
-          <p className="text-slate-500 text-sm mt-1">{total} contactos en total</p>
+          <p className="text-slate-500 text-sm mt-1">{total.toLocaleString()} contactos en total</p>
         </div>
-        <div className="flex flex-wrap gap-2">
+
+        {/* ── Toolbar ── */}
+        <div className="flex items-center gap-2">
           {selectionMode ? (
+            /* Selection mode bar */
             <>
-              <span className="flex items-center px-3 py-2 text-sm text-slate-600">
-                {selectedIds.size} seleccionado(s)
+              <span className="px-3 py-2 text-sm text-slate-600 font-medium">
+                {selectedIds.size} seleccionado{selectedIds.size !== 1 ? 's' : ''}
               </span>
               <button
                 onClick={() => setSelectedIds(new Set(contacts.map(c => c.id)))}
-                className="px-3 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50"
+                className="px-3 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
               >
-                Seleccionar todos
+                Todos
               </button>
               <button
                 onClick={handleDeleteSelected}
                 disabled={selectedIds.size === 0}
-                className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                className="px-3 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Eliminar ({selectedIds.size})
               </button>
               <button
                 onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
-                className="px-3 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50"
+                className="w-9 h-9 flex items-center justify-center border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-500 hover:text-slate-700 transition-colors"
+                title="Cancelar selección"
               >
-                <XCircle className="w-4 h-4" />
+                <X className="w-4 h-4" />
               </button>
             </>
           ) : (
+            /* Normal mode: 3 elements */
             <>
-              <button
-                onClick={handleSyncAll}
-                disabled={syncing}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition disabled:opacity-50 text-sm"
-              >
-                <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-                {syncing ? 'Sincronizando...' : 'Sincronizar'}
-              </button>
+              {/* Primary CTA */}
               <button
                 onClick={() => setShowCreateContact(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition text-sm font-medium"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-colors text-sm font-semibold shadow-sm shadow-emerald-900/20"
               >
                 <UserPlus className="w-4 h-4" />
                 Nuevo contacto
               </button>
-              <button
-                onClick={() => setShowPasteExcel(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition text-sm"
-              >
-                <ClipboardPaste className="w-4 h-4" />
-                Pegar Excel
-              </button>
-              <button
-                onClick={() => setShowImportModal(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition text-sm"
-              >
-                <Upload className="w-4 h-4" />
-                Importar CSV
-              </button>
-              <button
-                onClick={handleFindDuplicates}
-                disabled={loadingDuplicates}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition disabled:opacity-50 text-sm"
-              >
-                <Merge className="w-4 h-4" />
-                Duplicados
-              </button>
+
+              {/* Masivo — secondary but frequent */}
               <button
                 onClick={() => { fetchDevices(); setShowBroadcastModal(true) }}
                 disabled={broadcastableContacts.length === 0}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-emerald-200 rounded-lg hover:bg-emerald-50 transition text-emerald-700 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-2 px-4 py-2 border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors text-emerald-700 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <Radio className="w-4 h-4" />
                 Masivo
               </button>
-              <button
-                onClick={() => setSelectionMode(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition text-sm"
-              >
-                <CheckSquare className="w-4 h-4" />
-                Seleccionar
-              </button>
+
+              {/* ··· More dropdown */}
+              <div ref={moreMenuRef} className="relative">
+                <button
+                  onClick={() => setShowMoreMenu(v => !v)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-2 border rounded-lg text-sm transition-colors ${
+                    showMoreMenu
+                      ? 'border-slate-400 bg-slate-100 text-slate-700'
+                      : 'border-slate-300 hover:bg-slate-50 text-slate-600'
+                  }`}
+                  title="Más acciones"
+                >
+                  <MoreHorizontal className="w-4 h-4" />
+                  <span className="hidden sm:inline">Más</span>
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMoreMenu ? 'rotate-180' : ''}`} />
+                </button>
+
+                {showMoreMenu && (
+                  <div className="absolute right-0 top-full mt-1.5 w-52 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+                    <button
+                      onClick={() => { handleSyncAll(); setShowMoreMenu(false) }}
+                      disabled={syncing}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-4 h-4 text-slate-400 ${syncing ? 'animate-spin' : ''}`} />
+                      {syncing ? 'Sincronizando...' : 'Sincronizar'}
+                    </button>
+                    <button
+                      onClick={() => { setShowPasteExcel(true); setShowMoreMenu(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                    >
+                      <ClipboardPaste className="w-4 h-4 text-slate-400" />
+                      Pegar desde Excel
+                    </button>
+                    <button
+                      onClick={() => { setShowImportModal(true); setShowMoreMenu(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                    >
+                      <Upload className="w-4 h-4 text-slate-400" />
+                      Importar CSV
+                    </button>
+                    <div className="my-1 border-t border-slate-100" />
+                    <button
+                      onClick={() => { handleFindDuplicates(); setShowMoreMenu(false) }}
+                      disabled={loadingDuplicates}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-50"
+                    >
+                      <Merge className="w-4 h-4 text-slate-400" />
+                      {loadingDuplicates ? 'Buscando...' : 'Buscar duplicados'}
+                    </button>
+                    <button
+                      onClick={() => { setSelectionMode(true); setShowMoreMenu(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                    >
+                      <CheckSquare className="w-4 h-4 text-slate-400" />
+                      Seleccionar contactos
+                    </button>
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>
@@ -1250,6 +1298,30 @@ export default function ContactsPage() {
                   ) : (
                     <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.age ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('age', selectedContact.age?.toString() || '')} title="Clic para editar">
                       {selectedContact.age ? `${selectedContact.age} años` : 'Agregar edad'}
+                    </span>
+                  )}
+                </div>
+
+                {/* DNI */}
+                <div className="flex items-center gap-3 group">
+                  <Hash className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'dni' ? (
+                    <input autoFocus value={editValues.dni ?? ''} onChange={(e) => setEditValues({ ...editValues, dni: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'dni')} onBlur={() => saveContactField('dni')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="DNI" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.dni ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('dni', selectedContact.dni || '')} title="Clic para editar">
+                      {selectedContact.dni ? `DNI: ${selectedContact.dni}` : 'Agregar DNI'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Fecha de nacimiento */}
+                <div className="flex items-center gap-3 group">
+                  <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {editingField === 'birth_date' ? (
+                    <input autoFocus type="date" value={editValues.birth_date ?? ''} onChange={(e) => setEditValues({ ...editValues, birth_date: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'birth_date')} onBlur={() => saveContactField('birth_date')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" />
+                  ) : (
+                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.birth_date ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('birth_date', selectedContact.birth_date ? selectedContact.birth_date.split('T')[0] : '')} title="Clic para editar">
+                      {selectedContact.birth_date ? `Nac: ${new Date(selectedContact.birth_date).toLocaleDateString('es-PE')}` : 'Agregar fecha de nacimiento'}
                     </span>
                   )}
                 </div>

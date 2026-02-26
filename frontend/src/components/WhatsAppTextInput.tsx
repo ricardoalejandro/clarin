@@ -82,7 +82,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
 
   const handleInput = useCallback(() => {
     if (!editorRef.current) return
-    const text = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ')
+    const text = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n')
     const caretPos = getCaretOffset(editorRef.current)
     onChange(text)
     const html = formatToHtmlPreview(text)

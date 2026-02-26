@@ -1,9 +1,10 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { X, User, Smartphone } from 'lucide-react'
+import { X, User, Smartphone, Tag } from 'lucide-react'
 import ImageViewer from '@/components/chat/ImageViewer'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
+import TagInput from '@/components/TagInput'
 
 interface Contact {
   id: string
@@ -20,6 +21,7 @@ interface Contact {
   age?: number
   notes?: string
   is_group: boolean
+  structured_tags?: Array<{id: string, account_id: string, name: string, color: string}>
 }
 
 interface Lead {
@@ -162,6 +164,24 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
             }}
             className="flex-1 min-h-0"
           />
+
+          {/* Contact tags (separate from lead tags) */}
+          {contact && (
+            <div className="px-4 py-3 border-t border-slate-100 shrink-0">
+              <div className="flex items-center gap-1.5 mb-2">
+                <Tag className="w-3.5 h-3.5 text-slate-400" />
+                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas del contacto</h5>
+              </div>
+              <TagInput
+                entityType="contact"
+                entityId={contact.id}
+                assignedTags={contact.structured_tags || []}
+                onTagsChange={(newTags) => {
+                  setContact(prev => prev ? { ...prev, structured_tags: newTags } : prev)
+                }}
+              />
+            </div>
+          )}
         </div>
       ) : (
         /* ─── When there is NO lead, show basic contact info ─── */
@@ -215,6 +235,24 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
               {contact.age && (
                 <p className="text-sm text-slate-700">🎂 {contact.age} años</p>
               )}
+            </div>
+          )}
+
+          {/* Contact tags */}
+          {contact && (
+            <div className="px-4 py-3 border-b border-slate-200">
+              <div className="flex items-center gap-1.5 mb-2">
+                <Tag className="w-3.5 h-3.5 text-slate-400" />
+                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
+              </div>
+              <TagInput
+                entityType="contact"
+                entityId={contact.id}
+                assignedTags={contact.structured_tags || []}
+                onTagsChange={(newTags) => {
+                  setContact(prev => prev ? { ...prev, structured_tags: newTags } : prev)
+                }}
+              />
             </div>
           )}
 

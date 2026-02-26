@@ -2629,6 +2629,8 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		Email      *string  `json:"email"`
 		Company    *string  `json:"company"`
 		Age        *int     `json:"age"`
+		DNI        *string  `json:"dni"`
+		BirthDate  *string  `json:"birth_date"`
 		Tags       []string `json:"tags"`
 		Notes      *string  `json:"notes"`
 	}
@@ -2656,6 +2658,18 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 	}
 	if body.Age != nil {
 		contact.Age = body.Age
+	}
+	if body.DNI != nil {
+		contact.DNI = body.DNI
+	}
+	if body.BirthDate != nil {
+		if *body.BirthDate == "" {
+			contact.BirthDate = nil
+		} else {
+			if t, err := time.Parse("2006-01-02", *body.BirthDate); err == nil {
+				contact.BirthDate = &t
+			}
+		}
 	}
 	if body.Tags != nil {
 		contact.Tags = body.Tags
@@ -2775,13 +2789,15 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
 	var body struct {
-		Phone    string   `json:"phone"`
-		Name     string   `json:"name"`
-		LastName string   `json:"last_name"`
-		Email    string   `json:"email"`
-		Company  string   `json:"company"`
-		Notes    string   `json:"notes"`
-		Tags     []string `json:"tags"`
+		Phone     string   `json:"phone"`
+		Name      string   `json:"name"`
+		LastName  string   `json:"last_name"`
+		Email     string   `json:"email"`
+		Company   string   `json:"company"`
+		Notes     string   `json:"notes"`
+		DNI       string   `json:"dni"`
+		BirthDate string   `json:"birth_date"`
+		Tags      []string `json:"tags"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
@@ -2820,6 +2836,16 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 		contact.Tags = body.Tags
 		updated = true
 	}
+	if body.DNI != "" {
+		contact.DNI = &body.DNI
+		updated = true
+	}
+	if body.BirthDate != "" {
+		if t, err := time.Parse("2006-01-02", body.BirthDate); err == nil {
+			contact.BirthDate = &t
+			updated = true
+		}
+	}
 	if updated {
 		_ = s.services.Contact.Update(c.Context(), contact)
 	}
@@ -2835,13 +2861,15 @@ func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
 
 	var body struct {
 		Contacts []struct {
-			Phone    string   `json:"phone"`
-			Name     string   `json:"name"`
-			LastName string   `json:"last_name"`
-			Email    string   `json:"email"`
-			Company  string   `json:"company"`
-			Notes    string   `json:"notes"`
-			Tags     []string `json:"tags"`
+			Phone     string   `json:"phone"`
+			Name      string   `json:"name"`
+			LastName  string   `json:"last_name"`
+			Email     string   `json:"email"`
+			Company   string   `json:"company"`
+			Notes     string   `json:"notes"`
+			DNI       string   `json:"dni"`
+			BirthDate string   `json:"birth_date"`
+			Tags      []string `json:"tags"`
 		} `json:"contacts"`
 	}
 	if err := c.BodyParser(&body); err != nil {
@@ -2891,6 +2919,16 @@ func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
 		if len(row.Tags) > 0 {
 			contact.Tags = row.Tags
 			updated = true
+		}
+		if row.DNI != "" {
+			contact.DNI = &row.DNI
+			updated = true
+		}
+		if row.BirthDate != "" {
+			if t, err := time.Parse("2006-01-02", row.BirthDate); err == nil {
+				contact.BirthDate = &t
+				updated = true
+			}
 		}
 		if updated {
 			_ = s.services.Contact.Update(c.Context(), contact)
