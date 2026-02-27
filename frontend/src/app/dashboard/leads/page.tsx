@@ -416,6 +416,10 @@ export default function LeadsPage() {
   const [listObservations, setListObservations] = useState<Map<string, Observation[]>>(new Map())
   const [loadingListObs, setLoadingListObs] = useState<Set<string>>(new Set())
   const [expandedListLeadId, setExpandedListLeadId] = useState<string | null>(null)
+  const [listHistoryLead, setListHistoryLead] = useState<Lead | null>(null)
+  const [listHistoryFilterType, setListHistoryFilterType] = useState('')
+  const [listHistoryFilterFrom, setListHistoryFilterFrom] = useState('')
+  const [listHistoryFilterTo, setListHistoryFilterTo] = useState('')
 
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
@@ -1548,7 +1552,7 @@ export default function LeadsPage() {
   const listVirtualizer = useVirtualizer({
     count: listLeads.length,
     getScrollElement: () => listScrollRef.current,
-    estimateSize: () => 56,
+    estimateSize: () => 80,
     overscan: 10,
   })
 
@@ -2023,7 +2027,7 @@ export default function LeadsPage() {
       {viewMode === 'list' && (
         <div className="flex-1 min-h-0 flex flex-col">
           {/* Sticky header */}
-          <div className="bg-slate-50 border-b border-slate-200 flex-shrink-0">
+          <div className="bg-slate-50 border-b-2 border-slate-200 flex-shrink-0">
             <div className="flex">
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[220px]">Lead</div>
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[110px]">Etapa</div>
@@ -2057,8 +2061,8 @@ export default function LeadsPage() {
                       }}
                     >
                       <div
-                        className={`flex items-start group border-b border-slate-100 hover:bg-slate-50/80 transition cursor-pointer ${
-                          detailLead?.id === lead.id ? 'bg-emerald-50/50' : ''
+                        className={`flex items-start group border-b border-slate-200/80 hover:bg-emerald-50/40 hover:shadow-sm transition-all duration-150 cursor-pointer ${
+                          detailLead?.id === lead.id ? 'bg-emerald-50/60 border-l-2 border-l-emerald-500' : 'border-l-2 border-l-transparent'
                         }`}
                         onClick={() => openDetailPanel(lead)}
                       >
@@ -2116,7 +2120,18 @@ export default function LeadsPage() {
                         </div>
 
                         {/* Observations preview */}
-                        <div className="px-3 py-2.5 flex-1" onClick={(e) => e.stopPropagation()}>
+                        <div
+                          className="px-3 py-2.5 flex-1 cursor-pointer hover:bg-slate-50 rounded-lg transition-colors"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (obs && obs.length > 0) {
+                              setListHistoryLead(lead)
+                              setListHistoryFilterType('')
+                              setListHistoryFilterFrom('')
+                              setListHistoryFilterTo('')
+                            }
+                          }}
+                        >
                           {loadingListObs.has(lead.id) ? (
                             <div className="flex items-center gap-2">
                               <div className="animate-spin rounded-full h-3 w-3 border border-slate-200 border-t-emerald-500" />
@@ -2124,12 +2139,12 @@ export default function LeadsPage() {
                             </div>
                           ) : obs && obs.length > 0 ? (
                             <div className="space-y-1">
-                              {obs.slice(0, isExpanded ? 10 : 3).map(o => (
+                              {obs.slice(0, isExpanded ? 10 : 2).map(o => (
                                 <div key={o.id} className="flex items-start gap-1.5">
                                   <span className="shrink-0 mt-0.5 text-[10px]">
                                     {o.type === 'call' ? '📞' : o.type === 'note' ? '📝' : '↕'}
                                   </span>
-                                  <p className="text-[11px] text-slate-600 leading-tight line-clamp-1">
+                                  <p className="text-[11px] text-slate-600 leading-tight">
                                     {(o.notes || '').replace(/^\(sinc\)\s*/i, '')}
                                   </p>
                                   <span className="shrink-0 text-[9px] text-slate-400 mt-0.5 whitespace-nowrap">
@@ -2137,20 +2152,10 @@ export default function LeadsPage() {
                                   </span>
                                 </div>
                               ))}
-                              {obs.length > 3 && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    setExpandedListLeadId(isExpanded ? null : lead.id)
-                                  }}
-                                  className="text-[10px] text-emerald-600 hover:text-emerald-700 font-medium mt-0.5"
-                                >
-                                  {isExpanded ? (
-                                    <span className="inline-flex items-center gap-0.5"><ChevronUp className="w-3 h-3" /> Menos</span>
-                                  ) : (
-                                    <span className="inline-flex items-center gap-0.5"><ChevronDown className="w-3 h-3" /> +{obs.length - 3} más</span>
-                                  )}
-                                </button>
+                              {obs.length > 2 && (
+                                <span className="text-[10px] text-emerald-600 font-medium inline-flex items-center gap-0.5">
+                                  <Maximize2 className="w-3 h-3" /> Ver {obs.length} observaciones
+                                </span>
                               )}
                             </div>
                           ) : (
@@ -2187,6 +2192,93 @@ export default function LeadsPage() {
           </div>
         </div>
       )}
+
+      {/* List View — Historial Completo Modal */}
+      {listHistoryLead && (() => {
+        const historyObs = listObservations.get(listHistoryLead.id) || []
+        const filtered = historyObs.filter(obs => {
+          if (listHistoryFilterType && obs.type !== listHistoryFilterType) return false
+          if (listHistoryFilterFrom && new Date(obs.created_at) < new Date(listHistoryFilterFrom)) return false
+          if (listHistoryFilterTo) {
+            const to = new Date(listHistoryFilterTo)
+            to.setDate(to.getDate() + 1)
+            if (new Date(obs.created_at) >= to) return false
+          }
+          return true
+        })
+        return (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setListHistoryLead(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col border border-slate-100" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                <div>
+                  <h2 className="text-base font-semibold text-slate-900">Historial Completo</h2>
+                  <p className="text-sm text-slate-500">{listHistoryLead.name || 'Sin nombre'} &mdash; {filtered.length} registros</p>
+                </div>
+                <button onClick={() => setListHistoryLead(null)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <div>
+                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Tipo</label>
+                    <select value={listHistoryFilterType} onChange={(e) => setListHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white">
+                      <option value="">Todos</option>
+                      <option value="note">Nota</option>
+                      <option value="call">Llamada</option>
+                      <option value="whatsapp">WhatsApp</option>
+                      <option value="email">Email</option>
+                      <option value="meeting">Reunión</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Desde</label>
+                    <input type="date" value={listHistoryFilterFrom} onChange={(e) => setListHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Hasta</label>
+                    <input type="date" value={listHistoryFilterTo} onChange={(e) => setListHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
+                  </div>
+                  {(listHistoryFilterType || listHistoryFilterFrom || listHistoryFilterTo) && (
+                    <button onClick={() => { setListHistoryFilterType(''); setListHistoryFilterFrom(''); setListHistoryFilterTo('') }} className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1 transition">
+                      <XCircle className="w-3.5 h-3.5" /> Limpiar
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6">
+                {filtered.length === 0 ? (
+                  <p className="text-sm text-slate-400 text-center py-10">No hay registros con los filtros seleccionados</p>
+                ) : (
+                  <div className="space-y-3">
+                    {filtered.map((obs) => (
+                      <div key={obs.id} className="p-4 bg-slate-50 rounded-xl border border-slate-100 hover:border-slate-200 transition">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1.5">
+                              <span className={`px-2.5 py-0.5 text-xs rounded-lg font-semibold ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
+                                {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
+                              </span>
+                              <span className="text-xs text-slate-400">{format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}</span>
+                            </div>
+                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
+                            <div className="flex items-center gap-2 mt-1.5">
+                              {obs.created_by_name && <span className="text-xs text-slate-400">por {obs.created_by_name}</span>}
+                              {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium">↕ Kommo</span>}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Add Lead Modal */}
       {showAddModal && (

@@ -825,23 +825,23 @@ export default function LeadDetailPanel({
 
       {/* Full History Modal */}
       {showHistoryModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col border border-slate-100">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col border border-slate-100" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
               <div>
-                <h2 className="text-sm font-semibold text-slate-900">Historial Completo</h2>
-                <p className="text-xs text-slate-500">{lead.name || 'Sin nombre'} &mdash; {observations.length} registros</p>
+                <h2 className="text-base font-semibold text-slate-900">Historial Completo</h2>
+                <p className="text-sm text-slate-500">{lead.name || 'Sin nombre'} &mdash; {observations.length} registros</p>
               </div>
-              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100">
-                <X className="w-4 h-4" />
+              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+                <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
-              <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-4 flex-wrap">
                 <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Tipo</label>
-                  <select value={historyFilterType} onChange={(e) => setHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500">
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Tipo</label>
+                  <select value={historyFilterType} onChange={(e) => setHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white">
                     <option value="">Todos</option>
                     <option value="note">Nota</option>
                     <option value="call">Llamada</option>
@@ -851,16 +851,16 @@ export default function LeadDetailPanel({
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Desde</label>
-                  <input type="date" value={historyFilterFrom} onChange={(e) => setHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500" />
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Desde</label>
+                  <input type="date" value={historyFilterFrom} onChange={(e) => setHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
                 </div>
                 <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Hasta</label>
-                  <input type="date" value={historyFilterTo} onChange={(e) => setHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500" />
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Hasta</label>
+                  <input type="date" value={historyFilterTo} onChange={(e) => setHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
                 </div>
                 {(historyFilterType || historyFilterFrom || historyFilterTo) && (
-                  <button onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1">
-                    <XCircle className="w-3.5 h-3.5" />Limpiar
+                  <button onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1 transition">
+                    <XCircle className="w-3.5 h-3.5" /> Limpiar
                   </button>
                 )}
               </div>
@@ -878,21 +878,21 @@ export default function LeadDetailPanel({
                   }
                   return true
                 })
-                if (filtered.length === 0) return <p className="text-xs text-slate-400 text-center py-8">No hay registros con los filtros seleccionados</p>
+                if (filtered.length === 0) return <p className="text-sm text-slate-400 text-center py-10">No hay registros con los filtros seleccionados</p>
                 return (
-                  <div className="space-y-2">
+                  <div className="space-y-3">
                     {filtered.map((obs) => (
-                      <div key={obs.id} className="p-3 bg-slate-50 rounded-xl group relative border border-slate-100">
-                        <div className="flex items-start justify-between gap-2">
+                      <div key={obs.id} className="p-4 bg-slate-50 rounded-xl group relative border border-slate-100 hover:border-slate-200 transition">
+                        <div className="flex items-start justify-between gap-3">
                           <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className={`px-2 py-0.5 text-xs rounded font-medium ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
+                            <div className="flex items-center gap-2 mb-1.5">
+                              <span className={`px-2.5 py-0.5 text-xs rounded-lg font-semibold ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
                                 {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
                               </span>
                               <span className="text-xs text-slate-400">{format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}</span>
                             </div>
-                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
-                            <div className="flex items-center gap-2 mt-1">
+                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
+                            <div className="flex items-center gap-2 mt-1.5">
                               {obs.created_by_name && <span className="text-xs text-slate-400">por {obs.created_by_name}</span>}
                               {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium">↕ Kommo</span>}
                             </div>
