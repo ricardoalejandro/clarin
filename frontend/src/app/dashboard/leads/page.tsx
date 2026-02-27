@@ -318,6 +318,7 @@ export default function LeadsPage() {
   const [loadingMoreStages, setLoadingMoreStages] = useState<Set<string>>(new Set())
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
   const [activePipeline, setActivePipeline] = useState<Pipeline | null>(null)
+  const [pipelinesLoaded, setPipelinesLoaded] = useState(false)
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('')
@@ -448,7 +449,7 @@ export default function LeadsPage() {
       ])
       const data = await pipelinesRes.json()
       const connectedData = await connectedRes.json()
-      if (data.success && data.pipelines) {
+      if (data.success && data.pipelines && data.pipelines.length > 0) {
         setPipelines(data.pipelines)
         // Default to the Kommo-connected pipeline, then is_default, then first
         let defaultP = null
@@ -462,18 +463,21 @@ export default function LeadsPage() {
           defaultP = data.pipelines.find((p: Pipeline) => p.is_default) || data.pipelines[0]
         }
         if (defaultP) setActivePipeline(defaultP)
+      } else {
+        setPipelines([])
       }
     } catch (err) {
       console.error('Failed to fetch pipelines:', err)
+    } finally {
+      setPipelinesLoaded(true)
     }
   }, [])
 
   const fetchLeadsPaginated = useCallback(async () => {
-    if (!activePipeline) return
     const token = localStorage.getItem('token')
     try {
       const params = new URLSearchParams()
-      params.set('pipeline_id', activePipeline.id)
+      if (activePipeline) params.set('pipeline_id', activePipeline.id)
       params.set('per_stage', '50')
       if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
       if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
@@ -496,13 +500,12 @@ export default function LeadsPage() {
   }, [activePipeline, debouncedSearchTerm, filterTagNames, filterStageIds, filterDeviceIds])
 
   const fetchListLeads = useCallback(async (reset: boolean = false) => {
-    if (!activePipeline) return
     setListLoading(true)
     const offset = reset ? 0 : listOffsetRef.current
     const token = localStorage.getItem('token')
     try {
       const params = new URLSearchParams()
-      params.set('pipeline_id', activePipeline.id)
+      if (activePipeline) params.set('pipeline_id', activePipeline.id)
       params.set('offset', String(offset))
       params.set('limit', '100')
       if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
@@ -644,19 +647,19 @@ export default function LeadsPage() {
     } catch {}
   }, [fetchPipelines])
 
-  // Fetch paginated kanban data when pipeline or filters change
+  // Fetch paginated kanban data when pipelines loaded or pipeline/filters change
   useEffect(() => {
-    if (activePipeline) {
+    if (pipelinesLoaded) {
       fetchLeadsPaginated()
     }
-  }, [fetchLeadsPaginated])
+  }, [pipelinesLoaded, fetchLeadsPaginated])
 
   // Fetch list data when in list view (and when filters change)
   useEffect(() => {
-    if (viewMode === 'list' && activePipeline) {
+    if (viewMode === 'list' && pipelinesLoaded) {
       fetchListLeads(true)
     }
-  }, [viewMode, fetchListLeads, activePipeline])
+  }, [viewMode, fetchListLeads, pipelinesLoaded])
 
   // WebSocket: listen for lead_update events — delta updates for paginated data
   useEffect(() => {
