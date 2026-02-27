@@ -592,6 +592,10 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_leads_account_created ON leads(account_id, created_at DESC)`,
 		// Index for lead_tags lookups by lead_id (speeds up batch tag loading)
 		`CREATE INDEX IF NOT EXISTS idx_lead_tags_lead ON lead_tags(lead_id)`,
+		// Composite index for stage-based pagination (infinite scroll per column)
+		`CREATE INDEX IF NOT EXISTS idx_leads_stage_created ON leads(stage_id, created_at DESC)`,
+		// Composite index for pipeline + account filtering
+		`CREATE INDEX IF NOT EXISTS idx_leads_pipeline_account ON leads(account_id, pipeline_id)`,
 
 		// Backfill participant_tags from contact_tags for existing participants
 		`INSERT INTO participant_tags (participant_id, tag_id)

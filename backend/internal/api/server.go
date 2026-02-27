@@ -220,6 +220,9 @@ func (s *Server) setupRoutes() {
 	// Lead routes
 	leads := protected.Group("/leads", s.requirePermission(domain.PermLeads))
 	leads.Get("/", s.handleGetLeads)
+	leads.Get("/paginated", s.handleGetLeadsPaginated)
+	leads.Get("/list-paginated", s.handleGetLeadsListPaginated)
+	leads.Get("/by-stage/:stageId", s.handleGetLeadsByStage)
 	leads.Post("/", s.handleCreateLead)
 	leads.Delete("/batch", s.handleDeleteLeadsBatch)
 	leads.Post("/observations/batch", s.handleBatchLeadObservations)
@@ -1606,16 +1609,733 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 	return c.JSON(result)
 }
 
-// invalidateLeadsCache invalidates ALL cached leads keys for an account (base + device-filtered)
+// invalidateLeadsCache invalidates ALL cached leads keys for an account (base + device-filtered + paginated)
 func (s *Server) invalidateLeadsCache(accountID uuid.UUID) {
 	if s.cache != nil {
-		// Delete base key + any device-filtered keys using pattern
 		_ = s.cache.Del(context.Background(), "leads:"+accountID.String())
 		_ = s.cache.DelPattern(context.Background(), "leads:"+accountID.String()+":*")
+		_ = s.cache.DelPattern(context.Background(), "leads_paged:"+accountID.String()+":*")
+		_ = s.cache.DelPattern(context.Background(), "leads_stage:"+accountID.String()+":*")
+		_ = s.cache.DelPattern(context.Background(), "leads_list:"+accountID.String()+":*")
 	}
 }
 
-// broadcastLeadDelta sends a delta WebSocket event so frontends update a single lead instead of re-fetching all
+// handleGetLeadsPaginated returns leads grouped by stage with server-side filtering, first N per stage + total counts.
+// This enables instant load for any number of leads (100K+) — only the first page per column is returned.
+func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// Parse query params
+	pipelineID := c.Query("pipeline_id")
+	search := strings.TrimSpace(c.Query("search"))
+	tagNamesRaw := c.Query("tag_names")
+	stageIDsRaw := c.Query("stage_ids")
+	perStage, _ := strconv.Atoi(c.Query("per_stage", "50"))
+	if perStage <= 0 || perStage > 200 {
+		perStage = 50
+	}
+
+	// Parse device_ids
+	deviceIDs := c.Context().QueryArgs().PeekMulti("device_ids")
+	var deviceUUIDs []uuid.UUID
+	for _, did := range deviceIDs {
+		if id, err := uuid.Parse(string(did)); err == nil {
+			deviceUUIDs = append(deviceUUIDs, id)
+		}
+	}
+
+	// Parse tag names
+	var tagNames []string
+	if tagNamesRaw != "" {
+		tagNames = strings.Split(tagNamesRaw, ",")
+	}
+
+	// Parse stage_ids filter
+	var stageIDs []string
+	if stageIDsRaw != "" {
+		stageIDs = strings.Split(stageIDsRaw, ",")
+	}
+
+	// Build WHERE clause dynamically
+	args := []interface{}{accountID}
+	argIdx := 2
+	whereClauses := []string{"l.account_id = $1"}
+
+	if pipelineID != "" {
+		if pid, err := uuid.Parse(pipelineID); err == nil {
+			whereClauses = append(whereClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", argIdx))
+			args = append(args, pid)
+			argIdx++
+		}
+	}
+
+	if search != "" {
+		searchPattern := "%" + strings.ToLower(search) + "%"
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"(LOWER(COALESCE(l.name,'')) LIKE $%d OR LOWER(COALESCE(l.phone,'')) LIKE $%d OR LOWER(COALESCE(l.email,'')) LIKE $%d OR LOWER(COALESCE(l.company,'')) LIKE $%d OR LOWER(COALESCE(l.last_name,'')) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx, argIdx,
+		))
+		args = append(args, searchPattern)
+		argIdx++
+	}
+
+	if len(deviceUUIDs) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($%d))", argIdx))
+		args = append(args, deviceUUIDs)
+		argIdx++
+	}
+
+	if len(tagNames) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"l.id IN (SELECT lt.lead_id FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id WHERE t.name = ANY($%d))",
+			argIdx,
+		))
+		args = append(args, tagNames)
+		argIdx++
+	}
+
+	if len(stageIDs) > 0 {
+		var validStageUUIDs []uuid.UUID
+		for _, sid := range stageIDs {
+			if id, err := uuid.Parse(strings.TrimSpace(sid)); err == nil {
+				validStageUUIDs = append(validStageUUIDs, id)
+			}
+		}
+		if len(validStageUUIDs) > 0 {
+			whereClauses = append(whereClauses, fmt.Sprintf("l.stage_id = ANY($%d)", argIdx))
+			args = append(args, validStageUUIDs)
+			argIdx++
+		}
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// --- Run 3 queries in parallel: stages, counts per stage, first N leads per stage + tags ---
+	var wg sync.WaitGroup
+
+	// 1. Get pipeline stages
+	type stageInfo struct {
+		ID         uuid.UUID
+		PipelineID uuid.UUID
+		Name       string
+		Color      string
+		Position   int
+	}
+	var stagesList []stageInfo
+	var stagesErr error
+
+	// 2. Counts per stage
+	type stageCount struct {
+		StageID uuid.UUID
+		Count   int
+	}
+	var counts []stageCount
+	var countsErr error
+
+	// 3. First N leads per stage (window function)
+	var paginatedLeads []*domain.Lead
+	var leadsErr error
+
+	// 4. Tags map
+	tagMap := make(map[uuid.UUID][]*domain.Tag)
+	var tagsErr error
+
+	// 5. Unassigned count
+	var unassignedCount int
+	var unassignedErr error
+
+	wg.Add(5)
+
+	// Goroutine 1: pipeline stages
+	go func() {
+		defer wg.Done()
+		if pipelineID == "" {
+			return
+		}
+		pid, err := uuid.Parse(pipelineID)
+		if err != nil {
+			return
+		}
+		rows, err := s.repos.DB().Query(c.Context(),
+			`SELECT id, pipeline_id, name, color, position FROM pipeline_stages WHERE pipeline_id = $1 ORDER BY position`,
+			pid,
+		)
+		if err != nil {
+			stagesErr = err
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var si stageInfo
+			if err := rows.Scan(&si.ID, &si.PipelineID, &si.Name, &si.Color, &si.Position); err != nil {
+				stagesErr = err
+				return
+			}
+			stagesList = append(stagesList, si)
+		}
+	}()
+
+	// Goroutine 2: count leads per stage
+	go func() {
+		defer wg.Done()
+		q := fmt.Sprintf(`SELECT l.stage_id, COUNT(*) FROM leads l WHERE %s AND l.stage_id IS NOT NULL GROUP BY l.stage_id`, whereSQL)
+		rows, err := s.repos.DB().Query(c.Context(), q, args...)
+		if err != nil {
+			countsErr = err
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var sc stageCount
+			if err := rows.Scan(&sc.StageID, &sc.Count); err != nil {
+				countsErr = err
+				return
+			}
+			counts = append(counts, sc)
+		}
+	}()
+
+	// Goroutine 3: first N leads per stage using ROW_NUMBER() window function
+	go func() {
+		defer wg.Done()
+		q := fmt.Sprintf(`
+			WITH ranked AS (
+				SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name,
+				       l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
+				       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
+				       l.created_at, l.updated_at, l.kommo_id,
+				       ps.name AS stage_name, ps.color AS stage_color, ps.position AS stage_position,
+				       ROW_NUMBER() OVER (PARTITION BY l.stage_id ORDER BY l.created_at DESC) AS rn
+				FROM leads l
+				LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+				WHERE %s AND l.stage_id IS NOT NULL
+			)
+			SELECT id, account_id, contact_id, jid, name, last_name, short_name,
+			       phone, email, company, age, status, source, notes,
+			       tags, custom_fields, assigned_to, pipeline_id, stage_id,
+			       created_at, updated_at, kommo_id,
+			       stage_name, stage_color, stage_position
+			FROM ranked WHERE rn <= %d
+			ORDER BY stage_position NULLS LAST, created_at DESC
+		`, whereSQL, perStage)
+		rows, err := s.repos.DB().Query(c.Context(), q, args...)
+		if err != nil {
+			leadsErr = err
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			lead := &domain.Lead{}
+			if err := rows.Scan(
+				&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName,
+				&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes,
+				&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
+				&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
+				&lead.StageName, &lead.StageColor, &lead.StagePosition,
+			); err != nil {
+				leadsErr = err
+				return
+			}
+			paginatedLeads = append(paginatedLeads, lead)
+		}
+	}()
+
+	// Goroutine 4: tags for account leads
+	go func() {
+		defer wg.Done()
+		rows, err := s.repos.DB().Query(c.Context(), `
+			SELECT lt.lead_id, t.id, t.account_id, t.name, t.color
+			FROM lead_tags lt
+			JOIN tags t ON t.id = lt.tag_id
+			JOIN leads l ON l.id = lt.lead_id
+			WHERE l.account_id = $1
+			ORDER BY t.name
+		`, accountID)
+		if err != nil {
+			tagsErr = err
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var leadID uuid.UUID
+			t := &domain.Tag{}
+			if err := rows.Scan(&leadID, &t.ID, &t.AccountID, &t.Name, &t.Color); err != nil {
+				continue
+			}
+			tagMap[leadID] = append(tagMap[leadID], t)
+		}
+	}()
+
+	// Goroutine 5: unassigned leads count + first N
+	go func() {
+		defer wg.Done()
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l WHERE %s AND (l.stage_id IS NULL)`, whereSQL)
+		err := s.repos.DB().QueryRow(c.Context(), q, args...).Scan(&unassignedCount)
+		if err != nil {
+			unassignedErr = err
+		}
+	}()
+
+	wg.Wait()
+
+	if leadsErr != nil {
+		log.Printf("[LEADS] Paginated leads error: %v", leadsErr)
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": leadsErr.Error()})
+	}
+	if countsErr != nil {
+		log.Printf("[LEADS] Counts error: %v", countsErr)
+	}
+	if stagesErr != nil {
+		log.Printf("[LEADS] Stages error: %v", stagesErr)
+	}
+	if tagsErr != nil {
+		log.Printf("[LEADS] Tags error: %v", tagsErr)
+	}
+	if unassignedErr != nil {
+		log.Printf("[LEADS] Unassigned error: %v", unassignedErr)
+	}
+
+	// Assign tags to leads
+	for _, lead := range paginatedLeads {
+		lead.StructuredTags = tagMap[lead.ID]
+	}
+
+	// Build counts map
+	countMap := make(map[uuid.UUID]int)
+	for _, sc := range counts {
+		countMap[sc.StageID] = sc.Count
+	}
+
+	// Build stages response with leads grouped
+	type stageResponse struct {
+		ID         uuid.UUID      `json:"id"`
+		PipelineID uuid.UUID      `json:"pipeline_id"`
+		Name       string         `json:"name"`
+		Color      string         `json:"color"`
+		Position   int            `json:"position"`
+		TotalCount int            `json:"total_count"`
+		Leads      []*domain.Lead `json:"leads"`
+		HasMore    bool           `json:"has_more"`
+	}
+
+	stagesResp := make([]stageResponse, 0, len(stagesList))
+	for _, si := range stagesList {
+		sr := stageResponse{
+			ID:         si.ID,
+			PipelineID: si.PipelineID,
+			Name:       si.Name,
+			Color:      si.Color,
+			Position:   si.Position,
+			TotalCount: countMap[si.ID],
+			Leads:      make([]*domain.Lead, 0),
+		}
+		for _, lead := range paginatedLeads {
+			if lead.StageID != nil && *lead.StageID == si.ID {
+				sr.Leads = append(sr.Leads, lead)
+			}
+		}
+		sr.HasMore = sr.TotalCount > len(sr.Leads)
+		stagesResp = append(stagesResp, sr)
+	}
+
+	// Unassigned leads (first N)
+	var unassignedLeads []*domain.Lead
+	for _, lead := range paginatedLeads {
+		if lead.StageID == nil {
+			unassignedLeads = append(unassignedLeads, lead)
+		}
+	}
+	// If window function didn't catch unassigned (stage_id IS NOT NULL filter), fetch them separately
+	if unassignedCount > 0 && len(unassignedLeads) == 0 {
+		unassignedQ := fmt.Sprintf(`
+			SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name,
+			       l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
+			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
+			       l.created_at, l.updated_at, l.kommo_id
+			FROM leads l
+			WHERE %s AND l.stage_id IS NULL
+			ORDER BY l.created_at DESC
+			LIMIT %d
+		`, whereSQL, perStage)
+		rows, err := s.repos.DB().Query(c.Context(), unassignedQ, args...)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				lead := &domain.Lead{}
+				if err := rows.Scan(
+					&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName,
+					&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes,
+					&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
+					&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
+				); err == nil {
+					lead.StructuredTags = tagMap[lead.ID]
+					unassignedLeads = append(unassignedLeads, lead)
+				}
+			}
+		}
+	}
+
+	// Collect all unique tags for filter dropdown
+	type tagInfo struct {
+		Name  string `json:"name"`
+		Color string `json:"color"`
+		Count int    `json:"count"`
+	}
+	tagCountMap := make(map[string]*tagInfo)
+	for _, tags := range tagMap {
+		for _, t := range tags {
+			if existing, ok := tagCountMap[t.Name]; ok {
+				existing.Count++
+			} else {
+				tagCountMap[t.Name] = &tagInfo{Name: t.Name, Color: t.Color, Count: 1}
+			}
+		}
+	}
+	tagsList := make([]*tagInfo, 0, len(tagCountMap))
+	for _, ti := range tagCountMap {
+		tagsList = append(tagsList, ti)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"stages":  stagesResp,
+		"unassigned": fiber.Map{
+			"total_count": unassignedCount,
+			"leads":       unassignedLeads,
+			"has_more":    unassignedCount > len(unassignedLeads),
+		},
+		"all_tags": tagsList,
+	})
+}
+
+// handleGetLeadsByStage returns paginated leads for a single stage (used by infinite scroll)
+func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	stageIDParam := c.Params("stageId")
+
+	offset, _ := strconv.Atoi(c.Query("offset", "0"))
+	limit, _ := strconv.Atoi(c.Query("limit", "50"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	search := strings.TrimSpace(c.Query("search"))
+	tagNamesRaw := c.Query("tag_names")
+	pipelineID := c.Query("pipeline_id")
+
+	// Parse device_ids
+	deviceIDs := c.Context().QueryArgs().PeekMulti("device_ids")
+	var deviceUUIDs []uuid.UUID
+	for _, did := range deviceIDs {
+		if id, err := uuid.Parse(string(did)); err == nil {
+			deviceUUIDs = append(deviceUUIDs, id)
+		}
+	}
+
+	// Build WHERE
+	args := []interface{}{accountID}
+	argIdx := 2
+	whereClauses := []string{"l.account_id = $1"}
+
+	// Handle stage: "unassigned" or UUID
+	isUnassigned := stageIDParam == "unassigned"
+	if isUnassigned {
+		whereClauses = append(whereClauses, "l.stage_id IS NULL")
+	} else {
+		if stageUUID, err := uuid.Parse(stageIDParam); err == nil {
+			whereClauses = append(whereClauses, fmt.Sprintf("l.stage_id = $%d", argIdx))
+			args = append(args, stageUUID)
+			argIdx++
+		} else {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid stage_id"})
+		}
+	}
+
+	if pipelineID != "" {
+		if pid, err := uuid.Parse(pipelineID); err == nil {
+			whereClauses = append(whereClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", argIdx))
+			args = append(args, pid)
+			argIdx++
+		}
+	}
+
+	if search != "" {
+		searchPattern := "%" + strings.ToLower(search) + "%"
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"(LOWER(COALESCE(l.name,'')) LIKE $%d OR LOWER(COALESCE(l.phone,'')) LIKE $%d OR LOWER(COALESCE(l.email,'')) LIKE $%d OR LOWER(COALESCE(l.company,'')) LIKE $%d OR LOWER(COALESCE(l.last_name,'')) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx, argIdx,
+		))
+		args = append(args, searchPattern)
+		argIdx++
+	}
+
+	if len(deviceUUIDs) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($%d))", argIdx))
+		args = append(args, deviceUUIDs)
+		argIdx++
+	}
+
+	var tagNames []string
+	if tagNamesRaw != "" {
+		tagNames = strings.Split(tagNamesRaw, ",")
+	}
+	if len(tagNames) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"l.id IN (SELECT lt.lead_id FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id WHERE t.name = ANY($%d))",
+			argIdx,
+		))
+		args = append(args, tagNames)
+		argIdx++
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// Query leads with OFFSET/LIMIT
+	q := fmt.Sprintf(`
+		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name,
+		       l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
+		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
+		       l.created_at, l.updated_at, l.kommo_id,
+		       ps.name, ps.color, ps.position
+		FROM leads l
+		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+		WHERE %s
+		ORDER BY l.created_at DESC
+		LIMIT %d OFFSET %d
+	`, whereSQL, limit+1, offset) // +1 to detect has_more
+
+	rows, err := s.repos.DB().Query(c.Context(), q, args...)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	defer rows.Close()
+
+	var leads []*domain.Lead
+	for rows.Next() {
+		lead := &domain.Lead{}
+		if err := rows.Scan(
+			&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName,
+			&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes,
+			&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
+			&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
+			&lead.StageName, &lead.StageColor, &lead.StagePosition,
+		); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		leads = append(leads, lead)
+	}
+
+	hasMore := len(leads) > limit
+	if hasMore {
+		leads = leads[:limit]
+	}
+
+	// Load tags for these leads
+	if len(leads) > 0 {
+		leadIDs := make([]uuid.UUID, len(leads))
+		for i, l := range leads {
+			leadIDs[i] = l.ID
+		}
+		tagRows, err := s.repos.DB().Query(c.Context(), `
+			SELECT lt.lead_id, t.id, t.account_id, t.name, t.color
+			FROM lead_tags lt
+			JOIN tags t ON t.id = lt.tag_id
+			WHERE lt.lead_id = ANY($1)
+			ORDER BY t.name
+		`, leadIDs)
+		if err == nil {
+			defer tagRows.Close()
+			tagMap := make(map[uuid.UUID][]*domain.Tag)
+			for tagRows.Next() {
+				var leadID uuid.UUID
+				t := &domain.Tag{}
+				if err := tagRows.Scan(&leadID, &t.ID, &t.AccountID, &t.Name, &t.Color); err == nil {
+					tagMap[leadID] = append(tagMap[leadID], t)
+				}
+			}
+			for _, lead := range leads {
+				lead.StructuredTags = tagMap[lead.ID]
+			}
+		}
+	}
+
+	return c.JSON(fiber.Map{
+		"success":  true,
+		"leads":    leads,
+		"has_more": hasMore,
+	})
+}
+
+// handleGetLeadsListPaginated returns a flat paginated list of leads for the list view
+func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	offset, _ := strconv.Atoi(c.Query("offset", "0"))
+	limit, _ := strconv.Atoi(c.Query("limit", "100"))
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	search := strings.TrimSpace(c.Query("search"))
+	tagNamesRaw := c.Query("tag_names")
+	stageIDsRaw := c.Query("stage_ids")
+	pipelineID := c.Query("pipeline_id")
+
+	// Parse device_ids
+	deviceIDs := c.Context().QueryArgs().PeekMulti("device_ids")
+	var deviceUUIDs []uuid.UUID
+	for _, did := range deviceIDs {
+		if id, err := uuid.Parse(string(did)); err == nil {
+			deviceUUIDs = append(deviceUUIDs, id)
+		}
+	}
+
+	// Build WHERE
+	args := []interface{}{accountID}
+	argIdx := 2
+	whereClauses := []string{"l.account_id = $1"}
+
+	if pipelineID != "" {
+		if pid, err := uuid.Parse(pipelineID); err == nil {
+			whereClauses = append(whereClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", argIdx))
+			args = append(args, pid)
+			argIdx++
+		}
+	}
+	if search != "" {
+		searchPattern := "%" + strings.ToLower(search) + "%"
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"(LOWER(COALESCE(l.name,'')) LIKE $%d OR LOWER(COALESCE(l.phone,'')) LIKE $%d OR LOWER(COALESCE(l.email,'')) LIKE $%d OR LOWER(COALESCE(l.company,'')) LIKE $%d OR LOWER(COALESCE(l.last_name,'')) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx, argIdx,
+		))
+		args = append(args, searchPattern)
+		argIdx++
+	}
+	if len(deviceUUIDs) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf("l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($%d))", argIdx))
+		args = append(args, deviceUUIDs)
+		argIdx++
+	}
+	var tagNames []string
+	if tagNamesRaw != "" {
+		tagNames = strings.Split(tagNamesRaw, ",")
+	}
+	if len(tagNames) > 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"l.id IN (SELECT lt.lead_id FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id WHERE t.name = ANY($%d))",
+			argIdx,
+		))
+		args = append(args, tagNames)
+		argIdx++
+	}
+	if stageIDsRaw != "" {
+		var validStageIDs []uuid.UUID
+		for _, sid := range strings.Split(stageIDsRaw, ",") {
+			if id, err := uuid.Parse(strings.TrimSpace(sid)); err == nil {
+				validStageIDs = append(validStageIDs, id)
+			}
+		}
+		if len(validStageIDs) > 0 {
+			whereClauses = append(whereClauses, fmt.Sprintf("l.stage_id = ANY($%d)", argIdx))
+			args = append(args, validStageIDs)
+			argIdx++
+		}
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// Count + fetch in parallel
+	var total int
+	var leads []*domain.Lead
+	var countErr, leadsErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l WHERE %s`, whereSQL)
+		countErr = s.repos.DB().QueryRow(c.Context(), q, args...).Scan(&total)
+	}()
+
+	go func() {
+		defer wg.Done()
+		q := fmt.Sprintf(`
+			SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name,
+			       l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
+			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
+			       l.created_at, l.updated_at, l.kommo_id,
+			       ps.name, ps.color, ps.position
+			FROM leads l
+			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+			WHERE %s
+			ORDER BY l.updated_at DESC
+			LIMIT %d OFFSET %d
+		`, whereSQL, limit, offset)
+		rows, err := s.repos.DB().Query(c.Context(), q, args...)
+		if err != nil {
+			leadsErr = err
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			lead := &domain.Lead{}
+			if err := rows.Scan(
+				&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName,
+				&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes,
+				&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
+				&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
+				&lead.StageName, &lead.StageColor, &lead.StagePosition,
+			); err != nil {
+				leadsErr = err
+				return
+			}
+			leads = append(leads, lead)
+		}
+	}()
+
+	wg.Wait()
+
+	if leadsErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": leadsErr.Error()})
+	}
+	if countErr != nil {
+		log.Printf("[LEADS] List count error: %v", countErr)
+	}
+
+	// Load tags
+	if len(leads) > 0 {
+		leadIDs := make([]uuid.UUID, len(leads))
+		for i, l := range leads {
+			leadIDs[i] = l.ID
+		}
+		tagRows, err := s.repos.DB().Query(c.Context(), `
+			SELECT lt.lead_id, t.id, t.account_id, t.name, t.color
+			FROM lead_tags lt
+			JOIN tags t ON t.id = lt.tag_id
+			WHERE lt.lead_id = ANY($1)
+			ORDER BY t.name
+		`, leadIDs)
+		if err == nil {
+			defer tagRows.Close()
+			tagMap := make(map[uuid.UUID][]*domain.Tag)
+			for tagRows.Next() {
+				var leadID uuid.UUID
+				t := &domain.Tag{}
+				if err := tagRows.Scan(&leadID, &t.ID, &t.AccountID, &t.Name, &t.Color); err == nil {
+					tagMap[leadID] = append(tagMap[leadID], t)
+				}
+			}
+			for _, lead := range leads {
+				lead.StructuredTags = tagMap[lead.ID]
+			}
+		}
+	}
+
+	return c.JSON(fiber.Map{
+		"success":    true,
+		"leads":      leads,
+		"total":      total,
+		"has_more":   offset+len(leads) < total,
+	})
+}
 func (s *Server) broadcastLeadDelta(accountID uuid.UUID, action string, lead *domain.Lead) {
 	if s.hub == nil {
 		return

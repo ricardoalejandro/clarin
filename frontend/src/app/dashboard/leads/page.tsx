@@ -85,6 +85,23 @@ interface Observation {
   created_at: string
 }
 
+interface StageData {
+  id: string
+  pipeline_id: string
+  name: string
+  color: string
+  position: number
+  total_count: number
+  leads: Lead[]
+  has_more: boolean
+}
+
+interface TagInfo {
+  name: string
+  color: string
+  count: number
+}
+
 // --- Memoized LeadCard component (avoids re-rendering all cards on any state change) ---
 interface LeadCardProps {
   lead: Lead
@@ -172,9 +189,13 @@ const LeadCard = memo(function LeadCard({
   )
 })
 
-// --- Virtualized Kanban Column ---
+// --- Virtualized Kanban Column with Infinite Scroll ---
 interface VirtualColumnProps {
-  column: PipelineStage & { leads: Lead[] }
+  column: { id: string; name: string; color: string; leads: Lead[] }
+  totalCount: number
+  hasMore: boolean
+  loadingMore: boolean
+  onLoadMore: () => void
   selectedIds: Set<string>
   detailLeadId: string | null
   draggedLeadId: string | null
@@ -191,7 +212,8 @@ interface VirtualColumnProps {
 }
 
 const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
-  column, selectedIds, detailLeadId, draggedLeadId, dragOverColumn, selectionMode,
+  column, totalCount, hasMore, loadingMore, onLoadMore,
+  selectedIds, detailLeadId, draggedLeadId, dragOverColumn, selectionMode,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
 }: VirtualColumnProps) {
   const parentRef = useRef<HTMLDivElement>(null)
@@ -202,6 +224,20 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
     overscan: 5,
   })
 
+  // Infinite scroll: load more when near bottom
+  useEffect(() => {
+    const el = parentRef.current
+    if (!el || !hasMore || loadingMore) return
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = el
+      if (scrollHeight - scrollTop - clientHeight < 300) {
+        onLoadMore()
+      }
+    }
+    el.addEventListener('scroll', handleScroll, { passive: true })
+    return () => el.removeEventListener('scroll', handleScroll)
+  }, [hasMore, loadingMore, onLoadMore])
+
   return (
     <div className="w-[272px] flex-shrink-0 flex flex-col" style={{ maxHeight: '100%' }}>
       <div
@@ -210,12 +246,17 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
       >
         <div className="flex items-center justify-between">
           <span className="text-sm font-bold tracking-wide uppercase text-slate-800">{column.name}</span>
-          <span className="text-xs px-2 py-0.5 rounded-full font-bold text-white" style={{ backgroundColor: column.color }}>{column.leads.length}</span>
+          <div className="flex items-center gap-1.5">
+            {column.leads.length < totalCount && (
+              <span className="text-[10px] text-slate-500 font-medium tabular-nums">{column.leads.length}/</span>
+            )}
+            <span className="text-xs px-2 py-0.5 rounded-full font-bold text-white tabular-nums" style={{ backgroundColor: column.color }}>{totalCount}</span>
+          </div>
         </div>
       </div>
       <div
         ref={parentRef}
-        className={`bg-slate-50/80 p-2 flex-1 overflow-y-auto transition-colors ${
+        className={`bg-slate-50/80 p-2 flex-1 overflow-y-auto kanban-col-scroll transition-colors ${
           dragOverColumn === column.id ? 'bg-emerald-50 ring-2 ring-emerald-300 ring-inset' : ''
         }`}
         style={{ minHeight: 200 }}
@@ -255,6 +296,14 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
             )
           })}
         </div>
+        {loadingMore && (
+          <div className="flex items-center justify-center py-3">
+            <div className="animate-spin rounded-full h-5 w-5 border-2 border-slate-200 border-t-emerald-500" />
+          </div>
+        )}
+        {!hasMore && column.leads.length > 0 && column.leads.length >= totalCount && totalCount > 50 && (
+          <p className="text-center text-[10px] text-slate-400 py-2">Todos cargados</p>
+        )}
       </div>
     </div>
   )
@@ -262,7 +311,11 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
 
 export default function LeadsPage() {
   const router = useRouter()
-  const [leads, setLeads] = useState<Lead[]>([])
+  // Server-side paginated data
+  const [stageData, setStageData] = useState<StageData[]>([])
+  const [unassignedData, setUnassignedData] = useState<{ total_count: number; leads: Lead[]; has_more: boolean }>({ total_count: 0, leads: [], has_more: false })
+  const [allTags, setAllTags] = useState<TagInfo[]>([])
+  const [loadingMoreStages, setLoadingMoreStages] = useState<Set<string>>(new Set())
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
   const [activePipeline, setActivePipeline] = useState<Pipeline | null>(null)
   const [loading, setLoading] = useState(true)
@@ -348,6 +401,12 @@ export default function LeadsPage() {
   // View mode: kanban vs list
   const [viewMode, setViewMode] = useState<'kanban' | 'list'>('kanban')
 
+  // List view paginated data
+  const [listLeads, setListLeads] = useState<Lead[]>([])
+  const [listTotal, setListTotal] = useState(0)
+  const [listHasMore, setListHasMore] = useState(false)
+  const [listLoading, setListLoading] = useState(false)
+
   // "Más" dropdown menu
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
@@ -360,6 +419,7 @@ export default function LeadsPage() {
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
   const listScrollRef = useRef<HTMLDivElement>(null)
+  const listOffsetRef = useRef(0)
   const filterDropdownRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
 
@@ -408,25 +468,156 @@ export default function LeadsPage() {
     }
   }, [])
 
-  const fetchLeads = useCallback(async () => {
+  const fetchLeadsPaginated = useCallback(async () => {
+    if (!activePipeline) return
     const token = localStorage.getItem('token')
     try {
       const params = new URLSearchParams()
+      params.set('pipeline_id', activePipeline.id)
+      params.set('per_stage', '50')
+      if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
+      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+      if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
       filterDeviceIds.forEach(id => params.append('device_ids', id))
-      const url = `/api/leads${params.toString() ? '?' + params.toString() : ''}`
-      const res = await fetch(url, {
+      const res = await fetch(`/api/leads/paginated?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
       if (data.success) {
-        setLeads(data.leads || [])
+        setStageData(data.stages || [])
+        setUnassignedData(data.unassigned || { total_count: 0, leads: [], has_more: false })
+        setAllTags(data.all_tags || [])
       }
     } catch (err) {
       console.error('Failed to fetch leads:', err)
     } finally {
       setLoading(false)
     }
-  }, [filterDeviceIds])
+  }, [activePipeline, debouncedSearchTerm, filterTagNames, filterStageIds, filterDeviceIds])
+
+  const fetchListLeads = useCallback(async (reset: boolean = false) => {
+    if (!activePipeline) return
+    setListLoading(true)
+    const offset = reset ? 0 : listOffsetRef.current
+    const token = localStorage.getItem('token')
+    try {
+      const params = new URLSearchParams()
+      params.set('pipeline_id', activePipeline.id)
+      params.set('offset', String(offset))
+      params.set('limit', '100')
+      if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
+      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+      if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
+      filterDeviceIds.forEach(id => params.append('device_ids', id))
+      const res = await fetch(`/api/leads/list-paginated?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        const newLeads = data.leads || []
+        if (reset) {
+          setListLeads(newLeads)
+          listOffsetRef.current = newLeads.length
+        } else {
+          setListLeads(prev => [...prev, ...newLeads])
+          listOffsetRef.current = offset + newLeads.length
+        }
+        setListTotal(data.total || 0)
+        setListHasMore(data.has_more || false)
+      }
+    } catch (err) {
+      console.error('Failed to fetch list leads:', err)
+    } finally {
+      setListLoading(false)
+    }
+  }, [activePipeline, debouncedSearchTerm, filterTagNames, filterStageIds, filterDeviceIds])
+
+  const loadMoreForStage = useCallback(async (stageId: string) => {
+    if (loadingMoreStages.has(stageId)) return
+    setLoadingMoreStages(prev => new Set(prev).add(stageId))
+    const token = localStorage.getItem('token')
+    try {
+      const isUnassigned = stageId === '__unassigned__'
+      const currentLeads = isUnassigned
+        ? unassignedData.leads
+        : stageData.find(s => s.id === stageId)?.leads || []
+      const params = new URLSearchParams()
+      params.set('offset', String(currentLeads.length))
+      params.set('limit', '50')
+      if (activePipeline) params.set('pipeline_id', activePipeline.id)
+      if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
+      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+      filterDeviceIds.forEach(id => params.append('device_ids', id))
+      const endpoint = isUnassigned ? 'unassigned' : stageId
+      const res = await fetch(`/api/leads/by-stage/${endpoint}?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        const newLeads = data.leads || []
+        if (isUnassigned) {
+          setUnassignedData(prev => ({ ...prev, leads: [...prev.leads, ...newLeads], has_more: data.has_more }))
+        } else {
+          setStageData(prev => prev.map(s => s.id === stageId ? { ...s, leads: [...s.leads, ...newLeads], has_more: data.has_more } : s))
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load more leads:', err)
+    } finally {
+      setLoadingMoreStages(prev => { const next = new Set(prev); next.delete(stageId); return next })
+    }
+  }, [loadingMoreStages, stageData, unassignedData, activePipeline, debouncedSearchTerm, filterTagNames, filterDeviceIds])
+
+  // Helper: update a single lead across all stage data
+  const updateLeadInStages = useCallback((leadId: string, updater: (lead: Lead) => Lead) => {
+    setStageData(prev => prev.map(stage => ({
+      ...stage,
+      leads: stage.leads.map(l => l.id === leadId ? updater(l) : l)
+    })))
+    setUnassignedData(prev => ({
+      ...prev,
+      leads: prev.leads.map(l => l.id === leadId ? updater(l) : l)
+    }))
+    setListLeads(prev => prev.map(l => l.id === leadId ? updater(l) : l))
+  }, [])
+
+  // Helper: remove lead from all stage data
+  const removeLeadFromStages = useCallback((leadId: string) => {
+    setStageData(prev => prev.map(stage => ({
+      ...stage,
+      leads: stage.leads.filter(l => l.id !== leadId),
+      total_count: stage.leads.some(l => l.id === leadId) ? stage.total_count - 1 : stage.total_count
+    })))
+    setUnassignedData(prev => ({
+      ...prev,
+      leads: prev.leads.filter(l => l.id !== leadId),
+      total_count: prev.leads.some(l => l.id === leadId) ? prev.total_count - 1 : prev.total_count
+    }))
+    setListLeads(prev => prev.filter(l => l.id !== leadId))
+  }, [])
+
+  // All loaded leads from visible stages
+  const allLoadedLeads = useMemo(() => {
+    const all: Lead[] = []
+    stageData.forEach(s => all.push(...s.leads))
+    all.push(...unassignedData.leads)
+    return all
+  }, [stageData, unassignedData])
+
+  // Find lead by ID across all loaded data
+  const findLeadById = useCallback((leadId: string): Lead | undefined => {
+    for (const stage of stageData) {
+      const found = stage.leads.find(l => l.id === leadId)
+      if (found) return found
+    }
+    return unassignedData.leads.find(l => l.id === leadId)
+  }, [stageData, unassignedData])
+
+  // Total count from server (all matching leads, not just loaded)
+  const totalLeadCount = useMemo(() =>
+    stageData.reduce((sum, s) => sum + s.total_count, 0) + unassignedData.total_count,
+    [stageData, unassignedData]
+  )
 
   const fetchDevices = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -445,43 +636,110 @@ export default function LeadsPage() {
 
   useEffect(() => {
     fetchPipelines()
-    fetchLeads()
     fetchDevices()
     // Load hidden stages from localStorage
     try {
       const saved = localStorage.getItem('hiddenStageIds')
       if (saved) setHiddenStageIds(new Set(JSON.parse(saved)))
     } catch {}
-  }, [fetchPipelines, fetchLeads])
+  }, [fetchPipelines])
 
-  // WebSocket: listen for lead_update events — delta updates instead of full re-fetch
+  // Fetch paginated kanban data when pipeline or filters change
+  useEffect(() => {
+    if (activePipeline) {
+      fetchLeadsPaginated()
+    }
+  }, [fetchLeadsPaginated])
+
+  // Fetch list data when in list view (and when filters change)
+  useEffect(() => {
+    if (viewMode === 'list' && activePipeline) {
+      fetchListLeads(true)
+    }
+  }, [viewMode, fetchListLeads, activePipeline])
+
+  // WebSocket: listen for lead_update events — delta updates for paginated data
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string; action?: string; lead?: Lead; lead_id?: string; stage_id?: string }
       if (msg.event === 'lead_update') {
         if (msg.action === 'created' && msg.lead) {
-          setLeads(prev => [msg.lead!, ...prev])
+          const lead = msg.lead!
+          // Add to appropriate stage if it matches current pipeline
+          if (lead.pipeline_id === activePipeline?.id) {
+            if (lead.stage_id) {
+              setStageData(prev => prev.map(s => s.id === lead.stage_id
+                ? { ...s, leads: [lead, ...s.leads], total_count: s.total_count + 1 }
+                : s
+              ))
+            } else {
+              setUnassignedData(prev => ({
+                ...prev,
+                leads: [lead, ...prev.leads],
+                total_count: prev.total_count + 1
+              }))
+            }
+          } else if (!lead.pipeline_id) {
+            setUnassignedData(prev => ({
+              ...prev,
+              leads: [lead, ...prev.leads],
+              total_count: prev.total_count + 1
+            }))
+          }
         } else if (msg.action === 'updated' && msg.lead) {
-          setLeads(prev => prev.map(l => l.id === msg.lead!.id ? { ...l, ...msg.lead! } : l))
-          // Also update detail panel if viewing this lead
+          updateLeadInStages(msg.lead.id, l => ({ ...l, ...msg.lead! }))
           if (detailLead?.id === msg.lead.id) {
             setDetailLead(prev => prev ? { ...prev, ...msg.lead! } : prev)
           }
         } else if (msg.action === 'deleted' && msg.lead) {
-          setLeads(prev => prev.filter(l => l.id !== msg.lead!.id))
+          removeLeadFromStages(msg.lead.id)
           if (detailLead?.id === msg.lead.id) {
             setShowDetailPanel(false)
           }
         } else if (msg.action === 'stage_changed' && msg.lead_id && msg.stage_id) {
-          setLeads(prev => prev.map(l => l.id === msg.lead_id ? { ...l, stage_id: msg.stage_id! } : l))
+          const leadId = msg.lead_id!
+          const newStageId = msg.stage_id!
+          // Move lead between stages
+          setStageData(prev => {
+            let movedLead: Lead | undefined
+            const afterRemove = prev.map(s => {
+              if (s.id === newStageId && s.leads.some(l => l.id === leadId)) return s // already moved
+              const idx = s.leads.findIndex(l => l.id === leadId)
+              if (idx >= 0) {
+                movedLead = { ...s.leads[idx], stage_id: newStageId }
+                return { ...s, leads: s.leads.filter(l => l.id !== leadId), total_count: Math.max(0, s.total_count - 1) }
+              }
+              return s
+            })
+            if (movedLead) {
+              return afterRemove.map(s => s.id === newStageId
+                ? { ...s, leads: [movedLead!, ...s.leads], total_count: s.total_count + 1 }
+                : s
+              )
+            }
+            return prev
+          })
+          // Also check unassigned → stage move
+          setUnassignedData(prev => {
+            const idx = prev.leads.findIndex(l => l.id === leadId)
+            if (idx >= 0) {
+              const movedLead = { ...prev.leads[idx], stage_id: newStageId }
+              setStageData(sd => sd.map(s => s.id === newStageId
+                ? { ...s, leads: [movedLead, ...s.leads], total_count: s.total_count + 1 }
+                : s
+              ))
+              return { ...prev, leads: prev.leads.filter(l => l.id !== leadId), total_count: Math.max(0, prev.total_count - 1) }
+            }
+            return prev
+          })
         } else {
-          // Fallback: full re-fetch for unknown actions (e.g., from Kommo sync)
-          fetchLeads()
+          // Fallback: full re-fetch for unknown actions
+          fetchLeadsPaginated()
         }
       }
     })
     return () => unsubscribe()
-  }, [fetchLeads, detailLead])
+  }, [fetchLeadsPaginated, updateLeadInStages, removeLeadFromStages, detailLead, activePipeline])
 
   // Debounce search term (500ms)
   useEffect(() => {
@@ -576,7 +834,7 @@ export default function LeadsPage() {
       if (data.success) {
         setShowAddModal(false)
         setFormData({ name: '', phone: '', email: '', notes: '', tags: '' })
-        fetchLeads()
+        fetchLeadsPaginated()
       } else {
         alert(data.error || 'Error al crear lead')
       }
@@ -605,7 +863,7 @@ export default function LeadsPage() {
       if (data.success) {
         setShowEditModal(false)
         setSelectedLead(null)
-        fetchLeads()
+        fetchLeadsPaginated()
       } else {
         alert(data.error || 'Error al actualizar lead')
       }
@@ -625,7 +883,7 @@ export default function LeadsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        fetchLeads()
+        fetchLeadsPaginated()
       }
     } catch (err) {
       console.error('Failed to delete lead:', err)
@@ -650,7 +908,7 @@ export default function LeadsPage() {
       if (data.success) {
         setSelectedIds(new Set())
         setSelectionMode(false)
-        fetchLeads()
+        fetchLeadsPaginated()
       }
     } catch (err) {
       console.error('Failed to delete leads:', err)
@@ -670,7 +928,7 @@ export default function LeadsPage() {
   }
 
   const selectAll = () => {
-    setSelectedIds(new Set(filteredLeads.map(l => l.id)))
+    setSelectedIds(new Set(allLoadedLeads.map(l => l.id)))
   }
 
   const openDetailPanel = (lead: Lead) => {
@@ -716,7 +974,7 @@ export default function LeadsPage() {
       if (data.success && data.lead) {
         const merged = { ...data.lead, structured_tags: data.lead.structured_tags || detailLead.structured_tags }
         setDetailLead(merged)
-        setLeads(prev => prev.map(l => l.id === data.lead.id ? merged : l))
+        updateLeadInStages(data.lead.id, () => merged)
       }
     } catch (err) {
       console.error('Failed to save lead field:', err)
@@ -752,7 +1010,7 @@ export default function LeadsPage() {
       if (data.success && data.lead) {
         const merged = { ...data.lead, structured_tags: data.lead.structured_tags || detailLead.structured_tags }
         setDetailLead(merged)
-        setLeads(prev => prev.map(l => l.id === data.lead.id ? merged : l))
+        updateLeadInStages(data.lead.id, () => merged)
       }
       setEditingNotes(false)
     } catch (err) {
@@ -764,6 +1022,60 @@ export default function LeadsPage() {
 
   const handleUpdateLeadStage = async (leadId: string, stageId: string) => {
     const token = localStorage.getItem('token')
+
+    let stage = stages.find(s => s.id === stageId)
+    if (!stage) {
+       for (const p of pipelines) {
+         const found = p.stages?.find(s => s.id === stageId)
+         if (found) { stage = found; break }
+       }
+    }
+
+    const updatedProps = {
+      stage_id: stageId,
+      stage_name: stage?.name || null,
+      stage_color: stage?.color || null,
+      stage_position: stage?.position ?? null,
+    }
+
+    // Optimistic move between stages
+    setStageData(prev => {
+      let movedLead: Lead | undefined
+      const afterRemove = prev.map(s => {
+        const idx = s.leads.findIndex(l => l.id === leadId)
+        if (idx >= 0) {
+          movedLead = { ...s.leads[idx], ...updatedProps }
+          return { ...s, leads: s.leads.filter(l => l.id !== leadId), total_count: Math.max(0, s.total_count - 1) }
+        }
+        return s
+      })
+      if (movedLead) {
+        return afterRemove.map(s => s.id === stageId
+          ? { ...s, leads: [movedLead!, ...s.leads], total_count: s.total_count + 1 }
+          : s
+        )
+      }
+      return afterRemove
+    })
+    // Handle unassigned → stage move
+    setUnassignedData(prev => {
+      const idx = prev.leads.findIndex(l => l.id === leadId)
+      if (idx >= 0) {
+        const movedLead = { ...prev.leads[idx], ...updatedProps }
+        setStageData(sd => sd.map(s => s.id === stageId
+          ? { ...s, leads: [movedLead, ...s.leads], total_count: s.total_count + 1 }
+          : s
+        ))
+        return { ...prev, leads: prev.leads.filter(l => l.id !== leadId), total_count: Math.max(0, prev.total_count - 1) }
+      }
+      return prev
+    })
+    setListLeads(prev => prev.map(l => l.id === leadId ? { ...l, ...updatedProps } : l))
+
+    if (detailLead?.id === leadId) {
+      setDetailLead(prev => prev ? { ...prev, ...updatedProps } : null)
+    }
+
     try {
       const res = await fetch(`/api/leads/${leadId}/stage`, {
         method: 'PATCH',
@@ -774,39 +1086,12 @@ export default function LeadsPage() {
         body: JSON.stringify({ stage_id: stageId }),
       })
       const data = await res.json()
-      if (data.success) {
-        // Find stage in current pipeline or look it up across all pipelines
-        let stage = stages.find(s => s.id === stageId)
-        if (!stage) {
-           // Fallback: look in all pipelines
-           for (const p of pipelines) {
-             const found = p.stages?.find(s => s.id === stageId)
-             if (found) {
-               stage = found
-               break
-             }
-           }
-        }
-
-        setLeads(prev => prev.map(l => l.id === leadId ? {
-          ...l,
-          stage_id: stageId,
-          stage_name: stage?.name || null,
-          stage_color: stage?.color || null,
-          stage_position: stage?.position ?? null,
-        } : l))
-        if (detailLead?.id === leadId) {
-          setDetailLead(prev => prev ? {
-            ...prev,
-            stage_id: stageId,
-            stage_name: stage?.name || null,
-            stage_color: stage?.color || null,
-            stage_position: stage?.position ?? null,
-          } : null)
-        }
+      if (!data.success) {
+        fetchLeadsPaginated() // Rollback on failure
       }
     } catch (err) {
       console.error('Failed to update stage:', err)
+      fetchLeadsPaginated() // Rollback on error
     }
   }
 
@@ -833,7 +1118,7 @@ export default function LeadsPage() {
       if (data.success && data.lead) {
         const merged = { ...data.lead, structured_tags: data.lead.structured_tags || detailLead?.structured_tags }
         setDetailLead(merged)
-        setLeads(prev => prev.map(l => l.id === data.lead.id ? merged : l))
+        fetchLeadsPaginated()
       }
     } catch (err) {
       console.error('Failed to update pipeline:', err)
@@ -932,7 +1217,7 @@ export default function LeadsPage() {
       const data = await res.json()
       if (data.success && data.lead) {
         setDetailLead(data.lead)
-        setLeads(prev => prev.map(l => l.id === data.lead.id ? data.lead : l))
+        updateLeadInStages(data.lead.id, () => data.lead)
         fetchObservations(detailLead.id)
       } else {
         alert(data.error || 'Error al sincronizar')
@@ -1025,7 +1310,7 @@ export default function LeadsPage() {
     setDragOverColumn(null)
     const leadId = e.dataTransfer.getData('text/plain')
     if (leadId) {
-      const lead = leads.find(l => l.id === leadId)
+      const lead = findLeadById(leadId)
       if (lead && lead.stage_id !== targetStageId) {
         handleUpdateLeadStage(leadId, targetStageId)
       }
@@ -1069,7 +1354,7 @@ export default function LeadsPage() {
       const data = await res.json()
       if (data.success) {
         fetchPipelines()
-        fetchLeads()
+        fetchLeadsPaginated()
       }
     } catch (err) {
       console.error('Failed to delete stage:', err)
@@ -1147,37 +1432,18 @@ export default function LeadsPage() {
     return () => window.removeEventListener('keydown', handleEscapeKey)
   }, [showDeviceSelector, showStageModal, showAddModal, showEditModal, showFilterDropdown, showInlineChat, showDetailPanel])
 
-  const filteredLeads = useMemo(() => {
-    const search = debouncedSearchTerm.toLowerCase()
-    return leads.filter((lead) => {
-      const matchesSearch = !search ||
-        (lead.name || '').toLowerCase().includes(search) ||
-        (lead.phone || '').toLowerCase().includes(search) ||
-        (lead.email || '').toLowerCase().includes(search) ||
-        (lead.company || '').toLowerCase().includes(search) ||
-        (lead.last_name || '').toLowerCase().includes(search)
-      const matchesPipeline = !activePipeline || lead.pipeline_id === activePipeline.id || !lead.pipeline_id
-      const matchesStageFilter = filterStageIds.size === 0 || (lead.stage_id && filterStageIds.has(lead.stage_id))
-      const matchesTagFilter = filterTagNames.size === 0 || (lead.structured_tags && lead.structured_tags.some(t => filterTagNames.has(t.name)))
-      return matchesSearch && matchesPipeline && matchesStageFilter && matchesTagFilter
-    })
-  }, [leads, debouncedSearchTerm, activePipeline, filterStageIds, filterTagNames])
+  // Tags for filter dropdown (from server response)
+  const allUniqueTags = useMemo(() =>
+    allTags.map(t => ({ id: t.name, account_id: '', name: t.name, color: t.color })).sort((a, b) => a.name.localeCompare(b.name)),
+    [allTags]
+  )
 
-  // Collect unique tags from all leads for filter dropdown
-  const allUniqueTags = useMemo(() => Array.from(
-    new Map(leads.flatMap(l => l.structured_tags || []).map(t => [t.name, t])).values()
-  ).sort((a, b) => a.name.localeCompare(b.name)), [leads])
-
-  // Count leads per tag
+  // Count leads per tag (from server)
   const tagLeadCounts = useMemo(() => {
     const counts = new Map<string, number>()
-    leads.forEach(l => {
-      (l.structured_tags || []).forEach(t => {
-        counts.set(t.name, (counts.get(t.name) || 0) + 1)
-      })
-    })
+    allTags.forEach(t => counts.set(t.name, t.count))
     return counts
-  }, [leads])
+  }, [allTags])
 
   // Filter tags by search term (% = wildcard like Kommo/SQL LIKE)
   const filteredTags = allUniqueTags.filter(tag => {
@@ -1196,8 +1462,8 @@ export default function LeadsPage() {
 
   const activeFilterCount = filterStageIds.size + filterTagNames.size
 
-  // Leads with phone for broadcast
-  const broadcastableLeads = filteredLeads.filter(l => l.phone)
+  // Leads with phone for broadcast (from loaded data)
+  const broadcastableLeads = useMemo(() => allLoadedLeads.filter(l => l.phone), [allLoadedLeads])
 
   const handleCreateBroadcastFromLeads = async (formResult: CampaignFormResult) => {
     setSubmittingBroadcast(true)
@@ -1268,26 +1534,15 @@ export default function LeadsPage() {
     }
   }
 
-  // Group leads by stage (memoized)
-  const leadsByStage = useMemo(() => stages.map(stage => ({
-    ...stage,
-    leads: filteredLeads.filter(l => l.stage_id === stage.id),
-  })), [stages, filteredLeads])
-
-  const unassignedLeads = useMemo(() => {
-    const stageIds = new Set(stages.map(s => s.id))
-    return filteredLeads.filter(l => !l.stage_id || !stageIds.has(l.stage_id))
-  }, [stages, filteredLeads])
-
-  // Sorted leads for list view (memoized to avoid re-sorting on every render)
-  const sortedListLeads = useMemo(() =>
-    [...filteredLeads].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
-    [filteredLeads]
+  // Visible stages (from server data, filtered by hiddenStageIds)
+  const visibleStages = useMemo(() =>
+    stageData.filter(s => !hiddenStageIds.has(s.id)),
+    [stageData, hiddenStageIds]
   )
 
   // List virtualizer
   const listVirtualizer = useVirtualizer({
-    count: sortedListLeads.length,
+    count: listLeads.length,
     getScrollElement: () => listScrollRef.current,
     estimateSize: () => 56,
     overscan: 10,
@@ -1295,14 +1550,29 @@ export default function LeadsPage() {
 
   // Batch-fetch observations for visible list rows
   useEffect(() => {
-    if (viewMode !== 'list' || sortedListLeads.length === 0) return
+    if (viewMode !== 'list' || listLeads.length === 0) return
     const items = listVirtualizer.getVirtualItems()
     if (items.length === 0) return
-    const visibleIds = items.map(item => sortedListLeads[item.index]?.id).filter(Boolean)
+    const visibleIds = items.map(item => listLeads[item.index]?.id).filter(Boolean)
     if (visibleIds.length > 0) {
       fetchBatchObservations(visibleIds)
     }
-  }, [viewMode, listVirtualizer.getVirtualItems(), sortedListLeads, fetchBatchObservations])
+  }, [viewMode, listVirtualizer.getVirtualItems(), listLeads, fetchBatchObservations])
+
+  // Infinite scroll for list view
+  useEffect(() => {
+    if (viewMode !== 'list' || !listHasMore || listLoading) return
+    const el = listScrollRef.current
+    if (!el) return
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = el
+      if (scrollHeight - scrollTop - clientHeight < 300) {
+        fetchListLeads(false)
+      }
+    }
+    el.addEventListener('scroll', handleScroll, { passive: true })
+    return () => el.removeEventListener('scroll', handleScroll)
+  }, [viewMode, listHasMore, listLoading, fetchListLeads])
 
   if (loading) {
     return (
@@ -1355,7 +1625,7 @@ export default function LeadsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
         <div>
           <h1 className="text-xl font-bold text-slate-900">Leads</h1>
-          <p className="text-slate-500 text-sm mt-0.5">{filteredLeads.length} leads en total</p>
+          <p className="text-slate-500 text-sm mt-0.5">{totalLeadCount} leads en total</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {selectionMode ? (
@@ -1406,7 +1676,7 @@ export default function LeadsPage() {
 
               <button
                 onClick={() => { fetchDevices(); setShowBroadcastModal(true) }}
-                disabled={filteredLeads.filter(l => l.phone).length === 0}
+                disabled={broadcastableLeads.length === 0}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-emerald-200 rounded-lg hover:bg-emerald-50 transition text-emerald-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Radio className="w-3.5 h-3.5" />
@@ -1680,18 +1950,22 @@ export default function LeadsPage() {
         className="overflow-x-auto kanban-scroll-top flex-shrink-0"
         style={{ height: 12 }}
       >
-        <div style={{ width: `${(stages.length + (unassignedLeads.length > 0 ? 1 : 0)) * 288}px`, height: 1 }} />
+        <div style={{ width: `${(visibleStages.length + (unassignedData.total_count > 0 ? 1 : 0)) * 288}px`, height: 1 }} />
       </div>
       <div
         ref={kanbanRef}
         onScroll={handleKanbanScroll}
         className="overflow-x-auto flex-1 min-h-0 kanban-scroll"
       >
-        <div className="flex gap-3 h-full" style={{ minWidth: `${(stages.length + (unassignedLeads.length > 0 ? 1 : 0)) * 288}px` }}>
-          {leadsByStage.map((column) => (
+        <div className="flex gap-3 h-full" style={{ minWidth: `${(visibleStages.length + (unassignedData.total_count > 0 ? 1 : 0)) * 288}px` }}>
+          {visibleStages.map((stageItem) => (
             <VirtualKanbanColumn
-              key={column.id}
-              column={column}
+              key={stageItem.id}
+              column={stageItem}
+              totalCount={stageItem.total_count}
+              hasMore={stageItem.has_more}
+              loadingMore={loadingMoreStages.has(stageItem.id)}
+              onLoadMore={() => loadMoreForStage(stageItem.id)}
               selectedIds={selectedIds}
               detailLeadId={detailLead?.id || null}
               draggedLeadId={draggedLeadId}
@@ -1708,18 +1982,19 @@ export default function LeadsPage() {
             />
           ))}
           {/* Unassigned column */}
-          {unassignedLeads.length > 0 && (
+          {unassignedData.total_count > 0 && (
             <VirtualKanbanColumn
               key="__unassigned__"
               column={{
                 id: '__unassigned__',
-                pipeline_id: '',
                 name: 'Sin etapa',
                 color: '#64748b',
-                position: 999,
-                lead_count: unassignedLeads.length,
-                leads: unassignedLeads,
+                leads: unassignedData.leads,
               }}
+              totalCount={unassignedData.total_count}
+              hasMore={unassignedData.has_more}
+              loadingMore={loadingMoreStages.has('__unassigned__')}
+              onLoadMore={() => loadMoreForStage('__unassigned__')}
               selectedIds={selectedIds}
               detailLeadId={detailLead?.id || null}
               draggedLeadId={draggedLeadId}
@@ -1740,7 +2015,6 @@ export default function LeadsPage() {
       </div>
       )}
 
-      {/* List View */}
       {/* List View — Virtualized */}
       {viewMode === 'list' && (
         <div className="flex-1 min-h-0 flex flex-col">
@@ -1756,10 +2030,10 @@ export default function LeadsPage() {
           </div>
           {/* Virtualized rows */}
           <div ref={listScrollRef} className="flex-1 min-h-0 overflow-auto">
-            {sortedListLeads.length > 0 ? (
+            {listLeads.length > 0 ? (
               <div style={{ height: listVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
                 {listVirtualizer.getVirtualItems().map((virtualRow) => {
-                  const lead = sortedListLeads[virtualRow.index]
+                  const lead = listLeads[virtualRow.index]
                   const stageName = lead.stage_name || stages.find(s => s.id === lead.stage_id)?.name
                   const stageColor = lead.stage_color || stages.find(s => s.id === lead.stage_id)?.color || '#94a3b8'
                   const obs = listObservations.get(lead.id)
@@ -1899,6 +2173,11 @@ export default function LeadsPage() {
               <div className="flex flex-col items-center justify-center py-16 text-slate-400">
                 <FileText className="w-10 h-10 mb-2 text-slate-300" />
                 <p className="text-sm">No se encontraron leads</p>
+              </div>
+            )}
+            {listLoading && (
+              <div className="flex items-center justify-center py-3">
+                <div className="animate-spin rounded-full h-5 w-5 border-2 border-slate-200 border-t-emerald-500" />
               </div>
             )}
           </div>
@@ -2122,12 +2401,12 @@ export default function LeadsPage() {
                 lead={detailLead}
                 onLeadChange={(updatedLead: Lead) => {
                   setDetailLead(updatedLead as any)
-                  setLeads(prev => prev.map(l => l.id === updatedLead.id ? updatedLead as any : l))
+                  updateLeadInStages(updatedLead.id, () => updatedLead as any)
                 }}
                 onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
                 onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
                 onDelete={(leadId: string) => {
-                  setLeads(prev => prev.filter(l => l.id !== leadId))
+                  removeLeadFromStages(leadId)
                   setShowDetailPanel(false)
                   setShowInlineChat(false)
                 }}
@@ -2179,7 +2458,7 @@ export default function LeadsPage() {
       <ImportCSVModal
         open={showImportModal}
         onClose={() => setShowImportModal(false)}
-        onSuccess={() => { fetchLeads(); fetchPipelines() }}
+        onSuccess={() => { fetchLeadsPaginated(); fetchPipelines() }}
         defaultType="leads"
       />
 
@@ -2205,9 +2484,9 @@ export default function LeadsPage() {
               {filterStageIds.size > 0 || filterTagNames.size > 0 || debouncedSearchTerm
                 ? ' (filtrados)' : ''} como destinatarios de esta campaña.
             </p>
-            {filteredLeads.length !== broadcastableLeads.length && (
+            {allLoadedLeads.length !== broadcastableLeads.length && (
               <p className="text-amber-600 mt-1">
-                {filteredLeads.length - broadcastableLeads.length} lead(s) sin teléfono serán excluidos.
+                {allLoadedLeads.length - broadcastableLeads.length} lead(s) sin teléfono serán excluidos.
               </p>
             )}
           </div>

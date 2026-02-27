@@ -105,6 +105,35 @@ textarea::placeholder {
   background: rgba(0,0,0,0.38);
 }
 
+/* Kanban column vertical scroll — ultra-thin, appears on hover */
+.kanban-col-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.3s ease;
+}
+.kanban-col-scroll:hover {
+  scrollbar-color: rgba(16,185,129,0.3) transparent;
+}
+.kanban-col-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+.kanban-col-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 10px;
+  margin: 4px 0;
+}
+.kanban-col-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 10px;
+  transition: background 0.3s ease;
+}
+.kanban-col-scroll:hover::-webkit-scrollbar-thumb {
+  background: rgba(16,185,129,0.28);
+}
+.kanban-col-scroll:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(16,185,129,0.5);
+}
+
 /* Top synced scrollbar for kanban */
 .kanban-scroll-top {
   scrollbar-width: thin;
