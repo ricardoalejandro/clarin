@@ -5346,15 +5346,18 @@ func (s *Server) handleBatchLeadObservations(c *fiber.Ctx) error {
 	rows, err := s.repos.DB().Query(c.Context(), `
 		SELECT lead_id, id, type, direction, outcome, notes, created_by_name, created_at
 		FROM (
-			SELECT i.lead_id, i.id, i.type, i.direction, i.outcome, i.notes, i.created_by_name, i.created_at,
+			SELECT i.lead_id, i.id, i.type, i.direction, i.outcome, i.notes,
+			       u.display_name as created_by_name, i.created_at,
 			       ROW_NUMBER() OVER (PARTITION BY i.lead_id ORDER BY i.created_at DESC) as rn
 			FROM interactions i
+			LEFT JOIN users u ON i.created_by = u.id
 			WHERE i.lead_id = ANY($1)
 		) sub
 		WHERE rn <= $2
 		ORDER BY lead_id, created_at DESC
 	`, leadUUIDs, req.Limit)
 	if err != nil {
+		log.Printf("[API] Error querying batch observations: %v", err)
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	defer rows.Close()
@@ -5364,6 +5367,7 @@ func (s *Server) handleBatchLeadObservations(c *fiber.Ctx) error {
 		var leadID uuid.UUID
 		i := &domain.Interaction{}
 		if err := rows.Scan(&leadID, &i.ID, &i.Type, &i.Direction, &i.Outcome, &i.Notes, &i.CreatedByName, &i.CreatedAt); err != nil {
+			log.Printf("[API] Error scanning batch observation row: %v", err)
 			continue
 		}
 		lid := leadID.String()
