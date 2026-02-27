@@ -10,9 +10,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/helmet"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
@@ -68,6 +70,9 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 
 	// Middleware
 	app.Use(recover.New())
+	app.Use(compress.New(compress.Config{
+		Level: compress.LevelBestSpeed,
+	}))
 	app.Use(logger.New(logger.Config{
 		Format:     "${time} | ${status} | ${latency} | ${method} ${path}\n",
 		TimeFormat: "15:04:05",
@@ -217,6 +222,7 @@ func (s *Server) setupRoutes() {
 	leads.Get("/", s.handleGetLeads)
 	leads.Post("/", s.handleCreateLead)
 	leads.Delete("/batch", s.handleDeleteLeadsBatch)
+	leads.Post("/observations/batch", s.handleBatchLeadObservations)
 	leads.Get("/:id", s.handleGetLead)
 	leads.Put("/:id", s.handleUpdateLead)
 	leads.Delete("/:id", s.handleDeleteLead)
@@ -1501,86 +1507,126 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 		}
 	}
 
+	// --- Parallel: load leads + tags simultaneously ---
 	var leads []*domain.Lead
-	var err error
+	var leadsErr error
+	tagMap := make(map[uuid.UUID][]*domain.Tag)
+	var tagsErr error
 
-	if len(deviceUUIDs) > 0 {
-		// Filtered query: only leads whose JID matches a chat from one of the specified devices
-		rows, qErr := s.repos.DB().Query(c.Context(), `
-			SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
-			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-			       ps.name, ps.color, ps.position, l.kommo_id
-			FROM leads l
-			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Goroutine 1: load leads (slim — no notes/custom_fields for list)
+	go func() {
+		defer wg.Done()
+		if len(deviceUUIDs) > 0 {
+			rows, qErr := s.repos.DB().Query(c.Context(), `
+				SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.status, l.source, l.notes,
+				       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
+				       ps.name, ps.color, ps.position, l.kommo_id
+				FROM leads l
+				LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+				WHERE l.account_id = $1
+				  AND l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($2))
+				ORDER BY l.created_at DESC
+			`, accountID, deviceUUIDs)
+			if qErr != nil {
+				leadsErr = qErr
+				return
+			}
+			defer rows.Close()
+			for rows.Next() {
+				lead := &domain.Lead{}
+				if scanErr := rows.Scan(
+					&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
+					&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+					&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
+					&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
+				); scanErr != nil {
+					leadsErr = scanErr
+					return
+				}
+				leads = append(leads, lead)
+			}
+		} else {
+			leads, leadsErr = s.services.Lead.GetByAccountID(c.Context(), accountID)
+		}
+	}()
+
+	// Goroutine 2: load all tags for account's leads (fixed: direct JOIN, no subquery)
+	go func() {
+		defer wg.Done()
+		rows, err := s.repos.DB().Query(c.Context(), `
+			SELECT lt.lead_id, t.id, t.account_id, t.name, t.color
+			FROM lead_tags lt
+			JOIN tags t ON t.id = lt.tag_id
+			JOIN leads l ON l.id = lt.lead_id
 			WHERE l.account_id = $1
-			  AND l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($2))
-			ORDER BY l.created_at DESC
-		`, accountID, deviceUUIDs)
-		if qErr != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": qErr.Error()})
+			ORDER BY t.name
+		`, accountID)
+		if err != nil {
+			tagsErr = err
+			return
 		}
 		defer rows.Close()
 		for rows.Next() {
-			lead := &domain.Lead{}
-			if scanErr := rows.Scan(
-				&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
-				&lead.Email, &lead.Company, &lead.Age, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
-				&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
-				&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
-			); scanErr != nil {
-				return c.Status(500).JSON(fiber.Map{"success": false, "error": scanErr.Error()})
+			var leadID uuid.UUID
+			t := &domain.Tag{}
+			if err := rows.Scan(&leadID, &t.ID, &t.AccountID, &t.Name, &t.Color); err != nil {
+				continue
 			}
-			leads = append(leads, lead)
+			tagMap[leadID] = append(tagMap[leadID], t)
 		}
-	} else {
-		leads, err = s.services.Lead.GetByAccountID(c.Context(), accountID)
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-		}
+	}()
+
+	wg.Wait()
+
+	if leadsErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": leadsErr.Error()})
+	}
+	// tagsErr is non-fatal — leads still returned without tags
+	if tagsErr != nil {
+		log.Printf("[LEADS] Warning: failed to load tags: %v", tagsErr)
 	}
 
-	// Batch load structured tags for all leads in one query
-	if len(leads) > 0 {
-		rows, err := s.repos.DB().Query(c.Context(), `
-			SELECT lt.lead_id, t.id, t.account_id, t.name, t.color
-			FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id
-			WHERE lt.lead_id = ANY(SELECT id FROM leads WHERE account_id = $1)
-			ORDER BY t.name
-		`, accountID)
-		if err == nil {
-			defer rows.Close()
-			tagMap := make(map[uuid.UUID][]*domain.Tag)
-			for rows.Next() {
-				var leadID uuid.UUID
-				t := &domain.Tag{}
-				if err := rows.Scan(&leadID, &t.ID, &t.AccountID, &t.Name, &t.Color); err != nil {
-					continue
-				}
-				tagMap[leadID] = append(tagMap[leadID], t)
-			}
-			for _, lead := range leads {
-				lead.StructuredTags = tagMap[lead.ID]
-			}
-		}
+	// Assign tags to leads
+	for _, lead := range leads {
+		lead.StructuredTags = tagMap[lead.ID]
 	}
 
 	result := fiber.Map{"success": true, "leads": leads}
 
-	// Store in Redis cache (30s TTL)
+	// Store in Redis cache (60s TTL — longer to improve hit rate)
 	if s.cache != nil {
 		if data, err := json.Marshal(result); err == nil {
-			_ = s.cache.Set(c.Context(), cacheKey, data, 30*time.Second)
+			_ = s.cache.Set(c.Context(), cacheKey, data, 60*time.Second)
 		}
 	}
 
 	return c.JSON(result)
 }
 
-// invalidateLeadsCache invalidates the cached leads for an account
+// invalidateLeadsCache invalidates ALL cached leads keys for an account (base + device-filtered)
 func (s *Server) invalidateLeadsCache(accountID uuid.UUID) {
 	if s.cache != nil {
+		// Delete base key + any device-filtered keys using pattern
 		_ = s.cache.Del(context.Background(), "leads:"+accountID.String())
+		_ = s.cache.DelPattern(context.Background(), "leads:"+accountID.String()+":*")
 	}
+}
+
+// broadcastLeadDelta sends a delta WebSocket event so frontends update a single lead instead of re-fetching all
+func (s *Server) broadcastLeadDelta(accountID uuid.UUID, action string, lead *domain.Lead) {
+	if s.hub == nil {
+		return
+	}
+	payload := map[string]interface{}{
+		"action": action,
+	}
+	if lead != nil {
+		payload["lead"] = lead
+	}
+	s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, payload)
 }
 
 func (s *Server) handleCreateLead(c *fiber.Ctx) error {
@@ -1687,6 +1733,7 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 	}
 
 	s.invalidateLeadsCache(accountID)
+	s.broadcastLeadDelta(accountID, "created", lead)
 	return c.Status(201).JSON(fiber.Map{"success": true, "lead": lead})
 }
 
@@ -1875,6 +1922,7 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	}
 
 	s.invalidateLeadsCache(lead.AccountID)
+	s.broadcastLeadDelta(lead.AccountID, "updated", lead)
 	return c.JSON(fiber.Map{"success": true, "lead": lead})
 }
 
@@ -1909,7 +1957,11 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	s.invalidateLeadsCache(c.Locals("account_id").(uuid.UUID))
+	accountID := c.Locals("account_id").(uuid.UUID)
+	s.invalidateLeadsCache(accountID)
+	// Broadcast delete with just the ID
+	deletedLead := &domain.Lead{ID: leadID}
+	s.broadcastLeadDelta(accountID, "deleted", deletedLead)
 	return c.JSON(fiber.Map{"success": true, "message": "Lead deleted"})
 }
 
@@ -1980,12 +2032,18 @@ func (s *Server) handleUpdateLeadStage(c *fiber.Ctx) error {
 	}
 
 	// Push stage change to Kommo (async, non-blocking)
+	accountID := c.Locals("account_id").(uuid.UUID)
 	if s.kommoSync != nil {
-		accountID := c.Locals("account_id").(uuid.UUID)
 		go s.kommoSync.PushLeadStageChange(accountID, leadID, stageID)
 	}
 
-	s.invalidateLeadsCache(c.Locals("account_id").(uuid.UUID))
+	s.invalidateLeadsCache(accountID)
+	// Broadcast delta with stage info
+	s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{
+		"action":   "stage_changed",
+		"lead_id":  leadID.String(),
+		"stage_id": stageID.String(),
+	})
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -4533,6 +4591,66 @@ func (s *Server) handleGetLeadInteractions(c *fiber.Ctx) error {
 		interactions = make([]*domain.Interaction, 0)
 	}
 	return c.JSON(fiber.Map{"success": true, "interactions": interactions})
+}
+
+// handleBatchLeadObservations returns observations for multiple leads in a single request
+func (s *Server) handleBatchLeadObservations(c *fiber.Ctx) error {
+	var req struct {
+		LeadIDs []string `json:"lead_ids"`
+		Limit   int      `json:"limit"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if len(req.LeadIDs) == 0 {
+		return c.JSON(fiber.Map{"success": true, "observations": map[string]interface{}{}})
+	}
+	if req.Limit <= 0 {
+		req.Limit = 5
+	}
+	if req.Limit > 20 {
+		req.Limit = 20
+	}
+
+	var leadUUIDs []uuid.UUID
+	for _, id := range req.LeadIDs {
+		if uid, err := uuid.Parse(id); err == nil {
+			leadUUIDs = append(leadUUIDs, uid)
+		}
+	}
+	if len(leadUUIDs) == 0 {
+		return c.JSON(fiber.Map{"success": true, "observations": map[string]interface{}{}})
+	}
+
+	// Use a window function to get top N observations per lead in a single query
+	rows, err := s.repos.DB().Query(c.Context(), `
+		SELECT lead_id, id, type, direction, outcome, notes, created_by_name, created_at
+		FROM (
+			SELECT i.lead_id, i.id, i.type, i.direction, i.outcome, i.notes, i.created_by_name, i.created_at,
+			       ROW_NUMBER() OVER (PARTITION BY i.lead_id ORDER BY i.created_at DESC) as rn
+			FROM interactions i
+			WHERE i.lead_id = ANY($1)
+		) sub
+		WHERE rn <= $2
+		ORDER BY lead_id, created_at DESC
+	`, leadUUIDs, req.Limit)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	defer rows.Close()
+
+	result := make(map[string][]*domain.Interaction)
+	for rows.Next() {
+		var leadID uuid.UUID
+		i := &domain.Interaction{}
+		if err := rows.Scan(&leadID, &i.ID, &i.Type, &i.Direction, &i.Outcome, &i.Notes, &i.CreatedByName, &i.CreatedAt); err != nil {
+			continue
+		}
+		lid := leadID.String()
+		result[lid] = append(result[lid], i)
+	}
+
+	return c.JSON(fiber.Map{"success": true, "observations": result})
 }
 
 func (s *Server) handleGetContactEvents(c *fiber.Ctx) error {

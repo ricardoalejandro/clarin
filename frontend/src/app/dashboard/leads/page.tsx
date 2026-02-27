@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
 import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import ImportCSVModal from '@/components/ImportCSVModal'
 import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
@@ -83,6 +84,181 @@ interface Observation {
   created_by_name: string | null
   created_at: string
 }
+
+// --- Memoized LeadCard component (avoids re-rendering all cards on any state change) ---
+interface LeadCardProps {
+  lead: Lead
+  isSelected: boolean
+  isDetailActive: boolean
+  isDragged: boolean
+  selectionMode: boolean
+  onToggleSelection: (id: string) => void
+  onOpenDetail: (lead: Lead) => void
+  onDelete: (id: string) => void
+  onDragStart: (e: React.DragEvent, id: string) => void
+  onDragEnd: (e: React.DragEvent) => void
+}
+
+const LeadCard = memo(function LeadCard({
+  lead, isSelected, isDetailActive, isDragged, selectionMode,
+  onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd,
+}: LeadCardProps) {
+  return (
+    <div
+      draggable={!selectionMode}
+      onDragStart={(e) => onDragStart(e, lead.id)}
+      onDragEnd={onDragEnd}
+      className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
+        isSelected ? 'border-emerald-500 ring-2 ring-emerald-100'
+        : isDetailActive ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
+        : 'border-slate-100'
+      } ${isDragged ? 'opacity-50' : ''} ${!selectionMode ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      onClick={() => selectionMode ? onToggleSelection(lead.id) : onOpenDetail(lead)}
+    >
+      <div className="flex items-start justify-between group">
+        <div className="flex items-center gap-2">
+          {selectionMode ? (
+            <button onClick={(e) => { e.stopPropagation(); onToggleSelection(lead.id) }} className="p-0.5">
+              {isSelected ? <CheckSquare className="w-4 h-4 text-emerald-600" /> : <Square className="w-4 h-4 text-slate-300" />}
+            </button>
+          ) : (
+            <div className="w-7 h-7 bg-emerald-50 rounded-full flex items-center justify-center">
+              <span className="text-emerald-700 text-xs font-semibold">{(lead.name || '?').charAt(0).toUpperCase()}</span>
+            </div>
+          )}
+          <p className="text-[13px] font-medium text-slate-900 truncate max-w-[150px]">{lead.name || 'Sin nombre'}</p>
+          {lead.kommo_id && (
+            <span title={`Vinculado a Kommo #${lead.kommo_id}`} className="flex-shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-50 rounded-full text-[10px] font-medium text-emerald-600 leading-none">
+              <RefreshCw className="w-2.5 h-2.5" />K
+            </span>
+          )}
+        </div>
+        {!selectionMode && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(lead.id) }}
+            className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+      {lead.phone && (
+        <div className="flex items-center gap-1.5 mt-1.5 text-xs text-slate-500"><Phone className="w-3 h-3" />{lead.phone}</div>
+      )}
+      {lead.email && (
+        <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-500"><Mail className="w-3 h-3" /><span className="truncate max-w-[180px]">{lead.email}</span></div>
+      )}
+      {lead.company && (
+        <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-400"><Building2 className="w-3 h-3" /><span className="truncate max-w-[180px]">{lead.company}</span></div>
+      )}
+      {lead.structured_tags && lead.structured_tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1 mt-2">
+          {lead.structured_tags.slice(0, 3).map((tag) => (
+            <span key={tag.id} className="px-1.5 py-0.5 text-[10px] rounded-full text-white font-medium" style={{ backgroundColor: tag.color || '#6b7280' }}>{tag.name}</span>
+          ))}
+          {lead.structured_tags.length > 3 && <span className="px-1.5 py-0.5 text-slate-400 text-[10px]">+{lead.structured_tags.length - 3}</span>}
+        </div>
+      ) : lead.tags && lead.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1 mt-2">
+          {lead.tags.slice(0, 2).map((tag, i) => <span key={i} className="px-1.5 py-0.5 bg-slate-100 text-slate-500 text-[10px] rounded-full">{tag}</span>)}
+          {lead.tags.length > 2 && <span className="px-1.5 py-0.5 text-slate-400 text-[10px]">+{lead.tags.length - 2}</span>}
+        </div>
+      ) : null}
+      <div className="flex items-center justify-between mt-2 text-[10px] text-slate-400">
+        <span>{formatDistanceToNow(new Date(lead.created_at), { locale: es })}</span>
+        <MessageCircle className="w-3 h-3" />
+      </div>
+    </div>
+  )
+})
+
+// --- Virtualized Kanban Column ---
+interface VirtualColumnProps {
+  column: PipelineStage & { leads: Lead[] }
+  selectedIds: Set<string>
+  detailLeadId: string | null
+  draggedLeadId: string | null
+  dragOverColumn: string | null
+  selectionMode: boolean
+  onToggleSelection: (id: string) => void
+  onOpenDetail: (lead: Lead) => void
+  onDelete: (id: string) => void
+  onDragStart: (e: React.DragEvent, id: string) => void
+  onDragEnd: (e: React.DragEvent) => void
+  onDragOver: (e: React.DragEvent, stageId: string) => void
+  onDragLeave: (e: React.DragEvent) => void
+  onDrop: (e: React.DragEvent, stageId: string) => void
+}
+
+const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
+  column, selectedIds, detailLeadId, draggedLeadId, dragOverColumn, selectionMode,
+  onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
+}: VirtualColumnProps) {
+  const parentRef = useRef<HTMLDivElement>(null)
+  const virtualizer = useVirtualizer({
+    count: column.leads.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 120,
+    overscan: 5,
+  })
+
+  return (
+    <div className="w-[272px] flex-shrink-0 flex flex-col" style={{ maxHeight: '100%' }}>
+      <div
+        className="px-3 py-2.5 rounded-t-xl sticky top-0 z-10 shrink-0"
+        style={{ background: `linear-gradient(135deg, ${column.color}30, ${column.color}18)`, borderBottom: `3px solid ${column.color}`, boxShadow: `0 2px 8px ${column.color}20` }}
+      >
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-bold tracking-wide uppercase text-slate-800">{column.name}</span>
+          <span className="text-xs px-2 py-0.5 rounded-full font-bold text-white" style={{ backgroundColor: column.color }}>{column.leads.length}</span>
+        </div>
+      </div>
+      <div
+        ref={parentRef}
+        className={`bg-slate-50/80 p-2 flex-1 overflow-y-auto transition-colors ${
+          dragOverColumn === column.id ? 'bg-emerald-50 ring-2 ring-emerald-300 ring-inset' : ''
+        }`}
+        style={{ minHeight: 200 }}
+        onDragOver={(e) => onDragOver(e, column.id)}
+        onDragLeave={onDragLeave}
+        onDrop={(e) => onDrop(e, column.id)}
+      >
+        <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
+          {virtualizer.getVirtualItems().map((virtualItem) => {
+            const lead = column.leads[virtualItem.index]
+            return (
+              <div
+                key={lead.id}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${virtualItem.start}px)`,
+                }}
+              >
+                <div className="pb-2">
+                  <LeadCard
+                    lead={lead}
+                    isSelected={selectedIds.has(lead.id)}
+                    isDetailActive={detailLeadId === lead.id}
+                    isDragged={draggedLeadId === lead.id}
+                    selectionMode={selectionMode}
+                    onToggleSelection={onToggleSelection}
+                    onOpenDetail={onOpenDetail}
+                    onDelete={onDelete}
+                    onDragStart={onDragStart}
+                    onDragEnd={onDragEnd}
+                  />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+})
 
 export default function LeadsPage() {
   const router = useRouter()
@@ -183,6 +359,7 @@ export default function LeadsPage() {
 
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
+  const listScrollRef = useRef<HTMLDivElement>(null)
   const filterDropdownRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
 
@@ -277,16 +454,34 @@ export default function LeadsPage() {
     } catch {}
   }, [fetchPipelines, fetchLeads])
 
-  // WebSocket: listen for lead_update events for real-time refresh
+  // WebSocket: listen for lead_update events — delta updates instead of full re-fetch
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
-      const msg = data as { event?: string }
+      const msg = data as { event?: string; action?: string; lead?: Lead; lead_id?: string; stage_id?: string }
       if (msg.event === 'lead_update') {
-        fetchLeads()
+        if (msg.action === 'created' && msg.lead) {
+          setLeads(prev => [msg.lead!, ...prev])
+        } else if (msg.action === 'updated' && msg.lead) {
+          setLeads(prev => prev.map(l => l.id === msg.lead!.id ? { ...l, ...msg.lead! } : l))
+          // Also update detail panel if viewing this lead
+          if (detailLead?.id === msg.lead.id) {
+            setDetailLead(prev => prev ? { ...prev, ...msg.lead! } : prev)
+          }
+        } else if (msg.action === 'deleted' && msg.lead) {
+          setLeads(prev => prev.filter(l => l.id !== msg.lead!.id))
+          if (detailLead?.id === msg.lead.id) {
+            setShowDetailPanel(false)
+          }
+        } else if (msg.action === 'stage_changed' && msg.lead_id && msg.stage_id) {
+          setLeads(prev => prev.map(l => l.id === msg.lead_id ? { ...l, stage_id: msg.stage_id! } : l))
+        } else {
+          // Fallback: full re-fetch for unknown actions (e.g., from Kommo sync)
+          fetchLeads()
+        }
       }
     })
     return () => unsubscribe()
-  }, [fetchLeads])
+  }, [fetchLeads, detailLead])
 
   // Debounce search term (500ms)
   useEffect(() => {
@@ -663,7 +858,7 @@ export default function LeadsPage() {
     }
   }
 
-  // Fetch observations for a single lead in list view (with cache)
+  // Fetch observations for a single lead in list view (with cache) — used by detail panel
   const fetchListLeadObservations = async (leadId: string) => {
     if (listObservations.has(leadId) || loadingListObs.has(leadId)) return
     setLoadingListObs(prev => new Set(prev).add(leadId))
@@ -682,6 +877,48 @@ export default function LeadsPage() {
       setLoadingListObs(prev => { const next = new Set(prev); next.delete(leadId); return next })
     }
   }
+
+  // Batch fetch observations for multiple leads at once
+  const fetchBatchObservations = useCallback(async (leadIds: string[]) => {
+    const uncached = leadIds.filter(id => !listObservations.has(id) && !loadingListObs.has(id))
+    if (uncached.length === 0) return
+    setLoadingListObs(prev => {
+      const next = new Set(prev)
+      uncached.forEach(id => next.add(id))
+      return next
+    })
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/leads/observations/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ lead_ids: uncached, limit: 5 }),
+      })
+      const data = await res.json()
+      if (data.success && data.observations) {
+        setListObservations(prev => {
+          const next = new Map(prev)
+          // Set results for leads that had observations
+          for (const [leadId, obs] of Object.entries(data.observations)) {
+            next.set(leadId, obs as Observation[])
+          }
+          // Set empty arrays for leads with no observations
+          uncached.forEach(id => {
+            if (!next.has(id)) next.set(id, [])
+          })
+          return next
+        })
+      }
+    } catch (err) {
+      console.error('Failed to batch fetch observations:', err)
+    } finally {
+      setLoadingListObs(prev => {
+        const next = new Set(prev)
+        uncached.forEach(id => next.delete(id))
+        return next
+      })
+    }
+  }, [listObservations, loadingListObs])
 
   const handleSyncKommo = async () => {
     if (!detailLead) return
@@ -910,31 +1147,37 @@ export default function LeadsPage() {
     return () => window.removeEventListener('keydown', handleEscapeKey)
   }, [showDeviceSelector, showStageModal, showAddModal, showEditModal, showFilterDropdown, showInlineChat, showDetailPanel])
 
-  const filteredLeads = leads.filter((lead) => {
-    const matchesSearch =
-      (lead.name || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-      (lead.phone || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-      (lead.email || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-      (lead.company || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-      (lead.last_name || '').toLowerCase().includes(debouncedSearchTerm.toLowerCase())
-    const matchesPipeline = !activePipeline || lead.pipeline_id === activePipeline.id || !lead.pipeline_id
-    const matchesStageFilter = filterStageIds.size === 0 || (lead.stage_id && filterStageIds.has(lead.stage_id))
-    const matchesTagFilter = filterTagNames.size === 0 || (lead.structured_tags && lead.structured_tags.some(t => filterTagNames.has(t.name)))
-    return matchesSearch && matchesPipeline && matchesStageFilter && matchesTagFilter
-  })
+  const filteredLeads = useMemo(() => {
+    const search = debouncedSearchTerm.toLowerCase()
+    return leads.filter((lead) => {
+      const matchesSearch = !search ||
+        (lead.name || '').toLowerCase().includes(search) ||
+        (lead.phone || '').toLowerCase().includes(search) ||
+        (lead.email || '').toLowerCase().includes(search) ||
+        (lead.company || '').toLowerCase().includes(search) ||
+        (lead.last_name || '').toLowerCase().includes(search)
+      const matchesPipeline = !activePipeline || lead.pipeline_id === activePipeline.id || !lead.pipeline_id
+      const matchesStageFilter = filterStageIds.size === 0 || (lead.stage_id && filterStageIds.has(lead.stage_id))
+      const matchesTagFilter = filterTagNames.size === 0 || (lead.structured_tags && lead.structured_tags.some(t => filterTagNames.has(t.name)))
+      return matchesSearch && matchesPipeline && matchesStageFilter && matchesTagFilter
+    })
+  }, [leads, debouncedSearchTerm, activePipeline, filterStageIds, filterTagNames])
 
   // Collect unique tags from all leads for filter dropdown
-  const allUniqueTags = Array.from(
+  const allUniqueTags = useMemo(() => Array.from(
     new Map(leads.flatMap(l => l.structured_tags || []).map(t => [t.name, t])).values()
-  ).sort((a, b) => a.name.localeCompare(b.name))
+  ).sort((a, b) => a.name.localeCompare(b.name)), [leads])
 
   // Count leads per tag
-  const tagLeadCounts = new Map<string, number>()
-  leads.forEach(l => {
-    (l.structured_tags || []).forEach(t => {
-      tagLeadCounts.set(t.name, (tagLeadCounts.get(t.name) || 0) + 1)
+  const tagLeadCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    leads.forEach(l => {
+      (l.structured_tags || []).forEach(t => {
+        counts.set(t.name, (counts.get(t.name) || 0) + 1)
+      })
     })
-  })
+    return counts
+  }, [leads])
 
   // Filter tags by search term (% = wildcard like Kommo/SQL LIKE)
   const filteredTags = allUniqueTags.filter(tag => {
@@ -1025,17 +1268,83 @@ export default function LeadsPage() {
     }
   }
 
-  // Group leads by stage
-  const leadsByStage = stages.map(stage => ({
+  // Group leads by stage (memoized)
+  const leadsByStage = useMemo(() => stages.map(stage => ({
     ...stage,
     leads: filteredLeads.filter(l => l.stage_id === stage.id),
-  }))
-  const unassignedLeads = filteredLeads.filter(l => !l.stage_id || !stages.find(s => s.id === l.stage_id))
+  })), [stages, filteredLeads])
+
+  const unassignedLeads = useMemo(() => {
+    const stageIds = new Set(stages.map(s => s.id))
+    return filteredLeads.filter(l => !l.stage_id || !stageIds.has(l.stage_id))
+  }, [stages, filteredLeads])
+
+  // Sorted leads for list view (memoized to avoid re-sorting on every render)
+  const sortedListLeads = useMemo(() =>
+    [...filteredLeads].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
+    [filteredLeads]
+  )
+
+  // List virtualizer
+  const listVirtualizer = useVirtualizer({
+    count: sortedListLeads.length,
+    getScrollElement: () => listScrollRef.current,
+    estimateSize: () => 56,
+    overscan: 10,
+  })
+
+  // Batch-fetch observations for visible list rows
+  useEffect(() => {
+    if (viewMode !== 'list' || sortedListLeads.length === 0) return
+    const items = listVirtualizer.getVirtualItems()
+    if (items.length === 0) return
+    const visibleIds = items.map(item => sortedListLeads[item.index]?.id).filter(Boolean)
+    if (visibleIds.length > 0) {
+      fetchBatchObservations(visibleIds)
+    }
+  }, [viewMode, listVirtualizer.getVirtualItems(), sortedListLeads, fetchBatchObservations])
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
+      <div className="flex flex-col h-full min-h-0 animate-pulse">
+        {/* Skeleton header */}
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <div className="h-6 w-20 bg-slate-200 rounded" />
+            <div className="h-4 w-32 bg-slate-100 rounded mt-1" />
+          </div>
+          <div className="flex gap-2">
+            <div className="h-8 w-20 bg-slate-200 rounded-lg" />
+            <div className="h-8 w-16 bg-slate-200 rounded-lg" />
+            <div className="h-8 w-20 bg-emerald-200 rounded-lg" />
+          </div>
+        </div>
+        {/* Skeleton search */}
+        <div className="h-10 bg-slate-100 rounded-xl mb-3" />
+        {/* Skeleton kanban columns */}
+        <div className="flex-1 flex gap-3 overflow-hidden">
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} className="w-[272px] flex-shrink-0">
+              <div className="h-10 rounded-t-xl bg-slate-200 mb-2" />
+              <div className="space-y-2 p-2">
+                {[1, 2, 3, 4, 5].map(j => (
+                  <div key={j} className="bg-white p-3 rounded-xl border border-slate-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="w-7 h-7 bg-slate-200 rounded-full" />
+                      <div className="h-4 w-24 bg-slate-200 rounded" />
+                    </div>
+                    <div className="h-3 w-32 bg-slate-100 rounded mt-1.5" />
+                    <div className="flex gap-1 mt-2">
+                      <div className="h-4 w-12 bg-slate-100 rounded-full" />
+                      <div className="h-4 w-14 bg-slate-100 rounded-full" />
+                    </div>
+                    <div className="h-3 w-20 bg-slate-50 rounded mt-2" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     )
   }
@@ -1361,7 +1670,7 @@ export default function LeadsPage() {
         )}
       </div>
 
-      {/* Pipeline Kanban */}
+      {/* Pipeline Kanban — Virtualized */}
       {viewMode === 'kanban' && (
       <div className="flex-1 min-h-0 flex flex-col">
       {/* Top synced scrollbar */}
@@ -1376,167 +1685,55 @@ export default function LeadsPage() {
       <div
         ref={kanbanRef}
         onScroll={handleKanbanScroll}
-        className="overflow-x-auto overflow-y-auto flex-1 min-h-0 kanban-scroll"
+        className="overflow-x-auto flex-1 min-h-0 kanban-scroll"
       >
-        <div className="flex gap-3" style={{ minWidth: `${(stages.length + (unassignedLeads.length > 0 ? 1 : 0)) * 288}px` }}>
+        <div className="flex gap-3 h-full" style={{ minWidth: `${(stages.length + (unassignedLeads.length > 0 ? 1 : 0)) * 288}px` }}>
           {leadsByStage.map((column) => (
-            <div key={column.id} className="w-[272px] flex-shrink-0">
-              <div
-                className="px-3 py-2.5 rounded-t-xl sticky top-0 z-10"
-                style={{ background: `linear-gradient(135deg, ${column.color}30, ${column.color}18)`, borderBottom: `3px solid ${column.color}`, boxShadow: `0 2px 8px ${column.color}20` }}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-bold tracking-wide uppercase text-slate-800">{column.name}</span>
-                  <span className="text-xs px-2 py-0.5 rounded-full font-bold text-white" style={{ backgroundColor: column.color }}>{column.leads.length}</span>
-                </div>
-              </div>
-              <div
-                className={`bg-slate-50/80 p-2 min-h-[200px] space-y-2 transition-colors ${
-                  dragOverColumn === column.id ? 'bg-emerald-50 ring-2 ring-emerald-300 ring-inset' : ''
-                }`}
-                onDragOver={(e) => handleDragOver(e, column.id)}
-                onDragLeave={handleDragLeave}
-                onDrop={(e) => handleDrop(e, column.id)}
-              >
-                {column.leads.map((lead) => (
-                  <div
-                    key={lead.id}
-                    draggable={!selectionMode}
-                    onDragStart={(e) => handleDragStart(e, lead.id)}
-                    onDragEnd={handleDragEnd}
-                    className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
-                      selectedIds.has(lead.id) ? 'border-emerald-500 ring-2 ring-emerald-100'
-                      : detailLead?.id === lead.id ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
-                      : 'border-slate-100'
-                    } ${draggedLeadId === lead.id ? 'opacity-50' : ''} ${!selectionMode ? 'cursor-grab active:cursor-grabbing' : ''}`}
-                    onClick={() => selectionMode ? toggleSelection(lead.id) : openDetailPanel(lead)}
-                  >
-                    <div className="flex items-start justify-between group">
-                      <div className="flex items-center gap-2">
-                        {selectionMode ? (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); toggleSelection(lead.id) }}
-                            className="p-0.5"
-                          >
-                            {selectedIds.has(lead.id) ? (
-                              <CheckSquare className="w-4 h-4 text-emerald-600" />
-                            ) : (
-                              <Square className="w-4 h-4 text-slate-300" />
-                            )}
-                          </button>
-                        ) : (
-                          <div className="w-7 h-7 bg-emerald-50 rounded-full flex items-center justify-center">
-                            <span className="text-emerald-700 text-xs font-semibold">
-                              {(lead.name || '?').charAt(0).toUpperCase()}
-                            </span>
-                          </div>
-                        )}
-                        <p className="text-[13px] font-medium text-slate-900 truncate max-w-[150px]">
-                          {lead.name || 'Sin nombre'}
-                        </p>
-                        {lead.kommo_id && (
-                          <span title={`Vinculado a Kommo #${lead.kommo_id}`} className="flex-shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-50 rounded-full text-[10px] font-medium text-emerald-600 leading-none">
-                            <RefreshCw className="w-2.5 h-2.5" />
-                            K
-                          </span>
-                        )}
-                      </div>
-                      {!selectionMode && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleDeleteLead(lead.id) }}
-                          className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                    {lead.phone && (
-                      <div className="flex items-center gap-1.5 mt-1.5 text-xs text-slate-500">
-                        <Phone className="w-3 h-3" />
-                        {lead.phone}
-                      </div>
-                    )}
-                    {lead.email && (
-                      <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-500">
-                        <Mail className="w-3 h-3" />
-                        <span className="truncate max-w-[180px]">{lead.email}</span>
-                      </div>
-                    )}
-                    {lead.company && (
-                      <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-400">
-                        <Building2 className="w-3 h-3" />
-                        <span className="truncate max-w-[180px]">{lead.company}</span>
-                      </div>
-                    )}
-                    {lead.structured_tags && lead.structured_tags.length > 0 ? (
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        {lead.structured_tags.slice(0, 3).map((tag) => (
-                          <span
-                            key={tag.id}
-                            className="px-1.5 py-0.5 text-[10px] rounded-full text-white font-medium"
-                            style={{ backgroundColor: tag.color || '#6b7280' }}
-                          >
-                            {tag.name}
-                          </span>
-                        ))}
-                        {lead.structured_tags.length > 3 && (
-                          <span className="px-1.5 py-0.5 text-slate-400 text-[10px]">
-                            +{lead.structured_tags.length - 3}
-                          </span>
-                        )}
-                      </div>
-                    ) : lead.tags && lead.tags.length > 0 ? (
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        {lead.tags.slice(0, 2).map((tag, i) => (
-                          <span key={i} className="px-1.5 py-0.5 bg-slate-100 text-slate-500 text-[10px] rounded-full">
-                            {tag}
-                          </span>
-                        ))}
-                        {lead.tags.length > 2 && (
-                          <span className="px-1.5 py-0.5 text-slate-400 text-[10px]">+{lead.tags.length - 2}</span>
-                        )}
-                      </div>
-                    ) : null}
-                    <div className="flex items-center justify-between mt-2 text-[10px] text-slate-400">
-                      <span>{formatDistanceToNow(new Date(lead.created_at), { locale: es })}</span>
-                      <MessageCircle className="w-3 h-3" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <VirtualKanbanColumn
+              key={column.id}
+              column={column}
+              selectedIds={selectedIds}
+              detailLeadId={detailLead?.id || null}
+              draggedLeadId={draggedLeadId}
+              dragOverColumn={dragOverColumn}
+              selectionMode={selectionMode}
+              onToggleSelection={toggleSelection}
+              onOpenDetail={openDetailPanel}
+              onDelete={handleDeleteLead}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            />
           ))}
           {/* Unassigned column */}
           {unassignedLeads.length > 0 && (
-            <div className="w-[272px] flex-shrink-0">
-              <div className="px-3 py-2.5 rounded-t-xl sticky top-0 z-10" style={{ background: 'linear-gradient(135deg, rgba(100,116,139,0.2), rgba(100,116,139,0.1))', borderBottom: '3px solid #64748b', boxShadow: '0 2px 8px rgba(100,116,139,0.15)' }}>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-bold tracking-wide uppercase text-slate-800">Sin etapa</span>
-                  <span className="text-xs px-2 py-0.5 rounded-full font-bold text-white bg-slate-500">{unassignedLeads.length}</span>
-                </div>
-              </div>
-              <div className="bg-slate-50/80 p-2 min-h-[200px] space-y-2">
-                {unassignedLeads.map((lead) => (
-                  <div
-                    key={lead.id}
-                    draggable={!selectionMode}
-                    onDragStart={(e) => handleDragStart(e, lead.id)}
-                    onDragEnd={handleDragEnd}
-                    className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
-                      detailLead?.id === lead.id ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50' : 'border-slate-100'
-                    }`}
-                    onClick={() => selectionMode ? toggleSelection(lead.id) : openDetailPanel(lead)}
-                  >
-                    <p className="text-[13px] font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
-                    {lead.phone && (
-                      <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-500">
-                        <Phone className="w-3 h-3" />{lead.phone}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
+            <VirtualKanbanColumn
+              key="__unassigned__"
+              column={{
+                id: '__unassigned__',
+                pipeline_id: '',
+                name: 'Sin etapa',
+                color: '#64748b',
+                position: 999,
+                lead_count: unassignedLeads.length,
+                leads: unassignedLeads,
+              }}
+              selectedIds={selectedIds}
+              detailLeadId={detailLead?.id || null}
+              draggedLeadId={draggedLeadId}
+              dragOverColumn={dragOverColumn}
+              selectionMode={selectionMode}
+              onToggleSelection={toggleSelection}
+              onOpenDetail={openDetailPanel}
+              onDelete={handleDeleteLead}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            />
           )}
         </div>
       </div>
@@ -1544,158 +1741,167 @@ export default function LeadsPage() {
       )}
 
       {/* List View */}
+      {/* List View — Virtualized */}
       {viewMode === 'list' && (
-        <div className="flex-1 min-h-0 overflow-auto">
-          <table className="w-full text-left">
-            <thead className="sticky top-0 z-10 bg-slate-50">
-              <tr className="border-b border-slate-200">
-                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[220px]">Lead</th>
-                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[110px]">Etapa</th>
-                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[180px]">Etiquetas</th>
-                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Últimas observaciones</th>
-                <th className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[40px]"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredLeads
-                .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-                .map((lead) => {
+        <div className="flex-1 min-h-0 flex flex-col">
+          {/* Sticky header */}
+          <div className="bg-slate-50 border-b border-slate-200 flex-shrink-0">
+            <div className="flex">
+              <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[220px]">Lead</div>
+              <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[110px]">Etapa</div>
+              <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[180px]">Etiquetas</div>
+              <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex-1">Últimas observaciones</div>
+              <div className="px-3 py-2.5 w-[40px]"></div>
+            </div>
+          </div>
+          {/* Virtualized rows */}
+          <div ref={listScrollRef} className="flex-1 min-h-0 overflow-auto">
+            {sortedListLeads.length > 0 ? (
+              <div style={{ height: listVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
+                {listVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const lead = sortedListLeads[virtualRow.index]
                   const stageName = lead.stage_name || stages.find(s => s.id === lead.stage_id)?.name
                   const stageColor = lead.stage_color || stages.find(s => s.id === lead.stage_id)?.color || '#94a3b8'
                   const obs = listObservations.get(lead.id)
                   const isExpanded = expandedListLeadId === lead.id
 
-                  // Trigger lazy fetch when row renders
-                  if (!obs && !loadingListObs.has(lead.id)) {
-                    // Schedule non-blocking fetch
-                    setTimeout(() => fetchListLeadObservations(lead.id), 0)
-                  }
-
                   return (
-                    <tr
+                    <div
                       key={lead.id}
-                      className={`group hover:bg-slate-50/80 transition cursor-pointer ${
-                        detailLead?.id === lead.id ? 'bg-emerald-50/50' : ''
-                      }`}
-                      onClick={() => openDetailPanel(lead)}
+                      ref={listVirtualizer.measureElement}
+                      data-index={virtualRow.index}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
                     >
-                      {/* Lead info */}
-                      <td className="px-3 py-2.5">
-                        <div className="flex items-center gap-2.5">
-                          <div className="w-8 h-8 bg-emerald-50 rounded-full flex items-center justify-center shrink-0">
-                            <span className="text-emerald-700 text-xs font-semibold">
-                              {(lead.name || '?').charAt(0).toUpperCase()}
-                            </span>
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-[13px] font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
-                            {lead.phone && (
-                              <p className="text-[11px] text-slate-500 mt-0.5">{lead.phone}</p>
-                            )}
+                      <div
+                        className={`flex items-start group border-b border-slate-100 hover:bg-slate-50/80 transition cursor-pointer ${
+                          detailLead?.id === lead.id ? 'bg-emerald-50/50' : ''
+                        }`}
+                        onClick={() => openDetailPanel(lead)}
+                      >
+                        {/* Lead info */}
+                        <div className="px-3 py-2.5 w-[220px]">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-8 h-8 bg-emerald-50 rounded-full flex items-center justify-center shrink-0">
+                              <span className="text-emerald-700 text-xs font-semibold">
+                                {(lead.name || '?').charAt(0).toUpperCase()}
+                              </span>
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-[13px] font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
+                              {lead.phone && (
+                                <p className="text-[11px] text-slate-500 mt-0.5">{lead.phone}</p>
+                              )}
+                            </div>
                           </div>
                         </div>
-                      </td>
 
-                      {/* Stage */}
-                      <td className="px-3 py-2.5">
-                        {stageName ? (
-                          <span
-                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white"
-                            style={{ backgroundColor: stageColor }}
+                        {/* Stage */}
+                        <div className="px-3 py-2.5 w-[110px]">
+                          {stageName ? (
+                            <span
+                              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white"
+                              style={{ backgroundColor: stageColor }}
+                            >
+                              {stageName}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-slate-400 italic">Sin etapa</span>
+                          )}
+                        </div>
+
+                        {/* Tags */}
+                        <div className="px-3 py-2.5 w-[180px]">
+                          {lead.structured_tags && lead.structured_tags.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {lead.structured_tags.slice(0, 3).map(tag => (
+                                <span
+                                  key={tag.id}
+                                  className="px-1.5 py-0.5 text-[10px] rounded-full text-white font-medium"
+                                  style={{ backgroundColor: tag.color || '#6b7280' }}
+                                >
+                                  {tag.name}
+                                </span>
+                              ))}
+                              {lead.structured_tags.length > 3 && (
+                                <span className="text-[10px] text-slate-400">+{lead.structured_tags.length - 3}</span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-slate-300">—</span>
+                          )}
+                        </div>
+
+                        {/* Observations preview */}
+                        <div className="px-3 py-2.5 flex-1" onClick={(e) => e.stopPropagation()}>
+                          {loadingListObs.has(lead.id) ? (
+                            <div className="flex items-center gap-2">
+                              <div className="animate-spin rounded-full h-3 w-3 border border-slate-200 border-t-emerald-500" />
+                              <span className="text-[10px] text-slate-400">Cargando...</span>
+                            </div>
+                          ) : obs && obs.length > 0 ? (
+                            <div className="space-y-1">
+                              {obs.slice(0, isExpanded ? 10 : 3).map(o => (
+                                <div key={o.id} className="flex items-start gap-1.5">
+                                  <span className="shrink-0 mt-0.5 text-[10px]">
+                                    {o.type === 'call' ? '📞' : o.type === 'note' ? '📝' : '↕'}
+                                  </span>
+                                  <p className="text-[11px] text-slate-600 leading-tight line-clamp-1">
+                                    {(o.notes || '').replace(/^\(sinc\)\s*/i, '')}
+                                  </p>
+                                  <span className="shrink-0 text-[9px] text-slate-400 mt-0.5 whitespace-nowrap">
+                                    {formatDistanceToNow(new Date(o.created_at), { locale: es, addSuffix: false })}
+                                  </span>
+                                </div>
+                              ))}
+                              {obs.length > 3 && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setExpandedListLeadId(isExpanded ? null : lead.id)
+                                  }}
+                                  className="text-[10px] text-emerald-600 hover:text-emerald-700 font-medium mt-0.5"
+                                >
+                                  {isExpanded ? (
+                                    <span className="inline-flex items-center gap-0.5"><ChevronUp className="w-3 h-3" /> Menos</span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-0.5"><ChevronDown className="w-3 h-3" /> +{obs.length - 3} más</span>
+                                  )}
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-slate-300 italic">Sin observaciones</span>
+                          )}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="px-3 py-2.5 w-[40px]">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDeleteLead(lead.id) }}
+                            className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Eliminar"
                           >
-                            {stageName}
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-slate-400 italic">Sin etapa</span>
-                        )}
-                      </td>
-
-                      {/* Tags */}
-                      <td className="px-3 py-2.5">
-                        {lead.structured_tags && lead.structured_tags.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {lead.structured_tags.slice(0, 3).map(tag => (
-                              <span
-                                key={tag.id}
-                                className="px-1.5 py-0.5 text-[10px] rounded-full text-white font-medium"
-                                style={{ backgroundColor: tag.color || '#6b7280' }}
-                              >
-                                {tag.name}
-                              </span>
-                            ))}
-                            {lead.structured_tags.length > 3 && (
-                              <span className="text-[10px] text-slate-400">+{lead.structured_tags.length - 3}</span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-[10px] text-slate-300">—</span>
-                        )}
-                      </td>
-
-                      {/* Observations preview */}
-                      <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
-                        {loadingListObs.has(lead.id) ? (
-                          <div className="flex items-center gap-2">
-                            <div className="animate-spin rounded-full h-3 w-3 border border-slate-200 border-t-emerald-500" />
-                            <span className="text-[10px] text-slate-400">Cargando...</span>
-                          </div>
-                        ) : obs && obs.length > 0 ? (
-                          <div className="space-y-1">
-                            {obs.slice(0, isExpanded ? 10 : 3).map(o => (
-                              <div key={o.id} className="flex items-start gap-1.5">
-                                <span className="shrink-0 mt-0.5 text-[10px]">
-                                  {o.type === 'call' ? '📞' : o.type === 'note' ? '📝' : '↕'}
-                                </span>
-                                <p className="text-[11px] text-slate-600 leading-tight line-clamp-1">
-                                  {(o.notes || '').replace(/^\(sinc\)\s*/i, '')}
-                                </p>
-                                <span className="shrink-0 text-[9px] text-slate-400 mt-0.5 whitespace-nowrap">
-                                  {formatDistanceToNow(new Date(o.created_at), { locale: es, addSuffix: false })}
-                                </span>
-                              </div>
-                            ))}
-                            {obs.length > 3 && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setExpandedListLeadId(isExpanded ? null : lead.id)
-                                }}
-                                className="text-[10px] text-emerald-600 hover:text-emerald-700 font-medium mt-0.5"
-                              >
-                                {isExpanded ? (
-                                  <span className="inline-flex items-center gap-0.5"><ChevronUp className="w-3 h-3" /> Menos</span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-0.5"><ChevronDown className="w-3 h-3" /> +{obs.length - 3} más</span>
-                                )}
-                              </button>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-[10px] text-slate-300 italic">Sin observaciones</span>
-                        )}
-                      </td>
-
-                      {/* Actions */}
-                      <td className="px-3 py-2.5">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); handleDeleteLead(lead.id) }}
-                          className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                          title="Eliminar"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                   )
                 })}
-            </tbody>
-          </table>
-          {filteredLeads.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-16 text-slate-400">
-              <FileText className="w-10 h-10 mb-2 text-slate-300" />
-              <p className="text-sm">No se encontraron leads</p>
-            </div>
-          )}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                <FileText className="w-10 h-10 mb-2 text-slate-300" />
+                <p className="text-sm">No se encontraron leads</p>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
