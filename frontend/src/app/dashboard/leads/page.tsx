@@ -488,8 +488,9 @@ export default function LeadsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        setStageData(data.stages || [])
-        setUnassignedData(data.unassigned || { total_count: 0, leads: [], has_more: false })
+        setStageData((data.stages || []).map((s: StageData) => ({ ...s, leads: s.leads || [] })))
+        const ua = data.unassigned || { total_count: 0, leads: [], has_more: false }
+        setUnassignedData({ ...ua, leads: ua.leads || [] })
         setAllTags(data.all_tags || [])
       }
     } catch (err) {
@@ -602,18 +603,18 @@ export default function LeadsPage() {
   // All loaded leads from visible stages
   const allLoadedLeads = useMemo(() => {
     const all: Lead[] = []
-    stageData.forEach(s => all.push(...s.leads))
-    all.push(...unassignedData.leads)
+    stageData.forEach(s => all.push(...(s.leads || [])))
+    all.push(...(unassignedData.leads || []))
     return all
   }, [stageData, unassignedData])
 
   // Find lead by ID across all loaded data
   const findLeadById = useCallback((leadId: string): Lead | undefined => {
     for (const stage of stageData) {
-      const found = stage.leads.find(l => l.id === leadId)
+      const found = (stage.leads || []).find(l => l.id === leadId)
       if (found) return found
     }
-    return unassignedData.leads.find(l => l.id === leadId)
+    return (unassignedData.leads || []).find(l => l.id === leadId)
   }, [stageData, unassignedData])
 
   // Total count from server (all matching leads, not just loaded)

@@ -1939,7 +1939,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	}
 
 	// Unassigned leads (first N)
-	var unassignedLeads []*domain.Lead
+	unassignedLeads := make([]*domain.Lead, 0)
 	for _, lead := range paginatedLeads {
 		if lead.StageID == nil {
 			unassignedLeads = append(unassignedLeads, lead)
@@ -2109,7 +2109,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 	}
 	defer rows.Close()
 
-	var leads []*domain.Lead
+	leads := make([]*domain.Lead, 0)
 	for rows.Next() {
 		lead := &domain.Lead{}
 		if err := rows.Scan(
@@ -2244,7 +2244,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 
 	// Count + fetch in parallel
 	var total int
-	var leads []*domain.Lead
+	leads := make([]*domain.Lead, 0)
 	var countErr, leadsErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
