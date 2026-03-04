@@ -1,9 +1,10 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import FormulaEditor from '@/components/FormulaEditor'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import ImportCSVModal from '@/components/ImportCSVModal'
 import TagInput from '@/components/TagInput'
@@ -58,6 +59,8 @@ interface Lead {
   email: string
   company: string | null
   age: number | null
+  dni: string | null
+  birth_date: string | null
   status: string
   pipeline_id: string | null
   stage_id: string | null
@@ -309,6 +312,65 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   )
 })
 
+// ─── Date Filter Presets ──────────────────────────────────────────────────────
+const DATE_PRESETS = [
+  { key: 'last_15m', label: 'Últimos 15 min' },
+  { key: 'last_hour', label: 'Última hora' },
+  { key: 'today', label: 'Hoy' },
+  { key: 'yesterday', label: 'Ayer' },
+  { key: 'last_7d', label: 'Últimos 7 días' },
+  { key: 'this_week', label: 'Esta semana' },
+  { key: 'this_month', label: 'Este mes' },
+  { key: 'last_30d', label: 'Últimos 30 días' },
+  { key: 'custom', label: 'Rango personalizado' },
+] as const
+
+function resolveDatePreset(preset: string, customFrom?: string, customTo?: string): { from: string; to: string } | null {
+  const now = new Date()
+  switch (preset) {
+    case 'last_15m': {
+      const from = new Date(now.getTime() - 15 * 60 * 1000)
+      return { from: from.toISOString(), to: now.toISOString() }
+    }
+    case 'last_hour': {
+      const from = new Date(now.getTime() - 60 * 60 * 1000)
+      return { from: from.toISOString(), to: now.toISOString() }
+    }
+    case 'today': {
+      const start = new Date(now); start.setHours(0, 0, 0, 0)
+      return { from: start.toISOString(), to: now.toISOString() }
+    }
+    case 'yesterday': {
+      const start = new Date(now); start.setDate(start.getDate() - 1); start.setHours(0, 0, 0, 0)
+      const end = new Date(start); end.setHours(23, 59, 59, 999)
+      return { from: start.toISOString(), to: end.toISOString() }
+    }
+    case 'last_7d': {
+      const from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+      return { from: from.toISOString(), to: now.toISOString() }
+    }
+    case 'this_week': {
+      const start = new Date(now); const dow = start.getDay(); start.setDate(start.getDate() - (dow === 0 ? 6 : dow - 1)); start.setHours(0, 0, 0, 0)
+      return { from: start.toISOString(), to: now.toISOString() }
+    }
+    case 'this_month': {
+      const start = new Date(now.getFullYear(), now.getMonth(), 1)
+      return { from: start.toISOString(), to: now.toISOString() }
+    }
+    case 'last_30d': {
+      const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+      return { from: from.toISOString(), to: now.toISOString() }
+    }
+    case 'custom': {
+      if (!customFrom && !customTo) return null
+      const from = customFrom ? new Date(customFrom + 'T00:00:00').toISOString() : ''
+      const to = customTo ? new Date(customTo + 'T23:59:59').toISOString() : ''
+      return { from, to }
+    }
+    default: return null
+  }
+}
+
 export default function LeadsPage() {
   const router = useRouter()
   // Server-side paginated data
@@ -325,7 +387,16 @@ export default function LeadsPage() {
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
   const [filterStageIds, setFilterStageIds] = useState<Set<string>>(new Set())
   const [filterTagNames, setFilterTagNames] = useState<Set<string>>(new Set())
+  const [excludeFilterTagNames, setExcludeFilterTagNames] = useState<Set<string>>(new Set())
+  const [tagFilterMode, setTagFilterMode] = useState<'OR' | 'AND'>('OR')
   const [tagSearchTerm, setTagSearchTerm] = useState('')
+  // Advanced formula filter
+  const [leadFormulaType, setLeadFormulaType] = useState<'simple' | 'advanced'>('simple')
+  const [leadFormulaText, setLeadFormulaText] = useState('')
+  const [leadFormulaIsValid, setLeadFormulaIsValid] = useState(true)
+  // Applied formula (only applied on clicking Aplicar)
+  const [appliedFormulaType, setAppliedFormulaType] = useState<'simple' | 'advanced'>('simple')
+  const [appliedFormulaText, setAppliedFormulaText] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
@@ -340,6 +411,9 @@ export default function LeadsPage() {
     email: '',
     notes: '',
     tags: '',
+    stage_id: '',
+    dni: '',
+    birth_date: '',
   })
 
   // Detail panel
@@ -390,10 +464,19 @@ export default function LeadsPage() {
   const [inlineChatId, setInlineChatId] = useState('')
   const [inlineChat, setInlineChat] = useState<Chat | null>(null)
   const [inlineChatDeviceId, setInlineChatDeviceId] = useState('')
+  const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false)
+  const [existingChatForWA, setExistingChatForWA] = useState<any>(null)
+  const [allDevicesForModal, setAllDevicesForModal] = useState<Device[]>([])
 
   // Device filter for leads
   const [filterDeviceIds, setFilterDeviceIds] = useState<Set<string>>(new Set())
   const [showDeviceFilter, setShowDeviceFilter] = useState(false)
+
+  // Date filter
+  const [filterDateField, setFilterDateField] = useState<'created_at' | 'updated_at'>('created_at')
+  const [filterDatePreset, setFilterDatePreset] = useState('')
+  const [filterDateFrom, setFilterDateFrom] = useState('')
+  const [filterDateTo, setFilterDateTo] = useState('')
 
   // Broadcast from leads
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
@@ -401,6 +484,7 @@ export default function LeadsPage() {
 
   // View mode: kanban vs list
   const [viewMode, setViewMode] = useState<'kanban' | 'list'>('kanban')
+  const prevViewModeRef = useRef<'kanban' | 'list'>('kanban')
 
   // List view paginated data
   const [listLeads, setListLeads] = useState<Lead[]>([])
@@ -411,6 +495,11 @@ export default function LeadsPage() {
   // "Más" dropdown menu
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
+
+  // Create Event from Leads modal
+  const [showCreateEventModal, setShowCreateEventModal] = useState(false)
+  const [createEventForm, setCreateEventForm] = useState({ name: '', description: '', event_date: '', event_end: '', location: '', color: '#10b981' })
+  const [creatingEvent, setCreatingEvent] = useState(false)
 
   // List view observations cache
   const [listObservations, setListObservations] = useState<Map<string, Observation[]>>(new Map())
@@ -484,9 +573,21 @@ export default function LeadsPage() {
       if (activePipeline) params.set('pipeline_id', activePipeline.id)
       params.set('per_stage', '50')
       if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
-      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+      if (appliedFormulaType === 'advanced' && appliedFormulaText) {
+        params.set('tag_formula', appliedFormulaText)
+      } else {
+        if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+        if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
+        if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
+      }
       if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
       filterDeviceIds.forEach(id => params.append('device_ids', id))
+      const dateRange = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+      if (dateRange) {
+        params.set('date_field', filterDateField)
+        if (dateRange.from) params.set('date_from', dateRange.from)
+        if (dateRange.to) params.set('date_to', dateRange.to)
+      }
       const res = await fetch(`/api/leads/paginated?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -502,7 +603,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false)
     }
-  }, [activePipeline, debouncedSearchTerm, filterTagNames, filterStageIds, filterDeviceIds])
+  }, [activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const fetchListLeads = useCallback(async (reset: boolean = false) => {
     setListLoading(true)
@@ -510,13 +611,26 @@ export default function LeadsPage() {
     const token = localStorage.getItem('token')
     try {
       const params = new URLSearchParams()
-      if (activePipeline) params.set('pipeline_id', activePipeline.id)
+      // When searching, omit pipeline_id to find leads across all pipelines
+      if (activePipeline && !debouncedSearchTerm) params.set('pipeline_id', activePipeline.id)
       params.set('offset', String(offset))
       params.set('limit', '100')
       if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
-      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+      if (appliedFormulaType === 'advanced' && appliedFormulaText) {
+        params.set('tag_formula', appliedFormulaText)
+      } else {
+        if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+        if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
+        if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
+      }
       if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
       filterDeviceIds.forEach(id => params.append('device_ids', id))
+      const dateRange = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+      if (dateRange) {
+        params.set('date_field', filterDateField)
+        if (dateRange.from) params.set('date_from', dateRange.from)
+        if (dateRange.to) params.set('date_to', dateRange.to)
+      }
       const res = await fetch(`/api/leads/list-paginated?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -538,7 +652,7 @@ export default function LeadsPage() {
     } finally {
       setListLoading(false)
     }
-  }, [activePipeline, debouncedSearchTerm, filterTagNames, filterStageIds, filterDeviceIds])
+  }, [activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const loadMoreForStage = useCallback(async (stageId: string) => {
     if (loadingMoreStages.has(stageId)) return
@@ -554,8 +668,20 @@ export default function LeadsPage() {
       params.set('limit', '50')
       if (activePipeline) params.set('pipeline_id', activePipeline.id)
       if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
-      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+      if (appliedFormulaType === 'advanced' && appliedFormulaText) {
+        params.set('tag_formula', appliedFormulaText)
+      } else {
+        if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+        if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
+        if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
+      }
       filterDeviceIds.forEach(id => params.append('device_ids', id))
+      const dateRange = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+      if (dateRange) {
+        params.set('date_field', filterDateField)
+        if (dateRange.from) params.set('date_from', dateRange.from)
+        if (dateRange.to) params.set('date_to', dateRange.to)
+      }
       const endpoint = isUnassigned ? 'unassigned' : stageId
       const res = await fetch(`/api/leads/by-stage/${endpoint}?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -574,7 +700,7 @@ export default function LeadsPage() {
     } finally {
       setLoadingMoreStages(prev => { const next = new Set(prev); next.delete(stageId); return next })
     }
-  }, [loadingMoreStages, stageData, unassignedData, activePipeline, debouncedSearchTerm, filterTagNames, filterDeviceIds])
+  }, [loadingMoreStages, stageData, unassignedData, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   // Helper: update a single lead across all stage data
   const updateLeadInStages = useCallback((leadId: string, updater: (lead: Lead) => Lead) => {
@@ -666,6 +792,19 @@ export default function LeadsPage() {
     }
   }, [viewMode, fetchListLeads, pipelinesLoaded])
 
+  // Auto-switch to list view when search is active (cross-pipeline results work best in list)
+  useEffect(() => {
+    if (debouncedSearchTerm) {
+      if (viewMode !== 'list') {
+        prevViewModeRef.current = viewMode
+        setViewMode('list')
+      }
+    } else {
+      setViewMode(prevViewModeRef.current)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearchTerm])
+
   // WebSocket: listen for lead_update events — delta updates for paginated data
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
@@ -745,9 +884,25 @@ export default function LeadsPage() {
           fetchLeadsPaginated()
         }
       }
+      // Handle interaction updates — invalidate observations cache so list view refreshes
+      if (msg.event === 'interaction_update') {
+        const leadId = (msg as Record<string, unknown>).lead_id as string | undefined
+        if (leadId && viewMode === 'list') {
+          setListObservations(prev => {
+            const next = new Map(prev)
+            next.delete(leadId)
+            return next
+          })
+          setLoadingListObs(prev => {
+            const next = new Set(prev)
+            next.delete(leadId)
+            return next
+          })
+        }
+      }
     })
     return () => unsubscribe()
-  }, [fetchLeadsPaginated, updateLeadInStages, removeLeadFromStages, detailLead, activePipeline])
+  }, [fetchLeadsPaginated, updateLeadInStages, removeLeadFromStages, detailLead, activePipeline, viewMode])
 
   // Debounce search term (500ms)
   useEffect(() => {
@@ -827,6 +982,7 @@ export default function LeadsPage() {
   const handleCreateLead = async () => {
     const token = localStorage.getItem('token')
     try {
+      const stageId = formData.stage_id || (activePipeline?.stages?.[0]?.id) || undefined
       const res = await fetch('/api/leads', {
         method: 'POST',
         headers: {
@@ -834,14 +990,20 @@ export default function LeadsPage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          ...formData,
+          name: formData.name,
+          phone: formData.phone,
+          email: formData.email,
+          notes: formData.notes,
+          dni: formData.dni || undefined,
+          birth_date: formData.birth_date || undefined,
           tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
+          stage_id: stageId || undefined,
         }),
       })
       const data = await res.json()
       if (data.success) {
         setShowAddModal(false)
-        setFormData({ name: '', phone: '', email: '', notes: '', tags: '' })
+        setFormData({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
         fetchLeadsPaginated()
       } else {
         alert(data.error || 'Error al crear lead')
@@ -1391,15 +1553,126 @@ export default function LeadsPage() {
     }
   }
 
-  // WhatsApp internal chat
+  // Create event from current lead filters
+  const handleCreateEventFromLeads = async () => {
+    if (!createEventForm.name) return
+    setCreatingEvent(true)
+    try {
+      const body: Record<string, unknown> = {
+        name: createEventForm.name,
+        description: createEventForm.description || undefined,
+        event_date: createEventForm.event_date ? new Date(createEventForm.event_date).toISOString() : undefined,
+        event_end: createEventForm.event_end ? new Date(createEventForm.event_end).toISOString() : undefined,
+        location: createEventForm.location || undefined,
+        color: createEventForm.color,
+        // Lead filter criteria (current filters)
+        lead_pipeline_id: activePipeline?.id || undefined,
+        search: debouncedSearchTerm || undefined,
+        tag_names: filterTagNames.size > 0 ? Array.from(filterTagNames) : undefined,
+        stage_ids: filterStageIds.size > 0 ? Array.from(filterStageIds) : undefined,
+        device_ids: filterDeviceIds.size > 0 ? Array.from(filterDeviceIds) : undefined,
+      }
+      const res = await fetch('/api/events/from-leads', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowCreateEventModal(false)
+        setCreateEventForm({ name: '', description: '', event_date: '', event_end: '', location: '', color: '#10b981' })
+        // Navigate to the new event
+        window.location.href = `/dashboard/events/${data.event.id}`
+      } else {
+        alert(data.error || 'Error al crear evento')
+      }
+    } catch (e) { console.error(e); alert('Error de conexión') }
+    setCreatingEvent(false)
+  }
+
+  // WhatsApp internal chat — smart device selection
   const handleSendWhatsApp = async (phone: string) => {
     setWhatsappPhone(phone)
-    await fetchDevices()
+    const cleanPhone = phone.replace(/[^0-9]/g, '')
+    const token = localStorage.getItem('token')
+
+    // Fetch all devices (connected + disconnected)
+    let allDevices: Device[] = []
+    try {
+      const res = await fetch('/api/devices', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        allDevices = data.devices || []
+      }
+    } catch (err) {
+      console.error('Failed to fetch devices:', err)
+      alert('Error al obtener dispositivos')
+      return
+    }
+
+    const connectedDevices = allDevices.filter((d: Device) => d.status === 'connected')
+    if (connectedDevices.length === 0) {
+      // Check if there's an existing chat to show read-only
+      try {
+        const chatRes = await fetch(`/api/chats/find-by-phone/${cleanPhone}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const chatData = await chatRes.json()
+        if (chatData.success && chatData.chat) {
+          // Open existing chat in read-only mode
+          setInlineChatId(chatData.chat.id)
+          setInlineChat(chatData.chat)
+          setInlineChatDeviceId(chatData.chat.device_id || '')
+          setInlineChatReadOnly(true)
+          setShowInlineChat(true)
+          return
+        }
+      } catch {}
+      alert('No hay dispositivos conectados')
+      return
+    }
+
+    // Check for existing chat with this phone
+    let existingChat: any = null
+    try {
+      const chatRes = await fetch(`/api/chats/find-by-phone/${cleanPhone}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const chatData = await chatRes.json()
+      if (chatData.success && chatData.chat) {
+        existingChat = chatData.chat
+      }
+    } catch {}
+
+    // If only 1 connected device → skip modal, open directly
+    if (connectedDevices.length === 1) {
+      const device = connectedDevices[0]
+      // If existing chat is on this device, open it directly
+      if (existingChat && existingChat.device_id === device.id) {
+        setInlineChatId(existingChat.id)
+        setInlineChat(existingChat)
+        setInlineChatDeviceId(device.id)
+        setInlineChatReadOnly(false)
+        setShowInlineChat(true)
+        return
+      }
+      // Otherwise create/reassign chat to this device
+      await handleDeviceSelected(device)
+      return
+    }
+
+    // Multiple connected devices → show smart modal
+    setExistingChatForWA(existingChat)
+    setAllDevicesForModal(allDevices)
+    setDevices(connectedDevices)
     setShowDeviceSelector(true)
   }
 
   const handleDeviceSelected = async (device: Device) => {
     setShowDeviceSelector(false)
+    setInlineChatReadOnly(false)
     const cleanPhone = whatsappPhone.replace(/[^0-9]/g, '')
     const token = localStorage.getItem('token')
     try {
@@ -1420,6 +1693,17 @@ export default function LeadsPage() {
       }
     } catch {
       alert('Error de conexión')
+    }
+  }
+
+  const handlePreviousDeviceSelected = () => {
+    setShowDeviceSelector(false)
+    if (existingChatForWA) {
+      setInlineChatId(existingChatForWA.id)
+      setInlineChat(existingChatForWA)
+      setInlineChatDeviceId(existingChatForWA.device_id || '')
+      setInlineChatReadOnly(true)
+      setShowInlineChat(true)
     }
   }
 
@@ -1468,10 +1752,11 @@ export default function LeadsPage() {
     return tag.name.toLowerCase().includes(term.toLowerCase())
   })
 
-  const activeFilterCount = filterStageIds.size + filterTagNames.size
+  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0)
 
-  // Leads with phone for broadcast (from loaded data)
-  const broadcastableLeads = useMemo(() => allLoadedLeads.filter(l => l.phone), [allLoadedLeads])
+
+
+
 
   const handleCreateBroadcastFromLeads = async (formResult: CampaignFormResult) => {
     setSubmittingBroadcast(true)
@@ -1511,26 +1796,34 @@ export default function LeadsPage() {
         })
       }
 
-      // 3. Add filtered leads as recipients
-      const recipientsList = broadcastableLeads.map(lead => {
-        const cleanPhone = (lead.phone || '').replace(/[^0-9]/g, '')
-        return {
-          jid: cleanPhone ? cleanPhone + '@s.whatsapp.net' : '',
-          name: lead.name || null,
-          phone: cleanPhone,
-          metadata: {
-            ...(lead.short_name ? { nombre_corto: lead.short_name } : {}),
-            ...(lead.company ? { empresa: lead.company } : {}),
-          },
-        }
-      }).filter(r => r.jid)
+      // 3. Add ALL matching leads as recipients server-side (not limited by client pagination)
+      const filterParams = new URLSearchParams()
+      if (activePipeline && !debouncedSearchTerm) filterParams.set('pipeline_id', activePipeline.id)
+      if (debouncedSearchTerm) filterParams.set('search', debouncedSearchTerm)
+      if (appliedFormulaType === 'advanced' && appliedFormulaText) {
+        filterParams.set('tag_formula', appliedFormulaText)
+      } else {
+        if (filterTagNames.size > 0) filterParams.set('tag_names', Array.from(filterTagNames).join(','))
+        if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) filterParams.set('tag_mode', tagFilterMode)
+        if (excludeFilterTagNames.size > 0) filterParams.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
+      }
+      if (filterStageIds.size > 0) filterParams.set('stage_ids', Array.from(filterStageIds).join(','))
+      filterDeviceIds.forEach(id => filterParams.append('device_ids', id))
+      const dateRange = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+      if (dateRange) {
+        filterParams.set('date_field', filterDateField)
+        if (dateRange.from) filterParams.set('date_from', dateRange.from)
+        if (dateRange.to) filterParams.set('date_to', dateRange.to)
+      }
 
-      if (recipientsList.length > 0) {
-        await fetch(`/api/campaigns/${campaignId}/recipients`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ recipients: recipientsList }),
-        })
+      const recipRes = await fetch(`/api/campaigns/${campaignId}/recipients/from-leads?${filterParams}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const recipData = await recipRes.json()
+      if (!recipData.success) {
+        alert(recipData.error || 'Error al agregar destinatarios')
+        return
       }
 
       setShowBroadcastModal(false)
@@ -1633,7 +1926,7 @@ export default function LeadsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
         <div>
           <h1 className="text-xl font-bold text-slate-900">Leads</h1>
-          <p className="text-slate-500 text-sm mt-0.5">{totalLeadCount} leads en total</p>
+          <p className="text-slate-500 text-sm mt-0.5">{viewMode === 'list' ? listTotal : totalLeadCount} leads en total</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {selectionMode ? (
@@ -1684,7 +1977,7 @@ export default function LeadsPage() {
 
               <button
                 onClick={() => { fetchDevices(); setShowBroadcastModal(true) }}
-                disabled={broadcastableLeads.length === 0}
+                disabled={totalLeadCount === 0}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-emerald-200 rounded-lg hover:bg-emerald-50 transition text-emerald-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Radio className="w-3.5 h-3.5" />
@@ -1726,6 +2019,13 @@ export default function LeadsPage() {
                     >
                       <Upload className="w-4 h-4 text-slate-400" />
                       Importar CSV
+                    </button>
+                    <button
+                      onClick={() => { setShowCreateEventModal(true); setShowMoreMenu(false) }}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 hover:bg-emerald-50 transition-colors"
+                    >
+                      <Calendar className="w-4 h-4 text-emerald-500" />
+                      Crear Evento desde Leads
                     </button>
                     {devices.length > 0 && (
                       <>
@@ -1801,126 +2101,417 @@ export default function LeadsPage() {
             )}
           </button>
 
-          {/* Filter Dropdown */}
+          {/* Filter Dropdown — Two-Column Layout */}
           {showFilterDropdown && (
-            <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-30 max-h-[400px] overflow-y-auto">
-              <div className="p-3 border-b border-gray-100 flex items-center justify-between">
-                <span className="text-sm font-semibold text-gray-700">Filtros</span>
+            <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200/80 rounded-2xl shadow-2xl shadow-slate-200/50 z-30 flex flex-col max-h-[70vh]">
+              {/* ─── Header ─── */}
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
+                  <span className="text-sm font-semibold text-slate-800">Filtros</span>
+                  {activeFilterCount > 0 && (
+                    <span className="text-[10px] font-medium bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full">{activeFilterCount} activo{activeFilterCount > 1 ? 's' : ''}</span>
+                  )}
+                </div>
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
                     <button
-                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()) }}
-                      className="text-xs text-red-500 hover:text-red-700"
+                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo('') }}
+                      className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                     >
-                      Limpiar filtros
+                      Limpiar todo
                     </button>
                   )}
-                  <button onClick={() => setShowFilterDropdown(false)} className="p-0.5 hover:bg-gray-100 rounded">
-                    <X className="w-4 h-4 text-gray-400" />
+                  <button onClick={() => setShowFilterDropdown(false)} className="p-1 hover:bg-slate-100 rounded-lg transition-colors">
+                    <X className="w-4 h-4 text-slate-400" />
                   </button>
                 </div>
               </div>
 
-              {/* Stage filters */}
-              {stages.length > 0 && (
-                <div className="p-3 border-b border-gray-100">
-                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Etapa</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {stages.map(stage => {
-                      const isActive = filterStageIds.has(stage.id)
-                      return (
-                        <button
-                          key={stage.id}
-                          onClick={() => {
-                            const next = new Set(filterStageIds)
-                            if (isActive) next.delete(stage.id); else next.add(stage.id)
-                            setFilterStageIds(next)
-                          }}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition border ${
-                            isActive ? 'border-transparent text-white' : 'border-gray-200 text-gray-700 hover:bg-gray-50'
-                          }`}
-                          style={isActive ? { backgroundColor: stage.color } : {}}
-                        >
-                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: stage.color }} />
-                          {stage.name}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
+              {/* ─── Two-Column Body ─── */}
+              <div className="flex flex-1 min-h-0 overflow-hidden">
 
-              {/* Tag filters with search */}
-              {allUniqueTags.length > 0 && (
-                <div className="p-3">
-                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Etiquetas</p>
-                  <div className="relative mb-2">
-                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-                    <input
-                      type="text"
-                      value={tagSearchTerm}
-                      onChange={(e) => setTagSearchTerm(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
-                      placeholder="Buscar... (usa % como comodín)"
-                      className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
-                    />
-                  </div>
-                  {filterTagNames.size > 0 && (
-                    <div className="flex flex-wrap gap-1 mb-2">
-                      {Array.from(filterTagNames).map(name => {
-                        const tag = allUniqueTags.find(t => t.name === name)
-                        return (
-                          <span
-                            key={name}
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-white"
-                            style={{ backgroundColor: tag?.color || '#6b7280' }}
-                          >
-                            {name}
-                            <button onClick={() => { const next = new Set(filterTagNames); next.delete(name); setFilterTagNames(next) }} className="hover:opacity-75">
-                              <X className="w-2.5 h-2.5" />
+                {/* ══ Left Column — Selections ══ */}
+                <div className="w-[240px] shrink-0 border-r border-slate-100 overflow-y-auto p-3 space-y-4 bg-slate-50/30">
+
+                  {/* Stage pills */}
+                  {stages.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2.5">
+                        <div className="w-1 h-3.5 bg-slate-300 rounded-full" />
+                        <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Etapas</p>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {stages.map(stage => {
+                          const isActive = filterStageIds.has(stage.id)
+                          return (
+                            <button
+                              key={stage.id}
+                              onClick={() => {
+                                const next = new Set(filterStageIds)
+                                if (isActive) next.delete(stage.id); else next.add(stage.id)
+                                setFilterStageIds(next)
+                              }}
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all border ${
+                                isActive ? 'border-transparent text-white shadow-sm' : 'border-slate-200 text-slate-600 hover:bg-white hover:shadow-sm'
+                              }`}
+                              style={isActive ? { backgroundColor: stage.color } : {}}
+                            >
+                              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: stage.color }} />
+                              {stage.name}
                             </button>
-                          </span>
-                        )
-                      })}
+                          )
+                        })}
+                      </div>
                     </div>
                   )}
-                  <div className="max-h-[200px] overflow-y-auto space-y-0.5">
-                    {filteredTags.map(tag => {
-                      const isActive = filterTagNames.has(tag.name)
-                      const count = tagLeadCounts.get(tag.name) || 0
-                      return (
-                        <label
-                          key={tag.id}
-                          className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer transition"
+
+                  {/* ── Date Filter ── */}
+                  <div>
+                    <div className="flex items-center gap-2 mb-2.5">
+                      <div className="w-1 h-3.5 bg-blue-400 rounded-full" />
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Fecha</p>
+                    </div>
+                    {/* Field toggle */}
+                    <div className="flex rounded-lg border border-slate-200 bg-slate-50/50 overflow-hidden mb-2">
+                      <button
+                        onClick={() => setFilterDateField('created_at')}
+                        className={`flex-1 px-2 py-1.5 text-[10px] font-semibold transition-all ${filterDateField === 'created_at' ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
+                      >
+                        Creación
+                      </button>
+                      <button
+                        onClick={() => setFilterDateField('updated_at')}
+                        className={`flex-1 px-2 py-1.5 text-[10px] font-semibold transition-all ${filterDateField === 'updated_at' ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
+                      >
+                        Modificación
+                      </button>
+                    </div>
+                    {/* Preset buttons */}
+                    <div className="grid grid-cols-2 gap-1">
+                      {DATE_PRESETS.map(p => (
+                        <button
+                          key={p.key}
+                          onClick={() => {
+                            if (filterDatePreset === p.key) { setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo('') }
+                            else { setFilterDatePreset(p.key); if (p.key !== 'custom') { setFilterDateFrom(''); setFilterDateTo('') } }
+                          }}
+                          className={`px-2 py-1.5 rounded-lg text-[10px] font-medium transition-all border ${
+                            filterDatePreset === p.key
+                              ? 'bg-blue-500 text-white border-blue-500 shadow-sm'
+                              : 'border-slate-200 text-slate-600 hover:bg-white hover:shadow-sm'
+                          }`}
                         >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                    {/* Custom date range inputs */}
+                    {filterDatePreset === 'custom' && (
+                      <div className="mt-2 space-y-1.5">
+                        <div>
+                          <label className="text-[9px] font-semibold text-slate-400 uppercase">Desde</label>
                           <input
-                            type="checkbox"
-                            checked={isActive}
-                            onChange={() => {
-                              const next = new Set(filterTagNames)
-                              if (isActive) next.delete(tag.name); else next.add(tag.name)
-                              setFilterTagNames(next)
-                            }}
-                            className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                            type="date"
+                            value={filterDateFrom}
+                            onChange={e => setFilterDateFrom(e.target.value)}
+                            className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
                           />
-                          <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
-                          <span className="flex-1 text-xs text-slate-700">{tag.name}</span>
-                          <span className="text-[10px] text-slate-400 tabular-nums">{count}</span>
-                        </label>
-                      )
-                    })}
-                    {filteredTags.length === 0 && tagSearchTerm.trim() && (
-                      <p className="text-xs text-slate-400 text-center py-2">Sin resultados</p>
+                        </div>
+                        <div>
+                          <label className="text-[9px] font-semibold text-slate-400 uppercase">Hasta</label>
+                          <input
+                            type="date"
+                            value={filterDateTo}
+                            onChange={e => setFilterDateTo(e.target.value)}
+                            className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {/* Active date chip */}
+                    {filterDatePreset && filterDatePreset !== 'custom' && (
+                      <div className="mt-2 flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-blue-500" />
+                        <span className="text-[10px] font-medium text-blue-600">{DATE_PRESETS.find(p => p.key === filterDatePreset)?.label}</span>
+                        <button onClick={() => { setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo('') }} className="ml-auto p-0.5 hover:bg-slate-100 rounded">
+                          <X className="w-2.5 h-2.5 text-slate-400" />
+                        </button>
+                      </div>
                     )}
                   </div>
-                </div>
-              )}
 
-              {/* Aplicar button */}
-              <div className="p-3 border-t border-gray-100 sticky bottom-0 bg-white rounded-b-xl">
+                  {/* Active tag selections */}
+                  {allUniqueTags.length > 0 && (
+                    <div>
+                      <div className="flex items-center gap-2 mb-2.5">
+                        <div className="w-1 h-3.5 bg-emerald-400 rounded-full" />
+                        <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Selección</p>
+                      </div>
+
+                      {filterTagNames.size === 0 && excludeFilterTagNames.size === 0 ? (
+                        <div className="border-2 border-dashed border-slate-200 rounded-xl p-4 text-center">
+                          <Tag className="w-5 h-5 text-slate-300 mx-auto mb-1.5" />
+                          <p className="text-[11px] text-slate-400">Haz click en las etiquetas para filtrar</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {/* Include chips */}
+                          {filterTagNames.size > 0 && (
+                            <div>
+                              <div className="flex items-center gap-1.5 mb-1.5">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                                <span className="text-[10px] font-semibold text-emerald-600 uppercase tracking-wide">Incluir</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {Array.from(filterTagNames).map(name => {
+                                  const tag = allUniqueTags.find(t => t.name === name)
+                                  return (
+                                    <span
+                                      key={name}
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-white shadow-sm"
+                                      style={{ backgroundColor: tag?.color || '#6b7280' }}
+                                    >
+                                      {name}
+                                      <button onClick={() => { const next = new Set(filterTagNames); next.delete(name); setFilterTagNames(next) }} className="hover:opacity-75">
+                                        <X className="w-2.5 h-2.5" />
+                                      </button>
+                                    </span>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+                          {/* Exclude chips */}
+                          {excludeFilterTagNames.size > 0 && (
+                            <div>
+                              <div className="flex items-center gap-1.5 mb-1.5">
+                                <XCircle className="w-3 h-3 text-red-400" />
+                                <span className="text-[10px] font-semibold text-red-500 uppercase tracking-wide">Excluir</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {Array.from(excludeFilterTagNames).map(name => {
+                                  const tag = allUniqueTags.find(t => t.name === name)
+                                  return (
+                                    <span
+                                      key={name}
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium text-white/90 line-through shadow-sm"
+                                      style={{ backgroundColor: tag?.color || '#6b7280' }}
+                                    >
+                                      {name}
+                                      <button onClick={() => { const next = new Set(excludeFilterTagNames); next.delete(name); setExcludeFilterTagNames(next) }} className="hover:opacity-75 no-underline">
+                                        <X className="w-2.5 h-2.5" />
+                                      </button>
+                                    </span>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Click instructions */}
+                      <div className="mt-3 pt-3 border-t border-slate-100">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                            <div className="w-3 h-3 rounded-full bg-emerald-500 flex items-center justify-center shrink-0"><CheckSquare className="w-2 h-2 text-white" /></div>
+                            <span>Click = incluir</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                            <div className="w-3 h-3 rounded-full bg-red-500 flex items-center justify-center shrink-0"><X className="w-2 h-2 text-white" /></div>
+                            <span>2do click = excluir</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                            <div className="w-3 h-3 rounded-full bg-slate-200 shrink-0" />
+                            <span>3ro = quitar</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ══ Right Column — Tag Browser ══ */}
+                <div className="flex-1 flex flex-col min-w-0 min-h-0">
+
+                  {allUniqueTags.length > 0 && (
+                    <>
+                      {/* Top controls — shrink-0 */}
+                      <div className="p-3 pb-0 shrink-0 space-y-2.5">
+                        {/* Simple / Advanced tabs */}
+                        <div className="flex rounded-xl border border-slate-200 bg-slate-50/50 overflow-hidden">
+                          <button type="button"
+                            onClick={() => setLeadFormulaType('simple')}
+                            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-[11px] font-semibold transition-all ${
+                              leadFormulaType === 'simple'
+                                ? 'bg-emerald-500 text-white shadow-sm'
+                                : 'text-slate-500 hover:bg-white hover:text-slate-700'
+                            }`}>
+                            <FileText className="w-3.5 h-3.5" />
+                            Simple
+                          </button>
+                          <button type="button"
+                            onClick={() => setLeadFormulaType('advanced')}
+                            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-[11px] font-semibold transition-all ${
+                              leadFormulaType === 'advanced'
+                                ? 'bg-violet-500 text-white shadow-sm'
+                                : 'text-slate-500 hover:bg-white hover:text-slate-700'
+                            }`}>
+                            <Code className="w-3.5 h-3.5" />
+                            Avanzado
+                          </button>
+                        </div>
+
+                        {/* ─── SIMPLE MODE controls ─── */}
+                        {leadFormulaType === 'simple' && (
+                          <>
+                            <div className="flex items-center gap-3">
+                              <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+                                <button
+                                  onClick={() => setTagFilterMode('OR')}
+                                  className={`px-3 py-1 text-[10px] font-bold tracking-wide transition-all ${
+                                    tagFilterMode === 'OR' ? 'bg-emerald-500 text-white' : 'bg-white text-slate-400 hover:bg-slate-50'
+                                  }`}>
+                                  OR
+                                </button>
+                                <button
+                                  onClick={() => setTagFilterMode('AND')}
+                                  className={`px-3 py-1 text-[10px] font-bold tracking-wide transition-all ${
+                                    tagFilterMode === 'AND' ? 'bg-blue-500 text-white' : 'bg-white text-slate-400 hover:bg-slate-50'
+                                  }`}>
+                                  AND
+                                </button>
+                              </div>
+                              <p className="text-[10px] text-slate-400 leading-tight">
+                                {tagFilterMode === 'AND' ? 'Debe tener TODAS las incluidas' : 'Debe tener al menos UNA incluida'}
+                                {excludeFilterTagNames.size > 0 ? ' y NINGUNA excluida' : ''}
+                              </p>
+                            </div>
+                            <div className="relative">
+                              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                              <input
+                                type="text"
+                                value={tagSearchTerm}
+                                onChange={(e) => setTagSearchTerm(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
+                                placeholder="Buscar etiquetas... (% = comodín)"
+                                className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all"
+                              />
+                            </div>
+                          </>
+                        )}
+                      </div>
+
+                      {/* ─── SIMPLE MODE — Tag list (scrollable, fills space) ─── */}
+                      {leadFormulaType === 'simple' && (
+                        <div className="flex-1 min-h-0 overflow-y-auto p-3 pt-2">
+                          <div className="space-y-0.5">
+                            {filteredTags.map(tag => {
+                              const isIncluded = filterTagNames.has(tag.name)
+                              const isExcluded = excludeFilterTagNames.has(tag.name)
+                              const count = tagLeadCounts.get(tag.name) || 0
+                              return (
+                                <div
+                                  key={tag.id}
+                                  onClick={() => {
+                                    if (!isIncluded && !isExcluded) {
+                                      const next = new Set(filterTagNames); next.add(tag.name); setFilterTagNames(next)
+                                    } else if (isIncluded) {
+                                      const incl = new Set(filterTagNames); incl.delete(tag.name); setFilterTagNames(incl)
+                                      const excl = new Set(excludeFilterTagNames); excl.add(tag.name); setExcludeFilterTagNames(excl)
+                                    } else {
+                                      const next = new Set(excludeFilterTagNames); next.delete(tag.name); setExcludeFilterTagNames(next)
+                                    }
+                                  }}
+                                  className={`flex items-center gap-2.5 px-2.5 py-2 rounded-xl cursor-pointer select-none transition-all ${
+                                    isIncluded
+                                      ? 'bg-emerald-50 ring-1 ring-emerald-200'
+                                      : isExcluded
+                                        ? 'bg-red-50 ring-1 ring-red-200'
+                                        : 'hover:bg-white hover:shadow-sm'
+                                  }`}
+                                >
+                                  {isIncluded ? (
+                                    <div className="w-5 h-5 rounded-full shrink-0 bg-emerald-500 flex items-center justify-center shadow-sm shadow-emerald-200">
+                                      <CheckSquare className="w-3 h-3 text-white" />
+                                    </div>
+                                  ) : isExcluded ? (
+                                    <div className="w-5 h-5 rounded-full shrink-0 bg-red-500 flex items-center justify-center shadow-sm shadow-red-200">
+                                      <X className="w-3 h-3 text-white" />
+                                    </div>
+                                  ) : (
+                                    <div className="w-3.5 h-3.5 rounded-full shrink-0 ring-2 ring-white shadow-sm" style={{ backgroundColor: tag.color }} />
+                                  )}
+                                  <span className={`flex-1 text-[12px] transition-colors ${
+                                    isIncluded
+                                      ? 'text-emerald-700 font-semibold'
+                                      : isExcluded
+                                        ? 'text-red-400 line-through'
+                                        : 'text-slate-700'
+                                  }`}>{tag.name}</span>
+                                  <span className={`text-[10px] tabular-nums font-medium px-1.5 py-0.5 rounded-md ${
+                                    isIncluded ? 'bg-emerald-100 text-emerald-600' : isExcluded ? 'bg-red-100 text-red-500' : 'bg-slate-100 text-slate-400'
+                                  }`}>{count}</span>
+                                </div>
+                              )
+                            })}
+                            {filteredTags.length === 0 && tagSearchTerm.trim() && (
+                              <div className="text-center py-6">
+                                <Search className="w-5 h-5 text-slate-300 mx-auto mb-1.5" />
+                                <p className="text-xs text-slate-400">Sin resultados para &quot;{tagSearchTerm}&quot;</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ─── ADVANCED MODE ─── */}
+                      {leadFormulaType === 'advanced' && (
+                        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+                          <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100">
+                            <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Sintaxis</div>
+                            <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-600">
+                              <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;etiqueta&quot;</code> exacta</div>
+                              <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;mar%&quot;</code> comodín</div>
+                              <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">and</code> <code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">or</code> <code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not</code></div>
+                              <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">( )</code> agrupar</div>
+                            </div>
+                          </div>
+                          <FormulaEditor
+                            value={leadFormulaText}
+                            onChange={setLeadFormulaText}
+                            tags={allUniqueTags}
+                            compact
+                            rows={5}
+                            onValidChange={setLeadFormulaIsValid}
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {allUniqueTags.length === 0 && (
+                    <div className="flex-1 flex items-center justify-center p-6">
+                      <div className="text-center">
+                        <Tag className="w-6 h-6 text-slate-300 mx-auto mb-2" />
+                        <p className="text-xs text-slate-400">No hay etiquetas disponibles</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* ─── Footer — Aplicar ─── */}
+              <div className="px-4 py-3 border-t border-slate-100 shrink-0 bg-white rounded-b-2xl">
                 <button
-                  onClick={() => setShowFilterDropdown(false)}
-                  className="w-full px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition text-sm font-medium"
+                  onClick={() => {
+                    setAppliedFormulaType(leadFormulaType)
+                    setAppliedFormulaText(leadFormulaType === 'advanced' ? leadFormulaText : '')
+                    setShowFilterDropdown(false)
+                  }}
+                  disabled={leadFormulaType === 'advanced' && !leadFormulaIsValid}
+                  className="w-full px-4 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm font-semibold shadow-sm shadow-emerald-200 hover:shadow-md hover:shadow-emerald-200"
                 >
                   Aplicar
                 </button>
@@ -2026,6 +2617,13 @@ export default function LeadsPage() {
       {/* List View — Virtualized */}
       {viewMode === 'list' && (
         <div className="flex-1 min-h-0 flex flex-col">
+          {/* Cross-pipeline search indicator */}
+          {debouncedSearchTerm && (
+            <div className="flex-shrink-0 bg-emerald-50 border-b border-emerald-100 px-4 py-1.5 flex items-center gap-2 text-xs text-emerald-700">
+              <Search className="w-3 h-3" />
+              <span>Buscando en todos los pipelines · <strong>{listTotal}</strong> resultado{listTotal !== 1 ? 's' : ''}</span>
+            </div>
+          )}
           {/* Sticky header */}
           <div className="bg-slate-50 border-b-2 border-slate-200 flex-shrink-0">
             <div className="flex">
@@ -2286,6 +2884,26 @@ export default function LeadsPage() {
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md border border-slate-100">
             <h2 className="text-lg font-semibold text-slate-900 mb-4">Nuevo Lead</h2>
             <div className="space-y-3">
+              {/* Pipeline & Stage selector */}
+              {activePipeline && activePipeline.stages && activePipeline.stages.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Pipeline / Etapa</label>
+                  <div className="flex gap-2">
+                    <div className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 truncate">
+                      {activePipeline.name}
+                    </div>
+                    <select
+                      value={formData.stage_id || activePipeline.stages[0]?.id || ''}
+                      onChange={(e) => setFormData({ ...formData, stage_id: e.target.value })}
+                      className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
+                    >
+                      {activePipeline.stages.map((st) => (
+                        <option key={st.id} value={st.id}>{st.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">Nombre *</label>
                 <input
@@ -2316,6 +2934,27 @@ export default function LeadsPage() {
                   placeholder="correo@ejemplo.com"
                 />
               </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">DNI</label>
+                  <input
+                    type="text"
+                    value={formData.dni}
+                    onChange={(e) => setFormData({ ...formData, dni: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
+                    placeholder="12345678"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Fecha de nacimiento</label>
+                  <input
+                    type="date"
+                    value={formData.birth_date}
+                    onChange={(e) => setFormData({ ...formData, birth_date: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
+                  />
+                </div>
+              </div>
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">Etiquetas</label>
                 <input
@@ -2339,7 +2978,7 @@ export default function LeadsPage() {
             </div>
             <div className="flex gap-3 mt-5">
               <button
-                onClick={() => { setShowAddModal(false); setFormData({ name: '', phone: '', email: '', notes: '', tags: '' }) }}
+                onClick={() => { setShowAddModal(false); setFormData({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' }) }}
                 className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
               >
                 Cancelar
@@ -2474,7 +3113,7 @@ export default function LeadsPage() {
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
-            onClick={() => { setShowDetailPanel(false); setShowInlineChat(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
+            onClick={() => { setShowDetailPanel(false); setShowInlineChat(false); setInlineChatReadOnly(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
           />
           <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
 
@@ -2485,7 +3124,8 @@ export default function LeadsPage() {
                   chatId={inlineChatId}
                   deviceId={inlineChatDeviceId}
                   initialChat={inlineChat || undefined}
-                  onClose={() => setShowInlineChat(false)}
+                  readOnly={inlineChatReadOnly}
+                  onClose={() => { setShowInlineChat(false); setInlineChatReadOnly(false) }}
                   className="h-full"
                 />
               </div>
@@ -2516,7 +3156,6 @@ export default function LeadsPage() {
 
       {/* Device Selector Modal for WhatsApp */}
       {showDeviceSelector && (
-
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
             <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
@@ -2525,21 +3164,52 @@ export default function LeadsPage() {
               <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
               <div className="space-y-2">
-                {devices.map((device) => (
-                  <button
-                    key={device.id}
-                    onClick={() => handleDeviceSelected(device)}
-                    className="w-full flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
-                  >
-                    <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center">
-                      <Phone className="w-4 h-4 text-emerald-600" />
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                      <p className="text-xs text-slate-500">{device.phone || device.jid}</p>
-                    </div>
-                  </button>
-                ))}
+                {/* Connected devices — sort chat owner first */}
+                {[...devices].sort((a, b) => {
+                  if (existingChatForWA?.device_id === a.id) return -1
+                  if (existingChatForWA?.device_id === b.id) return 1
+                  return 0
+                }).map((device) => {
+                  const isChatOwner = existingChatForWA?.device_id === device.id
+                  return (
+                    <button
+                      key={device.id}
+                      onClick={() => handleDeviceSelected(device)}
+                      className={`w-full flex items-center gap-3 p-3 border rounded-xl transition text-left ${isChatOwner ? 'border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50' : 'border-slate-100 hover:bg-emerald-50 hover:border-emerald-200'}`}
+                    >
+                      <div className={`w-9 h-9 rounded-full flex items-center justify-center ${isChatOwner ? 'bg-emerald-100' : 'bg-emerald-50'}`}>
+                        <Phone className="w-4 h-4 text-emerald-600" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                          {isChatOwner && (
+                            <span className="text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">Chat activo</span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-500">{device.phone || device.jid}</p>
+                      </div>
+                    </button>
+                  )
+                })}
+
+                {/* Previous device option (disconnected) — read-only mode */}
+                {existingChatForWA && existingChatForWA.device_id && !devices.find(d => d.id === existingChatForWA.device_id) && (
+                  <div className="pt-2 mt-2 border-t border-slate-100">
+                    <button
+                      onClick={handlePreviousDeviceSelected}
+                      className="w-full flex items-center gap-3 p-3 border border-amber-200 bg-amber-50/50 rounded-xl hover:bg-amber-50 transition text-left"
+                    >
+                      <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center">
+                        <Eye className="w-4 h-4 text-amber-600" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-amber-800">Dispositivo anterior</p>
+                        <p className="text-xs text-amber-600">Solo lectura · {existingChatForWA.device_name || 'Desconectado'}</p>
+                      </div>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
             <button onClick={() => setShowDeviceSelector(false)} className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
@@ -2566,7 +3236,7 @@ export default function LeadsPage() {
         devices={devices}
         submitting={submittingBroadcast}
         title="Envío Masivo desde Leads"
-        subtitle={`Se incluirán ${broadcastableLeads.length} leads con teléfono`}
+        subtitle={`Se incluirán todos los ${totalLeadCount} leads con teléfono (filtro aplicado en servidor)`}
         submitLabel={submittingBroadcast ? 'Creando...' : 'Crear y agregar destinatarios'}
         initialName={`Leads - ${new Date().toLocaleDateString('es-PE', { day: 'numeric', month: 'short' })}`}
         infoPanel={
@@ -2576,18 +3246,124 @@ export default function LeadsPage() {
               <span className="font-medium">Destinatarios desde Leads</span>
             </div>
             <p className="text-emerald-600">
-              Se agregarán automáticamente <strong>{broadcastableLeads.length}</strong> leads
-              {filterStageIds.size > 0 || filterTagNames.size > 0 || debouncedSearchTerm
-                ? ' (filtrados)' : ''} como destinatarios de esta campaña.
+              Se agregarán automáticamente <strong>todos los leads con teléfono</strong> que coincidan con los filtros actuales
+              {filterStageIds.size > 0 || filterTagNames.size > 0 || debouncedSearchTerm || filterDatePreset
+                ? ' (filtrados)' : ''} como destinatarios.
             </p>
-            {allLoadedLeads.length !== broadcastableLeads.length && (
-              <p className="text-amber-600 mt-1">
-                {allLoadedLeads.length - broadcastableLeads.length} lead(s) sin teléfono serán excluidos.
-              </p>
-            )}
+            <p className="text-slate-500 mt-1">
+              Total de leads en filtro actual: <strong>{totalLeadCount}</strong> (los sin teléfono se excluyen automáticamente).
+            </p>
           </div>
         }
       />
+
+      {/* Create Event from Leads Modal */}
+      {showCreateEventModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Crear Evento desde Leads</h3>
+                <p className="text-xs text-slate-500 mt-0.5">Se agregarán los leads del filtro actual como participantes</p>
+              </div>
+              <button onClick={() => setShowCreateEventModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              {/* Active filters summary */}
+              {(debouncedSearchTerm || filterTagNames.size > 0 || filterStageIds.size > 0 || filterDeviceIds.size > 0) && (
+                <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-800">
+                  <p className="font-medium mb-1">Filtros activos:</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {debouncedSearchTerm && <span className="bg-emerald-100 px-2 py-0.5 rounded-full">Búsqueda: &quot;{debouncedSearchTerm}&quot;</span>}
+                    {filterTagNames.size > 0 && <span className="bg-emerald-100 px-2 py-0.5 rounded-full">{filterTagNames.size} etiqueta(s)</span>}
+                    {filterStageIds.size > 0 && <span className="bg-emerald-100 px-2 py-0.5 rounded-full">{filterStageIds.size} etapa(s)</span>}
+                    {filterDeviceIds.size > 0 && <span className="bg-emerald-100 px-2 py-0.5 rounded-full">{filterDeviceIds.size} dispositivo(s)</span>}
+                  </div>
+                </div>
+              )}
+              <div>
+                <label className="text-sm font-medium text-slate-700">Nombre del evento *</label>
+                <input
+                  value={createEventForm.name}
+                  onChange={e => setCreateEventForm(f => ({ ...f, name: e.target.value }))}
+                  placeholder="Ej: Webinar Febrero 2025"
+                  className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700">Descripción</label>
+                <textarea
+                  value={createEventForm.description}
+                  onChange={e => setCreateEventForm(f => ({ ...f, description: e.target.value }))}
+                  rows={2}
+                  className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Fecha inicio</label>
+                  <input
+                    type="datetime-local"
+                    value={createEventForm.event_date}
+                    onChange={e => setCreateEventForm(f => ({ ...f, event_date: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Fecha fin</label>
+                  <input
+                    type="datetime-local"
+                    value={createEventForm.event_end}
+                    onChange={e => setCreateEventForm(f => ({ ...f, event_end: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Ubicación</label>
+                  <input
+                    value={createEventForm.location}
+                    onChange={e => setCreateEventForm(f => ({ ...f, location: e.target.value }))}
+                    placeholder="Ej: Sala de conferencias"
+                    className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-slate-700">Color</label>
+                  <div className="mt-1 flex gap-2 flex-wrap">
+                    {['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1'].map(c => (
+                      <button
+                        key={c}
+                        onClick={() => setCreateEventForm(f => ({ ...f, color: c }))}
+                        className={`w-8 h-8 rounded-full border-2 transition-all ${createEventForm.color === c ? 'border-slate-800 scale-110' : 'border-transparent hover:scale-105'}`}
+                        style={{ backgroundColor: c }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={() => setShowCreateEventModal(false)}
+                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleCreateEventFromLeads}
+                disabled={creatingEvent || !createEventForm.name}
+                className="px-4 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition"
+              >
+                {creatingEvent ? 'Creando...' : 'Crear Evento'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

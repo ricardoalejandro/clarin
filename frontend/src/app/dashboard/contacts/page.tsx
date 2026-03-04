@@ -108,8 +108,13 @@ export default function ContactsPage() {
   const [showTagFilter, setShowTagFilter] = useState(false)
   const [tagSearchTerm, setTagSearchTerm] = useState('')
   const [allTags, setAllTags] = useState<StructuredTag[]>([])
-  const [page, setPage] = useState(0)
-  const pageSize = 50
+
+  // Infinite scroll state
+  const CONTACTS_PAGE_SIZE = 50
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const offsetRef = useRef(0)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // Selection
   const [selectionMode, setSelectionMode] = useState(false)
@@ -189,15 +194,21 @@ export default function ContactsPage() {
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
-  const fetchContacts = useCallback(async () => {
+  const fetchContacts = useCallback(async (reset: boolean = true) => {
     if (!token) return
+    const offset = reset ? 0 : offsetRef.current
+    if (reset) {
+      setLoading(true)
+    } else {
+      setLoadingMore(true)
+    }
     try {
       const params = new URLSearchParams()
       if (searchTerm) params.set('search', searchTerm)
       if (filterDevice) params.set('device_id', filterDevice)
       if (filterTagIds.size > 0) params.set('tag_ids', Array.from(filterTagIds).join(','))
-      params.set('limit', String(pageSize))
-      params.set('offset', String(page * pageSize))
+      params.set('limit', String(CONTACTS_PAGE_SIZE))
+      params.set('offset', String(offset))
       params.set('has_phone', 'false')
 
       const res = await fetch(`/api/contacts?${params.toString()}`, {
@@ -205,15 +216,44 @@ export default function ContactsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        setContacts(data.contacts || [])
-        setTotal(data.total || 0)
+        const newContacts: Contact[] = data.contacts || []
+        const serverTotal: number = data.total ?? 0
+        setTotal(serverTotal)
+
+        if (reset) {
+          setContacts(newContacts)
+          offsetRef.current = newContacts.length
+        } else {
+          setContacts(prev => {
+            const existingIds = new Set(prev.map(c => c.id))
+            const unique = newContacts.filter(c => !existingIds.has(c.id))
+            return [...prev, ...unique]
+          })
+          offsetRef.current = offset + newContacts.length
+        }
+        setHasMore((offset + newContacts.length) < serverTotal)
       }
     } catch (err) {
       console.error('Failed to fetch contacts:', err)
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
-  }, [token, searchTerm, filterDevice, filterTagIds, page])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, searchTerm, filterDevice, filterTagIds])
+
+  const loadMoreContacts = useCallback(() => {
+    if (loadingMore || !hasMore) return
+    fetchContacts(false)
+  }, [loadingMore, hasMore, fetchContacts])
+
+  const handleContactsScroll = useCallback(() => {
+    const el = scrollContainerRef.current
+    if (!el || !hasMore || loadingMore) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) {
+      loadMoreContacts()
+    }
+  }, [hasMore, loadingMore, loadMoreContacts])
 
   const fetchDevices = useCallback(async () => {
     if (!token) return
@@ -250,18 +290,18 @@ export default function ContactsPage() {
     fetchAllTags()
   }, [fetchDevices, fetchAllTags])
 
+  // Debounced fetch: resets scroll to top on filter/search change
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   useEffect(() => {
-    setLoading(true)
-    const timer = setTimeout(() => {
-      fetchContacts()
-    }, 500) // Debounce search
+    const timer = setTimeout(() => setDebouncedSearch(searchTerm), 500)
     return () => clearTimeout(timer)
-  }, [fetchContacts])
+  }, [searchTerm])
 
-  // Reset page on filter change
   useEffect(() => {
-    setPage(0)
-  }, [searchTerm, filterDevice, filterTagIds])
+    offsetRef.current = 0
+    fetchContacts(true)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, filterDevice, filterTagIds])
 
   // Lock body scroll when detail panel is open
   useEffect(() => {
@@ -770,8 +810,6 @@ export default function ContactsPage() {
     }
   }
 
-  const totalPages = Math.ceil(total / pageSize)
-
   if (loading && contacts.length === 0) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -1022,11 +1060,29 @@ export default function ContactsPage() {
         </div>
       </div>
 
-      {/* Contacts Table */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="overflow-x-auto">
+      {/* Contacts Table with Infinite Scroll */}
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden flex flex-col" style={{ maxHeight: 'calc(100vh - 280px)' }}>
+        {/* Counter bar */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-slate-100 bg-slate-50/50 shrink-0">
+          <p className="text-xs text-slate-500">
+            Mostrando {contacts.length} de {total.toLocaleString()} contactos
+          </p>
+          {loadingMore && (
+            <div className="flex items-center gap-1.5 text-xs text-emerald-600">
+              <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-emerald-600" />
+              Cargando más...
+            </div>
+          )}
+        </div>
+
+        {/* Scrollable table with sticky header */}
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleContactsScroll}
+          className="overflow-y-auto overflow-x-auto flex-1 min-h-0"
+        >
           <table className="w-full">
-            <thead className="bg-slate-50 border-b border-slate-200">
+            <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
               <tr>
                 {selectionMode && <th className="w-10 px-4 py-3" />}
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Contacto</th>
@@ -1039,7 +1095,7 @@ export default function ContactsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {contacts.length === 0 ? (
+              {contacts.length === 0 && !loading ? (
                 <tr>
                   <td colSpan={selectionMode ? 8 : 7} className="text-center py-12 text-slate-500">
                     <Users className="w-12 h-12 mx-auto mb-3 text-slate-300" />
@@ -1138,32 +1194,19 @@ export default function ContactsPage() {
               ))}
             </tbody>
           </table>
-        </div>
 
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 bg-slate-50">
-            <p className="text-sm text-slate-600">
-              Mostrando {page * pageSize + 1}-{Math.min((page + 1) * pageSize, total)} de {total}
-            </p>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setPage(p => Math.max(0, p - 1))}
-                disabled={page === 0}
-                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-white disabled:opacity-50"
-              >
-                Anterior
-              </button>
-              <button
-                onClick={() => setPage(p => p + 1)}
-                disabled={page >= totalPages - 1}
-                className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-white disabled:opacity-50"
-              >
-                Siguiente
-              </button>
+          {/* Loading sentinel at bottom */}
+          {loadingMore && (
+            <div className="flex items-center justify-center py-4">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-emerald-600" />
             </div>
-          </div>
-        )}
+          )}
+          {!hasMore && contacts.length > 0 && !loading && (
+            <div className="text-center py-3 text-xs text-slate-400">
+              Todos los contactos cargados
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Detail Panel (Slide-over) */}

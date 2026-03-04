@@ -1,9 +1,21 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3 } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3, Trash2, MapPin, Phone, Eye, Ban, Pencil, Plus } from 'lucide-react'
 import { renderFormattedText } from '@/lib/whatsappFormat'
 import { Message, Reaction, PollOption } from '@/types/chat'
+import { splitEmojiSegments, getAppleEmojiUrl } from '@/utils/appleEmoji'
+import dynamic from 'next/dynamic'
+
+const EmojiPickerReact = dynamic(() => import('emoji-picker-react'), {
+  ssr: false,
+  loading: () => (
+    <div className="w-[350px] h-[400px] bg-white rounded-xl shadow-xl border border-gray-200 flex items-center justify-center">
+      <div className="animate-pulse text-gray-400 text-sm">Cargando emojis...</div>
+    </div>
+  ),
+})
 
 interface MessageBubbleProps {
   message: Message
@@ -12,6 +24,8 @@ interface MessageBubbleProps {
   onRetry?: () => void
   onReply?: (message: Message) => void
   onForward?: (message: Message) => void
+  onDelete?: (message: Message) => void
+  onEdit?: (message: Message) => void
   onSaveSticker?: (mediaUrl: string) => void
   onReact?: (message: Message, emoji: string) => void
   savedStickerUrls?: Set<string>
@@ -40,25 +54,57 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
   return sender.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '')
 }
 
-export default function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onForward, onSaveSticker, onReact, savedStickerUrls }: MessageBubbleProps) {
+export default function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onForward, onDelete, onEdit, onSaveSticker, onReact, savedStickerUrls }: MessageBubbleProps) {
   const [imageLoaded, setImageLoaded] = useState(false)
   const [imageError, setImageError] = useState(false)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+  const [showFullPicker, setShowFullPicker] = useState(false)
+  const [pickerPos, setPickerPos] = useState({ top: 0, left: 0 })
   const emojiPickerRef = useRef<HTMLDivElement>(null)
+  const plusBtnRef = useRef<HTMLButtonElement>(null)
 
   const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏']
 
+  const closeAllPickers = () => {
+    setShowEmojiPicker(false)
+    setShowFullPicker(false)
+  }
+
+  const handleOpenFullPicker = () => {
+    if (plusBtnRef.current) {
+      const rect = plusBtnRef.current.getBoundingClientRect()
+      const pickerWidth = 350
+      const pickerHeight = 400
+      let left = message.is_from_me ? rect.right - pickerWidth : rect.left
+      let top = rect.top - pickerHeight - 8
+      // Clamp to viewport
+      if (top < 8) top = rect.bottom + 8
+      if (left < 8) left = 8
+      if (left + pickerWidth > window.innerWidth - 8) left = window.innerWidth - pickerWidth - 8
+      setPickerPos({ top, left })
+    }
+    setShowFullPicker(true)
+  }
+
   // Close emoji picker on outside click
   useEffect(() => {
-    if (!showEmojiPicker) return
+    if (!showEmojiPicker && !showFullPicker) return
     const handleClick = (e: MouseEvent) => {
+      if (showFullPicker) return // Full picker has its own backdrop
       if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
-        setShowEmojiPicker(false)
+        closeAllPickers()
       }
     }
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeAllPickers()
+    }
     document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [showEmojiPicker])
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleClick)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [showEmojiPicker, showFullPicker])
 
   // Use contactName (resolved by parent via getChatDisplayName) as the sender name for incoming messages
   const senderDisplayName = !message.is_from_me
@@ -101,6 +147,18 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
   }
 
   const renderMedia = () => {
+    // View-once: show special indicator instead of actual media
+    if (message.is_view_once) {
+      return (
+        <div className="flex items-center gap-2 px-2 py-2 bg-slate-50 rounded-lg mb-1">
+          <Eye className="w-5 h-5 text-slate-400" />
+          <span className="text-sm text-slate-500 italic">
+            {message.message_type === 'video' ? 'Video' : 'Foto'} · Ver una vez
+          </span>
+        </div>
+      )
+    }
+
     if (!message.media_url) {
       // Sticker without downloaded media — show placeholder
       if (message.message_type === 'sticker') {
@@ -262,6 +320,70 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     )
   }
 
+  const renderLocation = () => {
+    if (message.message_type !== 'location' || !message.latitude || !message.longitude) return null
+
+    const lat = message.latitude
+    const lng = message.longitude
+    const mapUrl = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=15/${lat}/${lng}`
+    const staticMapUrl = `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}&zoom=15&size=300x200&markers=${lat},${lng},red-pushpin`
+
+    return (
+      <div className="mb-1">
+        <a href={mapUrl} target="_blank" rel="noopener noreferrer" className="block">
+          <div className="relative rounded-lg overflow-hidden bg-slate-100">
+            <img
+              src={staticMapUrl}
+              alt="Ubicación"
+              className="w-full h-[150px] object-cover"
+              onError={(e) => {
+                (e.target as HTMLImageElement).style.display = 'none'
+              }}
+            />
+            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/50 to-transparent p-2">
+              <div className="flex items-center gap-1 text-white text-xs">
+                <MapPin className="w-3.5 h-3.5" />
+                <span>{message.body || 'Ubicación compartida'}</span>
+              </div>
+            </div>
+          </div>
+        </a>
+      </div>
+    )
+  }
+
+  const renderContactCard = () => {
+    if (message.message_type !== 'contact') return null
+
+    return (
+      <div className="mb-1 min-w-[200px]">
+        <div className="flex items-center gap-3 p-2 bg-slate-50 rounded-lg">
+          <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
+            <Phone className="w-5 h-5 text-slate-500" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-slate-800 truncate">
+              {message.contact_name || message.body || 'Contacto'}
+            </p>
+            {message.contact_phone && (
+              <p className="text-xs text-slate-500">{message.contact_phone}</p>
+            )}
+          </div>
+        </div>
+        {message.contact_phone && (
+          <a
+            href={`https://wa.me/${message.contact_phone}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block text-center text-xs text-emerald-600 hover:text-emerald-700 font-medium mt-1.5 py-1 border-t border-slate-200"
+          >
+            Enviar mensaje
+          </a>
+        )}
+      </div>
+    )
+  }
+
   const renderReactions = () => {
     if (!message.reactions || message.reactions.length === 0) return null
 
@@ -287,7 +409,13 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
                 : 'bg-gray-100 border-gray-200 hover:bg-gray-200'
             }`}
           >
-            <span>{g.emoji}</span>
+            <img
+              src={getAppleEmojiUrl(g.emoji)}
+              alt={g.emoji}
+              className="inline-block"
+              style={{ width: '16px', height: '16px' }}
+              draggable={false}
+            />
             {g.count > 1 && <span className="text-gray-600">{g.count}</span>}
           </button>
         ))}
@@ -317,14 +445,72 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     }
   }
 
-  const hasVisualMedia = !!message.media_url && ['image', 'video'].includes(message.message_type || '')
+  const hasVisualMedia = !!message.media_url && ['image', 'video'].includes(message.message_type || '') && !message.is_view_once
   const isOptimistic = (message.id || '').startsWith('optimistic-')
+
+  // Detect single-emoji messages (exactly 1 emoji, no text)
+  const isEmojiOnly = (() => {
+    if (!message.body || message.message_type !== 'text' || message.media_url) return false
+    const segments = splitEmojiSegments(message.body.trim())
+    const emojiSegments = segments.filter(s => s.type === 'emoji')
+    const textSegments = segments.filter(s => s.type === 'text' && s.value.trim().length > 0)
+    // Only exactly 1 emoji with no text → big display
+    return emojiSegments.length === 1 && textSegments.length === 0
+  })()
+
+  // Detect 2-3 emoji-only messages (medium size, in bubble)
+  const isMultiEmojiOnly = (() => {
+    if (isEmojiOnly || !message.body || message.message_type !== 'text' || message.media_url) return false
+    const segments = splitEmojiSegments(message.body.trim())
+    const emojiSegments = segments.filter(s => s.type === 'emoji')
+    const textSegments = segments.filter(s => s.type === 'text' && s.value.trim().length > 0)
+    return emojiSegments.length >= 2 && emojiSegments.length <= 3 && textSegments.length === 0
+  })()
+
+  // Revoked message — show "deleted" placeholder
+  if (message.is_revoked) {
+    return (
+      <div className={`group flex ${message.is_from_me ? 'justify-end' : 'justify-start'}`}>
+        <div className={`max-w-[85%] sm:max-w-[70%] px-3 py-1.5 rounded-xl shadow-sm ${
+          message.is_from_me ? 'bg-[#d9fdd3] rounded-br-none' : 'bg-white rounded-bl-none'
+        }`}>
+          <div className="flex items-center gap-1.5">
+            <Ban className="w-3.5 h-3.5 text-slate-400" />
+            <p className="text-slate-400 italic text-[14px]">
+              {message.is_from_me ? 'Eliminaste este mensaje' : 'Se eliminó este mensaje'}
+            </p>
+          </div>
+          <div className="flex items-center justify-end gap-1 mt-0.5">
+            <span className="text-[11px] text-slate-400">{formatTime(message.timestamp)}</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={`group flex ${message.is_from_me ? 'justify-end' : 'justify-start'}`}>
       {/* Action buttons - visible on mobile, hover on desktop (for outgoing: left side) */}
       {message.is_from_me && !isOptimistic && (
         <div className="flex md:hidden md:group-hover:flex items-center gap-1 mr-1 self-center">
+          {onEdit && message.is_from_me && message.message_type === 'text' && !message.is_revoked && (
+            <button
+              onClick={() => onEdit(message)}
+              className="p-1.5 rounded-full bg-white shadow-md hover:bg-blue-50 text-gray-500 hover:text-blue-500 transition-all"
+              title="Editar mensaje"
+            >
+              <Pencil className="w-4 h-4" />
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={() => onDelete(message)}
+              className="p-1.5 rounded-full bg-white shadow-md hover:bg-red-50 text-gray-500 hover:text-red-500 transition-all"
+              title="Eliminar para todos"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          )}
           <button
             onClick={() => onForward?.(message)}
             className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
@@ -349,25 +535,29 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         </div>
       )}
 
+      {/* Wrapper for message bubble + reaction popup */}
+      <div className="relative max-w-[85%] sm:max-w-[70%]">
       <div
-        className={`relative ${
+        className={`${
           message.message_type === 'sticker'
             ? 'p-1'
-            : hasVisualMedia
-              ? `max-w-[330px] rounded-xl shadow-sm overflow-hidden ${
-                  message.is_from_me
-                    ? 'bg-[#d9fdd3] rounded-br-none'
-                    : 'bg-white rounded-bl-none'
-                }`
-              : `max-w-[85%] sm:max-w-[70%] px-3 py-1.5 rounded-xl shadow-sm ${
-                  message.is_from_me
-                    ? 'bg-[#d9fdd3] rounded-br-none'
-                    : 'bg-white rounded-bl-none'
-                }`
+            : isEmojiOnly
+              ? 'py-0.5'
+              : hasVisualMedia
+                ? `max-w-[330px] rounded-xl shadow-sm overflow-hidden ${
+                    message.is_from_me
+                      ? 'bg-[#d9fdd3] rounded-br-none'
+                      : 'bg-white rounded-bl-none'
+                  }`
+                : `px-3 py-1.5 rounded-xl shadow-sm ${
+                    message.is_from_me
+                      ? 'bg-[#d9fdd3] rounded-br-none'
+                      : 'bg-white rounded-bl-none'
+                  }`
         }`}
       >
-        {/* Sender name for incoming messages */}
-        {!message.is_from_me && (senderDisplayName || message.from_name) && (
+        {/* Sender name for incoming messages (hidden for emoji-only like WhatsApp Web) */}
+        {!message.is_from_me && !isEmojiOnly && (senderDisplayName || message.from_name) && (
           <p className={`text-xs text-emerald-700 font-medium mb-0.5 ${hasVisualMedia ? 'px-3 pt-1.5' : ''}`}>
             {senderDisplayName || message.from_name}
           </p>
@@ -386,11 +576,59 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         {/* Poll content */}
         {renderPoll()}
 
+        {/* Location content */}
+        {renderLocation()}
+
+        {/* Contact card content */}
+        {renderContactCard()}
+
         {/* Text body */}
         {message.body && message.message_type !== 'sticker' && message.message_type !== 'poll' && (
-          <p className={`text-slate-900 whitespace-pre-wrap break-words text-[14.5px] leading-[19px] ${hasVisualMedia ? 'px-3 pt-1' : ''}`}>
-            {renderFormattedText(message.body)}
-          </p>
+          isEmojiOnly ? (
+            <div className={`flex flex-wrap gap-1 ${message.is_from_me ? 'justify-end' : 'justify-start'}`}>
+              {splitEmojiSegments(message.body.trim()).filter(s => s.type === 'emoji').map((seg, i) => (
+                <img
+                  key={i}
+                  src={getAppleEmojiUrl(seg.value)}
+                  alt={seg.value}
+                  className="inline-block object-contain"
+                  style={{ width: '66px', height: '66px' }}
+                  draggable={false}
+                  onError={(e) => {
+                    const span = document.createElement('span')
+                    span.textContent = seg.value
+                    span.style.fontSize = '66px'
+                    span.style.lineHeight = '1'
+                    e.currentTarget.replaceWith(span)
+                  }}
+                />
+              ))}
+            </div>
+          ) : isMultiEmojiOnly ? (
+            <div className="flex flex-wrap gap-1 items-end">
+              {splitEmojiSegments(message.body.trim()).filter(s => s.type === 'emoji').map((seg, i) => (
+                <img
+                  key={i}
+                  src={getAppleEmojiUrl(seg.value)}
+                  alt={seg.value}
+                  className="inline-block object-contain"
+                  style={{ width: '34px', height: '34px' }}
+                  draggable={false}
+                  onError={(e) => {
+                    const span = document.createElement('span')
+                    span.textContent = seg.value
+                    span.style.fontSize = '34px'
+                    span.style.lineHeight = '1'
+                    e.currentTarget.replaceWith(span)
+                  }}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className={`text-slate-900 whitespace-pre-wrap break-words text-[14.5px] leading-[19px] ${hasVisualMedia ? 'px-3 pt-1' : ''}`}>
+              {renderFormattedText(message.body)}
+            </p>
+          )
         )}
 
         {/* Empty placeholder for media-only messages */}
@@ -401,9 +639,16 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         {/* Timestamp and status */}
         <div className={`flex items-center justify-end gap-1 mt-0.5 ${
           message.message_type === 'sticker'
-            ? 'bg-black/30 rounded-full px-2 py-0.5'
-            : hasVisualMedia ? 'px-3 pb-1.5' : ''
+            ? 'bg-black/30 rounded-full px-2 py-0.5 w-fit ml-auto'
+            : isEmojiOnly
+              ? 'bg-slate-200/80 rounded-full px-2 py-0.5 w-fit ml-auto'
+              : hasVisualMedia ? 'px-3 pb-1.5' : ''
         }`}>
+          {message.is_edited && (
+            <span className={`text-[10px] italic ${message.message_type === 'sticker' ? 'text-white/70' : 'text-slate-400'}`}>
+              editado
+            </span>
+          )}
           <span className={`text-[11px] ${message.message_type === 'sticker' ? 'text-white' : 'text-slate-500'}`}>
             {formatTime(message.timestamp)}
           </span>
@@ -412,24 +657,61 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
 
         {/* Reactions display */}
         {renderReactions()}
+      </div>
 
-        {/* Emoji picker popup */}
-        {showEmojiPicker && (
-          <div
-            ref={emojiPickerRef}
-            className={`absolute z-10 ${message.is_from_me ? 'right-0' : 'left-0'} -bottom-9 flex gap-0.5 bg-white rounded-full shadow-lg border border-gray-200 px-1.5 py-1`}
+      {/* Quick reaction bar - positioned above message bubble like WhatsApp Web */}
+      {showEmojiPicker && !showFullPicker && (
+        <div
+          ref={emojiPickerRef}
+          className={`absolute z-50 ${message.is_from_me ? 'right-0' : 'left-0'} bottom-full mb-1 flex items-center gap-0.5 bg-white rounded-full shadow-xl border border-gray-100 px-2 py-1.5`}
+        >
+          {QUICK_EMOJIS.map((e) => (
+            <button
+              key={e}
+              onClick={() => { onReact?.(message, e); closeAllPickers() }}
+              className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-all hover:scale-110"
+            >
+              <img
+                src={getAppleEmojiUrl(e)}
+                alt={e}
+                className="w-7 h-7"
+                draggable={false}
+              />
+            </button>
+          ))}
+          <div className="w-px h-6 bg-gray-200 mx-0.5" />
+          <button
+            ref={plusBtnRef}
+            onClick={handleOpenFullPicker}
+            className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-all"
+            title="Más reacciones"
           >
-            {QUICK_EMOJIS.map((e) => (
-              <button
-                key={e}
-                onClick={() => { onReact?.(message, e); setShowEmojiPicker(false) }}
-                className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-base transition-transform hover:scale-125"
-              >
-                {e}
-              </button>
-            ))}
+            <Plus className="w-5 h-5 text-gray-400" />
+          </button>
+        </div>
+      )}
+
+      {/* Full emoji picker for reactions - rendered via portal */}
+      {showFullPicker && typeof document !== 'undefined' && createPortal(
+        <>
+          <div className="fixed inset-0 z-[100]" onClick={closeAllPickers} />
+          <div
+            className="fixed z-[101] rounded-xl overflow-hidden shadow-2xl"
+            style={{ top: pickerPos.top, left: pickerPos.left }}
+          >
+            <EmojiPickerReact
+              onEmojiClick={(emojiData: any) => { onReact?.(message, emojiData.emoji); closeAllPickers() }}
+              searchPlaceHolder="Buscar una reacción..."
+              width={350}
+              height={400}
+              skinTonesDisabled
+              previewConfig={{ showPreview: false }}
+              lazyLoadEmojis
+            />
           </div>
-        )}
+        </>,
+        document.body
+      )}
       </div>
 
       {/* Action buttons - visible on mobile, hover on desktop (for incoming: right side) */}

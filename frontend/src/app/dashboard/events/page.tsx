@@ -5,12 +5,74 @@ import { useRouter } from 'next/navigation'
 import {
   CalendarDays, Plus, Search, MapPin, Users, Clock, Edit2, Trash2,
   Eye, LayoutGrid, List, ChevronRight, Home, FolderPlus, MoreHorizontal,
-  LayoutTemplate, FolderOpen, ArrowLeft, MoveRight,
+  LayoutTemplate, FolderOpen, ArrowLeft, MoveRight, Tag, X, ChevronDown, Check,
+  Code, FileText, AlertCircle, CheckCircle2,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import FormulaEditor from '@/components/FormulaEditor'
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Extract quoted tag names from a formula string, e.g. '("foo" or "bar%") and "baz"' → ['foo','bar%','baz'] */
+function extractFormulaTags(formula: string): string[] {
+  const matches = formula.match(/"([^"]+)"/g)
+  if (!matches) return []
+  return Array.from(new Set(matches.map(m => m.slice(1, -1))))
+}
+
+/** Render tag pills for an event's formula or simple tags */
+function FormulaTagDisplay({ ev, maxTags = 3, size = 'sm' }: { ev: { tags?: { id: string; name: string; color: string; negate?: boolean }[]; tag_formula?: string; tag_formula_type?: string; tag_formula_mode?: string }; maxTags?: number; size?: 'sm' | 'xs' }) {
+  const isAdvanced = ev.tag_formula_type === 'advanced' && !!ev.tag_formula
+  const tags = ev.tags || []
+  const formulaTags = isAdvanced ? extractFormulaTags(ev.tag_formula!) : []
+  const tagColorMap = new Map(tags.map(t => [t.name.toLowerCase(), t.color]))
+  const px = size === 'sm' ? 'px-2 py-0.5' : 'px-1.5 py-0.5'
+  const text = size === 'sm' ? 'text-[11px]' : 'text-[10px]'
+
+  if (isAdvanced) {
+    const display = formulaTags.slice(0, maxTags)
+    const extra = formulaTags.length - maxTags
+    return (
+      <div className="flex items-center gap-1 flex-wrap">
+        {display.map((name, i) => {
+          const color = tagColorMap.get(name.toLowerCase()) || '#8b5cf6'
+          return <span key={i} className={`inline-flex items-center gap-0.5 ${px} rounded-full ${text} font-medium text-white`} style={{ backgroundColor: color }}>{name}</span>
+        })}
+        {extra > 0 && <span className={`${text} text-slate-400`}>+{extra}</span>}
+        <span className={`inline-flex items-center gap-0.5 ${px} rounded-full ${text} font-medium bg-violet-100 text-violet-700`}>
+          <Code className="w-2.5 h-2.5" />Avanzado
+        </span>
+      </div>
+    )
+  }
+
+  if (tags.length > 0) {
+    const display = tags.slice(0, maxTags)
+    const extra = tags.length - maxTags
+    const mode = ev.tag_formula_mode || 'OR'
+    return (
+      <div className="flex items-center gap-1 flex-wrap">
+        {display.map(tag => (
+          <span key={tag.id} className={`inline-flex items-center ${px} rounded-full ${text} font-medium text-white`} style={{ backgroundColor: tag.color }}>{tag.name}</span>
+        ))}
+        {extra > 0 && <span className={`${text} text-slate-400`}>+{extra}</span>}
+        <span className={`${text} text-slate-400 font-medium`}>{mode}</span>
+      </div>
+    )
+  }
+
+  return <span className="text-[10px] text-slate-300">-</span>
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+interface TagItem {
+  id: string
+  name: string
+  color: string
+  negate?: boolean
+}
 
 interface Event {
   id: string
@@ -21,10 +83,14 @@ interface Event {
   location?: string
   status: string
   color: string
+  tag_formula_mode?: string
+  tag_formula?: string
+  tag_formula_type?: string
   folder_id?: string | null
   created_at: string
   total_participants: number
   participant_counts?: Record<string, number>
+  tags?: TagItem[]
 }
 
 interface EventFolder {
@@ -43,10 +109,10 @@ interface EventFolder {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const STATUS_OPTIONS = [
-  { value: 'active', label: 'Activo', color: 'bg-emerald-100 text-emerald-700' },
-  { value: 'draft', label: 'Borrador', color: 'bg-slate-100 text-slate-700' },
-  { value: 'completed', label: 'Completado', color: 'bg-blue-100 text-blue-700' },
-  { value: 'cancelled', label: 'Cancelado', color: 'bg-red-100 text-red-700' },
+  { value: 'active', label: 'Activo', desc: 'Sincronizando etiquetas', color: 'bg-emerald-100 text-emerald-700', syncing: true },
+  { value: 'draft', label: 'Borrador', desc: 'Sin sincronizar', color: 'bg-slate-100 text-slate-700', syncing: false },
+  { value: 'completed', label: 'Completado', desc: 'Evento finalizado, sin sincronizar', color: 'bg-blue-100 text-blue-700', syncing: false },
+  { value: 'cancelled', label: 'Cancelado', desc: 'Evento eliminado, sin sincronizar', color: 'bg-red-100 text-red-700', syncing: false },
 ]
 
 const COLOR_OPTIONS = [
@@ -81,14 +147,26 @@ export default function EventsPage() {
   // Filters & View
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
-  const [viewMode, setViewMode] = useState<'grid' | 'compact' | 'list'>('grid')
+  const [hideCancelled, setHideCancelled] = useState(true)
+  const [viewMode, setViewMode] = useState<'grid' | 'compact' | 'list'>('compact')
 
   // Event modal
   const [showCreate, setShowCreate] = useState(false)
   const [editEvent, setEditEvent] = useState<Event | null>(null)
   const [formData, setFormData] = useState({
     name: '', description: '', event_date: '', event_end: '', location: '', color: '#3b82f6', status: 'active',
+    tag_ids: [] as string[], formula_mode: 'OR' as 'AND' | 'OR', include_tag_ids: [] as string[], exclude_tag_ids: [] as string[],
+    tag_formula: '', tag_formula_type: 'simple' as 'simple' | 'advanced',
   })
+
+  // Tags for auto-sync
+  const [availableTags, setAvailableTags] = useState<TagItem[]>([])
+  const [showTagDropdown, setShowTagDropdown] = useState(false)
+  const [tagSearch, setTagSearch] = useState('')
+  const tagDropdownRef = useRef<HTMLDivElement>(null)
+
+  // Formula validation state
+  const [formulaIsValid, setFormulaIsValid] = useState(true)
 
   // Folder modal
   const [showFolderModal, setShowFolderModal] = useState(false)
@@ -106,6 +184,18 @@ export default function EventsPage() {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : ''
 
   // ─── Data Fetching ──────────────────────────────────────────────────────────
+
+  const fetchTags = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tags', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) setAvailableTags(data.tags || [])
+    } catch (e) {
+      console.error(e)
+    }
+  }, [token])
 
   const fetchFolders = useCallback(async () => {
     try {
@@ -141,7 +231,8 @@ export default function EventsPage() {
     setLoading(true)
     fetchFolders()
     fetchEvents()
-  }, [fetchFolders, fetchEvents])
+    fetchTags()
+  }, [fetchFolders, fetchEvents, fetchTags])
 
   // Close modals on Escape
   useEffect(() => {
@@ -150,11 +241,24 @@ export default function EventsPage() {
         setShowCreate(false); setEditEvent(null)
         setShowFolderModal(false); setEditFolder(null)
         setMenuEventID(null); setShowMoveMenu(null)
+        setShowTagDropdown(false)
         resetEventForm()
       }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
+  }, [])
+
+  // Close tag dropdown on outside click
+  useEffect(() => {
+    const h = (e: MouseEvent) => {
+      if (tagDropdownRef.current && !tagDropdownRef.current.contains(e.target as Node)) {
+        setShowTagDropdown(false)
+        setTagSearch('')
+      }
+    }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
   }, [])
 
   // Close context menus on outside click
@@ -175,6 +279,9 @@ export default function EventsPage() {
   const visibleFolders = folders.filter(f =>
     currentFolderID ? f.parent_id === currentFolderID : !f.parent_id
   )
+
+  // Filter out cancelled events when hideCancelled is true
+  const filteredEvents = hideCancelled && !statusFilter ? events.filter(ev => ev.status !== 'cancelled') : events
 
   const navigateIntoFolder = (folder: EventFolder) => {
     setCurrentFolderID(folder.id)
@@ -232,10 +339,40 @@ export default function EventsPage() {
   // ─── Event CRUD ─────────────────────────────────────────────────────────────
 
   const resetEventForm = () => {
-    setFormData({ name: '', description: '', event_date: '', event_end: '', location: '', color: '#3b82f6', status: 'active' })
+    setFormData({ name: '', description: '', event_date: '', event_end: '', location: '', color: '#3b82f6', status: 'active', tag_ids: [], formula_mode: 'OR', include_tag_ids: [], exclude_tag_ids: [], tag_formula: '', tag_formula_type: 'simple' })
+    setShowTagDropdown(false)
+    setTagSearch('')
+    setFormulaIsValid(true)
   }
 
-  const openEditEvent = (ev: Event) => {
+  const openEditEvent = async (ev: Event) => {
+    // Fetch tags for this event
+    let includeIds: string[] = []
+    let excludeIds: string[] = []
+    let formulaMode: 'AND' | 'OR' = (ev.tag_formula_mode as 'AND' | 'OR') || 'OR'
+    let tagFormula = ''
+    let tagFormulaType: 'simple' | 'advanced' = 'simple'
+    try {
+      const res = await fetch(`/api/events/${ev.id}/tags`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success && data.tags) {
+        for (const t of data.tags as TagItem[]) {
+          if (t.negate) {
+            excludeIds.push(t.id)
+          } else {
+            includeIds.push(t.id)
+          }
+        }
+        if (data.formula_mode) formulaMode = data.formula_mode
+        if (data.tag_formula) tagFormula = data.tag_formula
+        if (data.tag_formula_type) tagFormulaType = data.tag_formula_type
+      }
+    } catch (e) {
+      console.error('Failed to fetch event tags:', e)
+    }
+
     setFormData({
       name: ev.name,
       description: ev.description || '',
@@ -244,12 +381,24 @@ export default function EventsPage() {
       location: ev.location || '',
       color: ev.color,
       status: ev.status,
+      tag_ids: [...includeIds, ...excludeIds],
+      formula_mode: formulaMode,
+      include_tag_ids: includeIds,
+      exclude_tag_ids: excludeIds,
+      tag_formula: tagFormula,
+      tag_formula_type: tagFormulaType,
     })
     setEditEvent(ev)
   }
 
   const handleCreateEvent = async () => {
     const body: Record<string, unknown> = { ...formData }
+    delete body.tag_ids
+    delete body.formula_mode
+    delete body.include_tag_ids
+    delete body.exclude_tag_ids
+    delete body.tag_formula
+    delete body.tag_formula_type
     if (formData.event_date) body.event_date = new Date(formData.event_date).toISOString()
     else delete body.event_date
     if (formData.event_end) body.event_end = new Date(formData.event_end).toISOString()
@@ -265,6 +414,27 @@ export default function EventsPage() {
     })
     const data = await res.json()
     if (data.success) {
+      // Save tags with formula if there's any formula config
+      const hasFormula = formData.tag_formula_type === 'advanced'
+        ? formData.tag_formula.trim() !== ''
+        : (formData.include_tag_ids.length > 0 || formData.exclude_tag_ids.length > 0)
+      if (hasFormula && data.event?.id) {
+        try {
+          await fetch(`/api/events/${data.event.id}/tags`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              formula_mode: formData.formula_mode,
+              include_tag_ids: formData.include_tag_ids,
+              exclude_tag_ids: formData.exclude_tag_ids,
+              tag_formula: formData.tag_formula,
+              tag_formula_type: formData.tag_formula_type,
+            }),
+          })
+        } catch (e) {
+          console.error('Failed to save event tags:', e)
+        }
+      }
       setShowCreate(false)
       resetEventForm()
       fetchEvents()
@@ -275,8 +445,18 @@ export default function EventsPage() {
   const handleUpdateEvent = async () => {
     if (!editEvent) return
     const body: Record<string, unknown> = { ...formData }
+    delete body.tag_ids
+    delete body.formula_mode
+    delete body.include_tag_ids
+    delete body.exclude_tag_ids
+    delete body.tag_formula
+    delete body.tag_formula_type
     if (formData.event_date) body.event_date = new Date(formData.event_date).toISOString()
+    else delete body.event_date
     if (formData.event_end) body.event_end = new Date(formData.event_end).toISOString()
+    else delete body.event_end
+    if (!formData.description) delete body.description
+    if (!formData.location) delete body.location
 
     const res = await fetch(`/api/events/${editEvent.id}`, {
       method: 'PUT',
@@ -285,6 +465,22 @@ export default function EventsPage() {
     })
     const data = await res.json()
     if (data.success) {
+      // Save tags with formula
+      try {
+        await fetch(`/api/events/${editEvent.id}/tags`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            formula_mode: formData.formula_mode,
+            include_tag_ids: formData.include_tag_ids,
+            exclude_tag_ids: formData.exclude_tag_ids,
+            tag_formula: formData.tag_formula,
+            tag_formula_type: formData.tag_formula_type,
+          }),
+        })
+      } catch (e) {
+        console.error('Failed to save event tags:', e)
+      }
       setEditEvent(null)
       resetEventForm()
       fetchEvents()
@@ -359,76 +555,367 @@ export default function EventsPage() {
   // ─── Render Helpers ───────────────────────────────────────────────────────────
 
   const renderEventForm = (onSubmit: () => void, submitLabel: string) => (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-      onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}>
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
-        onClick={e => e.stopPropagation()}>
-        <div className="p-6">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4">
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[calc(100vh-2rem)] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 flex-shrink-0">
+          <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+            <CalendarDays className="w-5 h-5 text-emerald-600" />
             {submitLabel === 'Crear' ? 'Nuevo Evento' : 'Editar Evento'}
           </h2>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Nombre *</label>
-              <input value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} autoFocus
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
-                placeholder="Ej: Clase Gratuita de Marketing"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Descripción</label>
-              <textarea value={formData.description} onChange={e => setFormData({ ...formData, description: e.target.value })} rows={3}
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
-                placeholder="Describe la actividad..." />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
+          <button onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}
+            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Body — 2 columns */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 lg:divide-x lg:divide-slate-200 h-full">
+            {/* LEFT COLUMN — Event details */}
+            <div className="p-6 space-y-4 overflow-y-auto">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Fecha inicio</label>
-                <input type="datetime-local" value={formData.event_date}
-                  onChange={e => setFormData({ ...formData, event_date: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 text-sm" />
+                <label className="block text-sm font-medium text-slate-700 mb-1">Nombre *</label>
+                <input value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} autoFocus
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
+                  placeholder="Ej: Clase Gratuita de Marketing" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Fecha fin</label>
-                <input type="datetime-local" value={formData.event_end}
-                  onChange={e => setFormData({ ...formData, event_end: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 text-sm" />
+                <label className="block text-sm font-medium text-slate-700 mb-1">Descripción</label>
+                <textarea value={formData.description} onChange={e => setFormData({ ...formData, description: e.target.value })} rows={3}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
+                  placeholder="Describe la actividad..." />
               </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Ubicación</label>
-              <input value={formData.location} onChange={e => setFormData({ ...formData, location: e.target.value })}
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900"
-                placeholder="Ej: Zoom, Oficina central..." />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Color</label>
-                <div className="flex flex-wrap gap-2">
-                  {COLOR_OPTIONS.map(c => (
-                    <button key={c} onClick={() => setFormData({ ...formData, color: c })}
-                      className={`w-7 h-7 rounded-full border-2 transition-all ${formData.color === c ? 'border-slate-900 scale-110' : 'border-transparent hover:scale-105'}`}
-                      style={{ backgroundColor: c }} />
-                  ))}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Fecha inicio</label>
+                  <input type="datetime-local" value={formData.event_date}
+                    onChange={e => setFormData({ ...formData, event_date: e.target.value })}
+                    className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Fecha fin</label>
+                  <input type="datetime-local" value={formData.event_end}
+                    onChange={e => setFormData({ ...formData, event_end: e.target.value })}
+                    className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 text-sm" />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Estado</label>
-                <select value={formData.status} onChange={e => setFormData({ ...formData, status: e.target.value })}
-                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900">
-                  {STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
-                </select>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Ubicación</label>
+                <input value={formData.location} onChange={e => setFormData({ ...formData, location: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900"
+                  placeholder="Ej: Zoom, Oficina central..." />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Color</label>
+                  <div className="flex flex-wrap gap-2">
+                    {COLOR_OPTIONS.map(c => (
+                      <button key={c} onClick={() => setFormData({ ...formData, color: c })}
+                        className={`w-7 h-7 rounded-full border-2 transition-all ${formData.color === c ? 'border-slate-900 scale-110' : 'border-transparent hover:scale-105'}`}
+                        style={{ backgroundColor: c }} />
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Estado</label>
+                  <select value={formData.status} onChange={e => setFormData({ ...formData, status: e.target.value })}
+                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900">
+                    {STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label} — {s.desc}</option>)}
+                  </select>
+                  {(() => {
+                    const opt = STATUS_OPTIONS.find(s => s.value === formData.status)
+                    if (!opt) return null
+                    return (
+                      <p className={`text-xs mt-1.5 flex items-center gap-1 ${opt.syncing ? 'text-emerald-600' : 'text-slate-400'}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${opt.syncing ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
+                        {opt.syncing ? 'Sincronización automática activa' : 'Sincronización pausada'}
+                      </p>
+                    )
+                  })()}
+                </div>
               </div>
             </div>
+
+            {/* RIGHT COLUMN — Tag formula configuration */}
+            <div className="p-6 overflow-y-auto bg-slate-50/50">
+              <div className="flex items-center gap-2 mb-1">
+                <Tag className="w-4 h-4 text-emerald-600" />
+                <span className="text-sm font-semibold text-slate-800">Fórmula de etiquetas (auto-sync)</span>
+              </div>
+              <p className="text-xs text-slate-500 mb-4">
+                Define qué leads se agregan como participantes automáticamente.
+              </p>
+
+              {/* Simple / Advanced toggle tabs */}
+              <div className="flex rounded-lg border border-slate-200 bg-white mb-4 overflow-hidden">
+                <button type="button"
+                  onClick={() => setFormData({ ...formData, tag_formula_type: 'simple' })}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold transition-colors ${
+                    formData.tag_formula_type === 'simple'
+                      ? 'bg-emerald-500 text-white'
+                      : 'text-slate-600 hover:bg-slate-50'
+                  }`}>
+                  <FileText className="w-3.5 h-3.5" />
+                  Simple
+                </button>
+                <button type="button"
+                  onClick={() => setFormData({ ...formData, tag_formula_type: 'advanced' })}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold transition-colors ${
+                    formData.tag_formula_type === 'advanced'
+                      ? 'bg-violet-500 text-white'
+                      : 'text-slate-600 hover:bg-slate-50'
+                  }`}>
+                  <Code className="w-3.5 h-3.5" />
+                  Avanzado
+                </button>
+              </div>
+
+              {/* ─── SIMPLE MODE ─── */}
+              {formData.tag_formula_type === 'simple' && (
+                <div className="space-y-3">
+                  {/* Formula mode toggle */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500">Modo:</span>
+                    <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+                      <button type="button"
+                        onClick={() => setFormData({ ...formData, formula_mode: 'OR' })}
+                        className={`px-3 py-1 text-xs font-semibold transition-colors ${
+                          formData.formula_mode === 'OR'
+                            ? 'bg-emerald-500 text-white'
+                            : 'bg-white text-slate-600 hover:bg-slate-50'
+                        }`}>
+                        OR (cualquiera)
+                      </button>
+                      <button type="button"
+                        onClick={() => setFormData({ ...formData, formula_mode: 'AND' })}
+                        className={`px-3 py-1 text-xs font-semibold transition-colors ${
+                          formData.formula_mode === 'AND'
+                            ? 'bg-blue-500 text-white'
+                            : 'bg-white text-slate-600 hover:bg-slate-50'
+                        }`}>
+                        AND (todas)
+                      </button>
+                    </div>
+                    <span className="text-[10px] text-slate-400">
+                      {formData.formula_mode === 'AND' ? 'Lead debe tener TODAS' : 'Lead debe tener al menos UNA'}
+                    </span>
+                  </div>
+
+                  {/* Formula preview */}
+                  {(formData.include_tag_ids.length > 0 || formData.exclude_tag_ids.length > 0) && (
+                    <div className="p-2.5 bg-white rounded-lg border border-slate-200">
+                      <div className="text-[10px] font-medium text-slate-400 mb-1">FÓRMULA:</div>
+                      <div className="flex flex-wrap items-center gap-1 text-xs">
+                        {formData.include_tag_ids.map((id, idx) => {
+                          const tag = availableTags.find(t => t.id === id)
+                          if (!tag) return null
+                          return (
+                            <span key={id} className="flex items-center gap-0.5">
+                              {idx > 0 && <span className="font-bold text-slate-500 mx-0.5">{formData.formula_mode}</span>}
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-white text-[10px] font-medium" style={{ backgroundColor: tag.color }}>{tag.name}</span>
+                            </span>
+                          )
+                        })}
+                        {formData.exclude_tag_ids.map(id => {
+                          const tag = availableTags.find(t => t.id === id)
+                          if (!tag) return null
+                          return (
+                            <span key={id} className="flex items-center gap-0.5">
+                              <span className="font-bold text-red-500 mx-0.5">NOT</span>
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-white text-[10px] font-medium line-through opacity-75" style={{ backgroundColor: tag.color }}>{tag.name}</span>
+                            </span>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Include tags */}
+                  <div>
+                    <div className="text-xs font-medium text-emerald-600 mb-1 flex items-center gap-1">
+                      <Check className="w-3 h-3" /> Incluir ({formData.formula_mode === 'AND' ? 'TODAS requeridas' : 'cualquiera'})
+                    </div>
+                    {formData.include_tag_ids.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mb-1.5">
+                        {formData.include_tag_ids.map(id => {
+                          const tag = availableTags.find(t => t.id === id)
+                          if (!tag) return null
+                          return (
+                            <span key={id} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium text-white"
+                              style={{ backgroundColor: tag.color }}>
+                              {tag.name}
+                              <button type="button" onClick={() => setFormData({
+                                ...formData,
+                                include_tag_ids: formData.include_tag_ids.filter(tid => tid !== id),
+                                tag_ids: formData.tag_ids.filter(tid => tid !== id),
+                              })}
+                                className="hover:bg-white/20 rounded-full p-0.5 transition-colors">
+                                <X className="w-3 h-3" />
+                              </button>
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Exclude tags */}
+                  <div>
+                    <div className="text-xs font-medium text-red-500 mb-1 flex items-center gap-1">
+                      <X className="w-3 h-3" /> Excluir (NOT)
+                    </div>
+                    {formData.exclude_tag_ids.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mb-1.5">
+                        {formData.exclude_tag_ids.map(id => {
+                          const tag = availableTags.find(t => t.id === id)
+                          if (!tag) return null
+                          return (
+                            <span key={id} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium text-white opacity-75 line-through"
+                              style={{ backgroundColor: tag.color }}>
+                              {tag.name}
+                              <button type="button" onClick={() => setFormData({
+                                ...formData,
+                                exclude_tag_ids: formData.exclude_tag_ids.filter(tid => tid !== id),
+                                tag_ids: formData.tag_ids.filter(tid => tid !== id),
+                              })}
+                                className="hover:bg-white/20 rounded-full p-0.5 transition-colors no-underline">
+                                <X className="w-3 h-3" />
+                              </button>
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Tag dropdown */}
+                  <div className="relative" ref={tagDropdownRef}>
+                    <button type="button" onClick={() => setShowTagDropdown(!showTagDropdown)}
+                      className={`w-full flex items-center justify-between px-3 py-2 border rounded-lg text-sm transition-colors ${
+                        showTagDropdown ? 'border-emerald-500 ring-2 ring-emerald-500/20' : 'border-slate-300 hover:border-slate-400'
+                      }`}>
+                      <span className="text-slate-500">
+                        {(formData.include_tag_ids.length + formData.exclude_tag_ids.length) === 0
+                          ? 'Seleccionar etiquetas...'
+                          : `${formData.include_tag_ids.length} incluidas, ${formData.exclude_tag_ids.length} excluidas`}
+                      </span>
+                      <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showTagDropdown ? 'rotate-180' : ''}`} />
+                    </button>
+                    {showTagDropdown && (
+                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 overflow-hidden">
+                        <div className="p-2 border-b border-slate-100">
+                          <input value={tagSearch} onChange={e => setTagSearch(e.target.value)}
+                            placeholder="Buscar etiqueta..." autoFocus
+                            className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+                        </div>
+                        <div className="max-h-48 overflow-y-auto">
+                          {availableTags
+                            .filter(t => !tagSearch || t.name.toLowerCase().includes(tagSearch.toLowerCase()))
+                            .map(tag => {
+                              const isInclude = formData.include_tag_ids.includes(tag.id)
+                              const isExclude = formData.exclude_tag_ids.includes(tag.id)
+                              return (
+                                <div key={tag.id} className={`flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 transition-colors ${isInclude || isExclude ? 'bg-slate-50/50' : ''}`}>
+                                  <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: tag.color }} />
+                                  <span className="flex-1 text-left text-slate-700">{tag.name}</span>
+                                  <button type="button"
+                                    onClick={() => {
+                                      if (isInclude) {
+                                        setFormData({ ...formData,
+                                          include_tag_ids: formData.include_tag_ids.filter(id => id !== tag.id),
+                                          tag_ids: formData.tag_ids.filter(id => id !== tag.id),
+                                        })
+                                      } else {
+                                        setFormData({ ...formData,
+                                          include_tag_ids: [...formData.include_tag_ids, tag.id],
+                                          exclude_tag_ids: formData.exclude_tag_ids.filter(id => id !== tag.id),
+                                          tag_ids: [...formData.tag_ids.filter(id => id !== tag.id), tag.id],
+                                        })
+                                      }
+                                    }}
+                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                                      isInclude ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-500 hover:bg-emerald-100 hover:text-emerald-700'
+                                    }`}>
+                                    {isInclude ? '✓ Incluida' : '+ Incluir'}
+                                  </button>
+                                  <button type="button"
+                                    onClick={() => {
+                                      if (isExclude) {
+                                        setFormData({ ...formData,
+                                          exclude_tag_ids: formData.exclude_tag_ids.filter(id => id !== tag.id),
+                                          tag_ids: formData.tag_ids.filter(id => id !== tag.id),
+                                        })
+                                      } else {
+                                        setFormData({ ...formData,
+                                          exclude_tag_ids: [...formData.exclude_tag_ids, tag.id],
+                                          include_tag_ids: formData.include_tag_ids.filter(id => id !== tag.id),
+                                          tag_ids: [...formData.tag_ids.filter(id => id !== tag.id), tag.id],
+                                        })
+                                      }
+                                    }}
+                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                                      isExclude ? 'bg-red-500 text-white' : 'bg-slate-100 text-slate-500 hover:bg-red-100 hover:text-red-700'
+                                    }`}>
+                                    {isExclude ? '✗ Excluida' : '− Excluir'}
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          {availableTags.filter(t => !tagSearch || t.name.toLowerCase().includes(tagSearch.toLowerCase())).length === 0 && (
+                            <p className="px-3 py-3 text-xs text-slate-400 text-center">No se encontraron etiquetas</p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* ─── ADVANCED MODE ─── */}
+              {formData.tag_formula_type === 'advanced' && (
+                <div className="space-y-3">
+                  {/* Syntax reference */}
+                  <div className="p-3 bg-white rounded-lg border border-slate-200">
+                    <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Referencia de sintaxis</div>
+                    <div className="grid grid-cols-1 gap-1 text-xs text-slate-600">
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;etiqueta&quot;</code> — coincidencia exacta</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;mar%&quot;</code> — empieza con &quot;mar&quot; (comodín)</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">and</code> — el lead debe tener ambas</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">or</code> — el lead debe tener al menos una</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not</code> — excluir leads con esta etiqueta</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">( )</code> — agrupar expresiones</div>
+                    </div>
+                    <div className="mt-2 pt-2 border-t border-slate-100">
+                      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Ejemplo</div>
+                      <code className="text-[11px] text-emerald-700 bg-emerald-50 px-2 py-1 rounded block">
+                        {`(("04-mar" or "07-mar") and "iquitos") and not "elimi%"`}
+                      </code>
+                    </div>
+                  </div>
+
+                  {/* Formula editor with autocomplete & token validation */}
+                  <FormulaEditor
+                    value={formData.tag_formula}
+                    onChange={(v) => setFormData({ ...formData, tag_formula: v })}
+                    tags={availableTags}
+                    onValidChange={setFormulaIsValid}
+                  />
+                </div>
+              )}
+            </div>
           </div>
-          <div className="flex justify-end gap-3 mt-6">
-            <button onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}
-              className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Cancelar</button>
-            <button disabled={!formData.name} onClick={onSubmit}
-              className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors">
-              {submitLabel}
-            </button>
-          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-200 flex-shrink-0 bg-white rounded-b-2xl">
+          <button onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}
+            className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium">Cancelar</button>
+          <button disabled={!formData.name || (formData.tag_formula_type === 'advanced' && !formulaIsValid)}
+            onClick={onSubmit}
+            className="px-6 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium">
+            {submitLabel}
+          </button>
         </div>
       </div>
     </div>
@@ -549,6 +1036,16 @@ export default function EventsPage() {
           <option value="">Todos los estados</option>
           {STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
         </select>
+        <button
+          onClick={() => setHideCancelled(!hideCancelled)}
+          className={`flex items-center gap-1.5 px-3 py-2 border rounded-lg text-sm transition-colors whitespace-nowrap ${
+            hideCancelled ? 'border-red-200 bg-red-50 text-red-600' : 'border-slate-300 text-slate-600 hover:bg-slate-50'
+          }`}
+          title={hideCancelled ? 'Mostrar cancelados' : 'Ocultar cancelados'}
+        >
+          {hideCancelled ? <AlertCircle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+          {hideCancelled ? 'Cancelados ocultos' : 'Todos visibles'}
+        </button>
         <div className="flex bg-slate-100 rounded-lg p-0.5">
           <button onClick={() => setViewMode('grid')} title="Cuadrícula"
             className={`p-2 rounded-md transition-colors ${viewMode === 'grid' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
@@ -619,13 +1116,16 @@ export default function EventsPage() {
       )}
 
       {/* ─── Events ──────────────────────────────────────────────────────────── */}
-      {events.length === 0 && visibleFolders.length === 0 ? (
+      {filteredEvents.length === 0 && visibleFolders.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-xl border border-slate-200">
           <CalendarDays className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-          <p className="text-slate-500 font-medium">No hay eventos</p>
-          <p className="text-slate-400 text-sm mt-1">Crea tu primer evento para empezar</p>
+          <p className="text-slate-500 font-medium">No hay eventos{hideCancelled && events.length > 0 ? ' visibles' : ''}</p>
+          <p className="text-slate-400 text-sm mt-1">{hideCancelled && events.length > 0 ? 'Hay eventos cancelados ocultos' : 'Crea tu primer evento para empezar'}</p>
+          {hideCancelled && events.length > 0 && (
+            <button onClick={() => setHideCancelled(false)} className="mt-2 text-sm text-emerald-600 hover:text-emerald-700 font-medium">Mostrar cancelados</button>
+          )}
         </div>
-      ) : events.length === 0 ? (
+      ) : filteredEvents.length === 0 ? (
         <div className="text-center py-10 bg-white rounded-xl border border-dashed border-slate-200">
           <FolderOpen className="w-10 h-10 text-slate-300 mx-auto mb-2" />
           <p className="text-slate-500 text-sm">No hay eventos aquí</p>
@@ -641,12 +1141,13 @@ export default function EventsPage() {
                 <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Fecha</th>
                 <th className="hidden sm:table-cell text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Ubicación</th>
                 <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Estado</th>
+                <th className="hidden md:table-cell text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Fórmula</th>
                 <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Part.</th>
                 <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {events.map(ev => {
+              {filteredEvents.map(ev => {
                 const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
                 return (
                   <tr key={ev.id} draggable onDragStart={e => handleDragStart(e, ev.id)}
@@ -671,6 +1172,9 @@ export default function EventsPage() {
                       {statusOpt && (
                         <span className={`${statusOpt.color} text-xs font-medium px-2 py-1 rounded-full`}>{statusOpt.label}</span>
                       )}
+                    </td>
+                    <td className="hidden md:table-cell px-4 py-3">
+                      <FormulaTagDisplay ev={ev} maxTags={2} size="xs" />
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
@@ -725,15 +1229,15 @@ export default function EventsPage() {
         </div>
       ) : viewMode === 'compact' ? (
         /* Compact View */
-        <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
-          {events.map(ev => {
+        <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
+          {filteredEvents.map(ev => {
             const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
             return (
               <div key={ev.id} draggable onDragStart={e => handleDragStart(e, ev.id)}
-                className="bg-white border border-slate-200 rounded-xl overflow-hidden hover:shadow-sm hover:border-slate-300 transition-all group cursor-pointer"
+                className="bg-white border border-slate-200 rounded-xl overflow-hidden hover:shadow-md hover:border-slate-300 transition-all group cursor-pointer"
                 onClick={() => router.push(`/dashboard/events/${ev.id}`)}>
-                <div className="h-1" style={{ backgroundColor: ev.color }} />
-                <div className="p-3">
+                <div className="h-1.5" style={{ backgroundColor: ev.color }} />
+                <div className="p-3.5">
                   <div className="flex items-start justify-between gap-1">
                     <p className="text-sm font-semibold text-slate-800 leading-snug line-clamp-2 flex-1">{ev.name}</p>
                     <button onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
@@ -741,6 +1245,11 @@ export default function EventsPage() {
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
+                  {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) && (
+                    <div className="mt-1.5">
+                      <FormulaTagDisplay ev={ev} maxTags={2} size="xs" />
+                    </div>
+                  )}
                   {ev.event_date && (
                     <div className="flex items-center gap-1 mt-2 text-xs text-slate-500">
                       <Clock className="w-3 h-3" />
@@ -762,14 +1271,14 @@ export default function EventsPage() {
         </div>
       ) : (
         /* Grid View */
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {events.map(ev => {
+        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {filteredEvents.map(ev => {
             const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
             const counts = ev.participant_counts || {}
             const total = ev.total_participants || 0
             return (
               <div key={ev.id} draggable onDragStart={e => handleDragStart(e, ev.id)}
-                className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-md transition-shadow group cursor-grab active:cursor-grabbing">
+                className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-md hover:border-slate-300 transition-all group cursor-grab active:cursor-grabbing">
                 <div className="h-1.5" style={{ backgroundColor: ev.color }} />
                 <div className="p-5">
                   <div className="flex items-start justify-between mb-3">
@@ -839,6 +1348,13 @@ export default function EventsPage() {
                       <span>{total} participantes</span>
                     </div>
                   </div>
+
+                  {/* Formula / tags display */}
+                  {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) && (
+                    <div className="mb-3">
+                      <FormulaTagDisplay ev={ev} maxTags={4} size="sm" />
+                    </div>
+                  )}
 
                   {total > 0 && (
                     <div className="mb-4">

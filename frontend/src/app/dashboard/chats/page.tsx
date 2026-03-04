@@ -8,6 +8,7 @@ import DeviceSelector from '@/components/chat/DeviceSelector'
 import TagSelector from '@/components/chat/TagSelector'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ChatPanel from '@/components/chat/ChatPanel'
+import ContactPanel from '@/components/chat/ContactPanel'
 import { Chat, Device } from '@/types/chat'
 import { getChatDisplayName, formatPhone } from '@/utils/chat'
 
@@ -29,11 +30,23 @@ export default function ChatsPage() {
   const [selectedChats, setSelectedChats] = useState<Set<string>>(new Set())
   const [deleting, setDeleting] = useState(false)
 
+  // Infinite scroll state
+  const CHATS_PAGE_SIZE = 50
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [totalChats, setTotalChats] = useState(0)
+  const offsetRef = useRef(0)
+  const chatListRef = useRef<HTMLDivElement>(null)
+
   // Resizable sidebar
   const [leftPanelWidth, setLeftPanelWidth] = useState(384) // default lg:w-96 = 384px
-  const resizingRef = useRef<'left' | null>(null)
+  const [rightPanelWidth, setRightPanelWidth] = useState(360) // contact detail panel
+  const resizingRef = useRef<'left' | 'right' | null>(null)
   const startXRef = useRef(0)
   const startWidthRef = useRef(0)
+
+  // Contact info (3rd column)
+  const [showContactInfo, setShowContactInfo] = useState(false)
 
   // Responsive
   const [isMdScreen, setIsMdScreen] = useState(true)
@@ -57,27 +70,68 @@ export default function ChatsPage() {
   // Auto-open logic
   const autoOpenProcessedRef = useRef(false)
 
-  // Fetch Data
-  const fetchChats = useCallback(async () => {
+  // Fetch Data (supports pagination: reset=true reloads from scratch, reset=false appends)
+  const fetchChats = useCallback(async (reset: boolean = true) => {
     const token = localStorage.getItem('token')
+    const offset = reset ? 0 : offsetRef.current
+    if (reset) {
+      setLoading(true)
+    } else {
+      setLoadingMore(true)
+    }
     try {
       const params = new URLSearchParams()
       filterDevices.forEach(id => params.append('device_ids', id))
       filterTags.forEach(id => params.append('tag_ids', id))
       if (filterUnread) params.append('unread_only', 'true')
       if (debouncedSearch) params.append('search', debouncedSearch)
+      params.append('limit', String(CHATS_PAGE_SIZE))
+      params.append('offset', String(offset))
 
       const res = await fetch(`/api/chats?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` }
       })
       const data = await res.json()
-      if (data.success) setChats(data.chats || [])
+      if (data.success) {
+        const newChats: Chat[] = data.chats || []
+        const total: number = data.total ?? 0
+        setTotalChats(total)
+
+        if (reset) {
+          setChats(newChats)
+          offsetRef.current = newChats.length
+        } else {
+          // Append with deduplication
+          setChats(prev => {
+            const existingIds = new Set(prev.map(c => c.id))
+            const unique = newChats.filter(c => !existingIds.has(c.id))
+            return [...prev, ...unique]
+          })
+          offsetRef.current = offset + newChats.length
+        }
+        setHasMore((offset + newChats.length) < total)
+      }
     } catch (err) {
       console.error('Failed to fetch chats', err)
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterDevices, filterTags, filterUnread, debouncedSearch])
+
+  const loadMoreChats = useCallback(() => {
+    if (loadingMore || !hasMore) return
+    fetchChats(false)
+  }, [loadingMore, hasMore, fetchChats])
+
+  const handleChatListScroll = useCallback(() => {
+    const el = chatListRef.current
+    if (!el || !hasMore || loadingMore) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) {
+      loadMoreChats()
+    }
+  }, [hasMore, loadingMore, loadMoreChats])
 
   const fetchDevices = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -168,11 +222,23 @@ export default function ChatsPage() {
     document.body.style.userSelect = 'none'
   }
 
+  const startRightResize = (e: React.MouseEvent) => {
+    e.preventDefault()
+    resizingRef.current = 'right'
+    startXRef.current = e.clientX
+    startWidthRef.current = rightPanelWidth
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }
+
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (resizingRef.current === 'left') {
         const delta = e.clientX - startXRef.current
         setLeftPanelWidth(Math.min(600, Math.max(260, startWidthRef.current + delta)))
+      } else if (resizingRef.current === 'right') {
+        const delta = startXRef.current - e.clientX
+        setRightPanelWidth(Math.min(600, Math.max(280, startWidthRef.current + delta)))
       }
     }
     const handleMouseUp = () => {
@@ -305,7 +371,7 @@ export default function ChatsPage() {
          </div>
 
          {/* Chat List Items */}
-         <div className="flex-1 overflow-y-auto">
+         <div ref={chatListRef} onScroll={handleChatListScroll} className="flex-1 overflow-y-auto">
             {loading ? (
                 <div className="flex justify-center p-8"><div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" /></div>
             ) : chats.length === 0 ? (
@@ -372,6 +438,17 @@ export default function ChatsPage() {
                     </div>
                 ))
             )}
+            {/* Loading more indicator */}
+            {loadingMore && (
+              <div className="flex justify-center py-3">
+                <div className="animate-spin rounded-full h-5 w-5 border-2 border-emerald-200 border-t-emerald-600" />
+              </div>
+            )}
+            {!hasMore && chats.length > 0 && totalChats > CHATS_PAGE_SIZE && (
+              <div className="text-center py-3 text-[11px] text-slate-400">
+                {totalChats} chats cargados
+              </div>
+            )}
          </div>
       </div>
 
@@ -390,7 +467,8 @@ export default function ChatsPage() {
                 chatId={selectedChat.id}
                 deviceId={selectedChat.device_id || devices[0]?.id || ''}
                 initialChat={selectedChat}
-                onClose={() => setSelectedChat(null)}
+                onClose={() => { setSelectedChat(null); setShowContactInfo(false) }}
+                {...(isMdScreen ? { onContactInfoToggle: setShowContactInfo, contactInfoOpen: showContactInfo } : {})}
             />
         ) : (
             <div className="flex-1 flex flex-col items-center justify-center p-8 text-slate-400">
@@ -401,6 +479,23 @@ export default function ChatsPage() {
             </div>
         )}
       </div>
+
+      {/* Right Resizer + Contact Panel (3rd column) */}
+      {isMdScreen && showContactInfo && selectedChat && (
+        <>
+          <div
+            onMouseDown={startRightResize}
+            className="w-1 hover:w-1.5 bg-slate-100 hover:bg-emerald-400/50 cursor-col-resize shrink-0 transition-all active:bg-emerald-500/50 z-10"
+          />
+          <div className="shrink-0 overflow-hidden border-l border-slate-200" style={{ width: rightPanelWidth }}>
+            <ContactPanel
+              chatId={selectedChat.id}
+              isOpen={true}
+              onClose={() => setShowContactInfo(false)}
+            />
+          </div>
+        </>
+      )}
 
        <NewChatModal
         isOpen={showNewChatModal}

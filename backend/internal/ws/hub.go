@@ -35,10 +35,15 @@ const (
 	EventChatUpdate       = "chat_update"
 	EventPresence         = "presence"
 	EventTyping           = "typing"
-	EventLeadUpdate       = "lead_update"
-	EventNotification     = "notification"
-	EventMessageReaction  = "message_reaction"
-	EventPollUpdate       = "poll_update"
+	EventLeadUpdate          = "lead_update"
+	EventNotification        = "notification"
+	EventMessageReaction     = "message_reaction"
+	EventPollUpdate          = "poll_update"
+	EventInteractionUpdate       = "interaction_update"
+	EventMessageRevoked          = "message_revoked"
+	EventMessageEdited           = "message_edited"
+	EventEventParticipantUpdate  = "event_participant_update"
+	EventHistorySyncComplete     = "history_sync_complete"
 )
 
 // Message represents a WebSocket message

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -277,6 +278,10 @@ func (c *Client) GetLeads(page int, updatedSince int64) ([]KommoLead, bool, erro
 func (c *Client) GetLeadByID(leadID int) (*KommoLead, error) {
 	data, err := c.get(fmt.Sprintf("/leads/%d?with=contacts", leadID))
 	if err != nil {
+		// 204 = lead was deleted or archived in Kommo
+		if strings.Contains(err.Error(), "204") {
+			return nil, fmt.Errorf("el lead #%d fue eliminado o archivado en Kommo", leadID)
+		}
 		return nil, err
 	}
 	var lead KommoLead

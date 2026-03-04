@@ -40,6 +40,9 @@ export interface Message {
   media_size?: number
   is_from_me: boolean
   is_read: boolean
+  is_revoked?: boolean
+  is_edited?: boolean
+  is_view_once?: boolean
   status: string
   timestamp: string
   quoted_message_id?: string
@@ -50,6 +53,13 @@ export interface Message {
   poll_options?: PollOption[]
   poll_votes?: PollVote[]
   poll_max_selections?: number
+  // Location data
+  latitude?: number
+  longitude?: number
+  // Contact card data
+  contact_name?: string
+  contact_phone?: string
+  contact_vcard?: string
 }
 
 export interface Chat {

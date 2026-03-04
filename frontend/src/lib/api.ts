@@ -316,6 +316,8 @@ export interface Lead {
   email: string
   company: string | null
   age: number | null
+  dni: string | null
+  birth_date: string | null
   status: string
   notes: string
   tags: string[]

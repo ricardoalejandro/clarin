@@ -1,4 +1,5 @@
 import React from 'react'
+import { splitEmojiSegments, getAppleEmojiUrl } from '@/utils/appleEmoji'
 
 /**
  * WhatsApp text formatting:
@@ -167,8 +168,32 @@ export function renderFormattedText(text: string): React.ReactNode[] {
           </a>
         )
       }
-      default:
-        return <React.Fragment key={i}>{token.content}</React.Fragment>
+      default: {
+        // Replace emoji characters with Apple emoji images
+        const segments = splitEmojiSegments(token.content)
+        if (segments.length === 1 && segments[0].type === 'text') {
+          return <React.Fragment key={i}>{token.content}</React.Fragment>
+        }
+        return (
+          <React.Fragment key={i}>
+            {segments.map((seg, j) =>
+              seg.type === 'emoji' ? (
+                <img
+                  key={j}
+                  src={getAppleEmojiUrl(seg.value)}
+                  alt={seg.value}
+                  className="inline-block align-text-bottom"
+                  style={{ width: '1.25em', height: '1.25em' }}
+                  draggable={false}
+                  loading="lazy"
+                />
+              ) : (
+                <React.Fragment key={j}>{seg.value}</React.Fragment>
+              )
+            )}
+          </React.Fragment>
+        )
+      }
     }
   })
 }

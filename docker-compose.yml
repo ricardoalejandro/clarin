@@ -94,7 +94,9 @@ services:
       KOMMO_ACCESS_TOKEN: ${KOMMO_ACCESS_TOKEN}
       KOMMO_REDIRECT_URI: ${KOMMO_REDIRECT_URI}
       # SOCKS5 proxy for WhatsApp CDN media uploads (Cloudflare WARP)
-      MEDIA_SOCKS5_PROXY: socks5://172.23.0.1:40001
+      MEDIA_SOCKS5_PROXY: socks5://host-gateway:40001
+    extra_hosts:
+      - "host-gateway:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,6 +106,14 @@ services:
         condition: service_healthy
     volumes:
       - whatsapp_sessions:/app/sessions
+    mem_limit: 1536m
+    cpus: 1.5
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     ports:
       - "8080:8080"
     networks:

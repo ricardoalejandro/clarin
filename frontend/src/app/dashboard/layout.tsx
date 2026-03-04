@@ -172,7 +172,6 @@ export default function DashboardLayout({
     { href: '/dashboard/chats', icon: MessageSquare, label: 'Chats' },
     { href: '/dashboard/contacts', icon: BookUser, label: 'Contactos' },
     { href: '/dashboard/programs', icon: BookOpen, label: 'Programas' },
-    { href: '/dashboard/devices', icon: Smartphone, label: 'Dispositivos' },
     { href: '/dashboard/leads', icon: Users, label: 'Leads' },
     { href: '/dashboard/events', icon: CalendarDays, label: 'Eventos' },
     { href: '/dashboard/broadcasts', icon: Radio, label: 'Difusión' },

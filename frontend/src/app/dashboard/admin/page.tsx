@@ -63,6 +63,7 @@ const ALL_MODULES = [
   { key: 'broadcasts', label: 'Difusión', color: 'yellow' },
   { key: 'tags', label: 'Etiquetas', color: 'teal' },
   { key: 'settings', label: 'Configuración', color: 'slate' },
+  { key: 'integrations', label: 'Integraciones', color: 'indigo' },
 ]
 
 type Tab = 'accounts' | 'users' | 'roles'

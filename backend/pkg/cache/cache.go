@@ -56,6 +56,11 @@ func (c *Cache) DelPattern(ctx context.Context, pattern string) error {
 	return nil
 }
 
+// Ping checks Redis connectivity
+func (c *Cache) Ping(ctx context.Context) error {
+	return c.client.Ping(ctx).Err()
+}
+
 func (c *Cache) Close() error {
 	return c.client.Close()
 }

@@ -5,7 +5,7 @@ import {
   Send, Paperclip, MoreVertical, Search, Phone, Video,
   ArrowLeft, Smile, Image as ImageIcon, FileText, X,
   Mic, Trash2, Reply, Check, CheckCheck, Download,
-  CornerUpRight, Play, Pause, AlertCircle, BarChart3, User
+  CornerUpRight, Play, Pause, AlertCircle, BarChart3, User, EyeOff, RefreshCw
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -21,6 +21,8 @@ import PollModal from './PollModal'
 import ContactPanel from './ContactPanel'
 import ForwardMessageModal from './ForwardMessageModal'
 import QuickReplyPicker from './QuickReplyPicker'
+import ContactSelector, { SelectedPerson } from '../ContactSelector'
+import { compressImageStandard } from '@/utils/imageCompression'
 
 interface ChatPanelProps {
   chatId: string | null
@@ -28,9 +30,12 @@ interface ChatPanelProps {
   initialChat?: Chat
   onClose?: () => void
   className?: string
+  readOnly?: boolean
+  onContactInfoToggle?: (show: boolean) => void
+  contactInfoOpen?: boolean
 }
 
-export default function ChatPanel({ chatId, deviceId, initialChat, onClose, className = '' }: ChatPanelProps) {
+export default function ChatPanel({ chatId, deviceId, initialChat, onClose, className = '', readOnly = false, onContactInfoToggle, contactInfoOpen }: ChatPanelProps) {
   const [chat, setChat] = useState<Chat | null>(initialChat || null)
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
@@ -43,6 +48,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   // Attachments
   const [showAttachments, setShowAttachments] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const docFileInputRef = useRef<HTMLInputElement>(null)
+  const [showContactPicker, setShowContactPicker] = useState(false)
 
   // Media preview with caption
   const [pendingMedia, setPendingMedia] = useState<{ file: File; type: string; previewUrl: string } | null>(null)
@@ -61,7 +68,12 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const [showPollModal, setShowPollModal] = useState(false)
 
   // Panels
-  const [showContactInfo, setShowContactInfo] = useState(false)
+  const [showContactInfoLocal, setShowContactInfoLocal] = useState(false)
+  const showContactInfo = contactInfoOpen !== undefined ? contactInfoOpen : showContactInfoLocal
+  const setShowContactInfo = (show: boolean) => {
+    if (onContactInfoToggle) onContactInfoToggle(show)
+    else setShowContactInfoLocal(show)
+  }
   const [showSearch, setShowSearch] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
 
@@ -69,16 +81,62 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const [forwardingMsg, setForwardingMsg] = useState<Message | null>(null)
   const [forwardSearch, setForwardSearch] = useState('')
 
+  // Editing
+  const [editingMsg, setEditingMsg] = useState<Message | null>(null)
+
   // Quick Reply
   const [showQuickReply, setShowQuickReply] = useState(false)
   const [quickReplyFilter, setQuickReplyFilter] = useState('')
   const [quickRepliesData, setQuickRepliesData] = useState<any[]>([])
+
+  // Typing indicator
+  const [contactTyping, setContactTyping] = useState<string | null>(null) // null | 'composing' | 'recording'
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const lastTypingSentRef = useRef<number>(0)
+  const typingPauseTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  // History sync
+  const [syncingHistory, setSyncingHistory] = useState(false)
+
+  // Helper: send typing/composing presence to recipient
+  const sendPresence = useCallback((composing: boolean, media: string = '') => {
+    if (!chat || !deviceId) return
+    const token = localStorage.getItem('token')
+    fetch('/api/messages/typing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ device_id: deviceId, to: chat.jid, composing, media })
+    }).catch(() => {})
+  }, [chat, deviceId])
+
+  // Request history sync for current chat
+  const handleRequestHistorySync = useCallback(async () => {
+    if (!chatId || syncingHistory) return
+    setSyncingHistory(true)
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/chats/${chatId}/sync-history`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Error solicitando historial')
+      }
+    } catch (err: any) {
+      console.error('[HistorySync]', err)
+    } finally {
+      // Keep spinning for a bit — response comes async via WebSocket
+      setTimeout(() => setSyncingHistory(false), 15000)
+    }
+  }, [chatId, syncingHistory])
 
   // Resize
   const [rightPanelWidth, setRightPanelWidth] = useState(320)
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<WhatsAppTextInputHandle>(null)
+  const captionInputRef = useRef<WhatsAppTextInputHandle>(null)
   const optimisticIdRef = useRef(0)
 
   // Fetch quick replies
@@ -191,6 +249,88 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         } else if ((eventType === 'message_update') && payload) {
           const actualMsg = payload.message || payload
           setMessages(prev => prev.map(m => m.id === actualMsg.id ? (actualMsg as Message) : m))
+        } else if (eventType === 'message_status' && payload) {
+          // Update message delivery/read status (only upgrade, never downgrade)
+          const msgIds: string[] = payload.message_ids || []
+          const newStatus: string = payload.status
+          const statusOrder: Record<string, number> = { sending: 0, sent: 1, delivered: 2, read: 3 }
+          const newLevel = statusOrder[newStatus] ?? -1
+          if (chat && payload.chat_jid === chat.jid && msgIds.length > 0 && newLevel >= 0) {
+            setMessages(prev => prev.map(m => {
+              if (!msgIds.includes(m.message_id)) return m
+              const currentLevel = statusOrder[m.status] ?? -1
+              if (newLevel > currentLevel) return { ...m, status: newStatus }
+              return m
+            }))
+          }
+        } else if (eventType === 'message_revoked' && payload) {
+          // Mark message as revoked
+          const revokedMsgId: string = payload.message_id
+          if (chat && payload.chat_jid === chat.jid) {
+            setMessages(prev => prev.map(m =>
+              m.message_id === revokedMsgId ? { ...m, is_revoked: true, body: undefined } : m
+            ))
+          }
+        } else if (eventType === 'message_edited' && payload) {
+          // Update edited message body
+          const editedMsgId: string = payload.message_id
+          const newBody: string = payload.new_body
+          if (chat && payload.chat_jid === chat.jid) {
+            setMessages(prev => prev.map(m =>
+              m.message_id === editedMsgId ? { ...m, body: newBody, is_edited: true } : m
+            ))
+          }
+        } else if ((eventType === 'typing' || eventType === 'presence') && payload) {
+          // Typing/presence indicator from contact
+          if (chat && payload.jid === chat.jid) {
+            if (payload.composing || payload.available) {
+              const media = payload.media === 'audio' ? 'recording' : 'composing'
+              setContactTyping(media)
+              // Auto-clear typing after 15s (in case stop event is missed)
+              if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
+              typingTimeoutRef.current = setTimeout(() => setContactTyping(null), 15000)
+            } else {
+              setContactTyping(null)
+              if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
+            }
+          }
+        } else if (eventType === 'history_sync_complete' && payload) {
+          // History sync completed — reload messages to include historical ones
+          setSyncingHistory(false)
+          fetchChatDetails()
+        } else if (eventType === 'message_reaction' && payload) {
+          // Incoming reaction from contact or self echo
+          if (chat && payload.chat_id === chat.id) {
+            const targetMsgId: string = payload.target_message_id
+            const emoji: string = payload.emoji
+            const senderJid: string = payload.sender_jid || ''
+            const senderName: string = payload.sender_name || ''
+            const isFromMe: boolean = !!payload.is_from_me
+            const removed: boolean = !!payload.removed
+
+            setMessages(prev => prev.map(m => {
+              if (m.message_id !== targetMsgId) return m
+              const reactions = [...(m.reactions || [])]
+              if (removed) {
+                // Remove reaction from this sender
+                const idx = reactions.findIndex(r => r.sender_jid === senderJid)
+                if (idx >= 0) reactions.splice(idx, 1)
+              } else {
+                // Upsert: remove previous reaction from same sender, add new
+                const idx = reactions.findIndex(r => r.sender_jid === senderJid)
+                if (idx >= 0) reactions.splice(idx, 1)
+                reactions.push({
+                  id: '',
+                  target_message_id: targetMsgId,
+                  sender_jid: senderJid,
+                  sender_name: senderName,
+                  emoji,
+                  is_from_me: isFromMe
+                })
+              }
+              return { ...m, reactions }
+            }))
+          }
         }
       },
       (send) => {
@@ -228,6 +368,26 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         setMessages(msgData.messages)
         setHasMoreMessages(msgData.messages.length >= 50)
         scrollToBottom()
+
+        // Send read receipts for unread incoming messages
+        if (deviceId && data.chat?.jid) {
+          const unreadIncoming = (msgData.messages as Message[]).filter(
+            (m: Message) => !m.is_from_me && !m.is_read
+          )
+          if (unreadIncoming.length > 0) {
+            const lastMsg = unreadIncoming[unreadIncoming.length - 1]
+            fetch('/api/messages/read-receipt', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+              body: JSON.stringify({
+                device_id: deviceId,
+                chat_jid: data.chat.jid,
+                sender_jid: lastMsg.from_jid || '',
+                message_ids: unreadIncoming.map((m: Message) => m.message_id)
+              })
+            }).catch(() => {})
+          }
+        }
       }
     } catch (error) {
       console.error('Failed to fetch chat', error)
@@ -289,15 +449,55 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const handleSendMessage = async () => {
     if ((!messageText.trim() && !forwardingMsg) || !chat || !deviceId) return
 
-    setSendingMessage(true)
     const text = messageText.trim()
+
+    // Handle edit mode
+    if (editingMsg) {
+      if (!text) return
+      const token = localStorage.getItem('token')
+      try {
+        const res = await fetch('/api/messages/edit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            device_id: deviceId,
+            chat_jid: chat.jid,
+            message_id: editingMsg.message_id,
+            new_body: text
+          })
+        })
+        const data = await res.json()
+        if (data.success) {
+          setMessages(prev => prev.map(m =>
+            m.message_id === editingMsg.message_id ? { ...m, body: text, is_edited: true } : m
+          ))
+        } else {
+          alert(data.error || 'Error al editar mensaje')
+        }
+      } catch (err) {
+        console.error('Failed to edit message', err)
+      }
+      setEditingMsg(null)
+      setMessageText('')
+      inputRef.current?.clear()
+      requestAnimationFrame(() => inputRef.current?.focus())
+      return
+    }
+
+    // Stop typing indicator on send
+    if (typingPauseTimeoutRef.current) clearTimeout(typingPauseTimeoutRef.current)
+    sendPresence(false)
+    lastTypingSentRef.current = 0
+
+    setSendingMessage(true)
     setMessageText('')
     setReplyingTo(null)
     setQuickReplyFilter('')
 
     if (inputRef.current) {
         inputRef.current.clear()
-        inputRef.current.focus()
+        // Use rAF to ensure focus happens after React re-render
+        requestAnimationFrame(() => inputRef.current?.focus())
     }
 
     // Optimistic UI
@@ -391,9 +591,19 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const handleSendMedia = async (file: File, mediaType: string, caption?: string) => {
       if (!chat || !deviceId) return
 
+      // Compress images client-side (like WhatsApp: max 1600px, JPEG 70%)
+      let fileToSend = file
+      if (mediaType === 'image') {
+        try {
+          fileToSend = await compressImageStandard(file)
+        } catch (err) {
+          console.warn('[ImageCompress] Compression failed, using original:', err)
+        }
+      }
+
       const tempId = `optimistic-${++optimisticIdRef.current}`
-      const previewUrl = URL.createObjectURL(file)
-      const finalCaption = caption ?? (mediaType === 'document' ? file.name : '')
+      const previewUrl = URL.createObjectURL(fileToSend)
+      const finalCaption = caption ?? (mediaType === 'document' ? fileToSend.name : '')
 
       const optimisticMsg: Message = {
         id: tempId,
@@ -416,7 +626,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       const token = localStorage.getItem('token')
       try {
            const formData = new FormData()
-           formData.append('file', file)
+           formData.append('file', fileToSend)
            formData.append('folder', 'uploads')
 
            const uploadRes = await fetch('/api/media/upload', {
@@ -565,11 +775,19 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
          const type = file.type.startsWith('image/') ? 'image' :
                       file.type.startsWith('video/') ? 'video' :
                       file.type.startsWith('audio/') ? 'audio' : 'document'
-         if (type === 'image' || type === 'video') {
-           const previewUrl = URL.createObjectURL(file)
+         // Video size limit: 15 MB (like WhatsApp)
+         if (type === 'video' && file.size > 15 * 1024 * 1024) {
+           alert('El video es demasiado grande. Máximo 15 MB.')
+           if (e.target) e.target.value = ''
+           return
+         }
+         if (type === 'image' || type === 'video' || type === 'document') {
+           const previewUrl = type !== 'document' ? URL.createObjectURL(file) : ''
            setPendingMedia({ file, type, previewUrl })
            setMediaCaption('')
+           captionInputRef.current?.clear()
            setShowAttachments(false)
+           setTimeout(() => captionInputRef.current?.focus(), 100)
          } else {
            handleSendMedia(file, type)
          }
@@ -578,12 +796,60 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
      if (e.target) e.target.value = ''
   }
 
+  const handleSendContact = async (contacts: SelectedPerson[]) => {
+    if (!chat || !deviceId) return
+    setShowContactPicker(false)
+    setShowAttachments(false)
+    const token = localStorage.getItem('token')
+    for (const contact of contacts) {
+      const tempId = `optimistic-${++optimisticIdRef.current}`
+      const displayName = contact.name || contact.phone || 'Contacto'
+      const optimisticMsg: Message = {
+        id: tempId,
+        message_id: tempId,
+        from_jid: '',
+        from_name: 'Me',
+        body: displayName,
+        message_type: 'contact',
+        is_from_me: true,
+        is_read: false,
+        status: 'sending',
+        timestamp: new Date().toISOString(),
+        contact_name: displayName,
+        contact_phone: contact.phone,
+      }
+      setMessages(prev => [...prev, optimisticMsg])
+      scrollToBottom()
+      try {
+        const res = await fetch('/api/messages/send-contact', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            device_id: deviceId,
+            to: chat.jid,
+            contact_name: displayName,
+            contact_phone: contact.phone,
+          })
+        })
+        const data = await res.json()
+        if (data.success && data.message) {
+          setMessages(prev => prev.map(m => m.id === tempId ? { ...data.message, is_from_me: true } : m))
+        } else {
+          setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        }
+      } catch {
+        setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+      }
+    }
+  }
+
   const handleSendPendingMedia = () => {
     if (!pendingMedia) return
     handleSendMedia(pendingMedia.file, pendingMedia.type, mediaCaption.trim())
     URL.revokeObjectURL(pendingMedia.previewUrl)
     setPendingMedia(null)
     setMediaCaption('')
+    captionInputRef.current?.clear()
   }
 
   const handleCancelPendingMedia = () => {
@@ -591,6 +857,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       URL.revokeObjectURL(pendingMedia.previewUrl)
       setPendingMedia(null)
       setMediaCaption('')
+      captionInputRef.current?.clear()
     }
   }
 
@@ -613,6 +880,9 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
             setRecordingDuration(prev => prev + 1)
         }, 1000)
 
+        // Send recording audio indicator
+        sendPresence(true, 'audio')
+
     } catch (e) {
         console.error('Mic error', e)
         alert('No se pudo acceder al micrófono')
@@ -631,6 +901,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
      }
      setIsRecording(false)
      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+     // Stop recording presence
+     sendPresence(false, 'audio')
   }
 
   const cancelRecording = () => {
@@ -640,6 +912,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       }
       setIsRecording(false)
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current)
+      // Stop recording presence
+      sendPresence(false, 'audio')
   }
 
   const formatTime = (seconds: number) => {
@@ -668,12 +942,53 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
              setShowQuickReply(false)
          }
      }
+
+     // Send typing indicator (debounced - max once every 3 seconds)
+     if (chat && deviceId && text.length > 0) {
+       const now = Date.now()
+       if (now - lastTypingSentRef.current > 3000) {
+         lastTypingSentRef.current = now
+         sendPresence(true)
+       }
+       // Auto-send paused after 5s of no typing
+       if (typingPauseTimeoutRef.current) clearTimeout(typingPauseTimeoutRef.current)
+       typingPauseTimeoutRef.current = setTimeout(() => {
+         sendPresence(false)
+         lastTypingSentRef.current = 0
+       }, 5000)
+     } else if (text.length === 0) {
+       // Cleared input — stop composing immediately
+       if (typingPauseTimeoutRef.current) clearTimeout(typingPauseTimeoutRef.current)
+       sendPresence(false)
+       lastTypingSentRef.current = 0
+     }
   }
 
   const handleQuickReplySelect = (reply: any) => {
      const textBeforeCommand = messageText.replace(/\/[\w-]*$/, '')
 
-     if (reply.media_url) {
+     // Multi-attachment support
+     if (reply.attachments && reply.attachments.length > 0) {
+         for (const att of reply.attachments) {
+             handleSendMediaUrl(att.media_url, att.media_type || 'image', att.caption || '')
+         }
+         if (reply.body) {
+             // Send body as separate text message
+             const sendText = async () => {
+                 const token = localStorage.getItem('token')
+                 if (!chat || !deviceId) return
+                 try {
+                     await fetch('/api/messages/send', {
+                         method: 'POST',
+                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                         body: JSON.stringify({ device_id: deviceId, to: chat.jid, body: reply.body })
+                     })
+                 } catch {}
+             }
+             sendText()
+         }
+         setMessageText(textBeforeCommand.trim())
+     } else if (reply.media_url) {
          handleSendMediaUrl(reply.media_url, reply.media_type || 'image', reply.body || '')
          setMessageText(textBeforeCommand.trim())
      } else {
@@ -739,14 +1054,42 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                         <h3 className="font-semibold text-sm text-slate-900 leading-tight">
                             {chat.contact_name || chat.name || chat.jid.split('@')[0]}
                         </h3>
-                        <p className="text-xs text-slate-500">
-                             Click para info
-                        </p>
+                        {contactTyping ? (
+                          <p className="text-xs text-emerald-600 font-medium">
+                            {contactTyping === 'recording' ? (
+                              <span className="flex items-center gap-1">
+                                <Mic className="w-3 h-3" />
+                                grabando audio...
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1">
+                                escribiendo
+                                <span className="inline-flex">
+                                  <span className="animate-bounce" style={{ animationDelay: '0ms' }}>.</span>
+                                  <span className="animate-bounce" style={{ animationDelay: '150ms' }}>.</span>
+                                  <span className="animate-bounce" style={{ animationDelay: '300ms' }}>.</span>
+                                </span>
+                              </span>
+                            )}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-slate-500">
+                               Click para info
+                          </p>
+                        )}
                     </div>
                 </div>
               </div>
 
               <div className="flex items-center gap-1">
+                   <button
+                     onClick={handleRequestHistorySync}
+                     disabled={syncingHistory}
+                     className="p-2 text-slate-500 hover:bg-slate-100 rounded-full transition disabled:opacity-50"
+                     title="Sincronizar historial de mensajes"
+                   >
+                       <RefreshCw className={`w-5 h-5 ${syncingHistory ? 'animate-spin' : ''}`} />
+                   </button>
                    <button onClick={() => setShowSearch(!showSearch)} className="p-2 text-slate-500 hover:bg-slate-100 rounded-full transition">
                        <Search className="w-5 h-5" />
                    </button>
@@ -809,14 +1152,83 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                                 onRetry={() => handleRetrySend(msg)}
                                 onReply={(m) => setReplyingTo(m)}
                                 onForward={(m) => setForwardingMsg(m)}
+                                onDelete={async (m) => {
+                                  if (!deviceId || !chat) return
+                                  const token = localStorage.getItem('token')
+                                  try {
+                                    const res = await fetch('/api/messages/delete', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                      body: JSON.stringify({
+                                        device_id: deviceId,
+                                        chat_jid: chat.jid,
+                                        sender_jid: m.from_jid || '',
+                                        message_id: m.message_id,
+                                        is_from_me: m.is_from_me
+                                      })
+                                    })
+                                    const data = await res.json()
+                                    if (data.success) {
+                                      setMessages(prev => prev.map(msg =>
+                                        msg.message_id === m.message_id ? { ...msg, is_revoked: true, body: undefined } : msg
+                                      ))
+                                    }
+                                  } catch (err) {
+                                    console.error('Failed to delete message', err)
+                                  }
+                                }}
+                                onEdit={(m) => {
+                                  setEditingMsg(m)
+                                  setMessageText(m.body || '')
+                                  requestAnimationFrame(() => {
+                                    inputRef.current?.focus()
+                                  })
+                                }}
+                                onReact={async (m, emoji) => {
+                                  if (!deviceId || !chat) return
+                                  const token = localStorage.getItem('token')
+                                  try {
+                                    // Optimistically update UI
+                                    setMessages(prev => prev.map(msg => {
+                                      if (msg.message_id !== m.message_id) return msg
+                                      const reactions = [...(msg.reactions || [])]
+                                      const existingIdx = reactions.findIndex(r => r.is_from_me && r.emoji === emoji)
+                                      if (existingIdx >= 0) {
+                                        reactions.splice(existingIdx, 1)
+                                      } else {
+                                        const prevIdx = reactions.findIndex(r => r.is_from_me)
+                                        if (prevIdx >= 0) reactions.splice(prevIdx, 1)
+                                        reactions.push({ id: '', target_message_id: m.message_id, sender_jid: '', emoji, is_from_me: true })
+                                      }
+                                      return { ...msg, reactions }
+                                    }))
+                                    const res = await fetch('/api/messages/react', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                      body: JSON.stringify({
+                                        device_id: deviceId,
+                                        to: chat.jid,
+                                        target_message_id: m.message_id,
+                                        target_from_me: !!m.is_from_me,
+                                        emoji: emoji
+                                      })
+                                    })
+                                    const data = await res.json()
+                                    if (!data.success) {
+                                      console.error('Failed to send reaction:', data.error)
+                                    }
+                                  } catch (err) {
+                                    console.error('Failed to send reaction', err)
+                                  }
+                                }}
                               />
                           </div>
                       )
                   })}
              </div>
 
-             {/* Right Panel (Contact/Search) - Overlay/Sidebar */}
-             {showContactInfo && (
+             {/* Right Panel (Contact/Search) - Overlay/Sidebar — only when NOT parent-controlled */}
+             {showContactInfo && !onContactInfoToggle && (
                 <div
                    className="absolute top-0 right-0 h-full border-l border-slate-200 bg-white z-20 shadow-xl"
                    style={{ width: isMdScreen ? rightPanelWidth : '100%' }}
@@ -847,28 +1259,51 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                <button onClick={handleCancelPendingMedia} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-full transition">
                  <X className="w-6 h-6" />
                </button>
-               <span className="text-slate-600 text-sm font-medium">{pendingMedia.type === 'image' ? 'Imagen' : 'Video'}</span>
+               <span className="text-slate-600 text-sm font-medium">
+                 {pendingMedia.type === 'image' ? 'Imagen' : pendingMedia.type === 'video' ? 'Video' : 'Documento'}
+               </span>
                <div className="w-10" />
              </div>
              {/* Preview */}
              <div className="flex-1 flex items-center justify-center p-4 min-h-0 bg-slate-50">
                {pendingMedia.type === 'image' ? (
                  <img src={pendingMedia.previewUrl} className="max-h-full max-w-full object-contain rounded-lg shadow-md" alt="Preview" />
-               ) : (
+               ) : pendingMedia.type === 'video' ? (
                  <video src={pendingMedia.previewUrl} className="max-h-full max-w-full rounded-lg shadow-md" controls />
+               ) : (
+                 <div className="flex flex-col items-center gap-4 p-8 bg-white rounded-2xl shadow-lg border border-slate-200 max-w-sm">
+                   <div className="w-20 h-20 bg-blue-100 rounded-2xl flex items-center justify-center">
+                     <FileText className="w-10 h-10 text-blue-500" />
+                   </div>
+                   <div className="text-center">
+                     <p className="text-sm font-semibold text-slate-800 break-all">{pendingMedia.file.name}</p>
+                     <p className="text-xs text-slate-400 mt-1">{(pendingMedia.file.size / 1024 / 1024).toFixed(2)} MB</p>
+                   </div>
+                 </div>
                )}
              </div>
              {/* Caption + Send */}
              <div className="px-4 py-3 flex items-center gap-3 border-t border-slate-200 bg-white">
-               <input
-                 type="text"
-                 placeholder="Agregar pie de foto..."
-                 value={mediaCaption}
-                 onChange={e => setMediaCaption(e.target.value)}
-                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendPendingMedia() } }}
-                 className="flex-1 bg-slate-100 text-slate-800 placeholder-slate-400 px-4 py-2.5 rounded-full text-sm border border-slate-200 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition"
-                 autoFocus
+               <EmojiPicker
+                 onEmojiSelect={(emoji) => {
+                   if (captionInputRef.current) {
+                     captionInputRef.current.insertAtCaret(emoji)
+                   } else {
+                     setMediaCaption(prev => prev + emoji)
+                   }
+                 }}
+                 buttonClassName="p-2 text-slate-500 hover:text-emerald-600 transition"
                />
+               <div className="flex-1">
+                 <WhatsAppTextInput
+                   ref={captionInputRef}
+                   value={mediaCaption}
+                   onChange={setMediaCaption}
+                   placeholder={pendingMedia.type === 'document' ? 'Agregar descripción...' : 'Agregar pie de foto...'}
+                   onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendPendingMedia() } }}
+                   singleLine
+                 />
+               </div>
                <button
                  onClick={handleSendPendingMedia}
                  className="p-3 bg-emerald-600 text-white rounded-full hover:bg-emerald-700 transition shadow-md"
@@ -880,7 +1315,22 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
          )}
 
          {/* Footer / Input */}
+         {readOnly ? (
+           <div className="px-4 py-3 bg-amber-50 border-t border-amber-200 flex items-center justify-center gap-2 shrink-0">
+             <EyeOff className="w-4 h-4 text-amber-600" />
+             <span className="text-sm text-amber-700 font-medium">Solo lectura — dispositivo no conectado</span>
+           </div>
+         ) : (
          <div className="px-3 py-2 bg-slate-50 border-t border-slate-200 flex items-end gap-2 relative z-30 shrink-0">
+              {editingMsg && (
+                  <div className="absolute bottom-full left-0 right-0 bg-blue-50 p-2 border-t border-blue-400 flex justify-between items-center shadow-sm">
+                      <div className="text-xs border-l-4 border-blue-500 pl-2">
+                          <p className="font-bold text-blue-700">Editando mensaje</p>
+                          <p className="line-clamp-1 text-slate-600">{editingMsg.body}</p>
+                      </div>
+                      <button onClick={() => { setEditingMsg(null); setMessageText(''); inputRef.current?.clear() }}><X className="w-4 h-4 text-slate-500" /></button>
+                  </div>
+              )}
               {replyingTo && (
                   <div className="absolute bottom-full left-0 right-0 bg-slate-100 p-2 border-t border-emerald-500 flex justify-between items-center shadow-sm">
                       <div className="text-xs border-l-4 border-emerald-500 pl-2">
@@ -894,18 +1344,19 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
               {/* Attachments Menu */}
               {showAttachments && (
                   <div className="absolute bottom-16 left-4 bg-white rounded-xl shadow-xl border border-slate-100 p-2 flex flex-col gap-2 animate-in slide-in-from-bottom-2 duration-200">
-                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700" onClick={() => fileInputRef.current?.click()}>
+                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700" onClick={() => { fileInputRef.current?.click(); setShowAttachments(false) }}>
                           <ImageIcon className="w-5 h-5 text-purple-500" /> Foto/Video
                       </button>
-                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700">
+                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700" onClick={() => { docFileInputRef.current?.click(); setShowAttachments(false) }}>
                           <FileText className="w-5 h-5 text-blue-500" /> Documento
                       </button>
-                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700">
+                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700" onClick={() => { setShowContactPicker(true); setShowAttachments(false) }}>
                           <User className="w-5 h-5 text-emerald-500" /> Contacto
                       </button>
                   </div>
               )}
-              <input type="file" ref={fileInputRef} className="hidden" multiple onChange={handleFileSelect} />
+              <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={handleFileSelect} />
+              <input type="file" ref={docFileInputRef} className="hidden" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar" onChange={handleFileSelect} />
 
               <div className="flex gap-1 pb-1">
                   <button onClick={() => setShowAttachments(!showAttachments)} className="p-2 text-slate-500 hover:text-emerald-600 transition">
@@ -945,7 +1396,6 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                       onChange={handleMessageChange}
                       placeholder="Escribe un mensaje... ( / para respuestas rápidas)"
                       onKeyDown={handleKeyDown}
-                      disabled={sendingMessage}
                       singleLine
                     />
               </div>
@@ -969,6 +1419,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                   </button>
               )}
          </div>
+         )}
 
          {/* Poll Modal */}
          {showPollModal && (
@@ -997,6 +1448,16 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                onSuccess={() => setForwardingMsg(null)}
              />
          )}
+
+         {/* Contact Picker for sending contact vCard */}
+         <ContactSelector
+           open={showContactPicker}
+           onClose={() => setShowContactPicker(false)}
+           onConfirm={handleSendContact}
+           title="Enviar Contacto"
+           subtitle="Selecciona los contactos que deseas enviar"
+           confirmLabel="Enviar"
+         />
     </div>
   )
 }

@@ -10,6 +10,7 @@ import { es } from 'date-fns/locale'
 import MessageBubble from '@/components/chat/MessageBubble'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '@/components/WhatsAppTextInput'
 import EmojiPicker from '@/components/chat/EmojiPicker'
+import { compressImageStandard } from '@/utils/imageCompression'
 
 interface Device {
   id: string
@@ -194,16 +195,22 @@ export default function CreateCampaignModal({
   const handleAttachFile = async (file: File, mediaType: string) => {
     if (attachments.length >= 10) { alert('Máximo 10 adjuntos por campaña'); return }
     if (file.size > 32 * 1024 * 1024) { alert('El archivo es demasiado grande. Máximo 32MB.'); return }
-    const localPreview = ['image', 'video'].includes(mediaType) ? URL.createObjectURL(file) : undefined
+    if (mediaType === 'video' && file.size > 15 * 1024 * 1024) { alert('El video es demasiado grande. Máximo 15 MB.'); return }
+    // Compress images client-side before upload
+    let fileToSend = file
+    if (mediaType === 'image') {
+      try { fileToSend = await compressImageStandard(file) } catch (err) { console.warn('[Campaign] Image compression failed, using original:', err) }
+    }
+    const localPreview = ['image', 'video'].includes(mediaType) ? URL.createObjectURL(fileToSend) : undefined
     const tempAttachment: CampaignAttachment = {
-      media_url: '', media_type: mediaType, caption: '', file_name: file.name,
-      file_size: file.size, position: attachments.length, _localPreview: localPreview, _uploading: true,
+      media_url: '', media_type: mediaType, caption: '', file_name: fileToSend.name,
+      file_size: fileToSend.size, position: attachments.length, _localPreview: localPreview, _uploading: true,
     }
     setAttachments(prev => [...prev, tempAttachment])
     const idx = attachments.length
     try {
       const fd = new FormData()
-      fd.append('file', file)
+      fd.append('file', fileToSend)
       fd.append('folder', 'uploads')
       const uploadRes = await fetch('/api/media/upload', {
         method: 'POST',

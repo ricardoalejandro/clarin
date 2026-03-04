@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,7 +76,7 @@ type SyncTask struct {
 // WorkerStatus reports the real-time status of the background sync worker.
 type WorkerStatus struct {
 	Running            bool       `json:"running"`
-	QueueLength        int        `json:"queue_length"`
+	ActiveAccounts     int        `json:"active_accounts"` // accounts being synced right now
 	LastCheck          *time.Time `json:"last_check,omitempty"`
 	LastSyncedPipeline string     `json:"last_synced_pipeline,omitempty"`
 	ConnectedCount     int        `json:"connected_count"`
@@ -96,31 +97,35 @@ type SyncService struct {
 	client  *Client
 	db      *pgxpool.Pool
 	hub     *ws.Hub
-	queue   chan SyncTask
 	stopCh  chan struct{}
-	stopped chan struct{}
+	wg      sync.WaitGroup  // tracks active per-account sync goroutines
 	mu      sync.RWMutex
 	status  WorkerStatus
 	running bool
 	fullSyncMu sync.RWMutex
 	fullSync   map[uuid.UUID]*FullSyncStatus
+	// Per-account busy tracking: prevents concurrent syncs for the same account.
+	busyAccounts   map[uuid.UUID]bool
+	busyMu         sync.Mutex
 	// Cache of unsorted lead IDs that failed to sync (no phone on contact).
 	// Prevents wasting API calls every cycle on leads that can never sync.
 	unsortedSkipCache   map[int]int64 // kommo lead ID → timestamp when cached
 	unsortedSkipCacheMu sync.Mutex
+	// OnLeadTagsChanged is called after lead tags are synced for an account.
+	// Used to trigger event participant reconciliation without tight coupling.
+	OnLeadTagsChanged func(ctx context.Context, accountID uuid.UUID)
 }
 
-// NewSyncService creates a new sync service with a background queue.
+// NewSyncService creates a new sync service with per-account parallel workers.
 func NewSyncService(client *Client, db *pgxpool.Pool, hub *ws.Hub) *SyncService {
 	return &SyncService{
 		client:            client,
 		db:                db,
 		hub:               hub,
-		queue:             make(chan SyncTask, 100),
 		stopCh:            make(chan struct{}),
-		stopped:           make(chan struct{}),
 		fullSync:          make(map[uuid.UUID]*FullSyncStatus),
 		unsortedSkipCache: make(map[int]int64),
+		busyAccounts:      make(map[uuid.UUID]bool),
 	}
 }
 
@@ -199,13 +204,10 @@ func (s *SyncService) Start() {
 	s.status.Running = true
 	s.mu.Unlock()
 
-	// Worker: processes sync tasks from the queue
-	go s.worker()
-
-	// Poller: checks for updates every 30 seconds
+	// Poller: each tick spawns per-account goroutines (parallel, skip-if-busy)
 	go s.poller()
 
-	log.Println("[Kommo Sync] Background worker started (5s poll interval)")
+	log.Println("[Kommo Sync] Background poller started (5s interval, parallel per-account)")
 }
 
 // Stop gracefully shuts down the sync worker.
@@ -218,65 +220,77 @@ func (s *SyncService) Stop() {
 	s.running = false
 	s.mu.Unlock()
 	close(s.stopCh)
-	<-s.stopped
+	s.wg.Wait() // wait for all per-account sync goroutines to finish
 	log.Println("[Kommo Sync] Background worker stopped")
 }
 
 // GetStatus returns the current worker status.
 func (s *SyncService) GetStatus() WorkerStatus {
+	s.busyMu.Lock()
+	active := len(s.busyAccounts)
+	s.busyMu.Unlock()
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	st := s.status
-	st.QueueLength = len(s.queue)
+	s.mu.RUnlock()
+	st.ActiveAccounts = active
 	return st
 }
 
-// EnqueuePipelineSync adds a pipeline sync task to the queue (non-blocking).
-func (s *SyncService) EnqueuePipelineSync(accountID uuid.UUID, kommoPipelineID int, updatedSince int64) {
-	select {
-	case s.queue <- SyncTask{AccountID: accountID, KommoPipelineID: kommoPipelineID, UpdatedSince: updatedSince}:
-	default:
-		log.Printf("[Kommo Sync] Queue full, dropping sync task for pipeline %d", kommoPipelineID)
+// spawnAccountSync spawns a goroutine to sync an account if not already running.
+// Returns true if spawned, false if a sync for this account is already in progress (skip-if-busy).
+func (s *SyncService) spawnAccountSync(accountID uuid.UUID, updatedSince int64) bool {
+	s.busyMu.Lock()
+	if s.busyAccounts[accountID] {
+		s.busyMu.Unlock()
+		return false
 	}
-}
+	s.busyAccounts[accountID] = true
+	s.busyMu.Unlock()
 
-// worker processes sync tasks from the channel one at a time.
-func (s *SyncService) worker() {
-	defer close(s.stopped)
-	for {
-		select {
-		case <-s.stopCh:
-			return
-		case task := <-s.queue:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			count, err := s.syncPipelineLeads(ctx, task.AccountID, task.KommoPipelineID, task.UpdatedSince)
-			cancel()
-			if err != nil {
-				if !strings.Contains(err.Error(), "204") && !strings.Contains(err.Error(), "No content") {
-					log.Printf("[Kommo Sync] Pipeline %d error: %v", task.KommoPipelineID, err)
-				}
-			} else if count > 0 {
-				log.Printf("[Kommo Sync] Pipeline %d: synced %d leads", task.KommoPipelineID, count)
-				// Broadcast real-time update to frontend
-				if s.hub != nil {
-					s.hub.BroadcastToAccount(task.AccountID, ws.EventLeadUpdate, map[string]interface{}{
-						"pipeline_id": task.KommoPipelineID,
-						"count":       count,
-					})
-				}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer func() {
+			s.busyMu.Lock()
+			delete(s.busyAccounts, accountID)
+			s.busyMu.Unlock()
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		count, err := s.syncGlobalLeads(ctx, accountID, updatedSince)
+		if err != nil {
+			if !strings.Contains(err.Error(), "204") && !strings.Contains(err.Error(), "No content") {
+				log.Printf("[Kommo Sync] Account %s sync error: %v", accountID, err)
 			}
-			// Update last_synced_at
-			_, _ = s.db.Exec(context.Background(),
-				`UPDATE kommo_connected_pipelines SET last_synced_at = NOW() WHERE account_id = $1 AND kommo_pipeline_id = $2`,
-				task.AccountID, task.KommoPipelineID)
-
-			s.mu.Lock()
-			now := time.Now()
-			s.status.LastCheck = &now
-			s.status.LastSyncedPipeline = fmt.Sprintf("%d", task.KommoPipelineID)
-			s.mu.Unlock()
+		} else if count > 0 {
+			log.Printf("[Kommo Sync] Account %s: synced %d leads", accountID, count)
+			if s.hub != nil {
+				s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{
+					"action": "synced",
+					"count":  count,
+				})
+			}
 		}
-	}
+
+		_, _ = s.db.Exec(context.Background(),
+			`UPDATE kommo_connected_pipelines SET last_synced_at = NOW() WHERE account_id = $1 AND enabled = TRUE`,
+			accountID)
+
+		// Trigger event participant reconciliation after tag sync
+		if s.OnLeadTagsChanged != nil {
+			log.Printf("[Kommo Sync] Triggering event reconciliation for account %s", accountID)
+			s.OnLeadTagsChanged(context.Background(), accountID)
+		}
+
+		s.mu.Lock()
+		now := time.Now()
+		s.status.LastCheck = &now
+		s.status.LastSyncedPipeline = accountID.String()[:8]
+		s.mu.Unlock()
+	}()
+	return true
 }
 
 // poller periodically checks for updates in connected pipelines.
@@ -306,34 +320,46 @@ func (s *SyncService) pollConnectedPipelines() {
 	}
 	defer rows.Close()
 
-	count := 0
+	// 2. Collect all account IDs first, then compute a GLOBAL cursor.
+	// Since all accounts share the same Kommo API/token, they all see the same leads.
+	// Using a per-account cursor based on local MAX(updated_at) is wrong because
+	// an account with newer local leads would skip leads that are new TO IT but
+	// older in Kommo. The global cursor = MIN across all accounts ensures every
+	// account sees every lead that changed since the slowest account's last sync.
+	var accountIDs []uuid.UUID
 	for rows.Next() {
 		var accountID uuid.UUID
 		if err := rows.Scan(&accountID); err != nil {
 			continue
 		}
+		accountIDs = append(accountIDs, accountID)
+	}
+	rows.Close()
 
-		// 2. Get last global sync timestamp for this account
-		// For simplicity, we can query the most recent updated_at from leads table + buffer.
-		var lastUpdated int64
-		_ = s.db.QueryRow(ctx, `
-			SELECT EXTRACT(EPOCH FROM MAX(updated_at))::bigint
-			FROM leads
-			WHERE account_id = $1 AND kommo_id IS NOT NULL
-		`, accountID).Scan(&lastUpdated)
+	if len(accountIDs) == 0 {
+		return
+	}
 
-		// Default to full sync if no leads (or 0)
-		since := lastUpdated
-		if since > 0 {
-			// Subtract 2 minutes buffer for safety
-			since = since - 120
-			if since < 0 {
-				since = 0
-			}
+	// Global cursor: the MINIMUM last_synced_at across all enabled pipelines.
+	// This guarantees every account gets every lead updated since the slowest sync.
+	var globalSince int64
+	_ = s.db.QueryRow(ctx, `
+		SELECT COALESCE(EXTRACT(EPOCH FROM MIN(last_synced_at))::bigint, 0)
+		FROM kommo_connected_pipelines
+		WHERE enabled = TRUE AND last_synced_at IS NOT NULL
+	`).Scan(&globalSince)
+
+	if globalSince > 0 {
+		// Subtract 5 minutes buffer for safety (API timestamp drift, slow processing)
+		globalSince = globalSince - 300
+		if globalSince < 0 {
+			globalSince = 0
 		}
+	}
 
-		// Enqueue Global Sync Task (KommoPipelineID = 0 represents Global)
-		s.EnqueuePipelineSync(accountID, 0, since)
+	count := 0
+	for _, accountID := range accountIDs {
+		s.spawnAccountSync(accountID, globalSince)
 		count++
 	}
 
@@ -401,8 +427,25 @@ func (s *SyncService) ConnectPipeline(ctx context.Context, accountID uuid.UUID, 
 		return nil, err
 	}
 
-	// Enqueue a full sync for this pipeline (updatedSince=0 = all leads)
-	s.EnqueuePipelineSync(accountID, kommoPipelineID, 0)
+	// Launch a full sync for this pipeline in background (bypass queue to avoid drops)
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		count, err := s.syncPipelineLeads(bgCtx, accountID, kommoPipelineID, 0)
+		if err != nil {
+			log.Printf("[Kommo Sync] Initial sync error for pipeline %d: %v", kommoPipelineID, err)
+		} else {
+			log.Printf("[Kommo Sync] Initial sync for pipeline %d: synced %d leads", kommoPipelineID, count)
+		}
+		_, _ = s.db.Exec(context.Background(),
+			`UPDATE kommo_connected_pipelines SET last_synced_at = NOW() WHERE account_id = $1 AND kommo_pipeline_id = $2`,
+			accountID, kommoPipelineID)
+		if s.hub != nil && count > 0 {
+			s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{
+				"action": "synced",
+			})
+		}
+	}()
 
 	return &cp, nil
 }
@@ -510,6 +553,12 @@ func (s *SyncService) SyncAll(ctx context.Context, accountID uuid.UUID) (*SyncRe
 	log.Printf("[Kommo Sync] Done for account %s: %d pipelines, %d tags, %d contacts, %d leads in %s",
 		accountID, result.Pipelines, result.Tags, result.Contacts, result.Leads, result.Duration)
 
+	// Trigger event participant reconciliation after full sync
+	if s.OnLeadTagsChanged != nil && result.Leads > 0 {
+		log.Printf("[Kommo Sync] Triggering event reconciliation after full sync for account %s", accountID)
+		s.OnLeadTagsChanged(ctx, accountID)
+	}
+
 	return result, nil
 }
 
@@ -549,7 +598,7 @@ func (s *SyncService) syncSinglePipeline(ctx context.Context, accountID uuid.UUI
 			stageKommoID := int64(ks.ID)
 			color := kommoColorToHex(ks.Color)
 			var existingStageID uuid.UUID
-			err := s.db.QueryRow(ctx, `SELECT id FROM pipeline_stages WHERE kommo_id = $1`, stageKommoID).Scan(&existingStageID)
+			err := s.db.QueryRow(ctx, `SELECT id FROM pipeline_stages WHERE pipeline_id = $1 AND kommo_id = $2`, pipelineID, stageKommoID).Scan(&existingStageID)
 			if err != nil {
 				_, _ = s.db.Exec(ctx, `
 					INSERT INTO pipeline_stages (id, pipeline_id, name, color, position, kommo_id, created_at)
@@ -760,8 +809,10 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		WHERE p.account_id = $1 AND p.kommo_id = $2 AND kcp.enabled = TRUE
 	`, accountID, pipelineKommoID).Scan(&pid)
 
+	pipelineSynced := false
 	if err == nil {
 		// Pipeline is synced
+		pipelineSynced = true
 		pipelineID = &pid
 		var sid uuid.UUID
 		err = s.db.QueryRow(ctx, `SELECT id FROM pipeline_stages WHERE pipeline_id = $1 AND kommo_id = $2`, pid, statusKommoID).Scan(&sid)
@@ -772,6 +823,17 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		// Pipeline is NOT synced (or not found) -> "Leads Entrantes" (Unassigned)
 		pipelineID = nil
 		stageID = nil
+	}
+
+	// Early check: if the pipeline is NOT synced and the lead doesn't already exist
+	// in this account, skip entirely to avoid creating orphan contacts.
+	if !pipelineSynced {
+		var existsInAccount bool
+		_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM leads WHERE account_id = $1 AND kommo_id = $2)`,
+			accountID, kommoID).Scan(&existsInAccount)
+		if !existsInAccount {
+			return nil // Lead not in a synced pipeline and doesn't exist → skip completely
+		}
 	}
 
 	var contactID *uuid.UUID
@@ -827,16 +889,13 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	if err == nil {
 		foundByKommoID = true
 	} else if jid != "" {
-		// Also try to find by JID (lead may exist from WhatsApp auto-create without kommo_id)
+		// Try to find an unlinked WhatsApp-created lead (no kommo_id) to attach this Kommo lead to.
+		// We deliberately skip leads that already have a kommo_id — since the UNIQUE(account_id,jid)
+		// constraint was removed, there can now be multiple leads per phone; each deserves its own row.
 		var existingKommoID *int64
-		err = s.db.QueryRow(ctx, `SELECT id, kommo_id FROM leads WHERE account_id = $1 AND jid = $2`, accountID, jid).Scan(&leadID, &existingKommoID)
-		if err == nil && existingKommoID != nil && *existingKommoID != kommoID {
-			// Conflict: found lead already has a different Kommo ID. Treat as not found to avoid incorrect merge.
-			// This will cause insertion of a new lead (likely failing on unique JID constraint if validation exists, or creating duplicate).
-			// Ideally we should log this.
-			log.Printf("[Kommo Sync] Conflict: Lead with JID %s has kommo_id %d, but update is for kommo_id %d. Skipping link.", jid, *existingKommoID, kommoID)
-			err = fmt.Errorf("lead conflict: jid matches but kommo_id differs")
-		}
+		err = s.db.QueryRow(ctx,
+			`SELECT id, kommo_id FROM leads WHERE account_id = $1 AND jid = $2 AND kommo_id IS NULL LIMIT 1`,
+			accountID, jid).Scan(&leadID, &existingKommoID)
 	}
 	if err != nil {
 		// NEW lead — only import if it belongs to a synced pipeline.
@@ -964,6 +1023,9 @@ func (s *SyncService) syncCallsFromKommo(ctx context.Context, accountID, leadID 
 			parts = append(parts, "Responsable: "+responsable)
 		}
 		if fecha != "" {
+			if ts, err := strconv.ParseInt(fecha, 10, 64); err == nil && ts > 0 {
+				fecha = time.Unix(ts, 0).Format("02/01/2006 15:04")
+			}
 			parts = append(parts, "Fecha: "+fecha)
 		}
 		if resultado != "" {
@@ -981,6 +1043,14 @@ func (s *SyncService) syncCallsFromKommo(ctx context.Context, accountID, leadID 
 		if err != nil {
 			log.Printf("[Kommo Sync] Error syncing call slot %d for lead %s: %v", slotNum, leadID, err)
 		}
+	}
+
+	// Broadcast interaction update for this lead
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, ws.EventInteractionUpdate, map[string]interface{}{
+			"action":  "synced",
+			"lead_id": leadID.String(),
+		})
 	}
 
 	// Handle "Otras llamadas" overflow field

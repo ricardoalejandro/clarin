@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Phone, Mail, User, Calendar, MessageCircle, Trash2, ChevronDown,
-  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle
+  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -46,6 +46,8 @@ interface Lead {
   email: string
   company: string | null
   age: number | null
+  dni: string | null
+  birth_date: string | null
   status: string
   pipeline_id: string | null
   stage_id: string | null
@@ -93,6 +95,20 @@ interface LeadDetailPanelProps {
   hideWhatsApp?: boolean
   /** Optional: extra CSS classes */
   className?: string
+  /** Event mode: shows event-specific stage selector instead of lead pipelines */
+  eventMode?: boolean
+  /** Event ID (required when eventMode is true) for API calls */
+  eventId?: string
+  /** The event's pipeline stages (required when eventMode is true) */
+  eventStages?: PipelineStage[]
+  /** The participant ID (required when eventMode is true) */
+  participantId?: string
+  /** Callback when stage changes in event mode */
+  onStageChange?: (stageId: string, stageName: string, stageColor: string) => void
+  /** Called before assigning a tag in event mode. Return false to cancel. */
+  onBeforeTagAssign?: (tagId: string) => Promise<boolean>
+  /** Called before removing a tag in event mode. Return false to cancel. */
+  onBeforeTagRemove?: (tagId: string) => Promise<boolean>
 }
 
 // ─── Component ───────────────────────────────────────────
@@ -106,6 +122,13 @@ export default function LeadDetailPanel({
   hideDelete = false,
   hideWhatsApp = false,
   className = '',
+  eventMode = false,
+  eventId,
+  eventStages,
+  participantId,
+  onStageChange,
+  onBeforeTagAssign,
+  onBeforeTagRemove,
 }: LeadDetailPanelProps) {
   // Pipelines
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
@@ -142,8 +165,12 @@ export default function LeadDetailPanel({
   // Kommo sync
   const [syncingKommo, setSyncingKommo] = useState(false)
 
-  // ─── Fetch pipelines ───────────────────────────────────
+  // History sync
+  const [syncingHistory, setSyncingHistory] = useState(false)
+
+  // ─── Fetch pipelines (skip in event mode) ───────────────
   useEffect(() => {
+    if (eventMode) return
     const token = localStorage.getItem('token')
     fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } })
       .then(res => res.json())
@@ -151,7 +178,7 @@ export default function LeadDetailPanel({
         if (data.success) setPipelines(data.pipelines || [])
       })
       .catch(console.error)
-  }, [])
+  }, [eventMode])
 
   // ─── Fetch observations when lead changes ──────────────
   useEffect(() => {
@@ -211,21 +238,34 @@ export default function LeadDetailPanel({
       const val = editValues[field]?.trim() ?? ''
       if (field === 'age') {
         payload[field] = val ? parseInt(val, 10) : null
+      } else if (field === 'birth_date') {
+        payload[field] = val || null
       } else {
         payload[field] = val || null
       }
-      const res = await fetch(`/api/leads/${lead.id}`, {
+      const endpoint = eventMode && eventId && participantId
+        ? `/api/events/${eventId}/participants/${participantId}`
+        : `/api/leads/${lead.id}`
+      const res = await fetch(endpoint, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(payload),
       })
       const data = await res.json()
-      if (data.success && data.lead) {
-        const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
-        onLeadChange(merged)
+      if (eventMode) {
+        if (data.success && data.participant) {
+          onLeadChange({ ...lead, ...payload } as Lead)
+        } else {
+          onLeadChange({ ...lead, ...payload } as Lead)
+        }
+      } else {
+        if (data.success && data.lead) {
+          const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
+          onLeadChange(merged)
+        }
       }
     } catch (err) {
-      console.error('Failed to save lead field:', err)
+      console.error('Failed to save field:', err)
     } finally {
       setSavingField(false)
       setEditingField(null)
@@ -236,13 +276,18 @@ export default function LeadDetailPanel({
     setSavingNotes(true)
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/leads/${lead.id}`, {
+      const endpoint = eventMode && eventId && participantId
+        ? `/api/events/${eventId}/participants/${participantId}`
+        : `/api/leads/${lead.id}`
+      const res = await fetch(endpoint, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ notes: notesValue }),
       })
       const data = await res.json()
-      if (data.success && data.lead) {
+      if (eventMode) {
+        onLeadChange({ ...lead, notes: notesValue })
+      } else if (data.success && data.lead) {
         const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
         onLeadChange(merged)
       }
@@ -257,25 +302,45 @@ export default function LeadDetailPanel({
   const handleUpdateLeadStage = async (leadId: string, stageId: string) => {
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/leads/${leadId}/stage`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ stage_id: stageId }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        let stage: PipelineStage | undefined
-        for (const p of pipelines) {
-          const found = p.stages?.find(s => s.id === stageId)
-          if (found) { stage = found; break }
-        }
-        onLeadChange({
-          ...lead,
-          stage_id: stageId,
-          stage_name: stage?.name || null,
-          stage_color: stage?.color || null,
-          stage_position: stage?.position ?? null,
+      if (eventMode && eventId && participantId) {
+        const res = await fetch(`/api/events/${eventId}/participants/${participantId}/stage`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ stage_id: stageId }),
         })
+        const data = await res.json()
+        if (data.success) {
+          const stage = eventStages?.find(s => s.id === stageId)
+          onLeadChange({
+            ...lead,
+            stage_id: stageId,
+            stage_name: stage?.name || null,
+            stage_color: stage?.color || null,
+            stage_position: stage?.position ?? null,
+          })
+          onStageChange?.(stageId, stage?.name || '', stage?.color || '')
+        }
+      } else {
+        const res = await fetch(`/api/leads/${leadId}/stage`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ stage_id: stageId }),
+        })
+        const data = await res.json()
+        if (data.success) {
+          let stage: PipelineStage | undefined
+          for (const p of pipelines) {
+            const found = p.stages?.find(s => s.id === stageId)
+            if (found) { stage = found; break }
+          }
+          onLeadChange({
+            ...lead,
+            stage_id: stageId,
+            stage_name: stage?.name || null,
+            stage_color: stage?.color || null,
+            stage_position: stage?.position ?? null,
+          })
+        }
       }
     } catch (err) {
       console.error('Failed to update stage:', err)
@@ -366,21 +431,54 @@ export default function LeadDetailPanel({
     }
   }
 
+  const handleRequestHistorySync = async () => {
+    if (syncingHistory || !lead.jid) return
+    setSyncingHistory(true)
+    try {
+      const token = localStorage.getItem('token')
+      // First, find or create the chat for this lead's JID
+      const findRes = await fetch(`/api/chats/find-by-phone/${encodeURIComponent(lead.phone)}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      const findData = await findRes.json()
+      const chatId = findData?.chat?.id
+      if (!chatId) {
+        console.error('[HistorySync] No chat found for lead')
+        return
+      }
+      const res = await fetch(`/api/chats/${chatId}/sync-history`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || 'Error solicitando historial')
+      }
+    } catch (err: any) {
+      console.error('[HistorySync]', err)
+    } finally {
+      setTimeout(() => setSyncingHistory(false), 15000)
+    }
+  }
+
   const handleDeleteLead = async () => {
-    if (!confirm('¿Estás seguro de eliminar este lead?')) return
+    if (!confirm(eventMode ? '¿Estás seguro de eliminar este participante?' : '¿Estás seguro de eliminar este lead?')) return
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/leads/${lead.id}`, {
+      const url = eventMode && eventId && participantId
+        ? `/api/events/${eventId}/participants/${participantId}`
+        : `/api/leads/${lead.id}`
+      const res = await fetch(url, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
       if (data.success) {
-        onDelete?.(lead.id)
+        onDelete?.(eventMode ? (participantId || lead.id) : lead.id)
         onClose()
       }
     } catch (err) {
-      console.error('Failed to delete lead:', err)
+      console.error('Failed to delete:', err)
     }
   }
 
@@ -403,7 +501,7 @@ export default function LeadDetailPanel({
       {/* Header */}
       {!hideHeader && (
         <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10 shrink-0">
-          <h2 className="text-sm font-semibold text-slate-900">Detalle del Lead</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{eventMode ? 'Detalle del Participante' : 'Detalle del Lead'}</h2>
           <div className="flex items-center gap-1">
             <button onClick={onClose} className="p-1.5 hover:bg-slate-100 rounded-lg">
               <X className="w-4 h-4 text-slate-400" />
@@ -449,6 +547,7 @@ export default function LeadDetailPanel({
           )}
 
           {/* Kommo sync status */}
+          {!eventMode && (
           <div className="flex items-center justify-center gap-2 mt-3">
             {lead.kommo_id ? (
               <>
@@ -473,6 +572,7 @@ export default function LeadDetailPanel({
               </span>
             )}
           </div>
+          )}
         </div>
 
         {/* Inline editable info fields */}
@@ -550,6 +650,30 @@ export default function LeadDetailPanel({
               </span>
             )}
           </div>
+
+          {/* DNI */}
+          <div className="flex items-center gap-3 group">
+            <CreditCard className="w-4 h-4 text-emerald-600 shrink-0" />
+            {editingField === 'dni' ? (
+              <input autoFocus value={editValues.dni ?? ''} onChange={(e) => setEditValues({ ...editValues, dni: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'dni')} onBlur={() => saveLeadField('dni')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="DNI" />
+            ) : (
+              <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${lead.dni ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('dni', lead.dni || '')} title="Clic para editar">
+                {lead.dni || 'Agregar DNI'}
+              </span>
+            )}
+          </div>
+
+          {/* Birth Date */}
+          <div className="flex items-center gap-3 group">
+            <Cake className="w-4 h-4 text-emerald-600 shrink-0" />
+            {editingField === 'birth_date' ? (
+              <input autoFocus type="date" value={editValues.birth_date ?? ''} onChange={(e) => setEditValues({ ...editValues, birth_date: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'birth_date')} onBlur={() => saveLeadField('birth_date')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" />
+            ) : (
+              <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${lead.birth_date ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('birth_date', lead.birth_date ? lead.birth_date.split('T')[0] : '')} title="Clic para editar">
+                {lead.birth_date ? format(new Date(lead.birth_date), 'dd/MM/yyyy') : 'Agregar fecha de nacimiento'}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Tags */}
@@ -562,12 +686,16 @@ export default function LeadDetailPanel({
             onTagsChange={(newTags) => {
               onLeadChange({ ...lead, structured_tags: newTags })
             }}
+            onBeforeAssign={eventMode ? onBeforeTagAssign : undefined}
+            onBeforeRemove={eventMode ? onBeforeTagRemove : undefined}
           />
         </div>
 
-        {/* Pipeline & Stage Selector (Accordion) */}
+        {/* Pipeline & Stage Selector */}
         <div className="border-t border-slate-100 pt-4" ref={dropdownRef}>
-          <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Etapa del Pipeline</h5>
+          <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+            {eventMode ? 'Etapa del Evento' : 'Etapa del Pipeline'}
+          </h5>
 
           <div className="relative">
             {/* Main Button */}
@@ -584,13 +712,17 @@ export default function LeadDetailPanel({
                   <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: lead.stage_color }} />
                 )}
                 <span className="truncate text-sm font-medium">
-                  {lead.stage_name || lead.pipeline_id ? (
-                    <>
-                      <span className="opacity-50 font-normal">{pipelines.find(p => p.id === lead.pipeline_id)?.name || 'Sin Pipeline'}</span>
-                      <span className="mx-1.5 opacity-30">/</span>
-                      {lead.stage_name || 'Sin etapa'}
-                    </>
-                  ) : 'Leads Entrantes (Sin asignar)'}
+                  {eventMode ? (
+                    lead.stage_name || 'Sin etapa asignada'
+                  ) : (
+                    lead.stage_name || lead.pipeline_id ? (
+                      <>
+                        <span className="opacity-50 font-normal">{pipelines.find(p => p.id === lead.pipeline_id)?.name || 'Sin Pipeline'}</span>
+                        <span className="mx-1.5 opacity-30">/</span>
+                        {lead.stage_name || 'Sin etapa'}
+                      </>
+                    ) : 'Leads Entrantes (Sin asignar)'
+                  )}
                 </span>
               </div>
               <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showPipelineDropdown ? 'rotate-180' : ''}`} />
@@ -599,74 +731,99 @@ export default function LeadDetailPanel({
             {/* Dropdown */}
             {showPipelineDropdown && (
               <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-20 max-h-[400px] overflow-y-auto">
-                {/* Unassigned */}
-                <button
-                  className="w-full text-left px-3 py-2 hover:bg-slate-50 cursor-pointer flex items-center gap-2 border-b border-slate-50 transition-colors"
-                  onClick={() => {
-                    handleUpdateLeadPipeline(lead.id, '')
-                    setShowPipelineDropdown(false)
-                  }}
-                  type="button"
-                >
-                  <div className="w-2 h-2 rounded-full bg-slate-300" />
-                  <span className="text-sm text-slate-600">Leads Entrantes (Sin Asignar)</span>
-                </button>
-
-                {/* Pipelines and Stages */}
-                {pipelines.map(pipeline => {
-                  const isExpanded = expandedPipelineId === pipeline.id
-                  return (
-                    <div key={pipeline.id} className="border-b border-slate-50 last:border-0">
+                {eventMode ? (
+                  /* Event mode: flat list of event stages */
+                  <>
+                    {eventStages?.map(stage => (
                       <button
-                        className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
-                          isExpanded ? 'bg-slate-50' : 'hover:bg-slate-50 bg-white'
+                        key={stage.id}
+                        className={`w-full flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors text-left ${
+                          lead.stage_id === stage.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50 text-slate-700'
                         }`}
-                        onClick={() => setExpandedPipelineId(prev => prev === pipeline.id ? null : pipeline.id)}
+                        onClick={() => {
+                          handleUpdateLeadStage(lead.id, stage.id)
+                          setShowPipelineDropdown(false)
+                        }}
                         type="button"
                       >
-                        <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{pipeline.name}</span>
-                        <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
+                        <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: stage.color }} />
+                        <span className="text-sm truncate">{stage.name}</span>
+                        {lead.stage_id === stage.id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-500" />}
                       </button>
+                    ))}
+                  </>
+                ) : (
+                  /* Lead mode: pipelines with accordion stages */
+                  <>
+                    {/* Unassigned */}
+                    <button
+                      className="w-full text-left px-3 py-2 hover:bg-slate-50 cursor-pointer flex items-center gap-2 border-b border-slate-50 transition-colors"
+                      onClick={() => {
+                        handleUpdateLeadPipeline(lead.id, '')
+                        setShowPipelineDropdown(false)
+                      }}
+                      type="button"
+                    >
+                      <div className="w-2 h-2 rounded-full bg-slate-300" />
+                      <span className="text-sm text-slate-600">Leads Entrantes (Sin Asignar)</span>
+                    </button>
 
-                      <div className={`transition-all duration-300 ease-in-out overflow-hidden ${isExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'}`}>
-                        <div className="p-1 bg-slate-50/30 border-t border-slate-100">
-                          {pipeline.stages?.map(stage => (
-                            <button
-                              key={stage.id}
-                              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors text-left ${
-                                lead.stage_id === stage.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-100 text-slate-700'
-                              }`}
-                              onClick={() => {
-                                if (lead.pipeline_id !== pipeline.id) {
-                                  // Cross-pipeline move
-                                  const token = localStorage.getItem('token')
-                                  fetch(`/api/leads/${lead.id}`, {
-                                    method: 'PUT',
-                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                    body: JSON.stringify({ pipeline_id: pipeline.id, stage_id: stage.id })
-                                  }).then(res => res.json()).then(data => {
-                                    if (data.success && data.lead) {
-                                      const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
-                                      onLeadChange(merged)
+                    {/* Pipelines and Stages */}
+                    {pipelines.map(pipeline => {
+                      const isExpanded = expandedPipelineId === pipeline.id
+                      return (
+                        <div key={pipeline.id} className="border-b border-slate-50 last:border-0">
+                          <button
+                            className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
+                              isExpanded ? 'bg-slate-50' : 'hover:bg-slate-50 bg-white'
+                            }`}
+                            onClick={() => setExpandedPipelineId(prev => prev === pipeline.id ? null : pipeline.id)}
+                            type="button"
+                          >
+                            <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{pipeline.name}</span>
+                            <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
+                          </button>
+
+                          <div className={`transition-all duration-300 ease-in-out overflow-hidden ${isExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'}`}>
+                            <div className="p-1 bg-slate-50/30 border-t border-slate-100">
+                              {pipeline.stages?.map(stage => (
+                                <button
+                                  key={stage.id}
+                                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors text-left ${
+                                    lead.stage_id === stage.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-100 text-slate-700'
+                                  }`}
+                                  onClick={() => {
+                                    if (lead.pipeline_id !== pipeline.id) {
+                                      const token = localStorage.getItem('token')
+                                      fetch(`/api/leads/${lead.id}`, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        body: JSON.stringify({ pipeline_id: pipeline.id, stage_id: stage.id })
+                                      }).then(res => res.json()).then(data => {
+                                        if (data.success && data.lead) {
+                                          const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
+                                          onLeadChange(merged)
+                                        }
+                                      })
+                                    } else {
+                                      handleUpdateLeadStage(lead.id, stage.id)
                                     }
-                                  })
-                                } else {
-                                  handleUpdateLeadStage(lead.id, stage.id)
-                                }
-                                setShowPipelineDropdown(false)
-                              }}
-                              type="button"
-                            >
-                              <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: stage.color }} />
-                              <span className="text-sm truncate">{stage.name}</span>
-                              {lead.stage_id === stage.id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-500" />}
-                            </button>
-                          ))}
+                                    setShowPipelineDropdown(false)
+                                  }}
+                                  type="button"
+                                >
+                                  <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: stage.color }} />
+                                  <span className="text-sm truncate">{stage.name}</span>
+                                  {lead.stage_id === stage.id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  )
-                })}
+                      )
+                    })}
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -711,6 +868,16 @@ export default function LeadDetailPanel({
             >
               <MessageCircle className="w-4 h-4" />
               Enviar WhatsApp
+            </button>
+          )}
+          {lead.phone && (
+            <button
+              onClick={handleRequestHistorySync}
+              disabled={syncingHistory}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition text-sm disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 ${syncingHistory ? 'animate-spin' : ''}`} />
+              {syncingHistory ? 'Sincronizando...' : 'Sincronizar Historial'}
             </button>
           )}
           {!hideDelete && (
@@ -817,10 +984,12 @@ export default function LeadDetailPanel({
           )}
         </div>
 
-        <div className="text-[10px] text-slate-400 space-y-0.5">
-          <p>Creado: {new Date(lead.created_at).toLocaleDateString('es')}</p>
-          <p>Actualizado: {formatDistanceToNow(new Date(lead.updated_at), { locale: es, addSuffix: true })}</p>
-        </div>
+        {!eventMode && lead.created_at && lead.updated_at && (
+          <div className="text-[10px] text-slate-400 space-y-0.5">
+            <p>Creado: {new Date(lead.created_at).toLocaleDateString('es')}</p>
+            <p>Actualizado: {formatDistanceToNow(new Date(lead.updated_at), { locale: es, addSuffix: true })}</p>
+          </div>
+        )}
       </div>
 
       {/* Full History Modal */}

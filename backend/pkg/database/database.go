@@ -540,6 +540,19 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE quick_replies ADD COLUMN IF NOT EXISTS media_type VARCHAR(50) DEFAULT ''`,
 		`ALTER TABLE quick_replies ADD COLUMN IF NOT EXISTS media_filename VARCHAR(255) DEFAULT ''`,
 
+		// Quick reply attachments (multi-attachment support)
+		`CREATE TABLE IF NOT EXISTS quick_reply_attachments (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			quick_reply_id UUID NOT NULL REFERENCES quick_replies(id) ON DELETE CASCADE,
+			media_url TEXT NOT NULL,
+			media_type VARCHAR(50) NOT NULL DEFAULT 'document',
+			media_filename VARCHAR(255) NOT NULL DEFAULT '',
+			caption TEXT NOT NULL DEFAULT '',
+			position INTEGER NOT NULL DEFAULT 0,
+			CONSTRAINT quick_reply_attachments_max_5 CHECK (position >= 0 AND position < 5)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_quick_reply_attachments_qr ON quick_reply_attachments(quick_reply_id)`,
+
 		// Lead pipeline linkage
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS pipeline_id UUID REFERENCES pipelines(id) ON DELETE SET NULL`,
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS stage_id UUID REFERENCES pipeline_stages(id) ON DELETE SET NULL`,
@@ -555,7 +568,8 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_kommo_id ON leads(account_id, kommo_id) WHERE kommo_id IS NOT NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_kommo_id ON contacts(account_id, kommo_id) WHERE kommo_id IS NOT NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pipelines_kommo_id ON pipelines(account_id, kommo_id) WHERE kommo_id IS NOT NULL`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_stages_kommo_id ON pipeline_stages(kommo_id) WHERE kommo_id IS NOT NULL`,
+		`DROP INDEX IF EXISTS idx_pipeline_stages_kommo_id`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_stages_pipeline_kommo_id ON pipeline_stages(pipeline_id, kommo_id) WHERE kommo_id IS NOT NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_kommo_id ON tags(account_id, kommo_id) WHERE kommo_id IS NOT NULL`,
 
 		// Kommo connected pipelines (real-time sync tracking)
@@ -632,8 +646,10 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Seed system roles (idempotent)
 		`INSERT INTO roles (name, description, is_system, permissions) VALUES
-			('Administrador', 'Acceso total a todos los módulos', TRUE, ARRAY['chats','contacts','programs','devices','leads','events','broadcasts','tags','settings'])
+			('Administrador', 'Acceso total a todos los módulos', TRUE, ARRAY['chats','contacts','programs','devices','leads','events','broadcasts','tags','settings','integrations'])
 		 ON CONFLICT (name) DO NOTHING`,
+		// Ensure existing 'Administrador' role gets the new 'integrations' permission
+		`UPDATE roles SET permissions = array_append(permissions, 'integrations') WHERE name = 'Administrador' AND NOT ('integrations' = ANY(permissions))`,
 		`INSERT INTO roles (name, description, is_system, permissions) VALUES
 			('Supervisor', 'Acceso a chats, leads, contactos y eventos', TRUE, ARRAY['chats','contacts','leads','events','tags'])
 		 ON CONFLICT (name) DO NOTHING`,
@@ -654,6 +670,85 @@ func Migrate(db *pgxpool.Pool) error {
 			updated_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 		`ALTER TABLE events ADD COLUMN IF NOT EXISTS folder_id UUID REFERENCES event_folders(id) ON DELETE SET NULL`,
+
+		// WhatsApp extended message fields
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_revoked BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_view_once BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS contact_name VARCHAR(255)`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS contact_phone VARCHAR(100)`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS contact_vcard TEXT`,
+
+		// Message editing support
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE`,
+
+		// DNI and BirthDate on leads (mirrors contacts)
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS dni VARCHAR(50)`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS birth_date TIMESTAMPTZ`,
+
+		// Event pipelines (dynamic stages for events, replacing hardcoded statuses)
+		`CREATE TABLE IF NOT EXISTS event_pipelines (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			description TEXT,
+			is_default BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_pipelines_account ON event_pipelines(account_id)`,
+
+		// Event pipeline stages
+		`CREATE TABLE IF NOT EXISTS event_pipeline_stages (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			pipeline_id UUID NOT NULL REFERENCES event_pipelines(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			color VARCHAR(50) DEFAULT '#6366f1',
+			position INT DEFAULT 0,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_pipeline_stages_pipeline ON event_pipeline_stages(pipeline_id)`,
+
+		// Link events to event pipelines
+		`ALTER TABLE events ADD COLUMN IF NOT EXISTS pipeline_id UUID REFERENCES event_pipelines(id) ON DELETE SET NULL`,
+
+		// Link event participants to pipeline stages and leads
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS stage_id UUID REFERENCES event_pipeline_stages(id) ON DELETE SET NULL`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS lead_id UUID REFERENCES leads(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_event_participants_stage ON event_participants(stage_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_participants_lead ON event_participants(lead_id)`,
+
+		// Option 3: allow multiple leads per phone (JID) per account.
+		// Each Kommo lead is unique by kommo_id (partial unique index already exists).
+		// The (account_id, jid) unique constraint is dropped so leads sharing a phone
+		// (e.g. archived + active) can both sync correctly.
+		`ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_account_id_jid_key`,
+
+		// Event tag auto-sync: junction table linking events to tags
+		`CREATE TABLE IF NOT EXISTS event_tags (
+			event_id UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+			tag_id UUID NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			PRIMARY KEY (event_id, tag_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_tags_tag_id ON event_tags(tag_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_tags_event_id ON event_tags(event_id)`,
+
+		// Mark participants created by tag auto-sync (manual participants won't be auto-removed)
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS auto_tag_sync BOOLEAN DEFAULT FALSE`,
+		// Index for fast lookup of auto-synced participants by lead_id
+		`CREATE INDEX IF NOT EXISTS idx_event_participants_auto_sync ON event_participants(event_id, lead_id) WHERE auto_tag_sync = TRUE`,
+
+		// Formula mode for event tag matching (AND = all tags required, OR = any tag matches)
+		`ALTER TABLE events ADD COLUMN IF NOT EXISTS tag_formula_mode TEXT NOT NULL DEFAULT 'OR'`,
+
+		// Negate flag for event_tags (TRUE = exclude leads with this tag)
+		`ALTER TABLE event_tags ADD COLUMN IF NOT EXISTS negate BOOLEAN NOT NULL DEFAULT FALSE`,
+
+		// Advanced formula: text-based boolean expression and type selector
+		`ALTER TABLE events ADD COLUMN IF NOT EXISTS tag_formula TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE events ADD COLUMN IF NOT EXISTS tag_formula_type TEXT NOT NULL DEFAULT 'simple'`,
 	}
 
 	for _, migration := range migrations {
@@ -762,6 +857,115 @@ func SeedAdmin(db *pgxpool.Pool, cfg *config.Config) error {
 			WHERE account_id = $3 AND pipeline_id IS NULL
 		`, pipelineID, firstStageID, accountID)
 	}
+
+	return nil
+}
+
+// MigrateEventPipelines creates default event pipelines for accounts that have events
+// but no event pipeline yet, and maps existing participant statuses to stages.
+func MigrateEventPipelines(db *pgxpool.Pool) error {
+	ctx := context.Background()
+
+	// Find accounts that have events but no event pipeline
+	rows, err := db.Query(ctx, `
+		SELECT DISTINCT e.account_id
+		FROM events e
+		WHERE NOT EXISTS (SELECT 1 FROM event_pipelines ep WHERE ep.account_id = e.account_id)
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to find accounts needing event pipeline: %w", err)
+	}
+	defer rows.Close()
+
+	var accountIDs []string
+	for rows.Next() {
+		var aid string
+		if err := rows.Scan(&aid); err != nil {
+			return err
+		}
+		accountIDs = append(accountIDs, aid)
+	}
+
+	if len(accountIDs) == 0 {
+		return nil
+	}
+
+	// Default stages for new event pipelines
+	defaultStages := []struct {
+		name      string
+		color     string
+		oldStatus string
+	}{
+		{"Registrados", "#3b82f6", "invited"},
+		{"Confirmados", "#10b981", "confirmed"},
+		{"Asistentes", "#059669", "attended"},
+		{"Pre inscrito", "#f59e0b", "contacted"},
+		{"Inscrito", "#6366f1", ""},
+	}
+
+	for _, aid := range accountIDs {
+		// Create default event pipeline
+		var pipelineID string
+		err := db.QueryRow(ctx, `
+			INSERT INTO event_pipelines (account_id, name, description, is_default)
+			VALUES ($1, 'Pipeline por Defecto', 'Pipeline por defecto para eventos', TRUE)
+			RETURNING id
+		`, aid).Scan(&pipelineID)
+		if err != nil {
+			fmt.Printf("[MIGRATE] Warning: failed to create event pipeline for account %s: %v\n", aid, err)
+			continue
+		}
+
+		// Create stages and build status→stage_id map
+		statusToStage := make(map[string]string)
+		for i, stage := range defaultStages {
+			var stageID string
+			err := db.QueryRow(ctx, `
+				INSERT INTO event_pipeline_stages (pipeline_id, name, color, position)
+				VALUES ($1, $2, $3, $4)
+				RETURNING id
+			`, pipelineID, stage.name, stage.color, i).Scan(&stageID)
+			if err != nil {
+				fmt.Printf("[MIGRATE] Warning: failed to create stage %s: %v\n", stage.name, err)
+				continue
+			}
+			statusToStage[stage.oldStatus] = stageID
+		}
+
+		// Set pipeline_id on all events for this account
+		_, _ = db.Exec(ctx, `UPDATE events SET pipeline_id = $1 WHERE account_id = $2 AND pipeline_id IS NULL`, pipelineID, aid)
+
+		// Map existing participant statuses to stages
+		for status, stageID := range statusToStage {
+			_, _ = db.Exec(ctx, `
+				UPDATE event_participants SET stage_id = $1
+				WHERE event_id IN (SELECT id FROM events WHERE account_id = $2)
+				AND status = $3 AND stage_id IS NULL
+			`, stageID, aid, status)
+		}
+
+		fmt.Printf("[MIGRATE] Created default event pipeline for account %s with %d stages\n", aid, len(statusToStage))
+	}
+
+	// Migrate messages unique constraint from (account_id, device_id, message_id) to (chat_id, message_id)
+	// This prevents cross-device duplicates and fixes NULL device_id dedup issues for history sync
+	// Drop old unique constraint (account_id, device_id, message_id) — replaced by (chat_id, message_id)
+	// Try as constraint first (most common), then as standalone index
+	_, _ = db.Exec(ctx, `
+		DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint WHERE conname = 'messages_account_id_device_id_message_id_key'
+			) THEN
+				ALTER TABLE messages DROP CONSTRAINT messages_account_id_device_id_message_id_key;
+			END IF;
+		END $$
+	`)
+	_, _ = db.Exec(ctx, `DROP INDEX IF EXISTS messages_account_id_device_id_message_id_key`)
+	_, _ = db.Exec(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS messages_chat_id_message_id_key ON messages (chat_id, message_id)`)
+
+	// Add created_by and started_by to campaigns
+	_, _ = db.Exec(ctx, `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id)`)
+	_, _ = db.Exec(ctx, `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS started_by UUID REFERENCES users(id)`)
 
 	return nil
 }

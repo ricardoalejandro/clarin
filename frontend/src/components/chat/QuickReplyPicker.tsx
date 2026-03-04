@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { Zap, Search, X, Image, Video, File } from 'lucide-react'
+import { Zap, Search, X, Image, Video, File, Paperclip } from 'lucide-react'
 
 interface QuickReplyItem {
   id: string
@@ -11,6 +11,7 @@ interface QuickReplyItem {
   media_url?: string
   media_type?: string
   media_filename?: string
+  attachments?: { media_url: string; media_type: string; media_filename: string; caption: string }[]
 }
 
 interface QuickReplyPickerProps {
@@ -125,14 +126,19 @@ export default function QuickReplyPicker({
                 {reply.title && (
                   <p className="text-sm font-medium text-gray-900 truncate">{reply.title}</p>
                 )}
-                {reply.media_url && (
+                {reply.attachments && reply.attachments.length > 0 ? (
+                  <div className="flex items-center gap-1 mb-0.5">
+                    <Paperclip className="w-3 h-3 text-green-500" />
+                    <span className="text-[10px] text-green-600">{reply.attachments.length} adjunto{reply.attachments.length > 1 ? 's' : ''}</span>
+                  </div>
+                ) : reply.media_url ? (
                   <div className="flex items-center gap-1 mb-0.5">
                     {reply.media_type === 'image' ? <Image className="w-3 h-3 text-green-500" /> :
                      reply.media_type === 'video' ? <Video className="w-3 h-3 text-green-500" /> :
                      <File className="w-3 h-3 text-green-500" />}
                     <span className="text-[10px] text-green-600">{reply.media_filename || reply.media_type}</span>
                   </div>
-                )}
+                ) : null}
                 {reply.body && <p className="text-xs text-gray-500 line-clamp-2">{reply.body}</p>}
               </div>
             </div>

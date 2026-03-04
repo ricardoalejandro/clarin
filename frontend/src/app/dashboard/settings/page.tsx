@@ -1,7 +1,9 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical } from 'lucide-react'
+import { useSearchParams } from 'next/navigation'
+import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit } from 'lucide-react'
+import { subscribeWebSocket } from '@/lib/api'
 import {
   getNotificationSettings,
   saveNotificationSettings,
@@ -27,6 +29,8 @@ interface UserProfile {
   role: string
   account_id?: string
   is_super_admin?: boolean
+  is_admin?: boolean
+  permissions?: string[]
 }
 
 export default function SettingsPage() {
@@ -47,8 +51,8 @@ export default function SettingsPage() {
   const [notifSettings, setNotifSettings] = useState<NotificationSettings | null>(null)
   const [notifPermission, setNotifPermission] = useState<NotificationPermission>('default')
   const { refreshSettings: refreshProviderSettings } = useNotifications()
-  const [quickReplies, setQuickReplies] = useState<{ id: string; shortcut: string; title: string; body: string; media_url: string; media_type: string; media_filename: string }[]>([])
-  const [editingQR, setEditingQR] = useState<{ id?: string; shortcut: string; title: string; body: string; media_url: string; media_type: string; media_filename: string } | null>(null)
+  const [quickReplies, setQuickReplies] = useState<{ id: string; shortcut: string; title: string; body: string; media_url: string; media_type: string; media_filename: string; attachments: { id?: string; media_url: string; media_type: string; media_filename: string; caption: string; position: number }[] }[]>([])
+  const [editingQR, setEditingQR] = useState<{ id?: string; shortcut: string; title: string; body: string; media_url: string; media_type: string; media_filename: string; attachments: { id?: string; media_url: string; media_type: string; media_filename: string; caption: string; position: number }[] } | null>(null)
   const [savingQR, setSavingQR] = useState(false)
   const [uploadingQRMedia, setUploadingQRMedia] = useState(false)
   const [kommoStatus, setKommoStatus] = useState<{
@@ -72,11 +76,28 @@ export default function SettingsPage() {
   const [kommoLoadingPipelines, setKommoLoadingPipelines] = useState(false)
   const [kommoConnecting, setKommoConnecting] = useState<number | null>(null)
   const [kommoWorkerStatus, setKommoWorkerStatus] = useState<{
-    running: boolean; queue_length: number; last_check: string | null; connected_count: number
+    running: boolean; active_accounts: number; last_check: string | null; connected_count: number
   } | null>(null)
   const [incomingStageId, setIncomingStageId] = useState<string>('')
   const [pipelineStages, setPipelineStages] = useState<{ id: string; name: string; color: string; pipeline_name: string }[]>([])
   const [savingStage, setSavingStage] = useState(false)
+
+  // Devices state
+  interface DeviceItem {
+    id: string; name: string; phone: string; jid: string; status: string; qr_code: string; last_seen_at: string
+  }
+  const [devDevices, setDevDevices] = useState<DeviceItem[]>([])
+  const [devLoading, setDevLoading] = useState(true)
+  const [devShowCreate, setDevShowCreate] = useState(false)
+  const [devNewName, setDevNewName] = useState('')
+  const [devCreating, setDevCreating] = useState(false)
+  const [devSelected, setDevSelected] = useState<DeviceItem | null>(null)
+  const [devEditing, setDevEditing] = useState<DeviceItem | null>(null)
+  const [devEditName, setDevEditName] = useState('')
+  const [devSaving, setDevSaving] = useState(false)
+
+  // URL tab param
+  const searchParams = useSearchParams()
 
   // Pipeline management state
   interface ManagedPipeline {
@@ -116,6 +137,8 @@ export default function SettingsPage() {
           role: u.role,
           account_id: u.account_id,
           is_super_admin: u.is_super_admin,
+          is_admin: u.is_admin,
+          permissions: u.permissions || [],
         })
         setFormData(prev => ({
           ...prev,
@@ -164,6 +187,12 @@ export default function SettingsPage() {
   useEffect(() => {
     fetchSettings()
   }, [fetchSettings])
+
+  // Read tab from URL param (for redirect from /dashboard/devices)
+  useEffect(() => {
+    const tab = searchParams.get('tab')
+    if (tab) setActiveTab(tab)
+  }, [searchParams])
 
   const fetchQuickReplies = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -406,14 +435,6 @@ export default function SettingsPage() {
   }, [activeTab, kommoStatus?.connected, fetchKommoPipelines, fetchKommoConnected, fetchKommoWorkerStatus])
 
   const handleKommoConnectPipeline = async (kommoId: number) => {
-    // Check if another pipeline is already connected
-    const currentConnected = kommoConnected.find(c => c.enabled && c.kommo_pipeline_id !== kommoId)
-    if (currentConnected) {
-      const pipelineName = kommoPipelines.find(p => p.id === currentConnected.kommo_pipeline_id)?.name || 'actual'
-      if (!confirm(`El embudo "${pipelineName}" se desconectará. Solo un embudo puede estar activo. ¿Continuar?`)) {
-        return
-      }
-    }
     setKommoConnecting(kommoId)
     const token = localStorage.getItem('token')
     try {
@@ -544,30 +565,53 @@ export default function SettingsPage() {
   }, [activeTab, kommoStatus?.connected, pollFullSyncStatus])
 
   const handleQRMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file || !editingQR) return
+    const files = e.target.files
+    if (!files || files.length === 0 || !editingQR) return
+    const currentCount = editingQR.attachments.length
+    const maxNew = 5 - currentCount
+    if (maxNew <= 0) {
+      showMessage('error', 'Máximo 5 adjuntos por respuesta rápida')
+      e.target.value = ''
+      return
+    }
     setUploadingQRMedia(true)
     const token = localStorage.getItem('token')
+    const newAttachments = [...editingQR.attachments]
     try {
-      const formData = new FormData()
-      formData.append('file', file)
-      const res = await fetch('/api/media/upload', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      })
-      const data = await res.json()
-      if (data.success && (data.proxy_url || data.public_url)) {
-        let mediaType = 'document'
-        if (file.type.startsWith('image/')) mediaType = 'image'
-        else if (file.type.startsWith('video/')) mediaType = 'video'
-        else if (file.type.startsWith('audio/')) mediaType = 'audio'
-        setEditingQR({ ...editingQR, media_url: data.proxy_url || data.public_url, media_type: mediaType, media_filename: file.name })
-      } else {
-        showMessage('error', data.error || 'Error al subir archivo')
+      const { compressImageStandard } = await import('@/utils/imageCompression')
+      for (let i = 0; i < Math.min(files.length, maxNew); i++) {
+        let file = files[i]
+        // Compress images
+        if (file.type.startsWith('image/') && !file.type.includes('gif')) {
+          try { file = await compressImageStandard(file) } catch {}
+        }
+        const formData = new FormData()
+        formData.append('file', file)
+        const res = await fetch('/api/media/upload', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: formData,
+        })
+        const data = await res.json()
+        if (data.success && (data.proxy_url || data.public_url)) {
+          let mediaType = 'document'
+          if (file.type.startsWith('image/')) mediaType = 'image'
+          else if (file.type.startsWith('video/')) mediaType = 'video'
+          else if (file.type.startsWith('audio/')) mediaType = 'audio'
+          newAttachments.push({
+            media_url: data.proxy_url || data.public_url,
+            media_type: mediaType,
+            media_filename: files[i].name,
+            caption: '',
+            position: newAttachments.length,
+          })
+        } else {
+          showMessage('error', data.error || `Error al subir ${files[i].name}`)
+        }
       }
+      setEditingQR({ ...editingQR, attachments: newAttachments })
     } catch {
-      showMessage('error', 'Error al subir archivo')
+      showMessage('error', 'Error al subir archivo(s)')
     } finally {
       setUploadingQRMedia(false)
       e.target.value = ''
@@ -575,7 +619,7 @@ export default function SettingsPage() {
   }
 
   const handleSaveQuickReply = async () => {
-    if (!editingQR || !editingQR.shortcut.trim() || (!editingQR.body.trim() && !editingQR.media_url)) return
+    if (!editingQR || !editingQR.shortcut.trim() || (!editingQR.body.trim() && !editingQR.media_url && editingQR.attachments.length === 0)) return
     setSavingQR(true)
     const token = localStorage.getItem('token')
     try {
@@ -590,6 +634,12 @@ export default function SettingsPage() {
           media_url: editingQR.media_url || '',
           media_type: editingQR.media_type || '',
           media_filename: editingQR.media_filename || '',
+          attachments: editingQR.attachments.map((a, i) => ({
+            media_url: a.media_url,
+            media_type: a.media_type,
+            media_filename: a.media_filename,
+            caption: a.caption || '',
+          })),
         }),
       })
       const data = await res.json()
@@ -762,6 +812,112 @@ export default function SettingsPage() {
     }
   }
 
+  // ─── Device Functions ───
+  const fetchDevicesForSettings = useCallback(async () => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      if (data.success) setDevDevices(data.devices || [])
+    } catch (err) { console.error('Failed to fetch devices:', err) }
+    finally { setDevLoading(false) }
+  }, [])
+
+  useEffect(() => {
+    if (activeTab === 'devices') {
+      fetchDevicesForSettings()
+      const interval = setInterval(fetchDevicesForSettings, 5000)
+      return () => clearInterval(interval)
+    }
+  }, [activeTab, fetchDevicesForSettings])
+
+  useEffect(() => {
+    if (activeTab !== 'devices') return
+    const unsubscribe = subscribeWebSocket((data: unknown) => {
+      const msg = data as { event?: string; data?: { status?: string; device_id?: string } }
+      if (msg.event === 'device_status') {
+        if (msg.data?.status === 'connected' && devSelected?.id === msg.data?.device_id) setDevSelected(null)
+        fetchDevicesForSettings()
+      } else if (msg.event === 'qr_code') fetchDevicesForSettings()
+    })
+    return () => unsubscribe()
+  }, [activeTab, fetchDevicesForSettings, devSelected])
+
+  useEffect(() => {
+    if (devSelected) {
+      const upd = devDevices.find(d => d.id === devSelected.id)
+      if (upd && upd.status === 'connected') setDevSelected(null)
+      else if (upd && upd.qr_code !== devSelected.qr_code) setDevSelected(upd)
+    }
+  }, [devDevices, devSelected])
+
+  const handleDevCreate = async () => {
+    if (!devNewName.trim()) return
+    setDevCreating(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/devices', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ name: devNewName }) })
+      const data = await res.json()
+      if (data.success) { setDevNewName(''); setDevShowCreate(false); fetchDevicesForSettings(); await handleDevConnect(data.device.id) }
+    } catch (err) { console.error('Failed to create device:', err) }
+    finally { setDevCreating(false) }
+  }
+
+  const handleDevConnect = async (deviceId: string) => {
+    const token = localStorage.getItem('token')
+    try { await fetch(`/api/devices/${deviceId}/connect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); fetchDevicesForSettings() }
+    catch (err) { console.error('Failed to connect device:', err) }
+  }
+
+  const handleDevDisconnect = async (deviceId: string) => {
+    const token = localStorage.getItem('token')
+    try { await fetch(`/api/devices/${deviceId}/disconnect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); fetchDevicesForSettings() }
+    catch (err) { console.error('Failed to disconnect device:', err) }
+  }
+
+  const handleDevReset = async (deviceId: string) => {
+    if (!confirm('¿Re-vincular este dispositivo? Se desconectará de WhatsApp y necesitarás escanear un nuevo código QR. Esto sincronizará todo el historial de mensajes.')) return
+    const token = localStorage.getItem('token')
+    try {
+      await fetch(`/api/devices/${deviceId}/reset`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+      fetchDevicesForSettings()
+      // Auto-reconnect to generate QR code
+      setTimeout(async () => {
+        await fetch(`/api/devices/${deviceId}/connect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+        fetchDevicesForSettings()
+        const dev = devDevices.find((d: any) => d.id === deviceId)
+        if (dev) setDevSelected(dev)
+      }, 1000)
+    } catch (err) { console.error('Failed to reset device:', err) }
+  }
+
+  const handleDevDelete = async (deviceId: string) => {
+    if (!confirm('¿Estás seguro de eliminar este dispositivo?')) return
+    const token = localStorage.getItem('token')
+    try { await fetch(`/api/devices/${deviceId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); fetchDevicesForSettings(); if (devSelected?.id === deviceId) setDevSelected(null) }
+    catch (err) { console.error('Failed to delete device:', err) }
+  }
+
+  const handleDevUpdate = async () => {
+    if (!devEditing || !devEditName.trim()) return
+    setDevSaving(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/devices/${devEditing.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ name: devEditName.trim() }) })
+      const data = await res.json()
+      if (data.success) { setDevEditing(null); fetchDevicesForSettings() } else alert(data.error || 'Error al actualizar')
+    } catch (err) { console.error('Failed to update device:', err) }
+    finally { setDevSaving(false) }
+  }
+
+  const getDevStatusBadge = (status: string) => {
+    switch (status) {
+      case 'connected': return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-700"><Wifi className="w-3.5 h-3.5" /> Conectado</span>
+      case 'connecting': return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-amber-50 text-amber-700"><Signal className="w-3.5 h-3.5 animate-pulse" /> Conectando</span>
+      default: return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-500"><WifiOff className="w-3.5 h-3.5" /> Desconectado</span>
+    }
+  }
+
   const handleLogout = () => {
     localStorage.removeItem('token')
     window.location.href = '/'
@@ -778,8 +934,9 @@ export default function SettingsPage() {
   const tabs = [
     { id: 'profile', label: 'Perfil', icon: User },
     { id: 'account', label: 'Cuenta', icon: Building },
-    ...(user?.is_super_admin ? [{ id: 'integrations', label: 'Integraciones', icon: Link2 }] : []),
-    { id: 'quick-replies', label: 'Respuestas Rápidas', icon: Zap },
+    ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('integrations') || user?.permissions?.includes('*')) ? [{ id: 'integrations', label: 'Integraciones', icon: Link2 }] : []),
+    ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('devices') || user?.permissions?.includes('*')) ? [{ id: 'devices', label: 'Dispositivos', icon: Smartphone }] : []),
+    { id: 'quick-replies', label: 'Resp. Rápidas', icon: Zap },
     { id: 'notifications', label: 'Notificaciones', icon: Bell },
     { id: 'security', label: 'Seguridad', icon: Shield },
   ]
@@ -1136,11 +1293,125 @@ export default function SettingsPage() {
               <div className="pt-6 border-t border-slate-200">
                 <h3 className="text-sm font-medium text-red-600 mb-2">Zona de Peligro</h3>
                 <p className="text-xs text-slate-500 mb-4">
-                  Una vez que elimines tu cuenta, no hay vuelta atrás. Por favor, ten cuidado.
+                  Estas acciones son irreversibles. Por favor, ten cuidado.
                 </p>
-                <button className="px-4 py-2 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 text-sm">
-                  Eliminar Cuenta
-                </button>
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    onClick={async () => {
+                      const confirmText = prompt('Para eliminar TODOS los leads de esta cuenta, escribe "ELIMINAR" (en mayúsculas):')
+                      if (confirmText !== 'ELIMINAR') {
+                        if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe ELIMINAR para confirmar.')
+                        return
+                      }
+                      const token = localStorage.getItem('token')
+                      try {
+                        const res = await fetch('/api/leads/batch', {
+                          method: 'DELETE',
+                          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ delete_all: true }),
+                        })
+                        const data = await res.json()
+                        if (data.success) {
+                          showMessage('success', 'Todos los leads han sido eliminados.')
+                        } else {
+                          showMessage('error', data.error || 'Error al eliminar leads')
+                        }
+                      } catch {
+                        showMessage('error', 'Error de conexión')
+                      }
+                    }}
+                    className="px-4 py-2 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 text-sm transition"
+                  >
+                    Eliminar todos los leads
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const confirmText = prompt('Para eliminar TODOS los contactos de esta cuenta, escribe "ELIMINAR" (en mayúsculas):')
+                      if (confirmText !== 'ELIMINAR') {
+                        if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe ELIMINAR para confirmar.')
+                        return
+                      }
+                      const token = localStorage.getItem('token')
+                      try {
+                        const res = await fetch('/api/contacts/batch', {
+                          method: 'DELETE',
+                          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ delete_all: true }),
+                        })
+                        const data = await res.json()
+                        if (data.success) {
+                          showMessage('success', 'Todos los contactos han sido eliminados.')
+                        } else {
+                          showMessage('error', data.error || 'Error al eliminar contactos')
+                        }
+                      } catch {
+                        showMessage('error', 'Error de conexión')
+                      }
+                    }}
+                    className="px-4 py-2 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 text-sm transition"
+                  >
+                    Eliminar todos los contactos
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const confirmText = prompt('Para eliminar TODOS los chats de esta cuenta, escribe "ELIMINAR" (en mayúsculas):')
+                      if (confirmText !== 'ELIMINAR') {
+                        if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe ELIMINAR para confirmar.')
+                        return
+                      }
+                      const token = localStorage.getItem('token')
+                      try {
+                        const res = await fetch('/api/chats/batch', {
+                          method: 'DELETE',
+                          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ delete_all: true }),
+                        })
+                        const data = await res.json()
+                        if (data.success) {
+                          showMessage('success', 'Todos los chats han sido eliminados.')
+                        } else {
+                          showMessage('error', data.error || 'Error al eliminar chats')
+                        }
+                      } catch {
+                        showMessage('error', 'Error de conexión')
+                      }
+                    }}
+                    className="px-4 py-2 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 text-sm transition"
+                  >
+                    Eliminar todos los chats
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const confirmText = prompt('Para eliminar TODAS las etiquetas de esta cuenta, escribe "ELIMINAR" (en mayúsculas):')
+                      if (confirmText !== 'ELIMINAR') {
+                        if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe ELIMINAR para confirmar.')
+                        return
+                      }
+                      const token = localStorage.getItem('token')
+                      try {
+                        const res = await fetch('/api/tags/batch', {
+                          method: 'DELETE',
+                          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ delete_all: true }),
+                        })
+                        const data = await res.json()
+                        if (data.success) {
+                          showMessage('success', 'Todas las etiquetas han sido eliminadas.')
+                        } else {
+                          showMessage('error', data.error || 'Error al eliminar etiquetas')
+                        }
+                      } catch {
+                        showMessage('error', 'Error de conexión')
+                      }
+                    }}
+                    className="px-4 py-2 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 text-sm transition"
+                  >
+                    Eliminar todas las etiquetas
+                  </button>
+                  <button className="px-4 py-2 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 text-sm transition">
+                    Eliminar Cuenta
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -1222,7 +1493,7 @@ export default function SettingsPage() {
                         <Power className="w-4 h-4" /> Embudos (Pipelines)
                       </h4>
                       <p className="text-xs text-slate-500">
-                        Selecciona un embudo para sincronizar en tiempo real. Solo un embudo puede estar activo a la vez.
+                        Selecciona los embudos que deseas sincronizar en tiempo real. Puedes conectar varios simultáneamente.
                       </p>
                     </div>
                     <button
@@ -1310,7 +1581,7 @@ export default function SettingsPage() {
                         </span>
                       </div>
                       <div className="text-[10px] text-slate-500 space-y-0.5">
-                        <p>{kommoWorkerStatus.connected_count} pipeline(s) conectado(s) · {kommoWorkerStatus.queue_length} tarea(s) en cola</p>
+                        <p>{kommoWorkerStatus.connected_count} pipeline(s) conectado(s) · {kommoWorkerStatus.active_accounts} cuenta(s) sincronizando en paralelo</p>
                         {kommoWorkerStatus.last_check && (
                           <p>Última verificación: {new Date(kommoWorkerStatus.last_check).toLocaleString('es-PE')}</p>
                         )}
@@ -1387,7 +1658,111 @@ export default function SettingsPage() {
 
                   {/* Read-only notice */}
                   <div className="text-xs text-slate-500 bg-emerald-50 border border-emerald-100 rounded-xl p-3">
-                    <strong>Sincronización bidireccional:</strong> Cambios de etapa, etiquetas y nuevos leads en Clarin se reflejan automáticamente en Kommo. Solo un embudo activo a la vez.
+                    <strong>Sincronización bidireccional:</strong> Cambios de etapa, etiquetas y nuevos leads en Clarin se reflejan automáticamente en Kommo. Puedes tener varios embudos activos.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Devices Tab */}
+          {activeTab === 'devices' && (
+            <div className="space-y-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-medium text-slate-900">Dispositivos WhatsApp</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">Gestiona tus conexiones de WhatsApp</p>
+                </div>
+                <button onClick={() => setDevShowCreate(true)} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-xl transition text-xs font-medium shadow-sm">
+                  <Plus className="w-3.5 h-3.5" /> Agregar
+                </button>
+              </div>
+
+              {devLoading ? (
+                <div className="flex items-center justify-center py-12"><div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" /></div>
+              ) : devDevices.length === 0 ? (
+                <div className="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center">
+                  <Smartphone className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                  <p className="text-sm font-medium text-slate-700 mb-1">No hay dispositivos</p>
+                  <p className="text-xs text-slate-500 mb-3">Agrega tu primer dispositivo WhatsApp</p>
+                  <button onClick={() => setDevShowCreate(true)} className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-xl transition text-xs font-medium shadow-sm">
+                    <Plus className="w-3.5 h-3.5" /> Agregar Dispositivo
+                  </button>
+                </div>
+              ) : (
+                <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
+                  {devDevices.map((device) => (
+                    <div key={device.id} className="p-3.5 flex items-center justify-between hover:bg-slate-50/50 transition">
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 bg-slate-100 rounded-lg flex items-center justify-center">
+                          <Smartphone className="w-4.5 h-4.5 text-slate-500" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                          <p className="text-xs text-slate-500">{device.phone || device.jid || 'Sin número'}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {getDevStatusBadge(device.status)}
+                        <button onClick={() => { setDevEditing(device); setDevEditName(device.name || '') }} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition" title="Editar"><Edit className="w-3.5 h-3.5" /></button>
+                        {device.status === 'connected' ? (
+                          <>
+                            <button onClick={() => handleDevReset(device.id)} className="p-1.5 text-slate-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition" title="Re-vincular (sincronizar historial completo)"><RefreshCw className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => handleDevDisconnect(device.id)} className="p-1.5 text-slate-400 hover:text-orange-600 hover:bg-orange-50 rounded-lg transition" title="Desconectar"><Power className="w-3.5 h-3.5" /></button>
+                          </>
+                        ) : device.status === 'connecting' ? (
+                          <button onClick={() => setDevSelected(device)} className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Ver QR"><QrCode className="w-3.5 h-3.5" /></button>
+                        ) : (
+                          <button onClick={() => { handleDevConnect(device.id); setDevSelected(device) }} className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Conectar"><Power className="w-3.5 h-3.5" /></button>
+                        )}
+                        <button onClick={() => handleDevDelete(device.id)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition" title="Eliminar"><Trash2 className="w-3.5 h-3.5" /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Create device modal */}
+              {devShowCreate && (
+                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
+                  <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4 border border-slate-100">
+                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Nuevo Dispositivo</h2>
+                    <input type="text" value={devNewName} onChange={(e) => setDevNewName(e.target.value)} placeholder="Nombre del dispositivo" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent mb-4 text-sm text-slate-900 placeholder:text-slate-400" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') handleDevCreate() }} />
+                    <div className="flex gap-3">
+                      <button onClick={() => setDevShowCreate(false)} className="flex-1 px-4 py-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
+                      <button onClick={handleDevCreate} disabled={devCreating || !devNewName.trim()} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devCreating ? 'Creando...' : 'Crear y Conectar'}</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* QR modal */}
+              {devSelected && devSelected.status === 'connecting' && devSelected.qr_code && (
+                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
+                  <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4 text-center border border-slate-100">
+                    <div className="flex items-center justify-center gap-2 mb-3"><QrCode className="w-5 h-5 text-emerald-600" /><h2 className="text-lg font-semibold text-slate-900">Escanea el código QR</h2></div>
+                    <p className="text-sm text-slate-500 mb-4">Abre WhatsApp en tu teléfono y escanea este código</p>
+                    <div className="bg-white p-4 rounded-xl border border-slate-100 inline-block mb-4"><img src={devSelected.qr_code} alt="QR Code" className="w-56 h-56" /></div>
+                    <div className="flex items-center justify-center gap-2 text-xs text-slate-500 mb-4"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Esperando escaneo...</div>
+                    <button onClick={() => setDevSelected(null)} className="px-4 py-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cerrar</button>
+                  </div>
+                </div>
+              )}
+
+              {/* Edit device modal */}
+              {devEditing && (
+                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
+                  <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4 border border-slate-100">
+                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Editar Dispositivo</h2>
+                    <div className="space-y-4">
+                      <div><label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label><input type="text" value={devEditName} onChange={(e) => setDevEditName(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') handleDevUpdate() }} /></div>
+                      <div><label className="block text-xs font-medium text-slate-600 mb-1">Teléfono</label><input type="text" value={devEditing.phone || 'Sin número'} disabled className="w-full px-3 py-2.5 border border-slate-100 rounded-xl bg-slate-50 text-sm text-slate-400" /><p className="text-[10px] text-slate-400 mt-1">Se asigna automáticamente al conectar</p></div>
+                      <div><label className="block text-xs font-medium text-slate-600 mb-1">Estado</label><div className="px-3 py-2">{getDevStatusBadge(devEditing.status)}</div></div>
+                    </div>
+                    <div className="flex gap-3 mt-5">
+                      <button onClick={() => setDevEditing(null)} className="flex-1 px-4 py-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
+                      <button onClick={handleDevUpdate} disabled={devSaving || !devEditName.trim()} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devSaving ? 'Guardando...' : 'Guardar'}</button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -1405,7 +1780,7 @@ export default function SettingsPage() {
                   </p>
                 </div>
                 <button
-                  onClick={() => setEditingQR({ shortcut: '', title: '', body: '', media_url: '', media_type: '', media_filename: '' })}
+                  onClick={() => setEditingQR({ shortcut: '', title: '', body: '', media_url: '', media_type: '', media_filename: '', attachments: [] })}
                   className="inline-flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-1.5 rounded-xl hover:bg-emerald-700 text-xs font-medium shadow-sm"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -1460,38 +1835,62 @@ export default function SettingsPage() {
                     />
                   </div>
 
-                  {/* Media attachment */}
+                  {/* Multi-attachment section */}
                   <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">Archivo adjunto (opcional)</label>
-                    {editingQR.media_url ? (
-                      <div className="flex items-center gap-3 p-2.5 bg-white border border-slate-200 rounded-xl">
-                        <div className="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center shrink-0">
-                          {editingQR.media_type === 'image' ? <Image className="w-4 h-4 text-emerald-600" /> :
-                           editingQR.media_type === 'video' ? <Video className="w-4 h-4 text-emerald-600" /> :
-                           <File className="w-4 h-4 text-emerald-600" />}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-slate-900 truncate">{editingQR.media_filename || 'Archivo'}</p>
-                          <p className="text-[10px] text-slate-400">{editingQR.media_type}</p>
-                        </div>
-                        <button
-                          onClick={() => setEditingQR({ ...editingQR, media_url: '', media_type: '', media_filename: '' })}
-                          className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition shrink-0"
-                          title="Eliminar adjunto"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      Adjuntos ({editingQR.attachments.length}/5)
+                    </label>
+                    {editingQR.attachments.length > 0 && (
+                      <div className="space-y-2 mb-2">
+                        {editingQR.attachments.map((att, idx) => (
+                          <div key={idx} className="bg-white border border-slate-200 rounded-xl p-2.5 space-y-2">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center shrink-0">
+                                {att.media_type === 'image' ? <Image className="w-4 h-4 text-emerald-600" /> :
+                                 att.media_type === 'video' ? <Video className="w-4 h-4 text-emerald-600" /> :
+                                 <File className="w-4 h-4 text-emerald-600" />}
+                              </div>
+                              {att.media_type === 'image' && (
+                                <img src={att.media_url} alt="" className="w-10 h-10 object-cover rounded-lg shrink-0" />
+                              )}
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-medium text-slate-900 truncate">{att.media_filename || 'Archivo'}</p>
+                                <p className="text-[10px] text-slate-400">{att.media_type}</p>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                {idx > 0 && (
+                                  <button onClick={() => { const atts = [...editingQR.attachments]; [atts[idx-1], atts[idx]] = [atts[idx], atts[idx-1]]; setEditingQR({ ...editingQR, attachments: atts.map((a, i) => ({ ...a, position: i })) }) }} className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition" title="Subir"><ChevronDown className="w-3.5 h-3.5 rotate-180" /></button>
+                                )}
+                                {idx < editingQR.attachments.length - 1 && (
+                                  <button onClick={() => { const atts = [...editingQR.attachments]; [atts[idx], atts[idx+1]] = [atts[idx+1], atts[idx]]; setEditingQR({ ...editingQR, attachments: atts.map((a, i) => ({ ...a, position: i })) }) }} className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition" title="Bajar"><ChevronDown className="w-3.5 h-3.5" /></button>
+                                )}
+                                <button onClick={() => { const atts = editingQR.attachments.filter((_, i) => i !== idx).map((a, i) => ({ ...a, position: i })); setEditingQR({ ...editingQR, attachments: atts }) }} className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition" title="Eliminar"><X className="w-3.5 h-3.5" /></button>
+                              </div>
+                            </div>
+                            {(att.media_type === 'image' || att.media_type === 'video') && (
+                              <input
+                                type="text"
+                                value={att.caption}
+                                onChange={e => { const atts = [...editingQR.attachments]; atts[idx] = { ...atts[idx], caption: e.target.value }; setEditingQR({ ...editingQR, attachments: atts }) }}
+                                placeholder="Pie de foto (opcional)"
+                                className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+                              />
+                            )}
+                          </div>
+                        ))}
                       </div>
-                    ) : (
+                    )}
+                    {editingQR.attachments.length < 5 && (
                       <label className="flex items-center gap-2 px-3 py-2 border border-dashed border-slate-300 rounded-xl text-slate-500 hover:bg-white hover:border-emerald-300 hover:text-emerald-600 transition cursor-pointer text-xs">
                         {uploadingQRMedia ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
                         ) : (
                           <Paperclip className="w-3.5 h-3.5" />
                         )}
-                        {uploadingQRMedia ? 'Subiendo...' : 'Adjuntar imagen, video o documento'}
+                        {uploadingQRMedia ? 'Subiendo...' : `Adjuntar imagen, video o documento${editingQR.attachments.length > 0 ? ` (${5 - editingQR.attachments.length} más)` : ''}`}
                         <input
                           type="file"
+                          multiple
                           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt"
                           onChange={handleQRMediaUpload}
                           disabled={uploadingQRMedia}
@@ -1502,51 +1901,42 @@ export default function SettingsPage() {
                   </div>
 
                   {/* Preview */}
-                  {(editingQR.body.trim() || editingQR.media_url) && (
+                  {(editingQR.body.trim() || editingQR.attachments.length > 0) && (
                     <div>
                       <label className="block text-xs font-medium text-slate-600 mb-1">Vista previa</label>
-                      <div className="bg-[#e5ddd5] rounded-xl p-3 flex justify-end">
-                        <div className="max-w-[280px]">
-                          {editingQR.media_url && editingQR.media_type === 'image' && (
-                            <div className="bg-white rounded-lg overflow-hidden shadow-sm mb-0.5">
-                              <img src={editingQR.media_url} alt="" className="w-full max-h-[200px] object-cover" />
-                              {editingQR.body.trim() && (
-                                <div className="px-2 py-1.5">
-                                  <p className="text-xs text-slate-800 whitespace-pre-wrap">{editingQR.body}</p>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {editingQR.media_url && editingQR.media_type === 'video' && (
-                            <div className="bg-white rounded-lg overflow-hidden shadow-sm mb-0.5">
-                              <video src={editingQR.media_url} className="w-full max-h-[200px] object-cover" />
-                              {editingQR.body.trim() && (
-                                <div className="px-2 py-1.5">
-                                  <p className="text-xs text-slate-800 whitespace-pre-wrap">{editingQR.body}</p>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {editingQR.media_url && editingQR.media_type !== 'image' && editingQR.media_type !== 'video' && (
-                            <div className="bg-white rounded-lg p-2 shadow-sm mb-0.5">
-                              <div className="flex items-center gap-2 bg-emerald-50 rounded-lg p-2">
-                                <File className="w-5 h-5 text-emerald-600 shrink-0" />
-                                <div className="min-w-0">
-                                  <p className="text-xs font-medium text-slate-900 truncate">{editingQR.media_filename}</p>
-                                  <p className="text-[10px] text-slate-400">{editingQR.media_type}</p>
+                      <div className="bg-[#e5ddd5] rounded-xl p-3 space-y-1 flex flex-col items-end">
+                        {editingQR.attachments.map((att, idx) => (
+                          <div key={idx} className="max-w-[280px] w-full">
+                            {att.media_type === 'image' ? (
+                              <div className="bg-white rounded-lg overflow-hidden shadow-sm">
+                                <img src={att.media_url} alt="" className="w-full max-h-[200px] object-cover" />
+                                {att.caption && <div className="px-2 py-1.5"><p className="text-xs text-slate-800 whitespace-pre-wrap">{att.caption}</p></div>}
+                              </div>
+                            ) : att.media_type === 'video' ? (
+                              <div className="bg-white rounded-lg overflow-hidden shadow-sm">
+                                <video src={att.media_url} className="w-full max-h-[200px] object-cover" />
+                                {att.caption && <div className="px-2 py-1.5"><p className="text-xs text-slate-800 whitespace-pre-wrap">{att.caption}</p></div>}
+                              </div>
+                            ) : (
+                              <div className="bg-white rounded-lg p-2 shadow-sm">
+                                <div className="flex items-center gap-2 bg-emerald-50 rounded-lg p-2">
+                                  <File className="w-5 h-5 text-emerald-600 shrink-0" />
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-medium text-slate-900 truncate">{att.media_filename}</p>
+                                    <p className="text-[10px] text-slate-400">{att.media_type}</p>
+                                  </div>
                                 </div>
                               </div>
-                              {editingQR.body.trim() && (
-                                <p className="text-xs text-slate-800 whitespace-pre-wrap mt-1.5 px-0.5">{editingQR.body}</p>
-                              )}
-                            </div>
-                          )}
-                          {!editingQR.media_url && editingQR.body.trim() && (
+                            )}
+                          </div>
+                        ))}
+                        {editingQR.body.trim() && (
+                          <div className="max-w-[280px]">
                             <div className="bg-[#dcf8c6] rounded-lg px-2.5 py-1.5 shadow-sm">
                               <p className="text-xs text-slate-800 whitespace-pre-wrap">{editingQR.body}</p>
                             </div>
-                          )}
-                        </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1560,7 +1950,7 @@ export default function SettingsPage() {
                     </button>
                     <button
                       onClick={handleSaveQuickReply}
-                      disabled={savingQR || !editingQR.shortcut.trim() || (!editingQR.body.trim() && !editingQR.media_url)}
+                      disabled={savingQR || !editingQR.shortcut.trim() || (!editingQR.body.trim() && editingQR.attachments.length === 0)}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-xs font-medium shadow-sm"
                     >
                       {savingQR ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
@@ -1586,7 +1976,19 @@ export default function SettingsPage() {
                       </span>
                       <div className="flex-1 min-w-0">
                         {qr.title && <p className="text-sm font-medium text-slate-900">{qr.title}</p>}
-                        {qr.media_url && (
+                        {qr.attachments && qr.attachments.length > 0 && (
+                          <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+                            {qr.attachments.map((att, i) => (
+                              <span key={i} className="inline-flex items-center gap-1 bg-emerald-50 rounded px-1.5 py-0.5">
+                                {att.media_type === 'image' ? <Image className="w-3 h-3 text-emerald-500" /> :
+                                 att.media_type === 'video' ? <Video className="w-3 h-3 text-emerald-500" /> :
+                                 <File className="w-3 h-3 text-emerald-500" />}
+                                <span className="text-[10px] text-emerald-600 font-medium truncate max-w-[100px]">{att.media_filename || att.media_type}</span>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {qr.attachments.length === 0 && qr.media_url && (
                           <div className="flex items-center gap-1.5 mb-1">
                             {qr.media_type === 'image' ? <Image className="w-3 h-3 text-emerald-500" /> :
                              qr.media_type === 'video' ? <Video className="w-3 h-3 text-emerald-500" /> :
@@ -1598,7 +2000,7 @@ export default function SettingsPage() {
                       </div>
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
                         <button
-                          onClick={() => setEditingQR({ id: qr.id, shortcut: qr.shortcut, title: qr.title, body: qr.body, media_url: qr.media_url || '', media_type: qr.media_type || '', media_filename: qr.media_filename || '' })}
+                          onClick={() => setEditingQR({ id: qr.id, shortcut: qr.shortcut, title: qr.title, body: qr.body, media_url: qr.media_url || '', media_type: qr.media_type || '', media_filename: qr.media_filename || '', attachments: qr.attachments || [] })}
                           className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-white rounded-lg"
                           title="Editar"
                         >

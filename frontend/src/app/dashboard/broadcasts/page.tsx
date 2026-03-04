@@ -7,7 +7,8 @@ import {
   Settings2, FileText, Image, Video, AudioLines, File, Eye, Copy,
   BarChart3, ZoomIn, ZoomOut, CalendarClock, X, Paperclip,
   MessageSquare, Upload, UserPlus, Download, CheckSquare, Square,
-  Phone, Mail, Save, Pencil, Ban, RotateCcw, Loader2
+  Phone, Mail, Save, Pencil, Ban, RotateCcw, Loader2,
+  LayoutGrid, List, User, Timer, Hash
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -44,6 +45,8 @@ interface Campaign {
   updated_at: string
   device_name: string | null
   attachments?: CampaignAttachment[]
+  created_by_name?: string | null
+  started_by_name?: string | null
 }
 
 interface Recipient {
@@ -143,6 +146,12 @@ export default function BroadcastsPage() {
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<string>>(new Set())
   const [allTags, setAllTags] = useState<BroadcastTag[]>([])
   const [filterTagIds, setFilterTagIds] = useState<Set<string>>(new Set())
+
+  // View mode
+  const [viewMode, setViewMode] = useState<'compact' | 'cards'>('compact')
+  // Summary modal
+  const [showSummaryModal, setShowSummaryModal] = useState(false)
+  const [summaryCampaign, setSummaryCampaign] = useState<Campaign | null>(null)
 
   // Edit recipient panel
   const [editingRecipient, setEditingRecipient] = useState<Recipient | null>(null)
@@ -797,6 +806,23 @@ export default function BroadcastsPage() {
             <Plus className="w-5 h-5" />
             Nueva Campaña
           </button>
+          {/* View mode toggle */}
+          <div className="flex items-center bg-slate-100 rounded-lg p-0.5">
+            <button
+              onClick={() => setViewMode('compact')}
+              className={`p-1.5 rounded-md transition ${viewMode === 'compact' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+              title="Vista compacta"
+            >
+              <List className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setViewMode('cards')}
+              className={`p-1.5 rounded-md transition ${viewMode === 'cards' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+              title="Vista tarjetas"
+            >
+              <LayoutGrid className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -815,6 +841,97 @@ export default function BroadcastsPage() {
           <Radio className="w-12 h-12 text-gray-300 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-gray-900">Sin campañas</h3>
           <p className="text-gray-500 mt-1">Crea tu primera campaña de envío masivo</p>
+        </div>
+      ) : viewMode === 'compact' ? (
+        /* ═══ Compact Table View ═══ */
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          {selectionMode && (
+            <div className="flex items-center gap-3 text-sm text-gray-600 px-4 py-2 border-b border-gray-100 bg-gray-50">
+              <button onClick={() => setSelectedCampaignIds(new Set(campaigns.map(c => c.id)))} className="text-blue-600 hover:underline text-xs">Seleccionar todos</button>
+              {selectedCampaignIds.size > 0 && <button onClick={() => setSelectedCampaignIds(new Set())} className="text-gray-500 hover:underline text-xs">Deseleccionar</button>}
+              <span className="text-xs text-gray-400">{selectedCampaignIds.size} seleccionada(s)</span>
+            </div>
+          )}
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100 text-left text-xs text-gray-500 uppercase tracking-wider">
+                {selectionMode && <th className="px-3 py-2.5 w-8"></th>}
+                <th className="px-4 py-2.5">Nombre</th>
+                <th className="px-3 py-2.5">Estado</th>
+                <th className="px-3 py-2.5 text-center">Destinatarios</th>
+                <th className="px-3 py-2.5 text-center">Enviados</th>
+                <th className="px-3 py-2.5 text-center">Fallidos</th>
+                <th className="px-3 py-2.5">Progreso</th>
+                <th className="px-3 py-2.5">Dispositivo</th>
+                <th className="px-3 py-2.5">Creada</th>
+                <th className="px-3 py-2.5 text-right">Acciones</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {campaigns.map(campaign => {
+                const progress = campaign.total_recipients > 0
+                  ? Math.round(((campaign.sent_count + campaign.failed_count) / campaign.total_recipients) * 100)
+                  : 0
+                return (
+                  <tr key={campaign.id} className="hover:bg-gray-50/50 transition group">
+                    {selectionMode && (
+                      <td className="px-3 py-2">
+                        <button onClick={() => toggleCampaignSelection(campaign.id)}>
+                          {selectedCampaignIds.has(campaign.id) ? <CheckSquare className="w-4 h-4 text-blue-600" /> : <Square className="w-4 h-4 text-gray-300" />}
+                        </button>
+                      </td>
+                    )}
+                    <td className="px-4 py-2.5">
+                      <button onClick={() => { setSummaryCampaign(campaign); setShowSummaryModal(true) }} className="font-medium text-gray-900 hover:text-emerald-700 truncate max-w-[200px] block text-left transition">
+                        {campaign.name}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium ${STATUS_COLORS[campaign.status] || STATUS_COLORS.draft}`}>
+                        {STATUS_LABELS[campaign.status] || campaign.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-center text-gray-600">{campaign.total_recipients}</td>
+                    <td className="px-3 py-2.5 text-center text-green-600 font-medium">{campaign.sent_count}</td>
+                    <td className="px-3 py-2.5 text-center text-red-500 font-medium">{campaign.failed_count}</td>
+                    <td className="px-3 py-2.5 w-32">
+                      {campaign.total_recipients > 0 ? (
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 bg-gray-200 rounded-full h-1.5 overflow-hidden">
+                            <div className="flex h-full">
+                              <div className="bg-green-500" style={{ width: `${(campaign.sent_count / campaign.total_recipients) * 100}%` }} />
+                              <div className="bg-red-400" style={{ width: `${(campaign.failed_count / campaign.total_recipients) * 100}%` }} />
+                            </div>
+                          </div>
+                          <span className="text-[10px] text-gray-400 w-8 text-right">{progress}%</span>
+                        </div>
+                      ) : <span className="text-xs text-gray-300">—</span>}
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-gray-500 truncate max-w-[120px]">{campaign.device_name || '—'}</td>
+                    <td className="px-3 py-2.5 text-xs text-gray-400 whitespace-nowrap">{format(new Date(campaign.created_at), "d MMM yy", { locale: es })}</td>
+                    <td className="px-3 py-2.5 text-right">
+                      <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition">
+                        {(campaign.status === 'draft' || campaign.status === 'scheduled' || campaign.status === 'paused') && campaign.total_recipients > 0 && (
+                          <button onClick={() => handleStartCampaign(campaign.id)} className="p-1 text-green-600 hover:bg-green-50 rounded transition" title="Iniciar"><Play className="w-4 h-4" /></button>
+                        )}
+                        {campaign.status === 'running' && (
+                          <button onClick={() => handlePauseCampaign(campaign.id)} className="p-1 text-orange-600 hover:bg-orange-50 rounded transition" title="Pausar"><Pause className="w-4 h-4" /></button>
+                        )}
+                        {(campaign.status === 'running' || campaign.status === 'paused' || campaign.status === 'scheduled') && (
+                          <button onClick={() => handleCancelCampaign(campaign.id)} className="p-1 text-red-600 hover:bg-red-50 rounded transition" title="Cancelar"><Ban className="w-4 h-4" /></button>
+                        )}
+                        <button onClick={() => handleViewRecipients(campaign)} className="p-1 text-gray-500 hover:bg-gray-100 rounded transition" title="Ver detalles"><Eye className="w-4 h-4" /></button>
+                        <button onClick={() => { setSummaryCampaign(campaign); setShowSummaryModal(true) }} className="p-1 text-emerald-600 hover:bg-emerald-50 rounded transition" title="Resumen"><BarChart3 className="w-4 h-4" /></button>
+                        {campaign.status !== 'running' && (
+                          <button onClick={() => handleDeleteCampaign(campaign.id)} className="p-1 text-red-500 hover:bg-red-50 rounded transition" title="Eliminar"><Trash2 className="w-4 h-4" /></button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       ) : (
         <div className="grid gap-4">
@@ -1856,6 +1973,149 @@ export default function BroadcastsPage() {
           }}
         />
       )}
+
+      {/* ═══ Campaign Summary Modal ═══ */}
+      {showSummaryModal && summaryCampaign && (() => {
+        const c = summaryCampaign
+        const progress = c.total_recipients > 0 ? Math.round(((c.sent_count + c.failed_count) / c.total_recipients) * 100) : 0
+        const pending = c.total_recipients - c.sent_count - c.failed_count
+        const duration = c.started_at && c.completed_at
+          ? (() => {
+              const ms = new Date(c.completed_at).getTime() - new Date(c.started_at).getTime()
+              const mins = Math.floor(ms / 60000)
+              const secs = Math.floor((ms % 60000) / 1000)
+              return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
+            })()
+          : null
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowSummaryModal(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900">{c.name}</h2>
+                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium mt-1 ${STATUS_COLORS[c.status] || STATUS_COLORS.draft}`}>
+                    {STATUS_LABELS[c.status] || c.status}
+                  </span>
+                </div>
+                <button onClick={() => setShowSummaryModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Stats Grid */}
+              <div className="px-6 py-4 grid grid-cols-3 gap-3">
+                <div className="text-center p-3 bg-slate-50 rounded-xl">
+                  <div className="text-xl font-bold text-slate-800">{c.total_recipients}</div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">Total</div>
+                </div>
+                <div className="text-center p-3 bg-green-50 rounded-xl">
+                  <div className="text-xl font-bold text-green-600">{c.sent_count}</div>
+                  <div className="text-[11px] text-green-600 mt-0.5">Enviados</div>
+                </div>
+                <div className="text-center p-3 bg-red-50 rounded-xl">
+                  <div className="text-xl font-bold text-red-500">{c.failed_count}</div>
+                  <div className="text-[11px] text-red-500 mt-0.5">Fallidos</div>
+                </div>
+              </div>
+
+              {/* Progress */}
+              {c.total_recipients > 0 && (
+                <div className="px-6 pb-3">
+                  <div className="flex justify-between text-xs text-gray-500 mb-1">
+                    <span>{pending > 0 ? `${pending} pendientes` : 'Completado'}</span>
+                    <span>{progress}%</span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2.5">
+                    <div className="flex h-2.5 rounded-full overflow-hidden">
+                      <div className="bg-green-500 transition-all" style={{ width: `${(c.sent_count / c.total_recipients) * 100}%` }} />
+                      <div className="bg-red-400 transition-all" style={{ width: `${(c.failed_count / c.total_recipients) * 100}%` }} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Details */}
+              <div className="px-6 py-4 border-t border-slate-100 space-y-2.5">
+                <div className="flex items-center gap-3 text-sm">
+                  <Send className="w-4 h-4 text-slate-400 shrink-0" />
+                  <span className="text-slate-500 w-28 shrink-0">Dispositivo</span>
+                  <span className="text-slate-800 font-medium">{c.device_name || '—'}</span>
+                </div>
+                <div className="flex items-center gap-3 text-sm">
+                  <User className="w-4 h-4 text-slate-400 shrink-0" />
+                  <span className="text-slate-500 w-28 shrink-0">Creada por</span>
+                  <span className="text-slate-800">{c.created_by_name || '—'}</span>
+                </div>
+                <div className="flex items-center gap-3 text-sm">
+                  <Clock className="w-4 h-4 text-slate-400 shrink-0" />
+                  <span className="text-slate-500 w-28 shrink-0">Creada</span>
+                  <span className="text-slate-800">{format(new Date(c.created_at), "d MMM yyyy HH:mm", { locale: es })}</span>
+                </div>
+                {c.scheduled_at && (
+                  <div className="flex items-center gap-3 text-sm">
+                    <CalendarClock className="w-4 h-4 text-blue-400 shrink-0" />
+                    <span className="text-slate-500 w-28 shrink-0">Programada</span>
+                    <span className="text-blue-700">{format(new Date(c.scheduled_at), "d MMM yyyy HH:mm", { locale: es })}</span>
+                  </div>
+                )}
+                {c.started_at && (
+                  <div className="flex items-center gap-3 text-sm">
+                    <Play className="w-4 h-4 text-green-400 shrink-0" />
+                    <span className="text-slate-500 w-28 shrink-0">Iniciada</span>
+                    <span className="text-slate-800">{format(new Date(c.started_at), "d MMM yyyy HH:mm", { locale: es })}</span>
+                  </div>
+                )}
+                {c.started_by_name && (
+                  <div className="flex items-center gap-3 text-sm">
+                    <User className="w-4 h-4 text-slate-400 shrink-0" />
+                    <span className="text-slate-500 w-28 shrink-0">Iniciada por</span>
+                    <span className="text-slate-800">{c.started_by_name}</span>
+                  </div>
+                )}
+                {c.completed_at && (
+                  <div className="flex items-center gap-3 text-sm">
+                    <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
+                    <span className="text-slate-500 w-28 shrink-0">Completada</span>
+                    <span className="text-slate-800">{format(new Date(c.completed_at), "d MMM yyyy HH:mm", { locale: es })}</span>
+                  </div>
+                )}
+                {duration && (
+                  <div className="flex items-center gap-3 text-sm">
+                    <Timer className="w-4 h-4 text-slate-400 shrink-0" />
+                    <span className="text-slate-500 w-28 shrink-0">Duración</span>
+                    <span className="text-slate-800 font-medium">{duration}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Message preview */}
+              <div className="px-6 py-4 border-t border-slate-100">
+                <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Mensaje</h4>
+                <div className="bg-slate-50 rounded-xl p-3 text-sm text-slate-700 whitespace-pre-wrap line-clamp-4">
+                  {c.message_template}
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="px-6 py-3 border-t border-slate-100 flex justify-end gap-2">
+                <button
+                  onClick={() => { setShowSummaryModal(false); handleViewRecipients(c) }}
+                  className="px-4 py-2 text-sm text-emerald-700 hover:bg-emerald-50 rounded-lg transition font-medium"
+                >
+                  Ver Destinatarios
+                </button>
+                <button
+                  onClick={() => setShowSummaryModal(false)}
+                  className="px-4 py-2 text-sm bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-lg transition"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

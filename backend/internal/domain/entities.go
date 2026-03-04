@@ -60,14 +60,15 @@ const (
 	PermEvents     = "events"
 	PermBroadcasts = "broadcasts"
 	PermTags       = "tags"
-	PermSettings   = "settings"
-	PermAll        = "*"
+	PermSettings     = "settings"
+	PermIntegrations = "integrations"
+	PermAll          = "*"
 )
 
 // AllPermissions contains all available permission modules in display order
 var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
-	PermDevices, PermEvents, PermBroadcasts, PermTags, PermSettings,
+	PermDevices, PermEvents, PermBroadcasts, PermTags, PermSettings, PermIntegrations,
 }
 
 // Role represents a named set of module permissions
@@ -211,8 +212,9 @@ type Chat struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 
 	// Device info (populated on demand)
-	DeviceName  *string `json:"device_name,omitempty"`
-	DevicePhone *string `json:"device_phone,omitempty"`
+	DeviceName   *string `json:"device_name,omitempty"`
+	DevicePhone  *string `json:"device_phone,omitempty"`
+	DeviceStatus *string `json:"device_status,omitempty"`
 
 	// Contact info (populated via JOIN)
 	ContactPhone      *string `json:"contact_phone,omitempty"`
@@ -253,13 +255,16 @@ type Message struct {
 	FromJID       *string    `json:"from_jid,omitempty"`
 	FromName      *string    `json:"from_name,omitempty"`
 	Body          *string    `json:"body,omitempty"`
-	MessageType   *string    `json:"message_type,omitempty"` // text, image, video, audio, document, sticker
+	MessageType   *string    `json:"message_type,omitempty"` // text, image, video, audio, document, sticker, location, contact
 	MediaURL      *string    `json:"media_url,omitempty"`
 	MediaMimetype *string    `json:"media_mimetype,omitempty"`
 	MediaFilename *string    `json:"media_filename,omitempty"`
 	MediaSize     *int64     `json:"media_size,omitempty"`
 	IsFromMe      bool       `json:"is_from_me"`
 	IsRead        bool       `json:"is_read"`
+	IsRevoked     bool       `json:"is_revoked"`
+	IsEdited      bool       `json:"is_edited"`
+	IsViewOnce    bool       `json:"is_view_once"`
 	Status        *string    `json:"status,omitempty"` // sent, delivered, read, failed
 	Timestamp     time.Time  `json:"timestamp"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -268,6 +273,15 @@ type Message struct {
 	QuotedMessageID *string `json:"quoted_message_id,omitempty"`
 	QuotedBody      *string `json:"quoted_body,omitempty"`
 	QuotedSender    *string `json:"quoted_sender,omitempty"`
+
+	// Location data (when message_type = location)
+	Latitude  *float64 `json:"latitude,omitempty"`
+	Longitude *float64 `json:"longitude,omitempty"`
+
+	// Contact card data (when message_type = contact)
+	ContactName  *string `json:"contact_name,omitempty"`
+	ContactPhone *string `json:"contact_phone,omitempty"`
+	ContactVCard *string `json:"contact_vcard,omitempty"`
 
 	// Reactions (populated on demand)
 	Reactions []*MessageReaction `json:"reactions,omitempty"`
@@ -337,6 +351,8 @@ type Lead struct {
 	Email        *string                `json:"email,omitempty"`
 	Company      *string                `json:"company,omitempty"`
 	Age          *int                   `json:"age,omitempty"`
+	DNI          *string                `json:"dni,omitempty"`
+	BirthDate    *time.Time             `json:"birth_date,omitempty"`
 	Status       *string                `json:"status,omitempty"` // legacy, kept for backward compat
 	PipelineID   *uuid.UUID             `json:"pipeline_id,omitempty"`
 	StageID      *uuid.UUID             `json:"stage_id,omitempty"`
@@ -419,6 +435,7 @@ type Tag struct {
 	Name      string    `json:"name"`
 	Color     string    `json:"color"`
 	KommoID   *int64    `json:"kommo_id,omitempty"`
+	Negate    bool      `json:"negate,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -442,12 +459,16 @@ type Campaign struct {
 	SentCount       int                    `json:"sent_count"`
 	FailedCount     int                    `json:"failed_count"`
 	Settings        map[string]interface{} `json:"settings"`
+	CreatedBy       *uuid.UUID             `json:"created_by,omitempty"`
+	StartedBy       *uuid.UUID             `json:"started_by,omitempty"`
 	CreatedAt       time.Time              `json:"created_at"`
 	UpdatedAt       time.Time              `json:"updated_at"`
 
 	// Populated on demand
-	DeviceName  *string               `json:"device_name,omitempty"`
-	Attachments []*CampaignAttachment `json:"attachments,omitempty"`
+	DeviceName     *string               `json:"device_name,omitempty"`
+	CreatedByName  *string               `json:"created_by_name,omitempty"`
+	StartedByName  *string               `json:"started_by_name,omitempty"`
+	Attachments    []*CampaignAttachment `json:"attachments,omitempty"`
 }
 
 // CampaignAttachment represents a media file attached to a campaign
@@ -489,25 +510,54 @@ const (
 	CampaignStatusFailed    = "failed"
 )
 
+// EventPipeline represents a pipeline for tracking event participant progression
+type EventPipeline struct {
+	ID          uuid.UUID              `json:"id"`
+	AccountID   uuid.UUID              `json:"account_id"`
+	Name        string                 `json:"name"`
+	Description *string                `json:"description,omitempty"`
+	IsDefault   bool                   `json:"is_default"`
+	Stages      []*EventPipelineStage  `json:"stages,omitempty"`
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+}
+
+// EventPipelineStage represents a stage in an event pipeline
+type EventPipelineStage struct {
+	ID               uuid.UUID `json:"id"`
+	PipelineID       uuid.UUID `json:"pipeline_id"`
+	Name             string    `json:"name"`
+	Color            string    `json:"color"`
+	Position         int       `json:"position"`
+	CreatedAt        time.Time `json:"created_at"`
+	ParticipantCount int       `json:"participant_count,omitempty"`
+}
+
 // Event represents an activity/event to track contact interactions
 type Event struct {
-	ID          uuid.UUID  `json:"id"`
-	AccountID   uuid.UUID  `json:"account_id"`
-	FolderID    *uuid.UUID `json:"folder_id,omitempty"`
-	Name        string     `json:"name"`
-	Description *string    `json:"description,omitempty"`
-	EventDate   *time.Time `json:"event_date,omitempty"`
-	EventEnd    *time.Time `json:"event_end,omitempty"`
-	Location    *string    `json:"location,omitempty"`
-	Status      string     `json:"status"` // draft, active, completed, cancelled
-	Color       string     `json:"color"`
-	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID              uuid.UUID  `json:"id"`
+	AccountID       uuid.UUID  `json:"account_id"`
+	FolderID        *uuid.UUID `json:"folder_id,omitempty"`
+	PipelineID      *uuid.UUID `json:"pipeline_id,omitempty"`
+	Name            string     `json:"name"`
+	Description     *string    `json:"description,omitempty"`
+	EventDate       *time.Time `json:"event_date,omitempty"`
+	EventEnd        *time.Time `json:"event_end,omitempty"`
+	Location        *string    `json:"location,omitempty"`
+	Status          string     `json:"status"` // draft, active, completed, cancelled
+	Color           string     `json:"color"`
+	TagFormulaMode  string     `json:"tag_formula_mode"`  // OR, AND (used in simple mode)
+	TagFormula      string     `json:"tag_formula"`       // text-based formula (advanced mode)
+	TagFormulaType  string     `json:"tag_formula_type"`  // simple, advanced
+	CreatedBy       *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 
 	// Populated on demand
 	ParticipantCounts map[string]int `json:"participant_counts,omitempty"`
 	TotalParticipants int            `json:"total_participants"`
+	PipelineName      *string        `json:"pipeline_name,omitempty"`
+	Tags              []*Tag         `json:"tags,omitempty"`
 }
 
 // EventFolder represents a folder for organising events (Windows Explorer style)
@@ -539,6 +589,8 @@ type EventParticipant struct {
 	ID             uuid.UUID  `json:"id"`
 	EventID        uuid.UUID  `json:"event_id"`
 	ContactID      *uuid.UUID `json:"contact_id,omitempty"`
+	LeadID         *uuid.UUID `json:"lead_id,omitempty"`
+	StageID        *uuid.UUID `json:"stage_id,omitempty"`
 	Name           string     `json:"name"`
 	LastName       *string    `json:"last_name,omitempty"`
 	ShortName      *string    `json:"short_name,omitempty"`
@@ -552,12 +604,15 @@ type EventParticipant struct {
 	InvitedAt      *time.Time `json:"invited_at,omitempty"`
 	ConfirmedAt    *time.Time `json:"confirmed_at,omitempty"`
 	AttendedAt     *time.Time `json:"attended_at,omitempty"`
+	AutoTagSync    bool       `json:"auto_tag_sync"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 
 	// Populated on demand
 	LastInteraction *Interaction `json:"last_interaction,omitempty"`
 	Tags            []*Tag       `json:"tags,omitempty"`
+	StageName       *string      `json:"stage_name,omitempty"`
+	StageColor      *string      `json:"stage_color,omitempty"`
 }
 
 // Participant status constants
@@ -637,16 +692,28 @@ type InteractionFilter struct {
 
 // QuickReply represents a canned/predefined response
 type QuickReply struct {
+	ID            uuid.UUID             `json:"id"`
+	AccountID     uuid.UUID             `json:"account_id"`
+	Shortcut      string                `json:"shortcut"`
+	Title         string                `json:"title"`
+	Body          string                `json:"body"`
+	MediaURL      string                `json:"media_url"`
+	MediaType     string                `json:"media_type"`
+	MediaFilename string                `json:"media_filename"`
+	Attachments   []QuickReplyAttachment `json:"attachments"`
+	CreatedAt     time.Time             `json:"created_at"`
+	UpdatedAt     time.Time             `json:"updated_at"`
+}
+
+// QuickReplyAttachment represents a media attachment for a quick reply (up to 5)
+type QuickReplyAttachment struct {
 	ID            uuid.UUID `json:"id"`
-	AccountID     uuid.UUID `json:"account_id"`
-	Shortcut      string    `json:"shortcut"`
-	Title         string    `json:"title"`
-	Body          string    `json:"body"`
+	QuickReplyID  uuid.UUID `json:"quick_reply_id"`
 	MediaURL      string    `json:"media_url"`
 	MediaType     string    `json:"media_type"`
 	MediaFilename string    `json:"media_filename"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Caption       string    `json:"caption"`
+	Position      int       `json:"position"`
 }
 
 // Default campaign settings (anti-ban)
@@ -741,3 +808,10 @@ const (
 	AttendanceStatusLate    = "late"
 	AttendanceStatusExcused = "excused"
 )
+
+// WhatsAppCheckResult represents the result of checking if a phone is on WhatsApp
+type WhatsAppCheckResult struct {
+	Phone        string `json:"phone"`
+	IsOnWhatsApp bool   `json:"is_on_whatsapp"`
+	JID          string `json:"jid,omitempty"`
+}

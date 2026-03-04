@@ -16,6 +16,10 @@ interface TagInputProps {
   assignedTags: Tag[]
   onTagsChange?: (tags: Tag[]) => void
   className?: string
+  /** Called before assigning a tag. Return false to cancel the assignment. */
+  onBeforeAssign?: (tagId: string) => Promise<boolean>
+  /** Called before removing a tag. Return false to cancel the removal. */
+  onBeforeRemove?: (tagId: string) => Promise<boolean>
 }
 
 const PRESET_COLORS = [
@@ -23,7 +27,7 @@ const PRESET_COLORS = [
   '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#6b7280',
 ]
 
-export default function TagInput({ entityType, entityId, assignedTags, onTagsChange, className = '' }: TagInputProps) {
+export default function TagInput({ entityType, entityId, assignedTags, onTagsChange, className = '', onBeforeAssign, onBeforeRemove }: TagInputProps) {
   const [allTags, setAllTags] = useState<Tag[]>([])
   const [inputValue, setInputValue] = useState('')
   const [isOpen, setIsOpen] = useState(false)
@@ -74,6 +78,10 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
   const showCreateOption = inputValue.trim() && !exactMatch
 
   const handleAssign = async (tag: Tag) => {
+    if (onBeforeAssign) {
+      const allowed = await onBeforeAssign(tag.id)
+      if (!allowed) return
+    }
     const token = localStorage.getItem('token')
     try {
       const res = await fetch('/api/tags/assign', {
@@ -100,6 +108,10 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
   }
 
   const handleRemove = async (tag: Tag) => {
+    if (onBeforeRemove) {
+      const allowed = await onBeforeRemove(tag.id)
+      if (!allowed) return
+    }
     const token = localStorage.getItem('token')
     try {
       const res = await fetch('/api/tags/remove', {
