@@ -366,8 +366,8 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS event_id UUID REFERENCES events(id) ON DELETE SET NULL`,
 		`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS source VARCHAR(50)`,
 		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS short_name VARCHAR(100)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_participants_unique_phone ON event_participants(event_id, phone) WHERE phone IS NOT NULL AND phone != ''`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_participants_unique_email ON event_participants(event_id, email) WHERE email IS NOT NULL AND email != ''`,
+		`DROP INDEX IF EXISTS idx_event_participants_unique_phone`,
+		`DROP INDEX IF EXISTS idx_event_participants_unique_email`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_participants_unique_contact ON event_participants(event_id, contact_id) WHERE contact_id IS NOT NULL`,
 
 		// Saved stickers
@@ -630,6 +630,9 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS end_time VARCHAR(10)`,
 		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS location TEXT`,
 
+		// Program participants: track which lead was used to add the participant
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS lead_id UUID REFERENCES leads(id) ON DELETE SET NULL`,
+
 		// RBAC: Custom roles with granular module permissions
 		`CREATE TABLE IF NOT EXISTS roles (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -749,6 +752,67 @@ func Migrate(db *pgxpool.Pool) error {
 		// Advanced formula: text-based boolean expression and type selector
 		`ALTER TABLE events ADD COLUMN IF NOT EXISTS tag_formula TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE events ADD COLUMN IF NOT EXISTS tag_formula_type TEXT NOT NULL DEFAULT 'simple'`,
+
+		// Campaign tracking: who created / who started
+		`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id)`,
+		`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS started_by UUID REFERENCES users(id)`,
+
+		// ── Event Logbooks (Bitácora) ──────────────────────────────────
+		`CREATE TABLE IF NOT EXISTS event_logbooks (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			event_id UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			date DATE NOT NULL,
+			title VARCHAR(255) NOT NULL DEFAULT '',
+			status VARCHAR(50) NOT NULL DEFAULT 'pending',
+			general_notes TEXT NOT NULL DEFAULT '',
+			stage_snapshot JSONB DEFAULT '{}',
+			total_participants INT NOT NULL DEFAULT 0,
+			captured_at TIMESTAMPTZ,
+			created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE(event_id, date)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_logbooks_event ON event_logbooks(event_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_logbooks_account ON event_logbooks(account_id)`,
+
+		// Event Logbook Entries (per-participant snapshot)
+		`CREATE TABLE IF NOT EXISTS event_logbook_entries (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			logbook_id UUID NOT NULL REFERENCES event_logbooks(id) ON DELETE CASCADE,
+			participant_id UUID NOT NULL REFERENCES event_participants(id) ON DELETE CASCADE,
+			stage_id UUID REFERENCES event_pipeline_stages(id) ON DELETE SET NULL,
+			stage_name VARCHAR(255) NOT NULL DEFAULT '',
+			stage_color VARCHAR(50) NOT NULL DEFAULT '',
+			notes TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE(logbook_id, participant_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_logbook_entries_logbook ON event_logbook_entries(logbook_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_logbook_entries_participant ON event_logbook_entries(participant_id)`,
+
+		// MCP access control per account
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS mcp_enabled BOOLEAN DEFAULT FALSE`,
+
+		// Eros AI conversation persistence
+		`CREATE TABLE IF NOT EXISTS eros_conversations (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			title TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_eros_conversations_user ON eros_conversations (user_id, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS eros_messages (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			conversation_id UUID NOT NULL REFERENCES eros_conversations(id) ON DELETE CASCADE,
+			role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+			content TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_eros_messages_conv ON eros_messages (conversation_id, created_at ASC)`,
 	}
 
 	for _, migration := range migrations {
@@ -858,6 +922,24 @@ func SeedAdmin(db *pgxpool.Pool, cfg *config.Config) error {
 		`, pipelineID, firstStageID, accountID)
 	}
 
+	// ─── API Keys table for MCP / external integrations ───
+	_, _ = db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS api_keys (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			name TEXT NOT NULL DEFAULT '',
+			key_hash TEXT NOT NULL,
+			key_prefix TEXT NOT NULL DEFAULT '',
+			permissions TEXT NOT NULL DEFAULT 'read',
+			is_active BOOLEAN NOT NULL DEFAULT true,
+			last_used_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_api_keys_account_id ON api_keys(account_id)`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash)`)
+
 	return nil
 }
 
@@ -963,9 +1045,11 @@ func MigrateEventPipelines(db *pgxpool.Pool) error {
 	_, _ = db.Exec(ctx, `DROP INDEX IF EXISTS messages_account_id_device_id_message_id_key`)
 	_, _ = db.Exec(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS messages_chat_id_message_id_key ON messages (chat_id, message_id)`)
 
-	// Add created_by and started_by to campaigns
-	_, _ = db.Exec(ctx, `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id)`)
-	_, _ = db.Exec(ctx, `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS started_by UUID REFERENCES users(id)`)
+	// Per-user Groq API key for Eros AI assistant
+	_, _ = db.Exec(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS groq_api_key TEXT DEFAULT ''`)
+
+	// Saved filter for pending logbooks (bitácoras)
+	_, _ = db.Exec(ctx, `ALTER TABLE event_logbooks ADD COLUMN IF NOT EXISTS saved_filter JSONB DEFAULT NULL`)
 
 	return nil
 }

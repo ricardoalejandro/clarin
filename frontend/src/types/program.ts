@@ -22,6 +22,7 @@ export interface ProgramParticipant {
   id: string;
   program_id: string;
   contact_id: string;
+  lead_id?: string;
   status: 'active' | 'dropped' | 'completed';
   enrolled_at: string;
   contact_name?: string;

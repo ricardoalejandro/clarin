@@ -39,6 +39,9 @@ type Repositories struct {
 	QuickReply         *QuickReplyRepository
 	Program           *ProgramRepository
 	Role              *RoleRepository
+	Logbook           *LogbookRepository
+	APIKey            *APIKeyRepository
+	ErosConversation  *ErosConversationRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -68,6 +71,9 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		QuickReply:         &QuickReplyRepository{db: db},
 		Program:           &ProgramRepository{db: db},
 		Role:              &RoleRepository{db: db},
+		Logbook:           &LogbookRepository{db: db},
+		APIKey:            &APIKeyRepository{db: db},
+		ErosConversation:  &ErosConversationRepository{db: db},
 	}
 }
 
@@ -196,6 +202,17 @@ func (r *UserRepository) Delete(ctx context.Context, userID uuid.UUID) error {
 	return err
 }
 
+func (r *UserRepository) GetGroqAPIKey(ctx context.Context, userID uuid.UUID) (string, error) {
+	var key string
+	err := r.db.QueryRow(ctx, `SELECT COALESCE(groq_api_key, '') FROM users WHERE id = $1`, userID).Scan(&key)
+	return key, err
+}
+
+func (r *UserRepository) SetGroqAPIKey(ctx context.Context, userID uuid.UUID, key string) error {
+	_, err := r.db.Exec(ctx, `UPDATE users SET groq_api_key = $2, updated_at = NOW() WHERE id = $1`, userID, key)
+	return err
+}
+
 // UserAccountRepository handles user-account assignments (many-to-many)
 type UserAccountRepository struct {
 	db *pgxpool.Pool
@@ -204,7 +221,7 @@ type UserAccountRepository struct {
 func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
-		       a.name, COALESCE(a.slug, ''),
+		       a.name, COALESCE(a.slug, ''), COALESCE(a.mcp_enabled, false),
 		       ua.role_id, COALESCE(ro.name, ''), COALESCE(ro.permissions, '{}')
 		FROM user_accounts ua
 		JOIN accounts a ON a.id = ua.account_id
@@ -221,7 +238,7 @@ func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUI
 	for rows.Next() {
 		ua := &domain.UserAccount{}
 		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
-			&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
+			&ua.AccountName, &ua.AccountSlug, &ua.AccountMCPEnabled, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, ua)
@@ -232,7 +249,7 @@ func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUI
 func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.UserAccount, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
-		       a.name, COALESCE(a.slug, ''),
+		       a.name, COALESCE(a.slug, ''), COALESCE(a.mcp_enabled, false),
 		       ua.role_id, COALESCE(ro.name, ''), COALESCE(ro.permissions, '{}')
 		FROM user_accounts ua
 		JOIN accounts a ON a.id = ua.account_id
@@ -249,7 +266,7 @@ func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uu
 	for rows.Next() {
 		ua := &domain.UserAccount{}
 		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
-			&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
+			&ua.AccountName, &ua.AccountSlug, &ua.AccountMCPEnabled, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, ua)
@@ -323,7 +340,7 @@ type AccountRepository struct {
 
 func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), a.created_at, a.updated_at,
 			(SELECT COUNT(*) FROM users WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
 			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
@@ -337,7 +354,7 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 	var accounts []*domain.Account
 	for rows.Next() {
 		a := &domain.Account{}
-		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.CreatedAt, &a.UpdatedAt,
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.MCPEnabled, &a.CreatedAt, &a.UpdatedAt,
 			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
 			return nil, err
 		}
@@ -349,12 +366,12 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Account, error) {
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), a.default_incoming_stage_id, a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
 			(SELECT COUNT(*) FROM users WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
 			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
 		FROM accounts a WHERE a.id = $1
-	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
+	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.MCPEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
 		&a.UserCount, &a.DeviceCount, &a.ChatCount)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -372,9 +389,9 @@ func (r *AccountRepository) Create(ctx context.Context, a *domain.Account) error
 
 func (r *AccountRepository) Update(ctx context.Context, a *domain.Account) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, updated_at = NOW()
+		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, mcp_enabled = $6, updated_at = NOW()
 		WHERE id = $1
-	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices)
+	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices, a.MCPEnabled)
 	return err
 }
 
@@ -1019,11 +1036,54 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		return nil, 0, err
 	}
 
-	// Select
+	// Select with last activity from chats
 	selectQuery := `
-		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at
-	` + baseQuery + " ORDER BY COALESCE(custom_name, name, push_name, phone) ASC NULLS LAST"
+		SELECT c.id, c.account_id, c.device_id, c.jid, c.phone, c.name, c.last_name, c.short_name, c.custom_name, c.push_name, c.avatar_url,
+		       c.email, c.company, c.age, c.dni, c.birth_date, c.tags, c.notes, c.source, c.is_group, c.created_at, c.updated_at,
+		       ch_agg.last_activity
+		FROM contacts c
+		LEFT JOIN (
+			SELECT ch.contact_id, MAX(ch.last_message_at) AS last_activity
+			FROM chats ch
+			WHERE ch.account_id = $1
+			GROUP BY ch.contact_id
+		) ch_agg ON ch_agg.contact_id = c.id
+		WHERE c.account_id = $1 AND c.is_group = $2
+	`
+
+	// Re-apply filters with c. prefix
+	selectArgs := []interface{}{accountID, filter.IsGroup}
+	selectArgNum := 3
+
+	if filter.Search != "" {
+		selectQuery += fmt.Sprintf(` AND (
+			c.name ILIKE $%d OR c.last_name ILIKE $%d OR c.short_name ILIKE $%d OR c.custom_name ILIKE $%d OR c.push_name ILIKE $%d OR
+			c.phone ILIKE $%d OR c.jid ILIKE $%d OR c.email ILIKE $%d OR c.company ILIKE $%d
+		)`, selectArgNum, selectArgNum, selectArgNum, selectArgNum, selectArgNum, selectArgNum, selectArgNum, selectArgNum, selectArgNum)
+		selectArgs = append(selectArgs, "%"+filter.Search+"%")
+		selectArgNum++
+	}
+	if filter.DeviceID != nil {
+		selectQuery += fmt.Sprintf(" AND c.device_id = $%d", selectArgNum)
+		selectArgs = append(selectArgs, *filter.DeviceID)
+		selectArgNum++
+	}
+	if filter.HasPhone {
+		selectQuery += " AND c.phone IS NOT NULL AND c.phone != ''"
+	}
+	if len(filter.Tags) > 0 {
+		selectQuery += fmt.Sprintf(" AND c.tags && $%d", selectArgNum)
+		selectArgs = append(selectArgs, filter.Tags)
+		selectArgNum++
+	}
+	if len(filter.TagIDs) > 0 {
+		selectQuery += fmt.Sprintf(" AND c.id IN (SELECT contact_id FROM contact_tags WHERE tag_id = ANY($%d))", selectArgNum)
+		selectArgs = append(selectArgs, filter.TagIDs)
+		selectArgNum++
+	}
+	_ = selectArgNum
+
+	selectQuery += " ORDER BY ch_agg.last_activity DESC NULLS LAST, c.updated_at DESC"
 
 	if filter.Limit > 0 {
 		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
@@ -1032,7 +1092,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		}
 	}
 
-	rows, err := r.db.Query(ctx, selectQuery, args...)
+	rows, err := r.db.Query(ctx, selectQuery, selectArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1046,6 +1106,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
 			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+			&contact.LastActivity,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -2701,12 +2762,14 @@ func (r *EventRepository) BulkAddParticipantsFromLeads(ctx context.Context, even
 	if len(leadIDs) == 0 {
 		return 0, nil
 	}
-	// Use a single INSERT...SELECT to create participants from leads.
-	// The NOT EXISTS prevents duplicates even if the lead already has a participant row.
+	// Use INSERT...SELECT with ON CONFLICT DO NOTHING to safely skip duplicates.
+	// Only dedup by lead_id — if a lead matches the formula, it MUST appear as participant.
+	// No phone/email dedup: two different leads with same phone both get added.
 	tag, err := r.db.Exec(ctx, `
 		INSERT INTO event_participants (id, event_id, lead_id, contact_id, stage_id, name, last_name, short_name, phone, email, age, status, auto_tag_sync, invited_at, created_at, updated_at)
 		SELECT gen_random_uuid(), $1, l.id, NULL, $3,
-		       COALESCE(l.name, ''), l.last_name, l.short_name, l.phone, l.email, l.age,
+		       COALESCE(l.name, ''), COALESCE(l.last_name, ''), COALESCE(l.short_name, ''),
+		       COALESCE(l.phone, ''), COALESCE(l.email, ''), COALESCE(l.age, 0),
 		       'invited', TRUE, NOW(), NOW(), NOW()
 		FROM leads l
 		WHERE l.id = ANY($2)
@@ -2714,6 +2777,7 @@ func (r *EventRepository) BulkAddParticipantsFromLeads(ctx context.Context, even
 			SELECT 1 FROM event_participants ep
 			WHERE ep.event_id = $1 AND ep.lead_id = l.id
 		)
+		ON CONFLICT DO NOTHING
 	`, eventID, leadIDs, stageID)
 	if err != nil {
 		return 0, err

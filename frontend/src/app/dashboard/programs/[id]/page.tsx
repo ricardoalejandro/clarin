@@ -5,12 +5,15 @@ import { useParams, useRouter } from 'next/navigation';
 import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
-  Repeat, ChevronRight, CheckCircle2, XCircle, Phone
+  Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program, ProgramParticipant, ProgramSession, ProgramAttendance } from '@/types/program';
+import { Chat } from '@/types/chat';
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector';
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal';
+import LeadDetailPanel from '@/components/LeadDetailPanel';
+import ChatPanel from '@/components/chat/ChatPanel';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -20,6 +23,7 @@ interface Device {
   id: string;
   name: string;
   phone: string | null;
+  phone_number?: string;
   status: string;
 }
 
@@ -52,6 +56,24 @@ export default function ProgramDetailPage() {
 
   // Campaign state
   const [creatingCampaign, setCreatingCampaign] = useState(false);
+
+  // Edit program state
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editForm, setEditForm] = useState({ name: '', description: '', color: '#10b981', status: 'active' });
+  const [saving, setSaving] = useState(false);
+  const [showHeaderMenu, setShowHeaderMenu] = useState(false);
+
+  // Participant detail panel
+  const [selectedLead, setSelectedLead] = useState<any | null>(null);
+  const [loadingLead, setLoadingLead] = useState(false);
+
+  // WhatsApp inline chat
+  const [showInlineChat, setShowInlineChat] = useState(false);
+  const [inlineChatId, setInlineChatId] = useState('');
+  const [inlineChat, setInlineChat] = useState<Chat | null>(null);
+  const [inlineChatDeviceId, setInlineChatDeviceId] = useState('');
+  const [showDeviceSelector, setShowDeviceSelector] = useState(false);
+  const [whatsappPhone, setWhatsappPhone] = useState('');
 
   // Generate sessions form
   const [genForm, setGenForm] = useState({
@@ -115,6 +137,128 @@ export default function ProgramDetailPage() {
       fetchProgramData();
     } catch (error) {
       console.error('Error adding participants:', error);
+    }
+  };
+
+  // Edit program
+  const openEditModal = () => {
+    if (program) {
+      setEditForm({
+        name: program.name,
+        description: program.description || '',
+        color: program.color || '#10b981',
+        status: program.status,
+      });
+      setIsEditModalOpen(true);
+      setShowHeaderMenu(false);
+    }
+  };
+
+  const handleUpdateProgram = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!program) return;
+    setSaving(true);
+    try {
+      const res = await api(`/api/programs/${programId}`, {
+        method: 'PUT',
+        body: JSON.stringify(editForm)
+      });
+      if (res.success) {
+        setIsEditModalOpen(false);
+        fetchProgramData();
+      }
+    } catch (error) {
+      console.error('Error updating program:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteProgram = async () => {
+    if (!confirm('¿Estás seguro de eliminar este programa? Se eliminarán también todos sus participantes, sesiones y asistencia.')) return;
+    try {
+      await api(`/api/programs/${programId}`, { method: 'DELETE' });
+      router.push('/dashboard/programs');
+    } catch (error) {
+      console.error('Error deleting program:', error);
+    }
+  };
+
+  const handleArchiveProgram = async () => {
+    if (!program) return;
+    const newStatus = program.status === 'archived' ? 'active' : 'archived';
+    try {
+      await api(`/api/programs/${programId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ ...program, status: newStatus, description: program.description || '' })
+      });
+      fetchProgramData();
+      setShowHeaderMenu(false);
+    } catch (error) {
+      console.error('Error archiving program:', error);
+    }
+  };
+
+  // Participant detail
+  const handleParticipantClick = async (participant: ProgramParticipant) => {
+    if (!participant.lead_id) {
+      // No lead linked — check if there's a lead by contact phone
+      return;
+    }
+    setLoadingLead(true);
+    try {
+      const res = await fetch(`/api/leads/${participant.lead_id}`, {
+        headers: { Authorization: `Bearer ${token()}` }
+      });
+      const data = await res.json();
+      if (data.success && data.lead) {
+        setSelectedLead(data.lead);
+      }
+    } catch (error) {
+      console.error('Error fetching lead:', error);
+    } finally {
+      setLoadingLead(false);
+    }
+  };
+
+  // WhatsApp chat
+  const handleSendWhatsApp = async (phone: string) => {
+    setWhatsappPhone(phone);
+    const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${token()}` } });
+    const data = await res.json();
+    const connected = (data.devices || []).filter((d: Device) => d.status === 'connected');
+    if (connected.length === 0) {
+      alert('No hay dispositivos conectados');
+      return;
+    }
+    if (connected.length === 1) {
+      handleDeviceSelectedForChat(connected[0], phone);
+    } else {
+      setDevices(connected);
+      setShowDeviceSelector(true);
+    }
+  };
+
+  const handleDeviceSelectedForChat = async (device: Device, phone?: string) => {
+    setShowDeviceSelector(false);
+    const cleanPhone = (phone || whatsappPhone).replace(/[^0-9]/g, '');
+    try {
+      const res = await fetch('/api/chats/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
+        body: JSON.stringify({ device_id: device.id, phone: cleanPhone }),
+      });
+      const data = await res.json();
+      if (data.success && data.chat) {
+        setInlineChatId(data.chat.id);
+        setInlineChat(data.chat);
+        setInlineChatDeviceId(device.id);
+        setShowInlineChat(true);
+      } else {
+        alert(data.error || 'Error al crear conversación');
+      }
+    } catch {
+      alert('Error de conexión');
     }
   };
 
@@ -349,14 +493,50 @@ export default function ProgramDetailPage() {
           <h1 className="text-2xl font-bold text-slate-800 truncate">{program.name}</h1>
           <p className="text-slate-500 text-sm truncate">{program.description || 'Sin descripción'}</p>
         </div>
-        <button
-          onClick={() => setShowCampaignModal(true)}
-          disabled={participantsWithPhone.length === 0}
-          className="hidden sm:flex items-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <Send className="w-4 h-4" />
-          Envío Masivo
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCampaignModal(true)}
+            disabled={participantsWithPhone.length === 0}
+            className="hidden sm:flex items-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Send className="w-4 h-4" />
+            Envío Masivo
+          </button>
+          <button
+            onClick={openEditModal}
+            className="p-2.5 hover:bg-slate-100 rounded-xl transition-colors text-slate-500 hover:text-slate-700"
+            title="Editar programa"
+          >
+            <Edit2 className="w-4 h-4" />
+          </button>
+          <div className="relative">
+            <button
+              onClick={() => setShowHeaderMenu(!showHeaderMenu)}
+              className="p-2.5 hover:bg-slate-100 rounded-xl transition-colors text-slate-500 hover:text-slate-700"
+              title="Más opciones"
+            >
+              <MoreVertical className="w-4 h-4" />
+            </button>
+            {showHeaderMenu && (
+              <div className="absolute right-0 top-full mt-1 bg-white rounded-xl border border-slate-200 shadow-lg py-1 w-48 z-50">
+                <button
+                  onClick={handleArchiveProgram}
+                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                >
+                  <Archive className="w-4 h-4" />
+                  {program.status === 'archived' ? 'Desarchivar' : 'Archivar'}
+                </button>
+                <button
+                  onClick={handleDeleteProgram}
+                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Eliminar Programa
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Quick Stats */}
@@ -475,13 +655,14 @@ export default function ProgramDetailPage() {
                       </tr>
                     ) : (
                       participants.map((p) => (
-                        <tr key={p.id} className="hover:bg-slate-50 transition-colors">
+                        <tr key={p.id} className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => handleParticipantClick(p)}>
                           <td className="px-5 py-3">
                             <div className="flex items-center gap-2.5">
                               <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-600 font-medium text-xs">
                                 {(p.contact_name || '?').charAt(0).toUpperCase()}
                               </div>
                               <span className="font-medium text-slate-800">{p.contact_name || 'Sin nombre'}</span>
+                              {loadingLead && <span className="text-xs text-slate-400">...</span>}
                             </div>
                           </td>
                           <td className="px-5 py-3 text-slate-600 font-mono text-xs">
@@ -501,7 +682,7 @@ export default function ProgramDetailPage() {
                           </td>
                           <td className="px-5 py-3 text-right">
                             <button
-                              onClick={() => handleRemoveParticipant(p.id)}
+                              onClick={(e) => { e.stopPropagation(); handleRemoveParticipant(p.id); }}
                               className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all"
                               title="Eliminar participante"
                             >
@@ -681,6 +862,7 @@ export default function ProgramDetailPage() {
                 onConfirm={handleAddParticipants}
                 title="Agregar Participantes"
                 confirmLabel="Agregar Seleccionados"
+                excludeIds={new Set(participants.map(p => p.contact_id))}
               />
             </div>
           </div>
@@ -1062,6 +1244,141 @@ export default function ProgramDetailPage() {
           </div>
         }
       />
+
+      {/* Edit Program Modal */}
+      {isEditModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setIsEditModalOpen(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-slate-100">
+              <h3 className="text-lg font-bold text-slate-800">Editar Programa</h3>
+              <button onClick={() => setIsEditModalOpen(false)} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors">
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+            <form onSubmit={handleUpdateProgram} className="p-5 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Nombre</label>
+                <input
+                  type="text"
+                  value={editForm.name}
+                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  required
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Descripción</label>
+                <textarea
+                  value={editForm.description}
+                  onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
+                  rows={3}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all resize-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Color</label>
+                <div className="flex gap-2 flex-wrap">
+                  {['#10b981', '#3b82f6', '#8b5cf6', '#6366f1', '#ec4899', '#f43f5e', '#f97316', '#f59e0b'].map(c => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setEditForm({ ...editForm, color: c })}
+                      className={`w-8 h-8 rounded-full transition-all ${editForm.color === c ? 'ring-2 ring-offset-2 ring-slate-400 scale-110' : 'hover:scale-110'}`}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Estado</label>
+                <select
+                  value={editForm.status}
+                  onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}
+                  className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                >
+                  <option value="active">Activo</option>
+                  <option value="archived">Archivado</option>
+                  <option value="completed">Completado</option>
+                </select>
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button type="button" onClick={() => setIsEditModalOpen(false)} className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium">
+                  Cancelar
+                </button>
+                <button type="submit" disabled={saving || !editForm.name.trim()} className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium disabled:opacity-50">
+                  {saving ? 'Guardando...' : 'Guardar Cambios'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Lead Detail Side Panel with Inline Chat */}
+      {selectedLead && (
+        <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+          <div
+            className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
+            onClick={() => { setSelectedLead(null); setShowInlineChat(false); }}
+          />
+          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
+            {/* Chat Panel - Left Side */}
+            {showInlineChat && inlineChatId && (
+              <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
+                <ChatPanel
+                  chatId={inlineChatId}
+                  deviceId={inlineChatDeviceId}
+                  initialChat={inlineChat || undefined}
+                  onClose={() => setShowInlineChat(false)}
+                  className="h-full"
+                />
+              </div>
+            )}
+            {/* Lead Details - Right Side */}
+            <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
+              <LeadDetailPanel
+                lead={selectedLead}
+                onLeadChange={(updated) => {
+                  setSelectedLead(updated);
+                  fetchProgramData();
+                }}
+                onClose={() => { setSelectedLead(null); setShowInlineChat(false); }}
+                onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                hideDelete
+                hideWhatsApp={showInlineChat}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Device Selector Modal for WhatsApp */}
+      {showDeviceSelector && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
+            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
+            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para el chat con {whatsappPhone}</p>
+            {devices.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
+            ) : (
+              <div className="space-y-2">
+                {devices.map(device => (
+                  <button key={device.id} onClick={() => handleDeviceSelectedForChat(device)}
+                    className="w-full flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
+                  >
+                    <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center"><Phone className="w-4 h-4 text-emerald-600" /></div>
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                      <p className="text-xs text-slate-500">{device.phone_number || device.phone || ''}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setShowDeviceSelector(false)} className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">Cancelar</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

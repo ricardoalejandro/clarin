@@ -95,22 +95,24 @@ return err
 
 func (r *ProgramRepository) AddParticipant(ctx context.Context, pp *domain.ProgramParticipant) error {
 err := r.db.QueryRow(ctx, `
-INSERT INTO program_participants (program_id, contact_id, status)
-VALUES ($1, $2, $3)
-ON CONFLICT (program_id, contact_id) DO UPDATE SET status = EXCLUDED.status
+INSERT INTO program_participants (program_id, contact_id, lead_id, status)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (program_id, contact_id) DO UPDATE SET status = EXCLUDED.status, lead_id = COALESCE(EXCLUDED.lead_id, program_participants.lead_id)
 RETURNING id, enrolled_at
-`, pp.ProgramID, pp.ContactID, pp.Status).Scan(&pp.ID, &pp.EnrolledAt)
+`, pp.ProgramID, pp.ContactID, pp.LeadID, pp.Status).Scan(&pp.ID, &pp.EnrolledAt)
 return err
 }
 
 func (r *ProgramRepository) ListParticipants(ctx context.Context, programID uuid.UUID) ([]*domain.ProgramParticipant, error) {
 rows, err := r.db.Query(ctx, `
-SELECT pp.id, pp.program_id, pp.contact_id, pp.status, pp.enrolled_at,
-c.name, c.phone
+SELECT pp.id, pp.program_id, pp.contact_id, pp.lead_id, pp.status, pp.enrolled_at,
+COALESCE(c.custom_name, c.name, c.push_name, c.phone, '') as display_name, c.phone,
+COALESCE(pp.lead_id, l.id) as resolved_lead_id
 FROM program_participants pp
 JOIN contacts c ON c.id = pp.contact_id
+LEFT JOIN leads l ON l.contact_id = pp.contact_id AND l.account_id = (SELECT account_id FROM programs WHERE id = pp.program_id)
 WHERE pp.program_id = $1
-ORDER BY c.name ASC
+ORDER BY COALESCE(c.custom_name, c.name, c.push_name, c.phone) ASC
 `, programID)
 if err != nil {
 return nil, err
@@ -120,12 +122,17 @@ defer rows.Close()
 var participants []*domain.ProgramParticipant
 for rows.Next() {
 pp := &domain.ProgramParticipant{}
+var resolvedLeadID *uuid.UUID
 err := rows.Scan(
-&pp.ID, &pp.ProgramID, &pp.ContactID, &pp.Status, &pp.EnrolledAt,
-&pp.ContactName, &pp.ContactPhone,
+&pp.ID, &pp.ProgramID, &pp.ContactID, &pp.LeadID, &pp.Status, &pp.EnrolledAt,
+&pp.ContactName, &pp.ContactPhone, &resolvedLeadID,
 )
 if err != nil {
 return nil, err
+}
+// Use resolved lead_id if the stored one is nil
+if pp.LeadID == nil && resolvedLeadID != nil {
+pp.LeadID = resolvedLeadID
 }
 participants = append(participants, pp)
 }

@@ -28,6 +28,9 @@ type Config struct {
 	KommoClientSecret string
 	KommoAccessToken  string
 	KommoRedirectURI  string
+	// AI Assistant
+	GeminiAPIKey string
+	GroqAPIKey   string
 }
 
 func Load() *Config {
@@ -58,6 +61,8 @@ func Load() *Config {
 		KommoClientSecret: getEnv("KOMMO_CLIENT_SECRET", ""),
 		KommoAccessToken:  getEnv("KOMMO_ACCESS_TOKEN", ""),
 		KommoRedirectURI:  getEnv("KOMMO_REDIRECT_URI", ""),
+		GeminiAPIKey:      getEnv("GEMINI_API_KEY", ""),
+		GroqAPIKey:        getEnv("GROQ_API_KEY", ""),
 	}
 }
 

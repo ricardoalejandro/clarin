@@ -7,7 +7,8 @@ import {
   CheckCircle2, Clock, GripVertical, List, LayoutGrid, X, Plus, Trash2,
   Filter, Send, Maximize2, MapPin, CalendarDays, Download,
   FileSpreadsheet, FileText, FileDown, Loader2, StickyNote,
-  Tag, CheckSquare, XCircle, Code, AlertCircle
+  Tag, CheckSquare, XCircle, Code, AlertCircle, BookOpen, Camera, Edit3,
+  ChevronRight, PenLine
 } from 'lucide-react'
 import { format, formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -247,8 +248,9 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   const virtualizer = useVirtualizer({
     count: column.participants.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 120,
+    estimateSize: () => 140,
     overscan: 5,
+    measureElement: (el) => el?.getBoundingClientRect().height || 140,
   })
 
   useEffect(() => {
@@ -308,7 +310,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
           {virtualizer.getVirtualItems().map((vi) => {
             const p = column.participants[vi.index]
             return (
-              <div key={p.id} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}>
+              <div key={p.id} ref={virtualizer.measureElement} data-index={vi.index} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}>
                 <div className="pb-2">
                   <ParticipantCard
                     participant={p}
@@ -356,7 +358,7 @@ export default function EventDetailPage() {
   const [loadingMoreStages, setLoadingMoreStages] = useState<Set<string>>(new Set())
 
   // UI state
-  const [viewMode, setViewMode] = useState<'kanban' | 'list'>('kanban')
+  const [viewMode, setViewMode] = useState<'kanban' | 'list' | 'logbook'>('kanban')
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
@@ -366,6 +368,7 @@ export default function EventDetailPage() {
   const [tagFilterMode, setTagFilterMode] = useState<'OR' | 'AND'>('OR')
   const [filterHasPhone, setFilterHasPhone] = useState(false)
   // Formula filter
+  const [tagSearchQuery, setTagSearchQuery] = useState('')
   const [pFormulaType, setPFormulaType] = useState<'simple' | 'advanced'>('simple')
   const [pFormulaText, setPFormulaText] = useState('')
   const [pFormulaIsValid, setPFormulaIsValid] = useState(true)
@@ -401,6 +404,9 @@ export default function EventDetailPage() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [addTab, setAddTab] = useState<'search' | 'manual'>('search')
   const [manualForm, setManualForm] = useState({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
+  const [leadForm, setLeadForm] = useState({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
+  const [leadPipelines, setLeadPipelines] = useState<{ id: string; name: string; stages: { id: string; name: string }[] }[]>([])
+  const [creatingLead, setCreatingLead] = useState(false)
 
   // Export
   const [showExportModal, setShowExportModal] = useState(false)
@@ -427,6 +433,52 @@ export default function EventDetailPage() {
   const [listHistoryFilterType, setListHistoryFilterType] = useState('')
   const [listHistoryFilterFrom, setListHistoryFilterFrom] = useState('')
   const [listHistoryFilterTo, setListHistoryFilterTo] = useState('')
+
+  // ── Logbook (Bitácora) state ──
+  interface Logbook {
+    id: string; event_id: string; account_id: string; date: string; title: string
+    status: string; general_notes: string; stage_snapshot: Record<string, { name: string; color: string; count: number }>
+    total_participants: number; captured_at: string | null; created_by: string | null
+    created_by_name: string | null; created_at: string; updated_at: string
+    entries?: LogbookEntry[]
+    saved_filter?: Record<string, unknown> | null
+  }
+  interface LogbookEntry {
+    id: string; logbook_id: string; participant_id: string; stage_id: string | null
+    stage_name: string; stage_color: string; notes: string; created_at: string
+    participant_name: string; participant_phone: string | null
+  }
+  // Helper: parse logbook date without timezone shift (dates stored as UTC midnight)
+  const parseLogbookDate = (dateStr: string) => {
+    if (!dateStr) return new Date()
+    // If it's a full ISO string with T00:00:00Z, extract just the date part and parse as local noon
+    const dateOnly = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr.slice(0, 10)
+    return new Date(dateOnly + 'T12:00:00')
+  }
+  const [logbooks, setLogbooks] = useState<Logbook[]>([])
+  const [logbooksLoading, setLogbooksLoading] = useState(false)
+  const [selectedLogbook, setSelectedLogbook] = useState<Logbook | null>(null)
+  const [selectedLogbookLoading, setSelectedLogbookLoading] = useState(false)
+  const [showNewLogbookModal, setShowNewLogbookModal] = useState(false)
+  const [newLogbookDate, setNewLogbookDate] = useState('')
+  const [newLogbookTitle, setNewLogbookTitle] = useState('')
+  const [newLogbookCaptureNow, setNewLogbookCaptureNow] = useState(false)
+  const [creatingLogbook, setCreatingLogbook] = useState(false)
+  const [capturingSnapshot, setCapturingSnapshot] = useState(false)
+  const [editingLogbookNotes, setEditingLogbookNotes] = useState(false)
+  const [logbookNotesText, setLogbookNotesText] = useState('')
+  const [savingLogbookNotes, setSavingLogbookNotes] = useState(false)
+  const [editingEntryId, setEditingEntryId] = useState<string | null>(null)
+  const [entryNotesText, setEntryNotesText] = useState('')
+  const [savingEntryNotes, setSavingEntryNotes] = useState(false)
+  const [autoCreating, setAutoCreating] = useState(false)
+  const [logbookViewMode, setLogbookViewMode] = useState<'list' | 'kanban'>('list')
+  // Preview for pending logbooks with saved filter
+  const [previewParticipants, setPreviewParticipants] = useState<Array<{ id: string; name: string; phone: string | null; stage_name: string; stage_color: string; stage_id: string | null }>>([])
+  const [previewLoading, setPreviewLoading] = useState(false)
+  // Filter confirmation for logbook snapshot
+  const [showFilterConfirmDialog, setShowFilterConfirmDialog] = useState(false)
+  const [filterConfirmAction, setFilterConfirmAction] = useState<(() => void) | null>(null)
 
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
@@ -543,11 +595,11 @@ export default function EventDetailPage() {
       params.set('offset', String(offset))
       params.set('limit', '100')
       if (debouncedSearch) params.set('search', debouncedSearch)
-      if (filterStageIds.size > 0) params.set('status', Array.from(filterStageIds).join(','))
+      if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
       if (appliedFormulaType === 'advanced' && appliedFormulaText) {
         params.set('tag_formula', appliedFormulaText)
       } else {
-        if (filterTagNames.size > 0) params.set('tags', Array.from(filterTagNames).join(','))
+        if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
         if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
         if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
       }
@@ -856,6 +908,62 @@ export default function EventDetailPage() {
     fetchEvent()
   }
 
+  // ─── Create Lead & Add as Participant ──────────────────────────────────────
+  const fetchLeadPipelines = useCallback(async () => {
+    try {
+      const res = await fetch('/api/pipelines', { headers: { Authorization: `Bearer ${getToken()}` } })
+      const data = await res.json()
+      if (data.success && data.pipelines) setLeadPipelines(data.pipelines)
+    } catch { /* ignore */ }
+  }, [])
+
+  const handleCreateLeadAndAdd = async () => {
+    if (!leadForm.name) return
+    setCreatingLead(true)
+    try {
+      const activePipeline = leadPipelines[0]
+      const stageId = leadForm.stage_id || activePipeline?.stages?.[0]?.id || undefined
+      // Step 1: Create the lead (backend auto-creates/links contact)
+      const leadRes = await fetch('/api/leads', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: leadForm.name,
+          phone: leadForm.phone || undefined,
+          email: leadForm.email || undefined,
+          notes: leadForm.notes || undefined,
+          dni: leadForm.dni || undefined,
+          birth_date: leadForm.birth_date || undefined,
+          tags: leadForm.tags.split(',').map(t => t.trim()).filter(Boolean),
+          stage_id: stageId || undefined,
+        }),
+      })
+      const leadData = await leadRes.json()
+      if (!leadData.success) { alert(leadData.error || 'Error al crear lead'); setCreatingLead(false); return }
+      const lead = leadData.lead
+      // Step 2: Add as event participant with lead_id
+      const partRes = await fetch(`/api/events/${eventId}/participants`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lead_id: lead.id,
+          contact_id: lead.contact_id || undefined,
+          name: lead.name,
+          last_name: lead.last_name || undefined,
+          phone: lead.phone || undefined,
+          email: lead.email || undefined,
+        }),
+      })
+      const partData = await partRes.json()
+      if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingLead(false); return }
+      setShowAddModal(false)
+      setLeadForm({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
+      fetchParticipantsPaginated()
+      fetchEvent()
+    } catch (e) { console.error(e); alert('Error de conexión') }
+    setCreatingLead(false)
+  }
+
   // ─── Delete ─────────────────────────────────────────────────────────────────
   const handleDeleteParticipant = useCallback(async (pid: string) => {
     if (!confirm('¿Eliminar este participante?')) return
@@ -929,8 +1037,11 @@ export default function EventDetailPage() {
           name: formResult.name, device_id: formResult.device_id,
           message_template: formResult.message_template, attachments: formResult.attachments,
           scheduled_at: formResult.scheduled_at || undefined, settings: formResult.settings,
-          status: filterStageIds.size > 0 ? Array.from(filterStageIds).join(',') : undefined,
-          tag_ids: filterTagNames.size > 0 ? Array.from(filterTagNames) : undefined,
+          stage_ids: filterStageIds.size > 0 ? Array.from(filterStageIds).join(',') : undefined,
+          tag_names: filterTagNames.size > 0 ? Array.from(filterTagNames) : undefined,
+          tag_mode: tagFilterMode || 'OR',
+          exclude_tag_names: excludeFilterTagNames.size > 0 ? Array.from(excludeFilterTagNames) : undefined,
+          tag_formula: (appliedFormulaType === 'advanced' && appliedFormulaText) ? appliedFormulaText : undefined,
           has_phone: true,
         }),
       })
@@ -987,6 +1098,193 @@ export default function EventDetailPage() {
     finally { setExporting(false) }
   }
 
+  // ─── Logbook Functions ──────────────────────────────────────────────────────
+  const fetchLogbooks = useCallback(async () => {
+    setLogbooksLoading(true)
+    try {
+      const res = await fetch(`/api/events/${eventId}/logbooks`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      const data = await res.json()
+      if (Array.isArray(data)) setLogbooks(data)
+    } catch (e) { console.error('[Logbooks] fetch error:', e) }
+    finally { setLogbooksLoading(false) }
+  }, [eventId])
+
+  const fetchLogbookPreview = useCallback(async (lid: string) => {
+    setPreviewLoading(true)
+    try {
+      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}/preview`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      const data = await res.json()
+      setPreviewParticipants(data.participants || [])
+    } catch (e) { console.error('[Logbook] preview error:', e); setPreviewParticipants([]) }
+    finally { setPreviewLoading(false) }
+  }, [eventId])
+
+  const fetchLogbookDetail = useCallback(async (lid: string) => {
+    setSelectedLogbookLoading(true)
+    setPreviewParticipants([])
+    try {
+      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      const data = await res.json()
+      if (data.id) {
+        setSelectedLogbook(data)
+        setLogbookNotesText(data.general_notes || '')
+        // Auto-fetch preview for pending logbooks with saved filter
+        if (data.status === 'pending' && data.saved_filter) {
+          fetchLogbookPreview(lid)
+        }
+      }
+    } catch (e) { console.error('[Logbook] detail error:', e) }
+    finally { setSelectedLogbookLoading(false) }
+  }, [eventId, fetchLogbookPreview])
+
+  const handleCreateLogbook = async () => {
+    if (!newLogbookDate) return
+    // If capture_now is checked AND filters are active, show confirmation first
+    if (newLogbookCaptureNow && activeFilterCount > 0) {
+      setFilterConfirmAction(() => () => doCreateLogbook())
+      setShowFilterConfirmDialog(true)
+      return
+    }
+    doCreateLogbook()
+  }
+
+  // Build filter body for snapshot capture
+  const getSnapshotFilterBody = () => {
+    if (activeFilterCount === 0) return {}
+    const body: Record<string, unknown> = {}
+    if (filterStageIds.size > 0) body.stage_ids = Array.from(filterStageIds).join(',')
+    if (appliedFormulaType === 'advanced' && appliedFormulaText) {
+      body.tag_formula = appliedFormulaText
+    } else {
+      if (filterTagNames.size > 0) body.tag_names = Array.from(filterTagNames)
+      if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) body.tag_mode = tagFilterMode
+      if (excludeFilterTagNames.size > 0) body.exclude_tag_names = Array.from(excludeFilterTagNames)
+    }
+    if (filterHasPhone) body.has_phone = true
+    const dateRange = resolveParticipantDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+    if (dateRange) {
+      body.date_field = filterDateField
+      if (dateRange.from) body.date_from = dateRange.from
+      if (dateRange.to) body.date_to = dateRange.to
+    }
+    return body
+  }
+
+  const doCreateLogbook = async () => {
+    if (!newLogbookDate) return
+    setShowFilterConfirmDialog(false)
+    setCreatingLogbook(true)
+    try {
+      const filterBody = getSnapshotFilterBody()
+      const res = await fetch(`/api/events/${eventId}/logbooks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ date: newLogbookDate, title: newLogbookTitle, capture_now: newLogbookCaptureNow, ...filterBody }),
+      })
+      const data = await res.json()
+      if (data.id) {
+        await fetchLogbooks()
+        setSelectedLogbook(data)
+        setShowNewLogbookModal(false)
+        setNewLogbookDate('')
+        setNewLogbookTitle('')
+        setNewLogbookCaptureNow(false)
+      } else if (data.error) {
+        alert(data.error)
+      }
+    } catch (e) { console.error('[Logbook] create error:', e) }
+    finally { setCreatingLogbook(false) }
+  }
+
+  const handleCaptureSnapshot = async (lid: string) => {
+    // If filters are active, show confirmation dialog
+    if (activeFilterCount > 0) {
+      setFilterConfirmAction(() => () => doCaptureSnapshot(lid))
+      setShowFilterConfirmDialog(true)
+      return
+    }
+    doCaptureSnapshot(lid)
+  }
+
+  const doCaptureSnapshot = async (lid: string) => {
+    setShowFilterConfirmDialog(false)
+    setCapturingSnapshot(true)
+    try {
+      const filterBody = getSnapshotFilterBody()
+      const hasFilters = Object.keys(filterBody).length > 0
+      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}/capture`, {
+        method: 'POST',
+        headers: { ...(hasFilters ? { 'Content-Type': 'application/json' } : {}), Authorization: `Bearer ${getToken()}` },
+        ...(hasFilters ? { body: JSON.stringify(filterBody) } : {}),
+      })
+      const data = await res.json()
+      if (data.id) {
+        setSelectedLogbook(data)
+        await fetchLogbooks()
+      }
+    } catch (e) { console.error('[Logbook] capture error:', e) }
+    finally { setCapturingSnapshot(false) }
+  }
+
+  const handleAutoCreateLogbooks = async () => {
+    setAutoCreating(true)
+    try {
+      const res = await fetch(`/api/events/${eventId}/logbooks/auto-create`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      })
+      const data = await res.json()
+      if (data.created > 0) {
+        await fetchLogbooks()
+      }
+    } catch (e) { console.error('[Logbook] auto-create error:', e) }
+    finally { setAutoCreating(false) }
+  }
+
+  const handleSaveLogbookNotes = async () => {
+    if (!selectedLogbook) return
+    setSavingLogbookNotes(true)
+    try {
+      await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ general_notes: logbookNotesText }),
+      })
+      setSelectedLogbook(prev => prev ? { ...prev, general_notes: logbookNotesText } : null)
+      setEditingLogbookNotes(false)
+    } catch (e) { console.error('[Logbook] save notes error:', e) }
+    finally { setSavingLogbookNotes(false) }
+  }
+
+  const handleSaveEntryNotes = async (entryId: string) => {
+    setSavingEntryNotes(true)
+    try {
+      await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook?.id}/entries/${entryId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ notes: entryNotesText }),
+      })
+      setSelectedLogbook(prev => {
+        if (!prev || !prev.entries) return prev
+        return { ...prev, entries: prev.entries.map(e => e.id === entryId ? { ...e, notes: entryNotesText } : e) }
+      })
+      setEditingEntryId(null)
+    } catch (e) { console.error('[Logbook] save entry notes error:', e) }
+    finally { setSavingEntryNotes(false) }
+  }
+
+  const handleDeleteLogbook = async (lid: string) => {
+    if (!confirm('¿Eliminar esta bitácora? Se perderán las notas y el snapshot.')) return
+    try {
+      await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      })
+      if (selectedLogbook?.id === lid) setSelectedLogbook(null)
+      await fetchLogbooks()
+    } catch (e) { console.error('[Logbook] delete error:', e) }
+  }
+
   // ─── Effects ───────────────────────────────────────────────────────────────
   useEffect(() => {
     Promise.all([fetchEvent(), fetchDevices()]).then(() => {})
@@ -999,6 +1297,11 @@ export default function EventDetailPage() {
   useEffect(() => {
     if (viewMode === 'list' && event) fetchListParticipants(true)
   }, [viewMode, fetchListParticipants, event])
+
+  // Fetch logbooks when switching to logbook view
+  useEffect(() => {
+    if (viewMode === 'logbook' && event) fetchLogbooks()
+  }, [viewMode, fetchLogbooks, event])
 
   // Debounce search
   useEffect(() => {
@@ -1015,9 +1318,12 @@ export default function EventDetailPage() {
         fetchEvent()
         if (viewMode === 'list') fetchListParticipants(true)
       }
+      if (msg.event === 'logbook_update' && msg.event_id === eventId) {
+        if (viewMode === 'logbook') fetchLogbooks()
+      }
     })
     return () => unsubscribe()
-  }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants])
+  }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants, fetchLogbooks])
 
   // Escape key
   useEffect(() => {
@@ -1119,43 +1425,63 @@ export default function EventDetailPage() {
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Event Header */}
-      <div className="flex-shrink-0 pb-3">
-        <div className="flex items-center gap-3 mb-2">
-          <button onClick={() => router.push('/dashboard/events')} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
+      {/* Event Header — compact in logbook mode */}
+      <div className={`flex-shrink-0 transition-all duration-300 ease-in-out ${viewMode === 'logbook' ? 'pb-0' : 'pb-3'}`}>
+        <div className={`flex items-center gap-3 transition-all duration-300 ${viewMode === 'logbook' ? 'mb-1' : 'mb-2'}`}>
+          <button onClick={() => router.back()} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: event.color }} />
-              <h1 className="text-xl font-bold text-slate-900 truncate">{event.name}</h1>
-            </div>
-            <div className="flex items-center gap-4 text-sm text-slate-500 mt-0.5 ml-5">
-              {event.event_date && (
-                <span className="flex items-center gap-1"><CalendarDays className="w-3.5 h-3.5" />{format(new Date(event.event_date), "d MMM yyyy, HH:mm", { locale: es })}</span>
+              <h1 className={`font-bold text-slate-900 truncate transition-all duration-300 ${viewMode === 'logbook' ? 'text-base' : 'text-xl'}`}>{event.name}</h1>
+              {viewMode === 'logbook' && (
+                <span className="text-xs text-slate-400 flex-shrink-0 ml-1">· {totalParticipantCount} participantes</span>
               )}
-              {event.location && (
-                <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" />{event.location}</span>
-              )}
-              <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" />{totalParticipantCount} participantes</span>
             </div>
+            {viewMode !== 'logbook' && (
+              <div className="flex items-center gap-4 text-sm text-slate-500 mt-0.5 ml-5">
+                {event.event_date && (
+                  <span className="flex items-center gap-1"><CalendarDays className="w-3.5 h-3.5" />{format(new Date(event.event_date), "d MMM yyyy, HH:mm", { locale: es })}</span>
+                )}
+                {event.location && (
+                  <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" />{event.location}</span>
+                )}
+                <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" />{totalParticipantCount} participantes</span>
+              </div>
+            )}
           </div>
+          {/* View toggle — inline right side in logbook mode */}
+          {viewMode === 'logbook' && (
+            <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden flex-shrink-0">
+              <button onClick={() => setViewMode('kanban')} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition text-slate-500 hover:bg-slate-50">
+                <LayoutGrid className="w-3.5 h-3.5" />
+              </button>
+              <button onClick={() => setViewMode('list')} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition text-slate-500 hover:bg-slate-50">
+                <List className="w-3.5 h-3.5" />
+              </button>
+              <button onClick={() => setViewMode('logbook')} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition bg-emerald-50 text-emerald-700" title="Bitácora">
+                <BookOpen className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
 
-        {/* Stage badges */}
-        <div className="flex items-center gap-2 flex-wrap ml-8 mb-3">
-          {stageData.map(s => (
-            <span key={s.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium" style={{ backgroundColor: hexBgLight(s.color), color: s.color }}>
-              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: s.color }} />
-              {s.total_count} {s.name.toLowerCase()}
-            </span>
-          ))}
-        </div>
+        {/* Stage badges + Toolbar — animated collapse in logbook mode */}
+        <div className={`transition-all duration-300 ease-in-out ${viewMode === 'logbook' ? 'max-h-0 opacity-0 pointer-events-none overflow-hidden' : 'max-h-[250px] opacity-100'}`}>
+          <div className="flex items-center gap-2 flex-wrap ml-8 mb-3">
+            {stageData.map(s => (
+              <span key={s.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium" style={{ backgroundColor: hexBgLight(s.color), color: s.color }}>
+                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: s.color }} />
+                {s.total_count} {s.name.toLowerCase()}
+              </span>
+            ))}
+          </div>
 
-        {/* Toolbar */}
-        <div className="flex items-center gap-3 ml-8 flex-wrap">
-          {/* Search + Filter dropdown container */}
-          <div className="relative flex-1 max-w-xs">
+          {/* Toolbar */}
+          <div className="flex items-center gap-3 ml-8 flex-wrap">
+            {/* Search + Filter dropdown container */}
+            <div className="relative flex-1 max-w-xs">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input
               value={searchQuery}
@@ -1188,7 +1514,7 @@ export default function EventDetailPage() {
                   <div className="flex items-center gap-2">
                     {activeFilterCount > 0 && (
                       <button
-                        onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setFilterHasPhone(false); setPFormulaType('simple'); setPFormulaText(''); setPFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo('') }}
+                        onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setFilterHasPhone(false); setPFormulaType('simple'); setPFormulaText(''); setPFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setTagSearchQuery('') }}
                         className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                       >
                         Limpiar todo
@@ -1412,11 +1738,21 @@ export default function EventDetailPage() {
                           )}
                         </div>
 
-                        {/* Simple mode — tag grid */}
+                        {/* Simple mode — tag search + grid */}
                         {pFormulaType === 'simple' ? (
-                          <div className="flex-1 overflow-y-auto p-3">
+                          <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                            <div className="relative">
+                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                              <input
+                                type="text"
+                                placeholder="Buscar etiqueta..."
+                                value={tagSearchQuery}
+                                onChange={(e) => setTagSearchQuery(e.target.value)}
+                                className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none transition placeholder:text-slate-400"
+                              />
+                            </div>
                             <div className="flex flex-wrap gap-1.5">
-                              {allUniqueTags.map(tag => {
+                              {allUniqueTags.filter(t => t.name.toLowerCase().includes(tagSearchQuery.toLowerCase())).map(tag => {
                                 const isInclude = filterTagNames.has(tag.name)
                                 const isExclude = excludeFilterTagNames.has(tag.name)
                                 return (
@@ -1504,41 +1840,50 @@ export default function EventDetailPage() {
             <button onClick={() => setViewMode('list')} className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
               <List className="w-3.5 h-3.5" />
             </button>
+            <button onClick={() => setViewMode('logbook')} className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${viewMode === 'logbook' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`} title="Bitácora">
+              <BookOpen className="w-3.5 h-3.5" />
+            </button>
           </div>
 
-          <button onClick={() => setShowExportModal(true)} className="flex items-center gap-2 px-3 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 text-xs font-medium shadow-sm">
-            <Download className="w-3.5 h-3.5" />Exportar
-          </button>
+          {viewMode !== 'logbook' && (
+            <>
+              <button onClick={() => setShowExportModal(true)} className="flex items-center gap-2 px-3 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 text-xs font-medium shadow-sm">
+                <Download className="w-3.5 h-3.5" />Exportar
+              </button>
 
-          <button
-            onClick={async () => {
-              fetchDevices()
-              try {
-                const res = await fetch('/api/campaigns', { headers: { Authorization: `Bearer ${getToken()}` } })
-                const data = await res.json()
-                const prefix = `Envío - ${event?.name || ''}`
-                const count = (data.campaigns || []).filter((c: any) => c.name.startsWith(prefix)).length
-                setCampaignInitialName(`${prefix} #${(count + 1).toString().padStart(3, '0')}`)
-              } catch { setCampaignInitialName(`Envío - ${event?.name || ''}`) }
-              setShowCampaignModal(true)
-            }}
-            className="flex items-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-xs font-medium shadow-sm"
-          >
-            <Send className="w-3.5 h-3.5" />Envío Masivo
-          </button>
+              <button
+                onClick={async () => {
+                  fetchDevices()
+                  try {
+                    const res = await fetch('/api/campaigns', { headers: { Authorization: `Bearer ${getToken()}` } })
+                    const data = await res.json()
+                    const prefix = `Envío - ${event?.name || ''}`
+                    const count = (data.campaigns || []).filter((c: any) => c.name.startsWith(prefix)).length
+                    setCampaignInitialName(`${prefix} #${(count + 1).toString().padStart(3, '0')}`)
+                  } catch { setCampaignInitialName(`Envío - ${event?.name || ''}`) }
+                  setShowCampaignModal(true)
+                }}
+                className="flex items-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-xs font-medium shadow-sm"
+              >
+                <Send className="w-3.5 h-3.5" />Envío Masivo
+              </button>
 
-          <button onClick={() => { setAddTab('search'); setShowAddModal(true) }} className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium shadow-sm">
-            <UserPlus className="w-3.5 h-3.5" />Agregar
-          </button>
-          <button onClick={() => { setAddTab('manual'); setShowAddModal(true) }} className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Agregar manualmente">
-            <Plus className="w-4 h-4" />
-          </button>
+              <button onClick={() => { setAddTab('search'); setShowAddModal(true) }} className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium shadow-sm">
+                <UserPlus className="w-3.5 h-3.5" />Agregar
+              </button>
+              <button onClick={() => { setAddTab('manual'); fetchLeadPipelines(); setShowAddModal(true) }} className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Crear nuevo lead">
+                <Plus className="w-4 h-4" />
+              </button>
+            </>
+          )}
+        </div>
+        {/* End of animated collapse wrapper */}
         </div>
       </div>
 
       {/* ═══ Kanban View ═══ */}
       {viewMode === 'kanban' && (
-        <div className="flex-1 min-h-0 flex flex-col">
+        <div className="flex-1 min-h-0 flex flex-col animate-view-enter">
           <div ref={topScrollRef} onScroll={handleTopScroll} className="overflow-x-auto kanban-scroll-top flex-shrink-0" style={{ height: 12 }}>
             <div style={{ width: `${(stageData.length + (unassignedData.total_count > 0 ? 1 : 0)) * 288}px`, height: 1 }} />
           </div>
@@ -1598,7 +1943,7 @@ export default function EventDetailPage() {
 
       {/* ═══ List View — Virtualized ═══ */}
       {viewMode === 'list' && (
-        <div className="flex-1 min-h-0 flex flex-col">
+        <div className="flex-1 min-h-0 flex flex-col animate-view-enter">
           <div className="bg-slate-50 border-b-2 border-slate-200 flex-shrink-0">
             <div className="flex">
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[220px]">Participante</div>
@@ -1698,6 +2043,520 @@ export default function EventDetailPage() {
                 <div className="animate-spin rounded-full h-5 w-5 border-2 border-slate-200 border-t-emerald-500" />
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Logbook (Bitácora) View ═══ */}
+      {viewMode === 'logbook' && (
+        <div className="flex-1 min-h-0 flex animate-view-enter">
+          {/* Left Panel — Logbook list */}
+          <div className="w-[280px] border-r border-slate-200 bg-slate-50/50 flex flex-col flex-shrink-0">
+            <div className="px-3 py-3 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-slate-700">Bitácoras</h3>
+              <div className="flex items-center gap-1">
+                {event?.event_date && (
+                  <button onClick={handleAutoCreateLogbooks} disabled={autoCreating}
+                    className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition disabled:opacity-50" title="Auto-crear desde rango de fechas">
+                    {autoCreating ? <Loader2 className="w-4 h-4 animate-spin" /> : <CalendarDays className="w-4 h-4" />}
+                  </button>
+                )}
+                <button onClick={() => setShowNewLogbookModal(true)}
+                  className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Nueva bitácora">
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {logbooksLoading ? (
+                <div className="space-y-2 p-3">
+                  {[...Array(4)].map((_, i) => <div key={i} className="h-14 bg-slate-100 rounded-lg animate-pulse" />)}
+                </div>
+              ) : logbooks.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center px-4">
+                  <BookOpen className="w-10 h-10 text-slate-300 mb-3" />
+                  <p className="text-sm text-slate-500 font-medium">Sin bitácoras</p>
+                  <p className="text-xs text-slate-400 mt-1">Crea una bitácora para registrar el estado de los participantes en una fecha</p>
+                  {event?.event_date && (
+                    <button onClick={handleAutoCreateLogbooks} disabled={autoCreating}
+                      className="mt-4 flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
+                      {autoCreating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CalendarDays className="w-3.5 h-3.5" />}
+                      Crear desde fechas del evento
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="p-2 space-y-1">
+                  {logbooks.map(lb => (
+                    <button key={lb.id}
+                      onClick={() => fetchLogbookDetail(lb.id)}
+                      className={`w-full text-left px-3 py-2.5 rounded-lg transition-all group ${
+                        selectedLogbook?.id === lb.id
+                          ? 'bg-emerald-50 border border-emerald-200 shadow-sm'
+                          : 'hover:bg-white hover:shadow-sm border border-transparent'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full flex-shrink-0 ${lb.status === 'completed' ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+                          <span className="text-sm font-medium text-slate-800 truncate">{lb.title || format(parseLogbookDate(lb.date), 'dd/MM/yyyy')}</span>
+                        </div>
+                        <button onClick={(e) => { e.stopPropagation(); handleDeleteLogbook(lb.id) }}
+                          className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1 ml-4">
+                        <span className="text-[11px] text-slate-400">{format(parseLogbookDate(lb.date), 'dd MMM yyyy', { locale: es })}</span>
+                        {lb.status === 'completed' && (
+                          <span className="text-[10px] text-emerald-600 font-medium">{lb.total_participants} part.</span>
+                        )}
+                        {lb.status === 'pending' && (
+                          <span className="text-[10px] text-amber-500 font-medium">Pendiente</span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Panel — Logbook detail */}
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            {selectedLogbookLoading ? (
+              <div className="flex-1 flex items-center justify-center">
+                <Loader2 className="w-8 h-8 animate-spin text-emerald-500" />
+              </div>
+            ) : selectedLogbook ? (
+              <>
+                {/* Logbook header */}
+                <div className="px-5 py-2.5 border-b border-slate-200 bg-white flex-shrink-0">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-lg font-semibold text-slate-900">{selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')}</h3>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                          selectedLogbook.status === 'completed' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
+                        }`}>
+                          {selectedLogbook.status === 'completed' ? 'Capturada' : 'Pendiente'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {format(parseLogbookDate(selectedLogbook.date), "EEEE, d 'de' MMMM yyyy", { locale: es })}
+                        {selectedLogbook.captured_at && <> · Capturada {formatDistanceToNow(new Date(selectedLogbook.captured_at), { locale: es, addSuffix: true })}</>}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
+                        {capturingSnapshot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+                        {selectedLogbook.status === 'completed' ? 'Re-capturar' : 'Capturar Snapshot'}
+                        {activeFilterCount > 0 && <span className="bg-white/20 rounded px-1 text-[10px]">({totalParticipantCount})</span>}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Stage snapshot badges */}
+                  {selectedLogbook.status === 'completed' && selectedLogbook.stage_snapshot && Object.keys(selectedLogbook.stage_snapshot).length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {Object.entries(selectedLogbook.stage_snapshot).map(([key, stage]) => (
+                        <div key={key} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-white"
+                          style={{ backgroundColor: stage.color || '#94a3b8' }}>
+                          {stage.name || 'Sin etapa'}: {stage.count}
+                        </div>
+                      ))}
+                      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
+                        Total: {selectedLogbook.total_participants}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* General notes */}
+                <div className="px-5 py-2 border-b border-slate-100 bg-slate-50/50 flex-shrink-0">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Observaciones generales</span>
+                    {!editingLogbookNotes ? (
+                      <button onClick={() => { setLogbookNotesText(selectedLogbook.general_notes || ''); setEditingLogbookNotes(true) }}
+                        className="p-1 text-slate-400 hover:text-emerald-600 rounded transition">
+                        <PenLine className="w-3.5 h-3.5" />
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => setEditingLogbookNotes(false)} className="p-1 text-slate-400 hover:text-slate-600 rounded transition">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={handleSaveLogbookNotes} disabled={savingLogbookNotes}
+                          className="p-1 text-emerald-600 hover:text-emerald-700 rounded transition disabled:opacity-50">
+                          {savingLogbookNotes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  {editingLogbookNotes ? (
+                    <textarea
+                      value={logbookNotesText}
+                      onChange={e => setLogbookNotesText(e.target.value)}
+                      className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none resize-none"
+                      rows={3}
+                      placeholder="Notas sobre esta fecha..."
+                      autoFocus
+                    />
+                  ) : (
+                    <p className="text-sm text-slate-600 whitespace-pre-line">{selectedLogbook.general_notes || <span className="text-slate-400 italic">Sin notas</span>}</p>
+                  )}
+                </div>
+
+                {/* View mode toggle */}
+                {selectedLogbook.status === 'completed' && selectedLogbook.entries && selectedLogbook.entries.length > 0 && (
+                  <div className="px-5 py-2 border-b border-slate-100 bg-white flex-shrink-0 flex items-center justify-between">
+                    <span className="text-xs text-slate-400">{selectedLogbook.entries.length} participantes</span>
+                    <div className="inline-flex items-center bg-slate-100 rounded-lg p-0.5">
+                      <button
+                        onClick={() => setLogbookViewMode('list')}
+                        className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition ${
+                          logbookViewMode === 'list' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                        }`}
+                      >
+                        <List className="w-3 h-3" />
+                        Lista
+                      </button>
+                      <button
+                        onClick={() => setLogbookViewMode('kanban')}
+                        className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition ${
+                          logbookViewMode === 'kanban' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                        }`}
+                      >
+                        <LayoutGrid className="w-3 h-3" />
+                        Kanban
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Entries */}
+                <div className="flex-1 overflow-y-auto">
+                  {selectedLogbook.status === 'pending' ? (
+                    <div className="flex flex-col h-full">
+                      {/* Preview banner + capture button */}
+                      <div className="px-5 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between gap-3 flex-shrink-0">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
+                          <span className="text-xs text-amber-700 font-medium">
+                            Vista previa{previewParticipants.length > 0 ? ` · ${previewParticipants.length} participantes` : ''}
+                          </span>
+                          {selectedLogbook.saved_filter && (
+                            <span className="text-[10px] text-amber-500 bg-amber-100 px-1.5 py-0.5 rounded">Con filtro guardado</span>
+                          )}
+                        </div>
+                        <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50 flex-shrink-0">
+                          {capturingSnapshot ? <Loader2 className="w-3 h-3 animate-spin" /> : <Camera className="w-3 h-3" />}
+                          Capturar Snapshot
+                        </button>
+                      </div>
+
+                      {/* Preview participants list */}
+                      {previewLoading ? (
+                        <div className="flex items-center justify-center py-16">
+                          <Loader2 className="w-6 h-6 animate-spin text-slate-300" />
+                        </div>
+                      ) : previewParticipants.length > 0 ? (
+                        <div className="flex-1 overflow-y-auto">
+                          <table className="w-full">
+                            <thead className="sticky top-0 bg-white z-10">
+                              <tr className="border-b border-slate-200">
+                                <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[200px]">Participante</th>
+                                <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4">Etapa</th>
+                                <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[140px]">Teléfono</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {previewParticipants.map((p, idx) => (
+                                <tr key={p.id} className={`border-b border-slate-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}`}>
+                                  <td className="py-2 px-4">
+                                    <span className="text-sm text-slate-700 font-medium">{p.name}</span>
+                                  </td>
+                                  <td className="py-2 px-4">
+                                    {p.stage_name ? (
+                                      <span className="inline-flex items-center gap-1.5 text-xs">
+                                        <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: p.stage_color || '#94a3b8' }} />
+                                        {p.stage_name}
+                                      </span>
+                                    ) : (
+                                      <span className="text-xs text-slate-400">Sin etapa</span>
+                                    )}
+                                  </td>
+                                  <td className="py-2 px-4 text-xs text-slate-500 font-mono">{p.phone || '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center py-16 text-center">
+                          <Camera className="w-12 h-12 text-slate-300 mb-3" />
+                          <p className="text-sm text-slate-500 font-medium">Bitácora pendiente</p>
+                          <p className="text-xs text-slate-400 mt-1 max-w-sm">
+                            {selectedLogbook.saved_filter
+                              ? 'El filtro guardado no encontró participantes que coincidan actualmente'
+                              : activeFilterCount > 0
+                                ? `Captura un snapshot con los ${totalParticipantCount} participantes filtrados actualmente`
+                                : 'Captura un snapshot para registrar el estado actual de todos los participantes en esta fecha'}
+                          </p>
+                          {!selectedLogbook.saved_filter && (
+                            <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot}
+                              className="mt-4 flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
+                              {capturingSnapshot ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
+                              {activeFilterCount > 0 ? `Capturar (${totalParticipantCount} filtrados)` : 'Capturar Snapshot'}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : selectedLogbook.entries && selectedLogbook.entries.length > 0 ? (
+                    logbookViewMode === 'list' ? (
+                    <table className="w-full">
+                      <thead className="sticky top-0 bg-white z-10">
+                        <tr className="border-b border-slate-200">
+                          <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[200px]">Participante</th>
+                          <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[120px]">Etapa</th>
+                          <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4">Notas</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {selectedLogbook.entries.map(entry => (
+                          <tr key={entry.id} className="hover:bg-slate-50/50 transition-colors">
+                            <td className="px-4 py-2.5">
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0">
+                                  <span className="text-emerald-700 text-xs font-semibold">{(entry.participant_name || '?').charAt(0).toUpperCase()}</span>
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-[13px] font-medium text-slate-800 truncate">{entry.participant_name}</p>
+                                  {entry.participant_phone && <p className="text-[10px] text-slate-400">{entry.participant_phone}</p>}
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-2.5">
+                              {entry.stage_name ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: entry.stage_color || '#94a3b8' }}>
+                                  {entry.stage_name}
+                                </span>
+                              ) : <span className="text-[10px] text-slate-400 italic">—</span>}
+                            </td>
+                            <td className="px-4 py-2.5">
+                              {editingEntryId === entry.id ? (
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    value={entryNotesText}
+                                    onChange={e => setEntryNotesText(e.target.value)}
+                                    className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none"
+                                    placeholder="Nota sobre este participante..."
+                                    autoFocus
+                                    onKeyDown={e => { if (e.key === 'Enter') handleSaveEntryNotes(entry.id); if (e.key === 'Escape') setEditingEntryId(null) }}
+                                  />
+                                  <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes}
+                                    className="p-1 text-emerald-600 hover:text-emerald-700 disabled:opacity-50">
+                                    {savingEntryNotes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                                  </button>
+                                  <button onClick={() => setEditingEntryId(null)} className="p-1 text-slate-400 hover:text-slate-600">
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-1 group/notes cursor-pointer"
+                                  onClick={() => { setEditingEntryId(entry.id); setEntryNotesText(entry.notes || '') }}>
+                                  {entry.notes ? (
+                                    <span className="text-sm text-slate-600">{entry.notes}</span>
+                                  ) : (
+                                    <span className="text-xs text-slate-300 italic">Agregar nota...</span>
+                                  )}
+                                  <PenLine className="w-3 h-3 text-slate-300 opacity-0 group-hover/notes:opacity-100 transition-opacity" />
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    ) : (
+                    /* Kanban view */
+                    <div className="h-full flex flex-col">
+                      <div className="flex-1 overflow-x-auto overflow-y-hidden">
+                        <div className="flex gap-3 p-4 h-full min-w-min">
+                          {(() => {
+                            // Group entries by stage
+                            const grouped: Record<string, { name: string; color: string; entries: typeof selectedLogbook.entries }> = {}
+                            for (const entry of selectedLogbook.entries) {
+                              const key = entry.stage_name || '__none__'
+                              if (!grouped[key]) {
+                                grouped[key] = { name: entry.stage_name || 'Sin etapa', color: entry.stage_color || '#94a3b8', entries: [] }
+                              }
+                              grouped[key].entries.push(entry)
+                            }
+                            // Sort: named stages first (by stage_snapshot order if available), "Sin etapa" last
+                            const stageOrder = selectedLogbook.stage_snapshot ? Object.keys(selectedLogbook.stage_snapshot) : []
+                            const sortedKeys = Object.keys(grouped).sort((a, b) => {
+                              if (a === '__none__') return 1
+                              if (b === '__none__') return -1
+                              const ia = stageOrder.indexOf(a)
+                              const ib = stageOrder.indexOf(b)
+                              if (ia !== -1 && ib !== -1) return ia - ib
+                              if (ia !== -1) return -1
+                              if (ib !== -1) return 1
+                              return a.localeCompare(b)
+                            })
+                            return sortedKeys.map(key => {
+                              const group = grouped[key]
+                              return (
+                                <div key={key} className="flex flex-col w-[220px] min-w-[220px] bg-slate-50 rounded-xl border border-slate-200/80 overflow-hidden">
+                                  {/* Column header */}
+                                  <div className="px-3 py-2.5 flex items-center gap-2 flex-shrink-0" style={{ borderBottom: `2px solid ${group.color}` }}>
+                                    <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: group.color }} />
+                                    <span className="text-xs font-semibold text-slate-700 truncate">{group.name}</span>
+                                    <span className="ml-auto text-[10px] font-bold text-slate-400 bg-white rounded-full px-1.5 py-0.5">{group.entries.length}</span>
+                                  </div>
+                                  {/* Cards */}
+                                  <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+                                    {group.entries.map(entry => (
+                                      <div key={entry.id} className="bg-white rounded-lg border border-slate-100 p-2.5 shadow-sm hover:shadow-md hover:border-slate-200 transition-all group/card">
+                                        <div className="flex items-center gap-2">
+                                          <div className="w-6 h-6 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0">
+                                            <span className="text-emerald-700 text-[10px] font-semibold">{(entry.participant_name || '?').charAt(0).toUpperCase()}</span>
+                                          </div>
+                                          <div className="min-w-0 flex-1">
+                                            <p className="text-[12px] font-medium text-slate-800 truncate leading-tight">{entry.participant_name}</p>
+                                            {entry.participant_phone && <p className="text-[10px] text-slate-400 leading-tight">{entry.participant_phone}</p>}
+                                          </div>
+                                        </div>
+                                        {/* Notes inline */}
+                                        <div className="mt-1.5">
+                                          {editingEntryId === entry.id ? (
+                                            <div className="flex items-center gap-1">
+                                              <input
+                                                value={entryNotesText}
+                                                onChange={e => setEntryNotesText(e.target.value)}
+                                                className="flex-1 bg-slate-50 border border-slate-200 rounded px-1.5 py-1 text-[11px] text-slate-700 focus:ring-1 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none"
+                                                placeholder="Nota..."
+                                                autoFocus
+                                                onKeyDown={e => { if (e.key === 'Enter') handleSaveEntryNotes(entry.id); if (e.key === 'Escape') setEditingEntryId(null) }}
+                                              />
+                                              <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes}
+                                                className="p-0.5 text-emerald-600 hover:text-emerald-700 disabled:opacity-50">
+                                                {savingEntryNotes ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
+                                              </button>
+                                              <button onClick={() => setEditingEntryId(null)} className="p-0.5 text-slate-400 hover:text-slate-600">
+                                                <X className="w-3 h-3" />
+                                              </button>
+                                            </div>
+                                          ) : (
+                                            <div className="flex items-center gap-1 cursor-pointer group/cnotes"
+                                              onClick={() => { setEditingEntryId(entry.id); setEntryNotesText(entry.notes || '') }}>
+                                              {entry.notes ? (
+                                                <p className="text-[11px] text-slate-500 leading-snug line-clamp-2">{entry.notes}</p>
+                                              ) : (
+                                                <p className="text-[10px] text-slate-300 italic opacity-0 group-hover/card:opacity-100 transition-opacity">+ nota</p>
+                                              )}
+                                              <PenLine className="w-2.5 h-2.5 text-slate-300 opacity-0 group-hover/cnotes:opacity-100 transition-opacity flex-shrink-0" />
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )
+                            })
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                    )
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                      <Users className="w-10 h-10 mb-2 text-slate-300" />
+                      <p className="text-sm">Sin entradas</p>
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center text-center">
+                <BookOpen className="w-12 h-12 text-slate-300 mb-3" />
+                <p className="text-sm text-slate-500 font-medium">Selecciona una bitácora</p>
+                <p className="text-xs text-slate-400 mt-1">Elige una fecha del panel izquierdo para ver el detalle</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* New Logbook Modal */}
+      {showNewLogbookModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setShowNewLogbookModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-100" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <h2 className="text-base font-semibold text-slate-900">Nueva Bitácora</h2>
+              <button onClick={() => setShowNewLogbookModal(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Fecha *</label>
+                <input type="date" value={newLogbookDate} onChange={e => setNewLogbookDate(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Título (opcional)</label>
+                <input type="text" value={newLogbookTitle} onChange={e => setNewLogbookTitle(e.target.value)}
+                  placeholder={newLogbookDate ? format(new Date(newLogbookDate + 'T12:00:00'), 'dd/MM/yyyy') : 'Ej: Día 1 - Inauguración'}
+                  className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none placeholder-slate-400" />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={newLogbookCaptureNow} onChange={e => setNewLogbookCaptureNow(e.target.checked)}
+                  className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
+                <span className="text-sm text-slate-700">Capturar snapshot ahora</span>
+              </label>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
+              <button onClick={() => setShowNewLogbookModal(false)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
+              <button onClick={handleCreateLogbook} disabled={!newLogbookDate || creatingLogbook}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
+                {creatingLogbook ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                Crear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Filter Confirmation Dialog for Logbook Snapshot */}
+      {showFilterConfirmDialog && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[70] p-4" onClick={() => setShowFilterConfirmDialog(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm border border-slate-100 animate-in fade-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
+            <div className="px-6 pt-6 pb-4 text-center">
+              <div className="w-12 h-12 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-3">
+                <Filter className="w-6 h-6 text-amber-600" />
+              </div>
+              <h3 className="text-base font-semibold text-slate-900 mb-1">Filtros activos</h3>
+              <p className="text-sm text-slate-500">
+                Tienes <span className="font-semibold text-amber-600">{activeFilterCount}</span> filtro{activeFilterCount > 1 ? 's' : ''} activo{activeFilterCount > 1 ? 's' : ''}.
+                La bitácora se creará con <span className="font-semibold text-emerald-600">{totalParticipantCount}</span> de <span className="font-semibold text-slate-700">{event?.total_participants ?? '?'}</span> participantes.
+              </p>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
+              <button onClick={() => setShowFilterConfirmDialog(false)}
+                className="flex-1 px-4 py-2.5 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">
+                Cancelar
+              </button>
+              <button onClick={() => { if (filterConfirmAction) filterConfirmAction() }}
+                className="flex-1 px-4 py-2.5 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm">
+                Continuar con filtros
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1889,47 +2748,78 @@ export default function EventDetailPage() {
       {/* ═══ Add Participant — Manual ═══ */}
       {showAddModal && addTab === 'manual' && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-hidden flex flex-col border border-slate-100">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col border border-slate-100">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-              <h2 className="text-lg font-semibold text-slate-900">Agregar Manualmente</h2>
-              <button onClick={() => setShowAddModal(false)} className="p-1, text-slate-400 hover:text-slate-600 rounded"><X className="w-5 h-5" /></button>
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Nuevo Lead</h2>
+                <p className="text-xs text-slate-500 mt-0.5">Se creará como lead y se agregará al evento</p>
+              </div>
+              <button onClick={() => setShowAddModal(false)} className="p-1 text-slate-400 hover:text-slate-600 rounded"><X className="w-5 h-5" /></button>
             </div>
             <div className="flex-1 overflow-y-auto p-6">
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-3">
+                {/* Pipeline & Stage */}
+                {leadPipelines.length > 0 && leadPipelines[0].stages?.length > 0 && (
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Nombre *</label>
-                    <input value={manualForm.name} onChange={e => setManualForm(f => ({ ...f, name: e.target.value }))} className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Pipeline / Etapa</label>
+                    <div className="flex gap-2">
+                      <div className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 truncate">
+                        {leadPipelines[0].name}
+                      </div>
+                      <select
+                        value={leadForm.stage_id || leadPipelines[0].stages[0]?.id || ''}
+                        onChange={(e) => setLeadForm(f => ({ ...f, stage_id: e.target.value }))}
+                        className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
+                      >
+                        {leadPipelines[0].stages.map((st: { id: string; name: string }) => (
+                          <option key={st.id} value={st.id}>{st.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Nombre *</label>
+                  <input value={leadForm.name} onChange={e => setLeadForm(f => ({ ...f, name: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="Nombre del lead" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Teléfono</label>
+                  <input value={leadForm.phone} onChange={e => setLeadForm(f => ({ ...f, phone: e.target.value }))} type="tel" className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="944903497" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Email</label>
+                  <input value={leadForm.email} onChange={e => setLeadForm(f => ({ ...f, email: e.target.value }))} type="email" className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="correo@ejemplo.com" />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">DNI</label>
+                    <input value={leadForm.dni} onChange={e => setLeadForm(f => ({ ...f, dni: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="12345678" />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Apellido</label>
-                    <input value={manualForm.last_name} onChange={e => setManualForm(f => ({ ...f, last_name: e.target.value }))} className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Fecha de nacimiento</label>
+                    <input value={leadForm.birth_date} onChange={e => setLeadForm(f => ({ ...f, birth_date: e.target.value }))} type="date" className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" />
                   </div>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Nombre Corto</label>
-                  <input value={manualForm.short_name} onChange={e => setManualForm(f => ({ ...f, short_name: e.target.value }))} placeholder="Apodo o nombre corto" className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Etiquetas</label>
+                  <input value={leadForm.tags} onChange={e => setLeadForm(f => ({ ...f, tags: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="ventas, premium (separadas por coma)" />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Teléfono</label>
-                  <input value={manualForm.phone} onChange={e => setManualForm(f => ({ ...f, phone: e.target.value }))} className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" placeholder="+51..." />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
-                  <input value={manualForm.email} onChange={e => setManualForm(f => ({ ...f, email: e.target.value }))} type="email" className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Edad</label>
-                  <input value={manualForm.age} onChange={e => setManualForm(f => ({ ...f, age: e.target.value }))} type="number" className="w-full px-4 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Notas</label>
+                  <textarea value={leadForm.notes} onChange={e => setLeadForm(f => ({ ...f, notes: e.target.value }))} rows={3} className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none" placeholder="Notas adicionales..." />
                 </div>
               </div>
               <button onClick={() => setAddTab('search')} className="mt-4 text-sm text-emerald-600 hover:text-emerald-700 font-medium">
                 Buscar contacto/lead existente
               </button>
             </div>
-            <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
-              <button onClick={() => setShowAddModal(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl text-sm">Cancelar</button>
-              <button onClick={handleAddManual} disabled={!manualForm.name} className="px-6 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 font-medium text-sm">Agregar</button>
+            <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
+              <button onClick={() => { setShowAddModal(false); setLeadForm({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' }) }} className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
+                Cancelar
+              </button>
+              <button onClick={handleCreateLeadAndAdd} disabled={!leadForm.name || creatingLead} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">
+                {creatingLead ? 'Creando...' : 'Crear Lead'}
+              </button>
             </div>
           </div>
         </div>

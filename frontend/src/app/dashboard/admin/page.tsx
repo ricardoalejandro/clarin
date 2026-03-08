@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import {
   Building2, Users, Plus, Pencil, Trash2, Power, KeyRound,
-  Search, X, Shield, ChevronDown, Link2, Lock, CheckSquare, Square
+  Search, X, Shield, ChevronDown, Link2, Lock, CheckSquare, Square, Bot
 } from 'lucide-react'
 
 interface Account {
@@ -13,6 +13,7 @@ interface Account {
   plan: string
   max_devices: number
   is_active: boolean
+  mcp_enabled: boolean
   user_count: number
   device_count: number
   chat_count: number
@@ -102,7 +103,7 @@ export default function AdminPage() {
 
   // Account form
   const [accountForm, setAccountForm] = useState({
-    name: '', slug: '', plan: 'basic', max_devices: 5
+    name: '', slug: '', plan: 'basic', max_devices: 5, mcp_enabled: false
   })
 
   // User form
@@ -176,13 +177,13 @@ export default function AdminPage() {
   // Account CRUD
   function openCreateAccount() {
     setEditingAccount(null)
-    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5 })
+    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, mcp_enabled: false })
     setShowAccountModal(true)
   }
 
   function openEditAccount(a: Account) {
     setEditingAccount(a)
-    setAccountForm({ name: a.name, slug: a.slug, plan: a.plan, max_devices: a.max_devices })
+    setAccountForm({ name: a.name, slug: a.slug, plan: a.plan, max_devices: a.max_devices, mcp_enabled: a.mcp_enabled })
     setShowAccountModal(true)
   }
 
@@ -543,12 +544,13 @@ export default function AdminPage() {
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Dispositivos</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Chats</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Estado</th>
+                <th className="text-center px-4 py-3 font-medium text-gray-500">MCP</th>
                 <th className="text-right px-4 py-3 font-medium text-gray-500">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filteredAccounts.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">No se encontraron cuentas</td></tr>
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">No se encontraron cuentas</td></tr>
               ) : filteredAccounts.map(a => (
                 <tr key={a.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3">
@@ -566,6 +568,12 @@ export default function AdminPage() {
                   <td className="px-4 py-3 text-center">
                     <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${a.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                       {a.is_active ? 'Activa' : 'Inactiva'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-center">
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${a.mcp_enabled ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-400'}`}>
+                      <Bot className="w-3 h-3" />
+                      {a.mcp_enabled ? 'Sí' : 'No'}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right">
@@ -841,6 +849,19 @@ export default function AdminPage() {
                     className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
                     min={1}
                   />
+                </div>
+              </div>
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAccountForm(f => ({ ...f, mcp_enabled: !f.mcp_enabled }))}
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${accountForm.mcp_enabled ? 'bg-violet-600' : 'bg-gray-300'}`}
+                >
+                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${accountForm.mcp_enabled ? 'translate-x-4' : 'translate-x-1'}`} />
+                </button>
+                <div>
+                  <span className="text-sm font-medium text-gray-700">Acceso MCP</span>
+                  <p className="text-xs text-gray-400">Permitir conexión desde ChatGPT u otros clientes MCP</p>
                 </div>
               </div>
             </div>

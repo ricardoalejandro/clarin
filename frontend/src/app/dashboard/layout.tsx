@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
+import ErosAssistant from '@/components/ErosAssistant'
 import {
   MessageSquare,
   Smartphone,
@@ -388,6 +389,7 @@ export default function DashboardLayout({
         </main>
       </div>
     </div>
+    <ErosAssistant />
     </NotificationProvider>
   )
 }

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +15,7 @@ type Account struct {
 	Plan       string     `json:"plan"`
 	MaxDevices int        `json:"max_devices"`
 	IsActive   bool       `json:"is_active"`
+	MCPEnabled bool       `json:"mcp_enabled"`
 	DefaultIncomingStageID *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
@@ -36,6 +38,7 @@ type User struct {
 	IsAdmin      bool      `json:"is_admin"`
 	IsSuperAdmin bool      `json:"is_super_admin"`
 	IsActive     bool      `json:"is_active"`
+	GroqAPIKey   string    `json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 
@@ -93,10 +96,11 @@ type UserAccount struct {
 	CreatedAt time.Time  `json:"created_at"`
 
 	// Populated on demand
-	AccountName string   `json:"account_name,omitempty"`
-	AccountSlug string   `json:"account_slug,omitempty"`
-	RoleName    string   `json:"role_name,omitempty"`
-	Permissions []string `json:"permissions,omitempty"`
+	AccountName       string   `json:"account_name,omitempty"`
+	AccountSlug       string   `json:"account_slug,omitempty"`
+	AccountMCPEnabled bool     `json:"account_mcp_enabled,omitempty"`
+	RoleName          string   `json:"role_name,omitempty"`
+	Permissions       []string `json:"permissions,omitempty"`
 }
 
 // Device represents a WhatsApp connection
@@ -143,9 +147,10 @@ type Contact struct {
 	Notes      *string    `json:"notes,omitempty"`
 	Source     *string    `json:"source,omitempty"`
 	IsGroup    bool       `json:"is_group"`
-	KommoID    *int64     `json:"kommo_id,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	KommoID      *int64     `json:"kommo_id,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	LastActivity *time.Time `json:"last_activity,omitempty"`
 
 	// Relations (populated on demand)
 	DeviceNames    []ContactDeviceName `json:"device_names,omitempty"`
@@ -759,11 +764,12 @@ type Program struct {
 
 // ProgramParticipant represents a contact enrolled in a program
 type ProgramParticipant struct {
-	ID         uuid.UUID `json:"id"`
-	ProgramID  uuid.UUID `json:"program_id"`
-	ContactID  uuid.UUID `json:"contact_id"`
-	Status     string    `json:"status"` // enrolled, dropped, completed
-	EnrolledAt time.Time `json:"enrolled_at"`
+	ID         uuid.UUID  `json:"id"`
+	ProgramID  uuid.UUID  `json:"program_id"`
+	ContactID  uuid.UUID  `json:"contact_id"`
+	LeadID     *uuid.UUID `json:"lead_id,omitempty"`
+	Status     string     `json:"status"` // active, dropped, completed
+	EnrolledAt time.Time  `json:"enrolled_at"`
 
 	// Populated on demand
 	ContactName  string  `json:"contact_name,omitempty"`
@@ -814,4 +820,85 @@ type WhatsAppCheckResult struct {
 	Phone        string `json:"phone"`
 	IsOnWhatsApp bool   `json:"is_on_whatsapp"`
 	JID          string `json:"jid,omitempty"`
+}
+
+// ── Event Logbooks (Bitácora) ──────────────────────────────────────────
+
+// EventLogbook represents a snapshot of an event's state on a specific date
+type EventLogbook struct {
+	ID                uuid.UUID              `json:"id"`
+	EventID           uuid.UUID              `json:"event_id"`
+	AccountID         uuid.UUID              `json:"account_id"`
+	Date              time.Time              `json:"date"`
+	Title             string                 `json:"title"`
+	Status            string                 `json:"status"` // pending, completed
+	GeneralNotes      string                 `json:"general_notes"`
+	StageSnapshot     map[string]interface{} `json:"stage_snapshot"`
+	TotalParticipants int                    `json:"total_participants"`
+	CapturedAt        *time.Time             `json:"captured_at,omitempty"`
+	CreatedBy         *uuid.UUID             `json:"created_by,omitempty"`
+	SavedFilter       json.RawMessage        `json:"saved_filter,omitempty"`
+	CreatedAt         time.Time              `json:"created_at"`
+	UpdatedAt         time.Time              `json:"updated_at"`
+
+	// Populated on demand
+	Entries       []*EventLogbookEntry `json:"entries,omitempty"`
+	CreatedByName *string              `json:"created_by_name,omitempty"`
+}
+
+// EventLogbookEntry represents a participant's state snapshot in a logbook
+type EventLogbookEntry struct {
+	ID            uuid.UUID  `json:"id"`
+	LogbookID     uuid.UUID  `json:"logbook_id"`
+	ParticipantID uuid.UUID  `json:"participant_id"`
+	StageID       *uuid.UUID `json:"stage_id,omitempty"`
+	StageName     string     `json:"stage_name"`
+	StageColor    string     `json:"stage_color"`
+	Notes         string     `json:"notes"`
+	CreatedAt     time.Time  `json:"created_at"`
+
+	// Populated on demand
+	ParticipantName  string  `json:"participant_name,omitempty"`
+	ParticipantPhone *string `json:"participant_phone,omitempty"`
+}
+
+// Logbook status constants
+const (
+	LogbookStatusPending   = "pending"
+	LogbookStatusCompleted = "completed"
+)
+
+// APIKey represents an API key for MCP / external integrations
+type APIKey struct {
+	ID          uuid.UUID  `json:"id"`
+	AccountID   uuid.UUID  `json:"account_id"`
+	Name        string     `json:"name"`
+	KeyHash     string     `json:"-"`
+	KeyPrefix   string     `json:"key_prefix"`
+	Permissions string     `json:"permissions"`
+	IsActive    bool       `json:"is_active"`
+	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// ErosConversation represents a persistent chat conversation with Eros AI
+type ErosConversation struct {
+	ID        uuid.UUID `json:"id"`
+	AccountID uuid.UUID `json:"account_id"`
+	UserID    uuid.UUID `json:"user_id"`
+	Title     string    `json:"title"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// Populated on demand
+	Messages []ErosMessage `json:"messages,omitempty"`
+}
+
+// ErosMessage represents a single message in an Eros conversation
+type ErosMessage struct {
+	ID             uuid.UUID `json:"id"`
+	ConversationID uuid.UUID `json:"conversation_id"`
+	Role           string    `json:"role"` // "user" or "assistant"
+	Content        string    `json:"content"`
+	CreatedAt      time.Time `json:"created_at"`
 }

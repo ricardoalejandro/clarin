@@ -60,6 +60,7 @@ interface Contact {
   kommo_id: number | null
   created_at: string
   updated_at: string
+  last_activity: string | null
   device_names?: ContactDeviceName[]
 }
 
@@ -1091,13 +1092,14 @@ export default function ContactsPage() {
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell">Empresa</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell">Etiquetas</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden md:table-cell">Fuente</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell">Última actividad</th>
                 <th className="w-10 px-4 py-3" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {contacts.length === 0 && !loading ? (
                 <tr>
-                  <td colSpan={selectionMode ? 8 : 7} className="text-center py-12 text-slate-500">
+                  <td colSpan={selectionMode ? 9 : 8} className="text-center py-12 text-slate-500">
                     <Users className="w-12 h-12 mx-auto mb-3 text-slate-300" />
                     <p className="text-base font-medium">No hay contactos</p>
                     <p className="text-sm mt-1">Los contactos se sincronizan automáticamente desde tus dispositivos WhatsApp</p>
@@ -1181,6 +1183,15 @@ export default function ContactsPage() {
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-500 hidden md:table-cell">
                     {contact.source || 'whatsapp'}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-slate-400 hidden lg:table-cell">
+                    {contact.last_activity ? (
+                      <span title={format(new Date(contact.last_activity), 'dd/MM/yyyy HH:mm', { locale: es })}>
+                        {formatDistanceToNow(new Date(contact.last_activity), { addSuffix: true, locale: es })}
+                      </span>
+                    ) : (
+                      <span className="text-slate-300">-</span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <button

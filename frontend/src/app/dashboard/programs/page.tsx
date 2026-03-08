@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Plus, Search, BookOpen, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X } from 'lucide-react';
+import { Plus, Search, BookOpen, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program } from '@/types/program';
 import Link from 'next/link';
@@ -24,6 +24,9 @@ export default function ProgramsPage() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newProgram, setNewProgram] = useState({ name: '', description: '', color: '#10b981' });
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [editingProgram, setEditingProgram] = useState<Program | null>(null);
+  const [editForm, setEditForm] = useState({ name: '', description: '', color: '#10b981', status: 'active' });
+  const [savingEdit, setSavingEdit] = useState(false);
 
   useEffect(() => {
     fetchPrograms();
@@ -72,6 +75,38 @@ export default function ProgramsPage() {
       console.error('Error deleting program:', error);
     } finally {
       setDeleting(null);
+    }
+  };
+
+  const openEditProgram = (program: Program, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setEditForm({
+      name: program.name,
+      description: program.description || '',
+      color: program.color || '#10b981',
+      status: program.status,
+    });
+    setEditingProgram(program);
+  };
+
+  const handleUpdateProgram = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingProgram) return;
+    setSavingEdit(true);
+    try {
+      const res = await api(`/api/programs/${editingProgram.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(editForm),
+      });
+      if (res.success) {
+        setEditingProgram(null);
+        fetchPrograms();
+      }
+    } catch (error) {
+      console.error('Error updating program:', error);
+    } finally {
+      setSavingEdit(false);
     }
   };
 
@@ -235,18 +270,27 @@ export default function ProgramsPage() {
             return (
               <Link href={`/dashboard/programs/${program.id}`} key={program.id}>
                 <div className="group bg-white rounded-xl border border-slate-200 p-5 hover:shadow-lg hover:border-slate-300 transition-all duration-200 cursor-pointer h-full flex flex-col relative">
-                  {/* Delete button */}
-                  <button
-                    onClick={(e) => handleDeleteProgram(program.id, e)}
-                    className="absolute top-3 right-3 p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-red-50 text-slate-400 hover:text-red-500"
-                    title="Eliminar programa"
-                  >
-                    {deleting === program.id ? (
-                      <div className="w-4 h-4 border-2 border-red-300 border-t-red-600 rounded-full animate-spin" />
-                    ) : (
-                      <Trash2 className="w-4 h-4" />
-                    )}
-                  </button>
+                  {/* Action buttons */}
+                  <div className="absolute top-3 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                    <button
+                      onClick={(e) => openEditProgram(program, e)}
+                      className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all"
+                      title="Editar programa"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={(e) => handleDeleteProgram(program.id, e)}
+                      className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all"
+                      title="Eliminar programa"
+                    >
+                      {deleting === program.id ? (
+                        <div className="w-4 h-4 border-2 border-red-300 border-t-red-600 rounded-full animate-spin" />
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
 
                   {/* Program header */}
                   <div className="flex items-start gap-3 mb-3">
@@ -371,6 +415,77 @@ export default function ProgramsPage() {
                   className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium"
                 >
                   Crear Programa
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Program Modal */}
+      {editingProgram && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setEditingProgram(null)}>
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-5">
+              <h2 className="text-xl font-bold text-slate-800">Editar Programa</h2>
+              <button onClick={() => setEditingProgram(null)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleUpdateProgram}>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Nombre</label>
+                  <input
+                    type="text"
+                    required
+                    value={editForm.name}
+                    onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Descripción</label>
+                  <textarea
+                    value={editForm.description}
+                    onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all resize-none"
+                    rows={3}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Color</label>
+                  <div className="flex gap-2.5">
+                    {COLORS.map(color => (
+                      <button
+                        key={color}
+                        type="button"
+                        onClick={() => setEditForm({ ...editForm, color })}
+                        className={`w-9 h-9 rounded-full transition-all ${editForm.color === color ? 'ring-2 ring-offset-2 ring-slate-400 scale-110' : 'hover:scale-105'}`}
+                        style={{ backgroundColor: color }}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Estado</label>
+                  <select
+                    value={editForm.status}
+                    onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                  >
+                    <option value="active">Activo</option>
+                    <option value="archived">Archivado</option>
+                    <option value="completed">Completado</option>
+                  </select>
+                </div>
+              </div>
+              <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+                <button type="button" onClick={() => setEditingProgram(null)} className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium">
+                  Cancelar
+                </button>
+                <button type="submit" disabled={savingEdit || !editForm.name.trim()} className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium disabled:opacity-50">
+                  {savingEdit ? 'Guardando...' : 'Guardar Cambios'}
                 </button>
               </div>
             </form>

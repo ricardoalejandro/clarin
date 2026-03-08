@@ -11,6 +11,7 @@ import (
 
 	"github.com/naperu/clarin/internal/api"
 	"github.com/naperu/clarin/internal/kommo"
+	clarinMCP "github.com/naperu/clarin/internal/mcp"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/storage"
@@ -121,6 +122,10 @@ func main() {
 
 	// Initialize API server
 	server := api.NewServer(cfg, services, repos, hub, devicePool, store, kommoSyncSvc, redisCache)
+
+	// Initialize and start MCP server (Model Context Protocol) for ChatGPT/Claude/Copilot integration
+	mcpServer := clarinMCP.New(repos, services, cfg.JWTSecret)
+	mcpServer.Start("8081")
 
 	// Start event tag auto-sync worker
 	eventSyncCtx, eventSyncCancel := context.WithCancel(context.Background())

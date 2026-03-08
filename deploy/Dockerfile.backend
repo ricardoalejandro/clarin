@@ -32,8 +32,9 @@ COPY --from=builder /clarin /app/clarin
 # Create sessions directory
 RUN mkdir -p /app/sessions
 
-# Expose port
+# Expose ports
 EXPOSE 8080
+EXPOSE 8081
 
 # Run
 CMD ["/app/clarin"]

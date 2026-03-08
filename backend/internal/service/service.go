@@ -1546,6 +1546,8 @@ func (s *EventService) ReconcileEventParticipantsAdvanced(ctx context.Context, e
 		return 0, 0, fmt.Errorf("execute formula query: %w", err)
 	}
 
+	log.Printf("[EVENT-SYNC] Advanced formula matched %d leads for event %s", len(matchedLeadIDs), eventID)
+
 	return s.reconcileWithMatchedLeads(ctx, eventID, defaultStageID, matchedLeadIDs)
 }
 

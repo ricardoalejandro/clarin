@@ -175,6 +175,11 @@ func (s *Server) setupRoutes() {
 	protected.Put("/settings/password", s.handleChangePassword)
 	protected.Put("/settings/incoming-stage", s.handleSetIncomingStage)
 
+	// API Key management routes
+	protected.Post("/settings/api-keys", s.handleCreateAPIKey)
+	protected.Get("/settings/api-keys", s.handleListAPIKeys)
+	protected.Delete("/settings/api-keys/:id", s.handleDeleteAPIKey)
+
 	// Device routes
 	// GET /devices — list available devices for sending; accessible by any authenticated user
 	// (needed by chats, contacts, leads, broadcasts, events, programs pages to populate device pickers)
@@ -374,6 +379,17 @@ func (s *Server) setupRoutes() {
 	events.Post("/:id/participants/:pid/check-tag-impact", s.handleCheckTagImpact)
 	events.Post("/:id/campaign", s.handleCreateCampaignFromEvent)
 
+	// Event Logbook (Bitácora) routes
+	events.Get("/:id/logbooks", s.handleGetEventLogbooks)
+	events.Post("/:id/logbooks", s.handleCreateEventLogbook)
+	events.Post("/:id/logbooks/auto-create", s.handleAutoCreateLogbooks)
+	events.Get("/:id/logbooks/:lid", s.handleGetEventLogbook)
+	events.Put("/:id/logbooks/:lid", s.handleUpdateEventLogbook)
+	events.Delete("/:id/logbooks/:lid", s.handleDeleteEventLogbook)
+	events.Post("/:id/logbooks/:lid/capture", s.handleCaptureLogbookSnapshot)
+	events.Get("/:id/logbooks/:lid/preview", s.handleLogbookPreview)
+	events.Put("/:id/logbooks/:lid/entries/:eid", s.handleUpdateLogbookEntry)
+
 	// Interaction routes
 	interactions := protected.Group("/interactions", s.requirePermission(domain.PermLeads))
 	interactions.Post("/", s.handleLogInteraction)
@@ -408,6 +424,15 @@ func (s *Server) setupRoutes() {
 
 	// Stats
 	protected.Get("/stats", s.handleGetStats)
+
+	// AI Assistant (Eros)
+	protected.Get("/ai/config", s.handleGetAIConfig)
+	protected.Put("/ai/config", s.handleSetAIConfig)
+	protected.Post("/ai/config/validate", s.handleValidateAIConfig)
+	protected.Post("/ai/chat", s.handleAIChat)
+	protected.Get("/ai/conversations", s.handleListErosConversations)
+	protected.Get("/ai/conversations/:id", s.handleGetErosConversation)
+	protected.Delete("/ai/conversations/:id", s.handleDeleteErosConversation)
 
 	// Super Admin routes
 	admin := protected.Group("/admin", s.superAdminMiddleware)
@@ -5540,35 +5565,188 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
 	}
-	search := c.Query("search")
-	status := c.Query("status")
 
-	// Parse tag IDs filter
-	var tagIDs []uuid.UUID
-	if tagsParam := c.Query("tags"); tagsParam != "" {
-		for _, tidStr := range strings.Split(tagsParam, ",") {
-			tid, err := uuid.Parse(strings.TrimSpace(tidStr))
-			if err == nil {
-				tagIDs = append(tagIDs, tid)
-			}
-		}
+	// Pagination
+	offset, _ := strconv.Atoi(c.Query("offset", "0"))
+	limit, _ := strconv.Atoi(c.Query("limit", "10000"))
+	if limit <= 0 || limit > 10000 {
+		limit = 10000
 	}
 
-	// Parse has_phone filter
+	// Filters — same params as paginated endpoint
+	search := strings.TrimSpace(c.Query("search"))
+	tagNamesRaw := c.Query("tag_names")
+	tagMode := strings.ToUpper(c.Query("tag_mode", "OR"))
+	excludeTagNamesRaw := c.Query("exclude_tag_names")
+	tagFormulaRaw := c.Query("tag_formula")
+	stageIDsRaw := c.Query("stage_ids")
 	var hasPhone *bool
 	if hp := c.Query("has_phone"); hp == "true" {
 		t := true
 		hasPhone = &t
 	}
 
-	participants, err := s.services.Event.GetParticipants(c.Context(), eventID, search, status, tagIDs, hasPhone)
+	// Build WHERE
+	args := []interface{}{eventID}
+	argIdx := 2
+	whereClauses := []string{"p.event_id = $1"}
+
+	if search != "" {
+		searchPattern := "%" + strings.ToLower(search) + "%"
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"(LOWER(COALESCE(p.name,'')) LIKE $%d OR LOWER(COALESCE(p.phone,'')) LIKE $%d OR LOWER(COALESCE(p.email,'')) LIKE $%d OR LOWER(COALESCE(p.last_name,'')) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx,
+		))
+		args = append(args, searchPattern)
+		argIdx++
+	}
+
+	var tagNames []string
+	if tagNamesRaw != "" {
+		tagNames = strings.Split(tagNamesRaw, ",")
+	}
+	var excludeTagNames []string
+	if excludeTagNamesRaw != "" {
+		excludeTagNames = strings.Split(excludeTagNamesRaw, ",")
+	}
+
+	if tagFormulaRaw != "" {
+		ast, parseErr := formula.Parse(tagFormulaRaw)
+		if parseErr == nil && ast != nil {
+			innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, eventID)
+			if buildErr == nil && innerSQL != "" {
+				remappedSQL := innerSQL
+				for i := len(innerArgs); i >= 1; i-- {
+					old := fmt.Sprintf("$%d", i)
+					nw := fmt.Sprintf("$%d", argIdx+i-1)
+					remappedSQL = strings.ReplaceAll(remappedSQL, old, nw)
+				}
+				whereClauses = append(whereClauses, fmt.Sprintf("p.id IN (%s)", remappedSQL))
+				args = append(args, innerArgs...)
+				argIdx += len(innerArgs)
+			}
+		}
+	} else if len(tagNames) > 0 || len(excludeTagNames) > 0 {
+		if len(tagNames) > 0 {
+			if tagMode == "AND" {
+				whereClauses = append(whereClauses, fmt.Sprintf(
+					"p.id IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d) GROUP BY p2.id HAVING COUNT(DISTINCT t.name) = $%d)",
+					argIdx, argIdx+1,
+				))
+				args = append(args, tagNames, len(tagNames))
+				argIdx += 2
+			} else {
+				whereClauses = append(whereClauses, fmt.Sprintf(
+					"p.id IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
+					argIdx,
+				))
+				args = append(args, tagNames)
+				argIdx++
+			}
+		}
+		if len(excludeTagNames) > 0 {
+			whereClauses = append(whereClauses, fmt.Sprintf(
+				"p.id NOT IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
+				argIdx,
+			))
+			args = append(args, excludeTagNames)
+			argIdx++
+		}
+	}
+
+	if hasPhone != nil && *hasPhone {
+		whereClauses = append(whereClauses, "p.phone IS NOT NULL AND p.phone != ''")
+	}
+
+	if stageIDsRaw != "" {
+		var validStageIDs []uuid.UUID
+		for _, sid := range strings.Split(stageIDsRaw, ",") {
+			if id, err := uuid.Parse(strings.TrimSpace(sid)); err == nil {
+				validStageIDs = append(validStageIDs, id)
+			}
+		}
+		if len(validStageIDs) > 0 {
+			whereClauses = append(whereClauses, fmt.Sprintf("p.stage_id = ANY($%d)", argIdx))
+			args = append(args, validStageIDs)
+			argIdx++
+		}
+	}
+
+	addDateFilter(c, "p", participantDateFields, &whereClauses, &args, &argIdx)
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// Count total
+	var total int
+	countQ := fmt.Sprintf("SELECT COUNT(*) FROM event_participants p WHERE %s", whereSQL)
+	_ = s.repos.DB().QueryRow(c.Context(), countQ, args...).Scan(&total)
+
+	// Fetch page
+	dataQ := fmt.Sprintf(`
+		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
+		       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
+		       p.status, p.notes, p.next_action, p.next_action_date,
+		       p.invited_at, p.confirmed_at, p.attended_at,
+		       p.created_at, p.updated_at,
+		       eps.name AS stage_name, eps.color AS stage_color
+		FROM event_participants p
+		LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id
+		WHERE %s
+		ORDER BY p.next_action_date ASC NULLS LAST, p.name ASC
+		OFFSET %d LIMIT %d
+	`, whereSQL, offset, limit)
+
+	rows, err := s.repos.DB().Query(c.Context(), dataQ, args...)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	defer rows.Close()
+
+	var participants []*domain.EventParticipant
+	for rows.Next() {
+		p := &domain.EventParticipant{}
+		if err := rows.Scan(
+			&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID,
+			&p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
+			&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate,
+			&p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt,
+			&p.CreatedAt, &p.UpdatedAt,
+			&p.StageName, &p.StageColor,
+		); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		participants = append(participants, p)
+	}
+
+	// Load tags for each participant
+	for _, p := range participants {
+		if p.LeadID == nil {
+			p.Tags = make([]*domain.Tag, 0)
+			continue
+		}
+		tagRows, err := s.repos.DB().Query(c.Context(), `
+			SELECT t.id, t.account_id, t.name, t.color, t.created_at
+			FROM tags t JOIN lead_tags lt ON lt.tag_id = t.id
+			WHERE lt.lead_id = $1
+		`, *p.LeadID)
+		if err == nil {
+			for tagRows.Next() {
+				tag := &domain.Tag{}
+				if err := tagRows.Scan(&tag.ID, &tag.AccountID, &tag.Name, &tag.Color, &tag.CreatedAt); err == nil {
+					p.Tags = append(p.Tags, tag)
+				}
+			}
+			tagRows.Close()
+		}
+		if p.Tags == nil {
+			p.Tags = make([]*domain.Tag, 0)
+		}
+	}
+
 	if participants == nil {
 		participants = make([]*domain.EventParticipant, 0)
 	}
-	return c.JSON(fiber.Map{"success": true, "participants": participants})
+	return c.JSON(fiber.Map{"success": true, "participants": participants, "total": total})
 }
 
 // handleGetEventParticipantsPaginated returns first N participants per stage using ROW_NUMBER()
@@ -6337,6 +6515,7 @@ func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 	}
 	var req struct {
 		ContactID *string `json:"contact_id"`
+		LeadID    *string `json:"lead_id"`
 		Name      string  `json:"name"`
 		LastName  *string `json:"last_name"`
 		ShortName *string `json:"short_name"`
@@ -6362,6 +6541,17 @@ func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 	if req.ContactID != nil {
 		if cid, err := uuid.Parse(*req.ContactID); err == nil {
 			p.ContactID = &cid
+		}
+	}
+	if req.LeadID != nil {
+		if lid, err := uuid.Parse(*req.LeadID); err == nil {
+			p.LeadID = &lid
+			// If no contact_id provided, look up the lead's contact_id
+			if p.ContactID == nil {
+				if lead, err := s.services.Lead.GetByID(c.Context(), lid); err == nil && lead != nil && lead.ContactID != nil {
+					p.ContactID = lead.ContactID
+				}
+			}
 		}
 	}
 	if err := s.services.Event.AddParticipant(c.Context(), p); err != nil {
@@ -6391,6 +6581,7 @@ func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
 	var req struct {
 		Participants []struct {
 			ContactID *string `json:"contact_id"`
+			LeadID    *string `json:"lead_id"`
 			Name      string  `json:"name"`
 			LastName  *string `json:"last_name"`
 			ShortName *string `json:"short_name"`
@@ -6415,6 +6606,16 @@ func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
 		if r.ContactID != nil {
 			if cid, err := uuid.Parse(*r.ContactID); err == nil {
 				p.ContactID = &cid
+			}
+		}
+		if r.LeadID != nil {
+			if lid, err := uuid.Parse(*r.LeadID); err == nil {
+				p.LeadID = &lid
+				if p.ContactID == nil {
+					if lead, err := s.services.Lead.GetByID(c.Context(), lid); err == nil && lead != nil && lead.ContactID != nil {
+						p.ContactID = lead.ContactID
+					}
+				}
 			}
 		}
 		participants = append(participants, p)
@@ -6696,9 +6897,12 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 			Position  int    `json:"position"`
 		} `json:"attachments"`
 		// Filters to select participants
-		Status   string   `json:"status"`
-		TagIDs   []string `json:"tag_ids"`
-		HasPhone *bool    `json:"has_phone"`
+		StageIDs        string   `json:"stage_ids"`
+		TagNames        []string `json:"tag_names"`
+		TagMode         string   `json:"tag_mode"`
+		ExcludeTagNames []string `json:"exclude_tag_names"`
+		TagFormula      string   `json:"tag_formula"`
+		HasPhone        *bool    `json:"has_phone"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -6715,20 +6919,109 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
 
-	// Parse tag IDs
-	var tagIDs []uuid.UUID
-	for _, tidStr := range req.TagIDs {
-		tid, err := uuid.Parse(tidStr)
-		if err == nil {
-			tagIDs = append(tagIDs, tid)
+	// Build WHERE clause for participant filtering (same logic as handleGetEventParticipants)
+	pArgs := []interface{}{eventID}
+	pArgIdx := 2
+	pWhere := []string{"p.event_id = $1", "p.phone IS NOT NULL", "p.phone != ''"}
+
+	if req.TagFormula != "" {
+		ast, parseErr := formula.Parse(req.TagFormula)
+		if parseErr == nil && ast != nil {
+			innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, eventID)
+			if buildErr == nil && innerSQL != "" {
+				remappedSQL := innerSQL
+				for i := len(innerArgs); i >= 1; i-- {
+					old := fmt.Sprintf("$%d", i)
+					nw := fmt.Sprintf("$%d", pArgIdx+i-1)
+					remappedSQL = strings.ReplaceAll(remappedSQL, old, nw)
+				}
+				pWhere = append(pWhere, fmt.Sprintf("p.id IN (%s)", remappedSQL))
+				pArgs = append(pArgs, innerArgs...)
+				pArgIdx += len(innerArgs)
+			}
+		}
+	} else {
+		tagMode := strings.ToUpper(req.TagMode)
+		if tagMode == "" {
+			tagMode = "OR"
+		}
+		if len(req.TagNames) > 0 {
+			if tagMode == "AND" {
+				pWhere = append(pWhere, fmt.Sprintf(
+					"p.id IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d) GROUP BY p2.id HAVING COUNT(DISTINCT t.name) = $%d)",
+					pArgIdx, pArgIdx+1,
+				))
+				pArgs = append(pArgs, req.TagNames, len(req.TagNames))
+				pArgIdx += 2
+			} else {
+				pWhere = append(pWhere, fmt.Sprintf(
+					"p.id IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
+					pArgIdx,
+				))
+				pArgs = append(pArgs, req.TagNames)
+				pArgIdx++
+			}
+		}
+		if len(req.ExcludeTagNames) > 0 {
+			pWhere = append(pWhere, fmt.Sprintf(
+				"p.id NOT IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
+				pArgIdx,
+			))
+			pArgs = append(pArgs, req.ExcludeTagNames)
+			pArgIdx++
 		}
 	}
 
-	// Get filtered participants (always require phone)
-	hasPhone := true
-	participants, err := s.services.Event.GetParticipants(c.Context(), eventID, "", req.Status, tagIDs, &hasPhone)
+	if req.StageIDs != "" {
+		var validStageIDs []uuid.UUID
+		for _, sid := range strings.Split(req.StageIDs, ",") {
+			if id, err := uuid.Parse(strings.TrimSpace(sid)); err == nil {
+				validStageIDs = append(validStageIDs, id)
+			}
+		}
+		if len(validStageIDs) > 0 {
+			pWhere = append(pWhere, fmt.Sprintf("p.stage_id = ANY($%d)", pArgIdx))
+			pArgs = append(pArgs, validStageIDs)
+			pArgIdx++
+		}
+	}
+	_ = pArgIdx // suppress unused
+
+	// Query participants
+	whereSQL := strings.Join(pWhere, " AND ")
+	dataQ := fmt.Sprintf(`
+		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
+		       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
+		       p.status, p.notes, p.next_action, p.next_action_date,
+		       p.invited_at, p.confirmed_at, p.attended_at,
+		       p.created_at, p.updated_at,
+		       eps.name AS stage_name, eps.color AS stage_color
+		FROM event_participants p
+		LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id
+		WHERE %s
+		ORDER BY p.name ASC
+	`, whereSQL)
+
+	rows, err := s.repos.DB().Query(c.Context(), dataQ, pArgs...)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	defer rows.Close()
+
+	var participants []*domain.EventParticipant
+	for rows.Next() {
+		p := &domain.EventParticipant{}
+		if err := rows.Scan(
+			&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID,
+			&p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
+			&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate,
+			&p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt,
+			&p.CreatedAt, &p.UpdatedAt,
+			&p.StageName, &p.StageColor,
+		); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		participants = append(participants, p)
 	}
 
 	if len(participants) == 0 {
@@ -6748,6 +7041,10 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 		Settings:        req.Settings,
 		EventID:         &eventID,
 		Source:          &source,
+	}
+	// Set created_by from authenticated user
+	if userID, ok := c.Locals("user_id").(uuid.UUID); ok {
+		campaign.CreatedBy = &userID
 	}
 	if err := s.services.Campaign.Create(c.Context(), campaign); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -7896,6 +8193,7 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		Slug       string `json:"slug"`
 		Plan       string `json:"plan"`
 		MaxDevices int    `json:"max_devices"`
+		MCPEnabled bool   `json:"mcp_enabled"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -7907,6 +8205,7 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		Slug:       req.Slug,
 		Plan:       req.Plan,
 		MaxDevices: req.MaxDevices,
+		MCPEnabled: req.MCPEnabled,
 	}
 
 	if err := s.services.Account.Update(c.Context(), account); err != nil {

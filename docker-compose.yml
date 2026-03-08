@@ -65,6 +65,27 @@ services:
       - "traefik.http.routers.clarin-minio-console.service=clarin-minio-console"
       - "traefik.http.services.clarin-minio-console.loadbalancer.server.port=9001"
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: clarin-ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    volumes:
+      - ollama_data:/root/.ollama
+    mem_limit: 10g
+    cpus: 3
+    ports:
+      - "11434:11434"
+    networks:
+      - clarin-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
   backend:
     build:
       context: ./backend
@@ -93,6 +114,9 @@ services:
       KOMMO_CLIENT_SECRET: ${KOMMO_CLIENT_SECRET}
       KOMMO_ACCESS_TOKEN: ${KOMMO_ACCESS_TOKEN}
       KOMMO_REDIRECT_URI: ${KOMMO_REDIRECT_URI}
+      # AI Assistant (Eros)
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
       # SOCKS5 proxy for WhatsApp CDN media uploads (Cloudflare WARP)
       MEDIA_SOCKS5_PROXY: socks5://host-gateway:40001
     extra_hosts:
@@ -116,6 +140,7 @@ services:
       start_period: 30s
     ports:
       - "8080:8080"
+      - "8081:8081"
     networks:
       - clarin-internal
       - dokploy-network
@@ -126,7 +151,16 @@ services:
       - "traefik.http.routers.clarin-api.tls=true"
       - "traefik.http.routers.clarin-api.tls.certresolver=letsencrypt"
       - "traefik.http.services.clarin-api.loadbalancer.server.port=8080"
+      - "traefik.http.routers.clarin-api.service=clarin-api"
       - "traefik.http.routers.clarin-api.priority=100"
+      # MCP Server (Model Context Protocol) — SSE transport on port 8081
+      - "traefik.http.routers.clarin-mcp.rule=Host(`clarin.naperu.cloud`) && (PathPrefix(`/mcp`) || PathPrefix(`/.well-known/oauth-authorization-server`) || PathPrefix(`/.well-known/oauth-protected-resource`))"
+      - "traefik.http.routers.clarin-mcp.entrypoints=websecure"
+      - "traefik.http.routers.clarin-mcp.tls=true"
+      - "traefik.http.routers.clarin-mcp.tls.certresolver=letsencrypt"
+      - "traefik.http.services.clarin-mcp.loadbalancer.server.port=8081"
+      - "traefik.http.routers.clarin-mcp.service=clarin-mcp"
+      - "traefik.http.routers.clarin-mcp.priority=110"
 
   frontend:
     build:
@@ -161,6 +195,7 @@ volumes:
   redis_data:
   whatsapp_sessions:
   minio_data:
+  ollama_data:
 
 networks:
   clarin-internal:
