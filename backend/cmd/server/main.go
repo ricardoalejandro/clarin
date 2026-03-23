@@ -48,6 +48,11 @@ func main() {
 		log.Printf("Warning: Failed to migrate event pipelines: %v", err)
 	}
 
+	// Seed template surveys for all accounts
+	if err := database.SeedTemplateSurveys(db); err != nil {
+		log.Printf("Warning: Failed to seed template surveys: %v", err)
+	}
+
 	// Initialize storage (MinIO)
 	var store *storage.Storage
 	if cfg.MinioEndpoint != "" {
@@ -108,6 +113,13 @@ func main() {
 	if redisCache != nil {
 		devicePool.SetCache(redisCache)
 	}
+
+	// Inject Redis cache into automation service and start the engine
+	if redisCache != nil {
+		services.Automation.SetCache(redisCache)
+	}
+	services.Automation.Start()
+	log.Printf("✅ Automation engine started (50 workers, 500/hr rate limit)")
 
 	// Initialize Kommo integration (optional)
 	var kommoSyncSvc *kommo.SyncService
@@ -284,6 +296,103 @@ func main() {
 		}
 	}()
 
+	// Start dynamic WhatsApp queue worker
+	dynamicWACtx, dynamicWACancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[DynamicWA Worker] ⚠️ PANIC recovered: %v — restarting in 10s", r)
+						select {
+						case <-dynamicWACtx.Done():
+							return
+						case <-time.After(10 * time.Second):
+						}
+					}
+				}()
+
+				log.Println("📱 Dynamic WhatsApp queue worker started")
+				ticker := time.NewTicker(5 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-dynamicWACtx.Done():
+						log.Println("[DynamicWA Worker] Shutting down")
+						return
+					case <-ticker.C:
+						pending, err := repos.Dynamic.GetPendingWhatsApp(dynamicWACtx, 25)
+						if err != nil || len(pending) == 0 {
+							continue
+						}
+						sentInBatch := 0
+						for _, q := range pending {
+							select {
+							case <-dynamicWACtx.Done():
+								return
+							default:
+							}
+							deviceID, err := devicePool.GetFirstConnectedDeviceForAccount(q.AccountID)
+							if err != nil {
+								log.Printf("[DynamicWA] ❌ No device for account %s: %v", q.AccountID, err)
+								_ = repos.Dynamic.UpdateWhatsAppStatus(dynamicWACtx, q.ID, "failed", err.Error())
+								continue
+							}
+							phone := q.Phone + "@s.whatsapp.net"
+							_, sendErr := devicePool.SendMediaMessage(dynamicWACtx, deviceID, phone, q.Caption, q.ImageURL, "image")
+							if sendErr != nil {
+								errMsg := sendErr.Error()
+								log.Printf("[DynamicWA] ❌ Failed to send to %s: %v", q.Phone, sendErr)
+								_ = repos.Dynamic.UpdateWhatsAppStatus(dynamicWACtx, q.ID, "failed", errMsg)
+							} else {
+								log.Printf("[DynamicWA] ✅ Sent image to %s", q.Phone)
+								// Send second message if configured
+								if q.ExtraMediaURL != "" {
+									time.Sleep(2 * time.Second)
+									_, extraErr := devicePool.SendMediaMessage(dynamicWACtx, deviceID, phone, q.ExtraText, q.ExtraMediaURL, q.ExtraMediaType)
+									if extraErr != nil {
+										log.Printf("[DynamicWA] ⚠️ Failed to send extra media to %s: %v", q.Phone, extraErr)
+									} else {
+										log.Printf("[DynamicWA] ✅ Sent extra %s to %s", q.ExtraMediaType, q.Phone)
+									}
+								} else if q.ExtraText != "" {
+									time.Sleep(2 * time.Second)
+									_, extraErr := devicePool.SendMessage(dynamicWACtx, deviceID, phone, q.ExtraText)
+									if extraErr != nil {
+										log.Printf("[DynamicWA] ⚠️ Failed to send extra text to %s: %v", q.Phone, extraErr)
+									} else {
+										log.Printf("[DynamicWA] ✅ Sent extra text to %s", q.Phone)
+									}
+								}
+								_ = repos.Dynamic.UpdateWhatsAppStatus(dynamicWACtx, q.ID, "sent", "")
+							}
+							sentInBatch++
+							// Rate limit: 10s between sends
+							select {
+							case <-dynamicWACtx.Done():
+								return
+							case <-time.After(10 * time.Second):
+							}
+							// Batch pause: 60s after 25 messages
+							if sentInBatch >= 25 {
+								log.Printf("[DynamicWA] Batch done: %d sent, pausing 60s", sentInBatch)
+								select {
+								case <-dynamicWACtx.Done():
+									return
+								case <-time.After(60 * time.Second):
+								}
+								sentInBatch = 0
+							}
+						}
+					}
+				}
+			}()
+			if dynamicWACtx.Err() != nil {
+				return
+			}
+		}
+	}()
+
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -292,8 +401,14 @@ func main() {
 		<-quit
 		log.Println("Shutting down server...")
 
+		// Stop automation engine
+		services.Automation.Stop()
+
 		// Stop campaign worker
 		campaignCancel()
+
+		// Stop dynamic WhatsApp queue worker
+		dynamicWACancel()
 
 		// Stop event tag sync worker
 		eventSyncCancel()

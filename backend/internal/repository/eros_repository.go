@@ -114,3 +114,10 @@ func (r *ErosConversationRepository) UpdateTitle(ctx context.Context, convID uui
 	_, err := r.db.Exec(ctx, `UPDATE eros_conversations SET title = $1, updated_at = NOW() WHERE id = $2`, title, convID)
 	return err
 }
+
+// CountByUser returns the number of conversations for a user.
+func (r *ErosConversationRepository) CountByUser(ctx context.Context, accountID, userID uuid.UUID) (int, error) {
+	var count int
+	err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM eros_conversations WHERE account_id = $1 AND user_id = $2`, accountID, userID).Scan(&count)
+	return count, err
+}

@@ -94,10 +94,11 @@ return s.repo.Program.DeleteSession(ctx, programID, sessionID)
 // --- Attendance ---
 
 func (s *ProgramService) MarkAttendance(ctx context.Context, a *domain.ProgramAttendance) error {
-if a.Status == "" {
-return errors.New("attendance status is required")
-}
 return s.repo.Program.MarkAttendance(ctx, a)
+}
+
+func (s *ProgramService) BatchMarkAttendance(ctx context.Context, attendances []*domain.ProgramAttendance) error {
+return s.repo.Program.BatchMarkAttendance(ctx, attendances)
 }
 
 func (s *ProgramService) GetAttendanceBySession(ctx context.Context, sessionID uuid.UUID) ([]*domain.ProgramAttendance, error) {
@@ -158,4 +159,36 @@ func (s *ProgramService) GenerateSessions(ctx context.Context, programID uuid.UU
 	}
 
 	return s.repo.Program.GenerateSessions(ctx, sessions)
+}
+
+// --- Folders ---
+
+func (s *ProgramService) GetFolders(ctx context.Context, accountID uuid.UUID) ([]*domain.ProgramFolder, error) {
+	return s.repo.ProgramFolder.GetByAccountID(ctx, accountID)
+}
+
+func (s *ProgramService) GetFolderByID(ctx context.Context, id uuid.UUID) (*domain.ProgramFolder, error) {
+	return s.repo.ProgramFolder.GetByID(ctx, id)
+}
+
+func (s *ProgramService) CreateFolder(ctx context.Context, f *domain.ProgramFolder) error {
+	return s.repo.ProgramFolder.Create(ctx, f)
+}
+
+func (s *ProgramService) UpdateFolder(ctx context.Context, f *domain.ProgramFolder) error {
+	return s.repo.ProgramFolder.Update(ctx, f)
+}
+
+func (s *ProgramService) DeleteFolder(ctx context.Context, id uuid.UUID) error {
+	return s.repo.ProgramFolder.Delete(ctx, id)
+}
+
+func (s *ProgramService) MoveProgramToFolder(ctx context.Context, programID uuid.UUID, folderID *uuid.UUID) error {
+	return s.repo.ProgramFolder.MoveProgram(ctx, programID, folderID)
+}
+
+// --- Attendance Stats ---
+
+func (s *ProgramService) GetAttendanceStats(ctx context.Context, programID uuid.UUID, months string) ([]map[string]interface{}, []map[string]interface{}, error) {
+	return s.repo.Program.GetAttendanceStats(ctx, programID, months)
 }

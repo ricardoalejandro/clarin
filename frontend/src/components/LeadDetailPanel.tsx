@@ -3,77 +3,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Phone, Mail, User, Calendar, MessageCircle, Trash2, ChevronDown,
-  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake
+  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import TagInput from '@/components/TagInput'
-
-// ─── Interfaces ──────────────────────────────────────────
-interface StructuredTag {
-  id: string
-  account_id: string
-  name: string
-  color: string
-}
-
-interface PipelineStage {
-  id: string
-  pipeline_id: string
-  name: string
-  color: string
-  position: number
-  lead_count?: number
-}
-
-interface Pipeline {
-  id: string
-  account_id?: string
-  name: string
-  description?: string | null
-  is_default: boolean
-  stages: PipelineStage[] | null
-}
-
-interface Lead {
-  id: string
-  jid: string
-  contact_id: string | null
-  name: string
-  last_name: string | null
-  short_name: string | null
-  phone: string
-  email: string
-  company: string | null
-  age: number | null
-  dni: string | null
-  birth_date: string | null
-  status: string
-  pipeline_id: string | null
-  stage_id: string | null
-  stage_name: string | null
-  stage_color: string | null
-  stage_position: number | null
-  notes: string
-  tags: string[]
-  structured_tags: StructuredTag[] | null
-  kommo_id: number | null
-  assigned_to: string
-  created_at: string
-  updated_at: string
-}
-
-interface Observation {
-  id: string
-  contact_id: string | null
-  lead_id: string | null
-  type: string
-  direction: string | null
-  outcome: string | null
-  notes: string | null
-  created_by_name: string | null
-  created_at: string
-}
+import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 
 // ─── Props ───────────────────────────────────────────────
 interface LeadDetailPanelProps {
@@ -109,11 +44,35 @@ interface LeadDetailPanelProps {
   onBeforeTagAssign?: (tagId: string) => Promise<boolean>
   /** Called before removing a tag in event mode. Return false to cancel. */
   onBeforeTagRemove?: (tagId: string) => Promise<boolean>
+  /** Called when lead is archived/unarchived */
+  onArchive?: (leadId: string, archive: boolean) => void
+  /** Called when lead block dialog should open */
+  onBlock?: (leadId: string) => void
+  /** Called when lead is unblocked */
+  onUnblock?: (leadId: string) => void
+  /** Contact mode: uses contact APIs, shows device_names, hides pipeline/archive/block */
+  contactMode?: boolean
+  /** The contact ID for API calls in contact mode */
+  contactId?: string
+  /** Device names to display in contact mode */
+  deviceNames?: { id: string; device_id: string; name: string | null; push_name: string | null; business_name: string | null; device_name: string | null; synced_at: string }[]
+  /** Push name from WhatsApp in contact mode */
+  pushName?: string | null
+  /** Avatar URL in contact mode */
+  avatarUrl?: string | null
+  /** Called when "Reset from Device" is clicked in contact mode */
+  onResetFromDevice?: () => void
+  /** Called when "Send Message" is clicked in contact mode */
+  onSendMessage?: () => void
+  /** Called after any field save in contact mode (to refresh parent's list) */
+  onContactUpdate?: (contact: any) => void
+  /** Called when an observation is created or deleted (to refresh parent's list view) */
+  onObservationChange?: (leadId: string) => void
 }
 
 // ─── Component ───────────────────────────────────────────
 export default function LeadDetailPanel({
-  lead,
+  lead: leadProp,
   onLeadChange,
   onClose,
   onSendWhatsApp,
@@ -129,7 +88,23 @@ export default function LeadDetailPanel({
   onStageChange,
   onBeforeTagAssign,
   onBeforeTagRemove,
+  onArchive,
+  onBlock,
+  onUnblock,
+  contactMode = false,
+  contactId,
+  deviceNames,
+  pushName,
+  avatarUrl,
+  onResetFromDevice,
+  onSendMessage,
+  onContactUpdate,
+  onObservationChange,
 }: LeadDetailPanelProps) {
+  // Internal lead state — updates immediately on save, syncs with prop
+  const [lead, setLead] = useState(leadProp)
+  useEffect(() => { setLead(leadProp) }, [leadProp])
+
   // Pipelines
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
 
@@ -168,9 +143,14 @@ export default function LeadDetailPanel({
   // History sync
   const [syncingHistory, setSyncingHistory] = useState(false)
 
-  // ─── Fetch pipelines (skip in event mode) ───────────────
+  // Lead stage dropdown (event mode only)
+  const [showLeadStageDropdown, setShowLeadStageDropdown] = useState(false)
+  const [expandedLeadPipelineId, setExpandedLeadPipelineId] = useState<string | null>(null)
+  const leadStageDropdownRef = useRef<HTMLDivElement>(null)
+
+  // ─── Fetch pipelines (skip in contact mode) ───────────────
   useEffect(() => {
-    if (eventMode) return
+    if (contactMode) return
     const token = localStorage.getItem('token')
     fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } })
       .then(res => res.json())
@@ -178,7 +158,7 @@ export default function LeadDetailPanel({
         if (data.success) setPipelines(data.pipelines || [])
       })
       .catch(console.error)
-  }, [eventMode])
+  }, [eventMode, contactMode])
 
   // ─── Fetch observations when lead changes ──────────────
   useEffect(() => {
@@ -187,25 +167,29 @@ export default function LeadDetailPanel({
     setEditingNotes(false)
     setObsDisplayCount(5)
     fetchObservations(lead.id)
-  }, [lead.id])
+  }, [leadProp.id])
 
   // ─── Close on Escape ───────────────────────────────────
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (showHistoryModal) { setShowHistoryModal(false); return }
-      if (showPipelineDropdown) { setShowPipelineDropdown(false); return }
-      onClose()
+      if (showHistoryModal) { e.stopPropagation(); e.preventDefault(); setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo(''); return }
+      if (showLeadStageDropdown) { e.stopPropagation(); setShowLeadStageDropdown(false); return }
+      if (showPipelineDropdown) { e.stopPropagation(); setShowPipelineDropdown(false); return }
+      // No internal state to close → let event propagate to parent page handler
     }
-    document.addEventListener('keydown', h)
-    return () => document.removeEventListener('keydown', h)
-  }, [showHistoryModal, showPipelineDropdown, onClose])
+    document.addEventListener('keydown', h, true)
+    return () => document.removeEventListener('keydown', h, true)
+  }, [showHistoryModal, showPipelineDropdown, showLeadStageDropdown])
 
   // ─── Click outside to close dropdown ───────────────────
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setShowPipelineDropdown(false)
+      }
+      if (leadStageDropdownRef.current && !leadStageDropdownRef.current.contains(event.target as Node)) {
+        setShowLeadStageDropdown(false)
       }
     }
     document.addEventListener('mousedown', handleClickOutside)
@@ -217,7 +201,10 @@ export default function LeadDetailPanel({
     setLoadingObservations(true)
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/leads/${leadId}/interactions?limit=100`, {
+      const url = contactMode && contactId
+        ? `/api/contacts/${contactId}/interactions?limit=100`
+        : `/api/leads/${leadId}/interactions?limit=100`
+      const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
@@ -237,30 +224,39 @@ export default function LeadDetailPanel({
       const payload: Record<string, string | number | null> = {}
       const val = editValues[field]?.trim() ?? ''
       if (field === 'age') {
-        payload[field] = val ? parseInt(val, 10) : null
-      } else if (field === 'birth_date') {
-        payload[field] = val || null
+        payload[field] = val ? parseInt(val, 10) : 0
       } else {
-        payload[field] = val || null
+        payload[field] = val
       }
-      const endpoint = eventMode && eventId && participantId
+      const endpoint = contactMode && contactId
+        ? `/api/contacts/${contactId}`
+        : eventMode && eventId && participantId
         ? `/api/events/${eventId}/participants/${participantId}`
         : `/api/leads/${lead.id}`
+      const apiPayload = contactMode && contactId
+        ? Object.fromEntries(Object.entries(payload).map(([k, v]) => [k === 'name' ? 'custom_name' : k, v]))
+        : payload
       const res = await fetch(endpoint, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(apiPayload),
       })
       const data = await res.json()
-      if (eventMode) {
-        if (data.success && data.participant) {
-          onLeadChange({ ...lead, ...payload } as Lead)
-        } else {
-          onLeadChange({ ...lead, ...payload } as Lead)
+      if (contactMode) {
+        if (data.success && data.contact) {
+          const updated = { ...lead, ...payload } as Lead
+          setLead(updated)
+          onLeadChange(updated)
+          onContactUpdate?.(data.contact)
         }
+      } else if (eventMode) {
+        const updated = { ...lead, ...payload } as Lead
+        setLead(updated)
+        onLeadChange(updated)
       } else {
         if (data.success && data.lead) {
           const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
+          setLead(merged)
           onLeadChange(merged)
         }
       }
@@ -276,7 +272,9 @@ export default function LeadDetailPanel({
     setSavingNotes(true)
     const token = localStorage.getItem('token')
     try {
-      const endpoint = eventMode && eventId && participantId
+      const endpoint = contactMode && contactId
+        ? `/api/contacts/${contactId}`
+        : eventMode && eventId && participantId
         ? `/api/events/${eventId}/participants/${participantId}`
         : `/api/leads/${lead.id}`
       const res = await fetch(endpoint, {
@@ -285,10 +283,18 @@ export default function LeadDetailPanel({
         body: JSON.stringify({ notes: notesValue }),
       })
       const data = await res.json()
-      if (eventMode) {
-        onLeadChange({ ...lead, notes: notesValue })
+      if (contactMode) {
+        const updated = { ...lead, notes: notesValue }
+        setLead(updated)
+        onLeadChange(updated)
+        if (data.success && data.contact) onContactUpdate?.(data.contact)
+      } else if (eventMode) {
+        const updated = { ...lead, notes: notesValue }
+        setLead(updated)
+        onLeadChange(updated)
       } else if (data.success && data.lead) {
         const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
+        setLead(merged)
         onLeadChange(merged)
       }
       setEditingNotes(false)
@@ -311,13 +317,15 @@ export default function LeadDetailPanel({
         const data = await res.json()
         if (data.success) {
           const stage = eventStages?.find(s => s.id === stageId)
-          onLeadChange({
+          const updated = {
             ...lead,
             stage_id: stageId,
             stage_name: stage?.name || null,
             stage_color: stage?.color || null,
             stage_position: stage?.position ?? null,
-          })
+          }
+          setLead(updated)
+          onLeadChange(updated)
           onStageChange?.(stageId, stage?.name || '', stage?.color || '')
         }
       } else {
@@ -333,13 +341,15 @@ export default function LeadDetailPanel({
             const found = p.stages?.find(s => s.id === stageId)
             if (found) { stage = found; break }
           }
-          onLeadChange({
+          const updated = {
             ...lead,
             stage_id: stageId,
             stage_name: stage?.name || null,
             stage_color: stage?.color || null,
             stage_position: stage?.position ?? null,
-          })
+          }
+          setLead(updated)
+          onLeadChange(updated)
         }
       }
     } catch (err) {
@@ -360,6 +370,7 @@ export default function LeadDetailPanel({
       const data = await res.json()
       if (data.success && data.lead) {
         const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
+        setLead(merged)
         onLeadChange(merged)
       }
     } catch (err) {
@@ -375,16 +386,16 @@ export default function LeadDetailPanel({
       const res = await fetch('/api/interactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          lead_id: lead.id,
-          type: newObservationType,
-          notes: newObservation.trim(),
-        }),
+        body: JSON.stringify(contactMode && contactId
+          ? { contact_id: contactId, type: newObservationType, notes: newObservation.trim() }
+          : { lead_id: lead.id, type: newObservationType, notes: newObservation.trim() }
+        ),
       })
       const data = await res.json()
       if (data.success) {
         setNewObservation('')
         fetchObservations(lead.id)
+        onObservationChange?.(lead.id)
       }
     } catch (err) {
       console.error('Failed to add observation:', err)
@@ -403,6 +414,7 @@ export default function LeadDetailPanel({
       })
       const data = await res.json()
       if (data.success) fetchObservations(lead.id)
+      if (data.success) onObservationChange?.(lead.id)
     } catch (err) {
       console.error('Failed to delete observation:', err)
     }
@@ -418,6 +430,7 @@ export default function LeadDetailPanel({
       })
       const data = await res.json()
       if (data.success && data.lead) {
+        setLead(data.lead)
         onLeadChange(data.lead)
         fetchObservations(lead.id)
       } else {
@@ -462,10 +475,13 @@ export default function LeadDetailPanel({
   }
 
   const handleDeleteLead = async () => {
-    if (!confirm(eventMode ? '¿Estás seguro de eliminar este participante?' : '¿Estás seguro de eliminar este lead?')) return
+    const confirmMsg = contactMode ? '¿Estás seguro de eliminar este contacto?' : eventMode ? '¿Estás seguro de eliminar este participante?' : '¿Estás seguro de eliminar este lead?'
+    if (!confirm(confirmMsg)) return
     const token = localStorage.getItem('token')
     try {
-      const url = eventMode && eventId && participantId
+      const url = contactMode && contactId
+        ? `/api/contacts/${contactId}`
+        : eventMode && eventId && participantId
         ? `/api/events/${eventId}/participants/${participantId}`
         : `/api/leads/${lead.id}`
       const res = await fetch(url, {
@@ -501,7 +517,7 @@ export default function LeadDetailPanel({
       {/* Header */}
       {!hideHeader && (
         <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10 shrink-0">
-          <h2 className="text-sm font-semibold text-slate-900">{eventMode ? 'Detalle del Participante' : 'Detalle del Lead'}</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{contactMode ? 'Detalle del Contacto' : eventMode ? 'Detalle del Participante' : 'Detalle del Lead'}</h2>
           <div className="flex items-center gap-1">
             <button onClick={onClose} className="p-1.5 hover:bg-slate-100 rounded-lg">
               <X className="w-4 h-4 text-slate-400" />
@@ -513,11 +529,15 @@ export default function LeadDetailPanel({
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
         {/* Lead Avatar & Name */}
         <div className="text-center">
+          {contactMode && avatarUrl ? (
+            <img src={avatarUrl} alt="" className="w-14 h-14 rounded-full object-cover mx-auto mb-2" />
+          ) : (
           <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
             <span className="text-emerald-700 font-bold text-base">
               {(lead.name || '?').charAt(0).toUpperCase()}
             </span>
           </div>
+          )}
           {editingField === 'name' ? (
             <input
               autoFocus
@@ -545,9 +565,83 @@ export default function LeadDetailPanel({
               {lead.stage_name}
             </span>
           )}
+          {contactMode && pushName && pushName !== lead.name && (
+            <p className="text-xs text-slate-400 mt-0.5">Push: {pushName}</p>
+          )}
+          {contactMode && lead.jid && (
+            <p className="text-xs text-slate-400">{lead.jid}</p>
+          )}
+
+          {/* Archive/Block status badges */}
+          {!contactMode && (lead.is_archived || lead.is_blocked) && (
+            <div className="flex items-center justify-center gap-2 mt-2">
+              {lead.is_archived && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-50 border border-amber-200 rounded-full text-xs font-medium text-amber-700">
+                  <Archive className="w-3 h-3" />
+                  Archivado
+                </span>
+              )}
+              {lead.is_blocked && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-50 border border-red-200 rounded-full text-xs font-medium text-red-700" title={lead.block_reason || ''}>
+                  <ShieldBan className="w-3 h-3" />
+                  Bloqueado{lead.block_reason ? `: ${lead.block_reason}` : ''}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Archive/Block action buttons */}
+          {!eventMode && !contactMode && (
+            <div className="flex items-center justify-center gap-2 mt-2">
+              {lead.is_blocked ? (
+                onUnblock && (
+                  <button
+                    onClick={() => onUnblock(lead.id)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50 rounded-full text-xs font-medium text-slate-500 hover:text-emerald-700 transition-colors"
+                  >
+                    <ShieldOff className="w-3 h-3" />
+                    Desbloquear
+                  </button>
+                )
+              ) : (
+                <>
+                  {lead.is_archived ? (
+                    onArchive && (
+                      <button
+                        onClick={() => onArchive(lead.id, false)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50 rounded-full text-xs font-medium text-slate-500 hover:text-emerald-700 transition-colors"
+                      >
+                        <ArchiveRestore className="w-3 h-3" />
+                        Restaurar
+                      </button>
+                    )
+                  ) : (
+                    onArchive && (
+                      <button
+                        onClick={() => onArchive(lead.id, true)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:border-amber-300 hover:bg-amber-50 rounded-full text-xs font-medium text-slate-500 hover:text-amber-700 transition-colors"
+                      >
+                        <Archive className="w-3 h-3" />
+                        Archivar
+                      </button>
+                    )
+                  )}
+                  {onBlock && (
+                    <button
+                      onClick={() => onBlock(lead.id)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-red-200 hover:bg-red-50 rounded-full text-xs font-medium text-slate-500 hover:text-red-700 transition-colors"
+                    >
+                      <ShieldBan className="w-3 h-3" />
+                      Bloquear
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           {/* Kommo sync status */}
-          {!eventMode && (
+          {!eventMode && !contactMode && (
           <div className="flex items-center justify-center gap-2 mt-3">
             {lead.kommo_id ? (
               <>
@@ -680,18 +774,21 @@ export default function LeadDetailPanel({
         <div className="space-y-2">
           <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
           <TagInput
-            entityType="lead"
-            entityId={lead.id}
+            entityType={contactMode ? "contact" : "lead"}
+            entityId={contactMode && contactId ? contactId : lead.id}
             assignedTags={lead.structured_tags || []}
             onTagsChange={(newTags) => {
-              onLeadChange({ ...lead, structured_tags: newTags })
+              const updated = { ...lead, structured_tags: newTags }
+              setLead(updated)
+              onLeadChange(updated)
             }}
             onBeforeAssign={eventMode ? onBeforeTagAssign : undefined}
             onBeforeRemove={eventMode ? onBeforeTagRemove : undefined}
           />
         </div>
 
-        {/* Pipeline & Stage Selector */}
+        {/* Pipeline & Stage Selector (hidden in contact mode) */}
+        {!contactMode && (
         <div className="border-t border-slate-100 pt-4" ref={dropdownRef}>
           <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
             {eventMode ? 'Etapa del Evento' : 'Etapa del Pipeline'}
@@ -802,6 +899,7 @@ export default function LeadDetailPanel({
                                       }).then(res => res.json()).then(data => {
                                         if (data.success && data.lead) {
                                           const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
+                                          setLead(merged)
                                           onLeadChange(merged)
                                         }
                                       })
@@ -828,6 +926,130 @@ export default function LeadDetailPanel({
             )}
           </div>
         </div>
+        )}
+
+        {/* Lead Stage (event mode only — independent of event stage) */}
+        {eventMode && pipelines.length > 0 && (
+        <div className="border-t border-slate-100 pt-3 mt-1">
+          <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+            Etapa del Lead
+          </h5>
+
+          <div className="relative" ref={leadStageDropdownRef}>
+            <button
+              onClick={() => setShowLeadStageDropdown(!showLeadStageDropdown)}
+              className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-all text-sm ${
+                lead.lead_stage_id
+                  ? 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+                  : 'bg-slate-50 border-slate-200 text-slate-400'
+              }`}
+            >
+              <div className="flex items-center gap-2 overflow-hidden">
+                {lead.lead_stage_color && (
+                  <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: lead.lead_stage_color }} />
+                )}
+                <span className="truncate">
+                  {lead.lead_stage_name ? (
+                    <>
+                      <span className="opacity-50 font-normal">{pipelines.find(p => p.id === lead.lead_pipeline_id)?.name || ''}</span>
+                      {lead.lead_pipeline_id && <span className="mx-1 opacity-30">/</span>}
+                      {lead.lead_stage_name}
+                    </>
+                  ) : 'Sin etapa de lead'}
+                </span>
+              </div>
+              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showLeadStageDropdown ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showLeadStageDropdown && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-20 max-h-[350px] overflow-y-auto">
+                {pipelines.map(pipeline => {
+                  const isExpanded = expandedLeadPipelineId === pipeline.id
+                  return (
+                    <div key={pipeline.id} className="border-b border-slate-50 last:border-0">
+                      <button
+                        className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
+                          lead.lead_pipeline_id === pipeline.id ? 'bg-emerald-50/50' : 'hover:bg-slate-50'
+                        }`}
+                        onClick={() => setExpandedLeadPipelineId(isExpanded ? null : pipeline.id)}
+                        type="button"
+                      >
+                        <span className="text-sm font-medium text-slate-700 truncate">{pipeline.name}</span>
+                        <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      <div className={`transition-all duration-300 ease-in-out overflow-hidden ${isExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'}`}>
+                        <div className="p-1 bg-slate-50/30 border-t border-slate-100">
+                          {pipeline.stages?.map(stage => (
+                            <button
+                              key={stage.id}
+                              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors text-left ${
+                                lead.lead_stage_id === stage.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-100 text-slate-600'
+                              }`}
+                              onClick={() => {
+                                const token = localStorage.getItem('token')
+                                const leadId = lead.id
+                                fetch(`/api/leads/${leadId}`, {
+                                  method: 'PUT',
+                                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                  body: JSON.stringify({ pipeline_id: pipeline.id, stage_id: stage.id })
+                                }).then(res => res.json()).then(data => {
+                                  if (data.success) {
+                                    const updated = {
+                                      ...lead,
+                                      lead_pipeline_id: pipeline.id,
+                                      lead_stage_id: stage.id,
+                                      lead_stage_name: stage.name,
+                                      lead_stage_color: stage.color,
+                                    }
+                                    setLead(updated)
+                                    onLeadChange(updated)
+                                  }
+                                }).catch(console.error)
+                                setShowLeadStageDropdown(false)
+                              }}
+                              type="button"
+                            >
+                              <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: stage.color }} />
+                              <span className="text-sm truncate">{stage.name}</span>
+                              {lead.lead_stage_id === stage.id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+        )}
+
+        {/* Device Names (contact mode only) */}
+        {contactMode && deviceNames && deviceNames.length > 0 && (
+          <div className="border-t border-slate-100 pt-4">
+            <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+              <Smartphone className="w-3.5 h-3.5" />
+              Nombres por Dispositivo
+            </h5>
+            <div className="space-y-2">
+              {deviceNames.map((dn) => (
+                <div key={dn.id} className="p-3 bg-slate-50 rounded-xl text-sm border border-slate-100">
+                  <p className="font-medium text-slate-700">{dn.device_name || 'Dispositivo'}</p>
+                  <div className="text-slate-500 mt-1 space-y-0.5">
+                    {dn.name && <p>Nombre: {dn.name}</p>}
+                    {dn.push_name && <p>Push: {dn.push_name}</p>}
+                    {dn.business_name && <p>Negocio: {dn.business_name}</p>}
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Sincronizado {formatDistanceToNow(new Date(dn.synced_at), { locale: es, addSuffix: true })}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Notes */}
         <div className="border-t border-slate-100 pt-4">
@@ -861,6 +1083,29 @@ export default function LeadDetailPanel({
 
         {/* Actions */}
         <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
+          {contactMode ? (
+            <>
+              {onSendMessage && (
+                <button
+                  onClick={onSendMessage}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition text-sm font-medium shadow-sm"
+                >
+                  <MessageCircle className="w-4 h-4" />
+                  Enviar Mensaje
+                </button>
+              )}
+              {onResetFromDevice && (
+                <button
+                  onClick={onResetFromDevice}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  Restaurar del Dispositivo
+                </button>
+              )}
+            </>
+          ) : (
+            <>
           {!hideWhatsApp && lead.phone && (
             <button
               onClick={() => onSendWhatsApp?.(lead.phone)}
@@ -879,6 +1124,8 @@ export default function LeadDetailPanel({
               <RefreshCw className={`w-4 h-4 ${syncingHistory ? 'animate-spin' : ''}`} />
               {syncingHistory ? 'Sincronizando...' : 'Sincronizar Historial'}
             </button>
+          )}
+            </>
           )}
           {!hideDelete && (
             <button
@@ -994,23 +1241,30 @@ export default function LeadDetailPanel({
 
       {/* Full History Modal */}
       {showHistoryModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col border border-slate-100" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-              <div>
-                <h2 className="text-base font-semibold text-slate-900">Historial Completo</h2>
-                <p className="text-sm text-slate-500">{lead.name || 'Sin nombre'} &mdash; {observations.length} registros</p>
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4 animate-in fade-in duration-150" onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col border border-slate-200/60 animate-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-emerald-100 flex items-center justify-center">
+                  <Clock className="w-4.5 h-4.5 text-emerald-600" />
+                </div>
+                <div>
+                  <h2 className="text-base font-semibold text-slate-900">Historial de Observaciones</h2>
+                  <p className="text-xs text-slate-500">{lead.name || 'Sin nombre'} &middot; {observations.length} registro{observations.length !== 1 ? 's' : ''}</p>
+                </div>
               </div>
-              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-2 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-all" title="Cerrar (Esc)">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
-              <div className="flex items-center gap-4 flex-wrap">
+            {/* Filters */}
+            <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/70">
+              <div className="flex items-end gap-4 flex-wrap">
                 <div>
                   <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Tipo</label>
-                  <select value={historyFilterType} onChange={(e) => setHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white">
+                  <select value={historyFilterType} onChange={(e) => setHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition">
                     <option value="">Todos</option>
                     <option value="note">Nota</option>
                     <option value="call">Llamada</option>
@@ -1021,20 +1275,21 @@ export default function LeadDetailPanel({
                 </div>
                 <div>
                   <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Desde</label>
-                  <input type="date" value={historyFilterFrom} onChange={(e) => setHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
+                  <input type="date" value={historyFilterFrom} onChange={(e) => setHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition" />
                 </div>
                 <div>
                   <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Hasta</label>
-                  <input type="date" value={historyFilterTo} onChange={(e) => setHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
+                  <input type="date" value={historyFilterTo} onChange={(e) => setHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition" />
                 </div>
                 {(historyFilterType || historyFilterFrom || historyFilterTo) && (
-                  <button onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1 transition">
-                    <XCircle className="w-3.5 h-3.5" /> Limpiar
+                  <button onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="px-2.5 py-1.5 text-xs text-slate-500 hover:text-red-600 hover:bg-red-50 flex items-center gap-1 transition rounded-lg border border-transparent hover:border-red-200">
+                    <XCircle className="w-3.5 h-3.5" /> Limpiar filtros
                   </button>
                 )}
               </div>
             </div>
 
+            {/* Content */}
             <div className="flex-1 overflow-y-auto p-6">
               {(() => {
                 const filtered = observations.filter(obs => {
@@ -1047,26 +1302,31 @@ export default function LeadDetailPanel({
                   }
                   return true
                 })
-                if (filtered.length === 0) return <p className="text-sm text-slate-400 text-center py-10">No hay registros con los filtros seleccionados</p>
+                if (filtered.length === 0) return (
+                  <div className="text-center py-16">
+                    <FileText className="w-10 h-10 text-slate-200 mx-auto mb-3" />
+                    <p className="text-sm text-slate-400">No hay registros con los filtros seleccionados</p>
+                  </div>
+                )
                 return (
-                  <div className="space-y-3">
+                  <div className="space-y-2.5">
                     {filtered.map((obs) => (
-                      <div key={obs.id} className="p-4 bg-slate-50 rounded-xl group relative border border-slate-100 hover:border-slate-200 transition">
+                      <div key={obs.id} className="p-4 bg-white rounded-xl group relative border border-slate-100 hover:border-slate-200 hover:shadow-sm transition-all">
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-1.5">
-                              <span className={`px-2.5 py-0.5 text-xs rounded-lg font-semibold ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
+                              <span className={`px-2.5 py-0.5 text-[11px] rounded-md font-semibold tracking-wide ${obs.type === 'note' ? 'bg-amber-50 text-amber-700 border border-amber-200/60' : obs.type === 'call' ? 'bg-blue-50 text-blue-700 border border-blue-200/60' : obs.type === 'whatsapp' ? 'bg-green-50 text-green-700 border border-green-200/60' : obs.type === 'email' ? 'bg-purple-50 text-purple-700 border border-purple-200/60' : 'bg-orange-50 text-orange-700 border border-orange-200/60'}`}>
                                 {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
                               </span>
                               <span className="text-xs text-slate-400">{format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}</span>
                             </div>
-                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
-                            <div className="flex items-center gap-2 mt-1.5">
-                              {obs.created_by_name && <span className="text-xs text-slate-400">por {obs.created_by_name}</span>}
-                              {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium">↕ Kommo</span>}
+                            <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
+                            <div className="flex items-center gap-2 mt-2">
+                              {obs.created_by_name && <span className="text-[11px] text-slate-400">por <span className="font-medium text-slate-500">{obs.created_by_name}</span></span>}
+                              {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium border border-emerald-100">↕ Kommo</span>}
                             </div>
                           </div>
-                          <button onClick={() => handleDeleteObservation(obs.id)} className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" title="Eliminar">
+                          <button onClick={() => handleDeleteObservation(obs.id)} className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg sm:opacity-0 sm:group-hover:opacity-100 transition-all shrink-0" title="Eliminar">
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
@@ -1075,6 +1335,14 @@ export default function LeadDetailPanel({
                   </div>
                 )
               })()}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/50 flex items-center justify-between">
+              <span className="text-[11px] text-slate-400">Presiona <kbd className="px-1.5 py-0.5 bg-slate-200/80 text-slate-500 rounded text-[10px] font-mono">Esc</kbd> para cerrar</span>
+              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="px-4 py-1.5 text-sm text-slate-600 hover:text-slate-800 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-all">
+                Cerrar
+              </button>
             </div>
           </div>
         </div>

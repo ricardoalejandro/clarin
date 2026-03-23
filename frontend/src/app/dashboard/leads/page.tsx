@@ -1,8 +1,9 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2 } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
+import { useKanbanPan } from '@/lib/useKanbanPan'
 import { es } from 'date-fns/locale'
 import FormulaEditor from '@/components/FormulaEditor'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -14,31 +15,7 @@ import { subscribeWebSocket } from '@/lib/api'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import { Chat } from '@/types/chat'
-
-interface StructuredTag {
-  id: string
-  account_id: string
-  name: string
-  color: string
-}
-
-interface PipelineStage {
-  id: string
-  pipeline_id: string
-  name: string
-  color: string
-  position: number
-  lead_count: number
-}
-
-interface Pipeline {
-  id: string
-  account_id: string
-  name: string
-  description: string | null
-  is_default: boolean
-  stages: PipelineStage[] | null
-}
+import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 
 interface Device {
   id: string
@@ -46,46 +23,6 @@ interface Device {
   phone: string
   jid: string
   status: string
-}
-
-interface Lead {
-  id: string
-  jid: string
-  contact_id: string | null
-  name: string
-  last_name: string | null
-  short_name: string | null
-  phone: string
-  email: string
-  company: string | null
-  age: number | null
-  dni: string | null
-  birth_date: string | null
-  status: string
-  pipeline_id: string | null
-  stage_id: string | null
-  stage_name: string | null
-  stage_color: string | null
-  stage_position: number | null
-  notes: string
-  tags: string[]
-  structured_tags: StructuredTag[] | null
-  kommo_id: number | null
-  assigned_to: string
-  created_at: string
-  updated_at: string
-}
-
-interface Observation {
-  id: string
-  contact_id: string | null
-  lead_id: string | null
-  type: string
-  direction: string | null
-  outcome: string | null
-  notes: string | null
-  created_by_name: string | null
-  created_at: string
 }
 
 interface StageData {
@@ -486,6 +423,10 @@ export default function LeadsPage() {
   const [viewMode, setViewMode] = useState<'kanban' | 'list'>('kanban')
   const prevViewModeRef = useRef<'kanban' | 'list'>('kanban')
 
+  // Status filter: active, archived, blocked
+  const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'blocked'>('active')
+  const [leadCounts, setLeadCounts] = useState({ active: 0, archived: 0, blocked: 0 })
+
   // List view paginated data
   const [listLeads, setListLeads] = useState<Lead[]>([])
   const [listTotal, setListTotal] = useState(0)
@@ -516,6 +457,9 @@ export default function LeadsPage() {
   const listOffsetRef = useRef(0)
   const filterDropdownRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
+
+  // Ctrl+drag kanban panning
+  useKanbanPan(kanbanRef, topScrollRef)
 
   // Click outside to close dropdowns
   useEffect(() => {
@@ -566,10 +510,26 @@ export default function LeadsPage() {
     }
   }, [])
 
+  const fetchLeadCounts = useCallback(async () => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/leads/counts', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setLeadCounts({ active: data.active || 0, archived: data.archived || 0, blocked: data.blocked || 0 })
+      }
+    } catch (err) {
+      console.error('Failed to fetch lead counts:', err)
+    }
+  }, [])
+
   const fetchLeadsPaginated = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
       const params = new URLSearchParams()
+      params.set('status_filter', statusFilter)
       if (activePipeline) params.set('pipeline_id', activePipeline.id)
       params.set('per_stage', '50')
       if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
@@ -603,7 +563,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false)
     }
-  }, [activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const fetchListLeads = useCallback(async (reset: boolean = false) => {
     setListLoading(true)
@@ -611,6 +571,7 @@ export default function LeadsPage() {
     const token = localStorage.getItem('token')
     try {
       const params = new URLSearchParams()
+      params.set('status_filter', statusFilter)
       // When searching, omit pipeline_id to find leads across all pipelines
       if (activePipeline && !debouncedSearchTerm) params.set('pipeline_id', activePipeline.id)
       params.set('offset', String(offset))
@@ -652,7 +613,7 @@ export default function LeadsPage() {
     } finally {
       setListLoading(false)
     }
-  }, [activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const loadMoreForStage = useCallback(async (stageId: string) => {
     if (loadingMoreStages.has(stageId)) return
@@ -664,6 +625,7 @@ export default function LeadsPage() {
         ? unassignedData.leads
         : stageData.find(s => s.id === stageId)?.leads || []
       const params = new URLSearchParams()
+      params.set('status_filter', statusFilter)
       params.set('offset', String(currentLeads.length))
       params.set('limit', '50')
       if (activePipeline) params.set('pipeline_id', activePipeline.id)
@@ -782,8 +744,9 @@ export default function LeadsPage() {
   useEffect(() => {
     if (pipelinesLoaded) {
       fetchLeadsPaginated()
+      fetchLeadCounts()
     }
-  }, [pipelinesLoaded, fetchLeadsPaginated])
+  }, [pipelinesLoaded, fetchLeadsPaginated, fetchLeadCounts])
 
   // Fetch list data when in list view (and when filters change)
   useEffect(() => {
@@ -898,6 +861,14 @@ export default function LeadsPage() {
             next.delete(leadId)
             return next
           })
+          // Immediate refetch for the affected lead
+          const tk = localStorage.getItem('token')
+          if (tk) {
+            fetch(`/api/leads/${leadId}/interactions?limit=5`, { headers: { Authorization: `Bearer ${tk}` } })
+              .then(r => r.json()).then(d => {
+                if (d.success) setListObservations(prev => new Map(prev).set(leadId, d.interactions || []))
+              }).catch(() => {})
+          }
         }
       }
     })
@@ -1087,6 +1058,118 @@ export default function LeadsPage() {
     }
   }
 
+  const handleArchiveLead = async (leadId: string, archive: boolean) => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${leadId}/archive`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ archive }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        fetchLeadsPaginated()
+        fetchLeadCounts()
+        if (viewMode === 'list') fetchListLeads(true)
+      }
+    } catch (err) {
+      console.error('Failed to archive lead:', err)
+    }
+  }
+
+  const handleBlockLead = async (leadId: string, block: boolean, reason: string = '') => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${leadId}/block`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ block, reason }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        fetchLeadsPaginated()
+        fetchLeadCounts()
+        if (viewMode === 'list') fetchListLeads(true)
+        if (showDetailPanel) setShowDetailPanel(false)
+      }
+    } catch (err) {
+      console.error('Failed to block lead:', err)
+    }
+  }
+
+  const handleArchiveSelectedBatch = async (archive: boolean) => {
+    if (selectedIds.size === 0) return
+    const token = localStorage.getItem('token')
+    setDeleting(true)
+    try {
+      const res = await fetch('/api/leads/batch/archive', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ ids: Array.from(selectedIds), archive }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setSelectedIds(new Set())
+        setSelectionMode(false)
+        fetchLeadsPaginated()
+        fetchLeadCounts()
+        if (viewMode === 'list') fetchListLeads(true)
+      }
+    } catch (err) {
+      console.error('Failed to archive leads batch:', err)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const handleBlockSelectedBatch = async (block: boolean, reason: string = '') => {
+    if (selectedIds.size === 0) return
+    const token = localStorage.getItem('token')
+    setDeleting(true)
+    try {
+      const res = await fetch('/api/leads/batch/block', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ ids: Array.from(selectedIds), block, reason }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setSelectedIds(new Set())
+        setSelectionMode(false)
+        fetchLeadsPaginated()
+        fetchLeadCounts()
+        if (viewMode === 'list') fetchListLeads(true)
+      }
+    } catch (err) {
+      console.error('Failed to block leads batch:', err)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  // Block reason modal state
+  const [showBlockModal, setShowBlockModal] = useState(false)
+  const [blockReason, setBlockReason] = useState('')
+  const [blockTargetId, setBlockTargetId] = useState<string | null>(null)
+  const [blockBatchMode, setBlockBatchMode] = useState(false)
+
+  const openBlockModal = (leadId: string | null, batchMode: boolean = false) => {
+    setBlockTargetId(leadId)
+    setBlockBatchMode(batchMode)
+    setBlockReason('')
+    setShowBlockModal(true)
+  }
+
+  const confirmBlock = () => {
+    if (!blockReason) return
+    if (blockBatchMode) {
+      handleBlockSelectedBatch(true, blockReason)
+    } else if (blockTargetId) {
+      handleBlockLead(blockTargetId, true, blockReason)
+    }
+    setShowBlockModal(false)
+  }
+
   const toggleSelection = (leadId: string) => {
     const newSelected = new Set(selectedIds)
     if (newSelected.has(leadId)) {
@@ -1108,7 +1191,6 @@ export default function LeadsPage() {
     setEditingField(null)
     setEditingNotes(false)
     setNotesValue(lead.notes || '')
-    fetchObservations(lead.id)
   }
 
   const startEditing = (field: string, currentValue: string) => {
@@ -1826,6 +1908,21 @@ export default function LeadsPage() {
         return
       }
 
+      // Add spreadsheet recipients if any
+      if (formResult.recipients && formResult.recipients.length > 0) {
+        const sheetRecipients = formResult.recipients.map(r => ({
+          jid: r.phone + '@s.whatsapp.net',
+          name: r.name || '',
+          phone: r.phone,
+          metadata: r.metadata || {},
+        }))
+        await fetch(`/api/campaigns/${campaignId}/recipients`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ recipients: sheetRecipients }),
+        })
+      }
+
       setShowBroadcastModal(false)
       router.push('/dashboard/broadcasts')
     } catch (err) {
@@ -1937,12 +2034,52 @@ export default function LeadsPage() {
               <button onClick={selectAll} className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600 font-medium">
                 Todos
               </button>
+              {statusFilter === 'active' && (
+                <button
+                  onClick={() => handleArchiveSelectedBatch(true)}
+                  disabled={selectedIds.size === 0 || deleting}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50 font-medium"
+                >
+                  <Archive className="w-3 h-3" />
+                  Archivar ({selectedIds.size})
+                </button>
+              )}
+              {statusFilter === 'archived' && (
+                <button
+                  onClick={() => handleArchiveSelectedBatch(false)}
+                  disabled={selectedIds.size === 0 || deleting}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 font-medium"
+                >
+                  <ArchiveRestore className="w-3 h-3" />
+                  Restaurar ({selectedIds.size})
+                </button>
+              )}
+              {statusFilter !== 'blocked' && (
+                <button
+                  onClick={() => openBlockModal(null, true)}
+                  disabled={selectedIds.size === 0 || deleting}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 font-medium"
+                >
+                  <ShieldBan className="w-3 h-3" />
+                  Bloquear ({selectedIds.size})
+                </button>
+              )}
+              {statusFilter === 'blocked' && (
+                <button
+                  onClick={() => handleBlockSelectedBatch(false)}
+                  disabled={selectedIds.size === 0 || deleting}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 font-medium"
+                >
+                  <ShieldOff className="w-3 h-3" />
+                  Desbloquear ({selectedIds.size})
+                </button>
+              )}
               <button
                 onClick={handleDeleteSelected}
                 disabled={selectedIds.size === 0 || deleting}
-                className="px-3 py-1.5 text-xs bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 font-medium"
+                className="px-3 py-1.5 text-xs bg-red-800 text-white rounded-lg hover:bg-red-900 disabled:opacity-50 font-medium"
               >
-                {deleting ? 'Eliminando...' : `Eliminar (${selectedIds.size})`}
+                {deleting ? '...' : `Eliminar (${selectedIds.size})`}
               </button>
               <button
                 onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
@@ -2075,6 +2212,55 @@ export default function LeadsPage() {
             </>
           )}
         </div>
+      </div>
+
+      {/* Status filter tabs */}
+      <div className="flex items-center gap-1 mb-3">
+        <button
+          onClick={() => setStatusFilter('active')}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+            statusFilter === 'active'
+              ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+              : 'text-slate-500 hover:bg-slate-50'
+          }`}
+        >
+          Activos
+          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
+            statusFilter === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
+          }`}>{leadCounts.active}</span>
+        </button>
+        <button
+          onClick={() => setStatusFilter('archived')}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+            statusFilter === 'archived'
+              ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
+              : 'text-slate-500 hover:bg-slate-50'
+          }`}
+        >
+          <Archive className="w-3 h-3" />
+          Archivados
+          {leadCounts.archived > 0 && (
+            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
+              statusFilter === 'archived' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'
+            }`}>{leadCounts.archived}</span>
+          )}
+        </button>
+        <button
+          onClick={() => setStatusFilter('blocked')}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+            statusFilter === 'blocked'
+              ? 'bg-red-50 text-red-700 ring-1 ring-red-200'
+              : 'text-slate-500 hover:bg-slate-50'
+          }`}
+        >
+          <ShieldBan className="w-3 h-3" />
+          Bloqueados
+          {leadCounts.blocked > 0 && (
+            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
+              statusFilter === 'blocked' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'
+            }`}>{leadCounts.blocked}</span>
+          )}
+        </button>
       </div>
 
       {/* Pipeline selector + Search */}
@@ -3141,12 +3327,32 @@ export default function LeadsPage() {
                 }}
                 onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
                 onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                onObservationChange={(leadId: string) => {
+                  if (viewMode === 'list') {
+                    setListObservations(prev => { const next = new Map(prev); next.delete(leadId); return next })
+                    setLoadingListObs(prev => { const next = new Set(prev); next.delete(leadId); return next })
+                    fetchBatchObservations([leadId])
+                  }
+                }}
                 onDelete={(leadId: string) => {
                   removeLeadFromStages(leadId)
                   setShowDetailPanel(false)
                   setShowInlineChat(false)
                 }}
                 hideWhatsApp={showInlineChat}
+                onArchive={(leadId: string, archive: boolean) => {
+                  handleArchiveLead(leadId, archive)
+                  setShowDetailPanel(false)
+                  setShowInlineChat(false)
+                }}
+                onBlock={(leadId: string) => {
+                  openBlockModal(leadId, false)
+                }}
+                onUnblock={(leadId: string) => {
+                  handleBlockLead(leadId, false)
+                  setShowDetailPanel(false)
+                  setShowInlineChat(false)
+                }}
               />
 
             </div>
@@ -3359,6 +3565,67 @@ export default function LeadsPage() {
                 className="px-4 py-2 bg-emerald-600 text-white text-sm font-medium rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition"
               >
                 {creatingEvent ? 'Creando...' : 'Crear Evento'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Block Reason Modal */}
+      {showBlockModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
+            <div className="px-6 py-4 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <ShieldBan className="w-5 h-5 text-red-500" />
+                Bloquear {blockBatchMode ? `${selectedIds.size} lead(s)` : 'lead'}
+              </h3>
+              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del bloqueo. Los leads bloqueados no recibirán mensajes ni participarán en campañas o eventos.</p>
+            </div>
+            <div className="px-6 py-4 space-y-2">
+              {[
+                'No está interesado',
+                'Solicita no ser contactado',
+                'Agresivo o abusivo',
+                'Número equivocado',
+                'Spam o fraude',
+              ].map(reason => (
+                <button
+                  key={reason}
+                  onClick={() => setBlockReason(reason)}
+                  className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${
+                    blockReason === reason
+                      ? 'bg-red-50 text-red-700 ring-1 ring-red-200 font-medium'
+                      : 'text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  {reason}
+                </button>
+              ))}
+              <div className="pt-2">
+                <input
+                  type="text"
+                  placeholder="Otro motivo..."
+                  value={!['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''}
+                  onChange={(e) => setBlockReason(e.target.value)}
+                  onFocus={() => { if (['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }}
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={() => setShowBlockModal(false)}
+                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmBlock}
+                disabled={!blockReason}
+                className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition"
+              >
+                Bloquear
               </button>
             </div>
           </div>

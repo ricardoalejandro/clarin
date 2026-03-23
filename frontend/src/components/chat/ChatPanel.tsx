@@ -1052,7 +1052,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                     )}
                     <div>
                         <h3 className="font-semibold text-sm text-slate-900 leading-tight">
-                            {chat.contact_name || chat.name || chat.jid.split('@')[0]}
+                            {getChatDisplayName(chat)}
                         </h3>
                         {contactTyping ? (
                           <p className="text-xs text-emerald-600 font-medium">

@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { X, User, Smartphone, Tag } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { X, User, Smartphone, Tag, Pencil, Check } from 'lucide-react'
 import ImageViewer from '@/components/chat/ImageViewer'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import TagInput from '@/components/TagInput'
+import type { Lead, StructuredTag } from '@/types/contact'
 
 interface Contact {
   id: string
@@ -21,35 +22,7 @@ interface Contact {
   age?: number
   notes?: string
   is_group: boolean
-  structured_tags?: Array<{id: string, account_id: string, name: string, color: string}>
-}
-
-interface Lead {
-  id: string
-  jid: string
-  contact_id: string | null
-  name: string
-  last_name: string | null
-  short_name: string | null
-  phone: string
-  email: string
-  company: string | null
-  age: number | null
-  dni: string | null
-  birth_date: string | null
-  status: string
-  pipeline_id: string | null
-  stage_id: string | null
-  stage_name: string | null
-  stage_color: string | null
-  stage_position: number | null
-  notes: string
-  tags: string[]
-  structured_tags: any[] | null
-  kommo_id: number | null
-  assigned_to: string
-  created_at: string
-  updated_at: string
+  structured_tags?: StructuredTag[]
 }
 
 interface ContactPanelProps {
@@ -65,6 +38,10 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   const [lead, setLead] = useState<Lead | null>(null)
   const [loading, setLoading] = useState(true)
   const [showAvatarViewer, setShowAvatarViewer] = useState(false)
+  const [editingName, setEditingName] = useState(false)
+  const [editNameValue, setEditNameValue] = useState('')
+  const [savingName, setSavingName] = useState(false)
+  const nameInputRef = useRef<HTMLInputElement>(null)
 
   // Close on Escape
   useEffect(() => {
@@ -100,6 +77,34 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   }
 
   if (!isOpen) return null
+
+  const startEditingName = () => {
+    setEditNameValue(contact?.custom_name || contact?.name || contact?.push_name || '')
+    setEditingName(true)
+    setTimeout(() => nameInputRef.current?.focus(), 50)
+  }
+
+  const saveCustomName = async () => {
+    if (!contact) return
+    setSavingName(true)
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/contacts/${contact.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ custom_name: editNameValue.trim() }),
+      })
+      const data = await res.json()
+      if (data.success && data.contact) {
+        setContact(data.contact)
+      }
+    } catch (err) {
+      console.error('Failed to save contact name:', err)
+    } finally {
+      setSavingName(false)
+      setEditingName(false)
+    }
+  }
 
   const cleanName = (name?: string | null) => name?.replace(/^[\s.·•\-]+/, '').trim() || ''
   const displayName = cleanName(contact?.custom_name) || cleanName(contact?.name) || cleanName(contact?.push_name) || cleanName(lead?.name) || 'Contacto'
@@ -141,7 +146,32 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
                 </div>
               )}
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold text-slate-900 truncate">{displayName}</p>
+                <div className="flex items-center gap-1.5 group/name">
+                  {editingName ? (
+                    <div className="flex items-center gap-1 flex-1 min-w-0">
+                      <input
+                        ref={nameInputRef}
+                        value={editNameValue}
+                        onChange={e => setEditNameValue(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') saveCustomName(); if (e.key === 'Escape') setEditingName(false) }}
+                        className="text-sm font-semibold text-slate-900 bg-slate-50 border border-emerald-300 rounded px-1.5 py-0.5 flex-1 min-w-0 focus:outline-none focus:ring-2 focus:ring-emerald-500/25"
+                        disabled={savingName}
+                      />
+                      <button onClick={saveCustomName} disabled={savingName} className="p-0.5 text-emerald-600 hover:text-emerald-700 transition-colors shrink-0">
+                        <Check className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-sm font-semibold text-slate-900 truncate">{displayName}</p>
+                      {contact && (
+                        <button onClick={startEditingName} className="p-0.5 text-slate-300 hover:text-emerald-600 opacity-0 group-hover/name:opacity-100 transition-all shrink-0" title="Editar nombre">
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
                 {(deviceName || fmtDevicePhone) && (
                   <div className="flex items-center gap-1.5 mt-0.5">
                     <Smartphone className="w-3 h-3 text-slate-400" />
@@ -152,7 +182,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
             </div>
           </div>
 
-          {/* Unified Lead Panel */}
+          {/* Unified Lead Panel — tags are now unified (contact_tags shown in lead panel) */}
           <LeadDetailPanel
             lead={lead}
             onLeadChange={(updatedLead) => setLead(updatedLead)}
@@ -166,24 +196,6 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
             }}
             className="flex-1 min-h-0"
           />
-
-          {/* Contact tags (separate from lead tags) */}
-          {contact && (
-            <div className="px-4 py-3 border-t border-slate-100 shrink-0">
-              <div className="flex items-center gap-1.5 mb-2">
-                <Tag className="w-3.5 h-3.5 text-slate-400" />
-                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas del contacto</h5>
-              </div>
-              <TagInput
-                entityType="contact"
-                entityId={contact.id}
-                assignedTags={contact.structured_tags || []}
-                onTagsChange={(newTags) => {
-                  setContact(prev => prev ? { ...prev, structured_tags: newTags } : prev)
-                }}
-              />
-            </div>
-          )}
         </div>
       ) : (
         /* ─── When there is NO lead, show basic contact info ─── */
@@ -202,7 +214,32 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
                 <User className="w-10 h-10 text-emerald-600" />
               </div>
             )}
-            <h4 className="text-xl font-semibold text-slate-900">{displayName}</h4>
+            <div className="flex items-center justify-center gap-2 group/name">
+              {editingName ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    ref={nameInputRef}
+                    value={editNameValue}
+                    onChange={e => setEditNameValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') saveCustomName(); if (e.key === 'Escape') setEditingName(false) }}
+                    className="text-xl font-semibold text-slate-900 bg-slate-50 border border-emerald-300 rounded-lg px-2 py-1 text-center focus:outline-none focus:ring-2 focus:ring-emerald-500/25"
+                    disabled={savingName}
+                  />
+                  <button onClick={saveCustomName} disabled={savingName} className="p-1 text-emerald-600 hover:text-emerald-700 transition-colors">
+                    <Check className="w-5 h-5" />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <h4 className="text-xl font-semibold text-slate-900">{displayName}</h4>
+                  {contact && (
+                    <button onClick={startEditingName} className="p-1 text-slate-300 hover:text-emerald-600 opacity-0 group-hover/name:opacity-100 transition-all" title="Editar nombre">
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
             {contact?.phone && (
               <p className="text-slate-600 text-sm mt-1 font-medium">
                 {contact.phone.startsWith('+') ? contact.phone : '+' + contact.phone}

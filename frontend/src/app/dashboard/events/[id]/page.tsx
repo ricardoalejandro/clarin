@@ -1,14 +1,14 @@
 'use client'
 
 import { useEffect, useState, useCallback, useMemo, useRef, memo } from 'react'
-import { useParams, useRouter } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import {
   ArrowLeft, Users, UserPlus, Search, Phone, MessageSquare, Mail,
   CheckCircle2, Clock, GripVertical, List, LayoutGrid, X, Plus, Trash2,
   Filter, Send, Maximize2, MapPin, CalendarDays, Download,
   FileSpreadsheet, FileText, FileDown, Loader2, StickyNote,
   Tag, CheckSquare, XCircle, Code, AlertCircle, BookOpen, Camera, Edit3,
-  ChevronRight, PenLine
+  ChevronRight, PenLine, Settings, Lock
 } from 'lucide-react'
 import { format, formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -22,6 +22,7 @@ import { Chat } from '@/types/chat'
 import { exportToExcel, exportToCSV } from '@/utils/eventExport'
 import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/eventWordReport'
 import { subscribeWebSocket } from '@/lib/api'
+import { useKanbanPan } from '@/lib/useKanbanPan'
 
 const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
 
@@ -78,6 +79,7 @@ interface Participant {
   last_name?: string; short_name?: string; phone?: string; email?: string
   age?: number; status: string; notes?: string; dni?: string; birth_date?: string
   stage_id?: string; stage_name?: string; stage_color?: string
+  lead_pipeline_id?: string; lead_stage_id?: string; lead_stage_name?: string; lead_stage_color?: string
   next_action?: string; next_action_date?: string; invited_at?: string
   confirmed_at?: string; attended_at?: string; last_interaction?: string
   tags?: TagItem[]
@@ -130,6 +132,10 @@ function participantToLead(p: Participant): any {
     stage_id: p.stage_id || null,
     stage_name: p.stage_name || null,
     stage_color: p.stage_color || null,
+    lead_pipeline_id: p.lead_pipeline_id || null,
+    lead_stage_id: p.lead_stage_id || null,
+    lead_stage_name: p.lead_stage_name || null,
+    lead_stage_color: p.lead_stage_color || null,
     notes: p.notes || '',
     tags: [],
     structured_tags: p.tags?.map(t => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color })) || null,
@@ -346,7 +352,9 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
 export default function EventDetailPage() {
   const params = useParams()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const eventId = params.id as string
+  const folderParam = searchParams.get('folder')
 
   // Core data
   const [event, setEvent] = useState<Event | null>(null)
@@ -390,6 +398,10 @@ export default function EventDetailPage() {
   // Detail panel
   const [showDetailPanel, setShowDetailPanel] = useState(false)
   const [detailParticipant, setDetailParticipant] = useState<Participant | null>(null)
+
+  // Track own stage changes to avoid WebSocket refetch race condition
+  const ownStageChangeRef = useRef(false)
+  const ownStageTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   // WhatsApp inline chat
   const [showInlineChat, setShowInlineChat] = useState(false)
@@ -460,6 +472,11 @@ export default function EventDetailPage() {
   const [selectedLogbook, setSelectedLogbook] = useState<Logbook | null>(null)
   const [selectedLogbookLoading, setSelectedLogbookLoading] = useState(false)
   const [showNewLogbookModal, setShowNewLogbookModal] = useState(false)
+  const [showLogbookSettingsModal, setShowLogbookSettingsModal] = useState(false)
+  const [logbookSettingsTitle, setLogbookSettingsTitle] = useState('')
+  const [logbookSettingsDate, setLogbookSettingsDate] = useState('')
+  const [logbookSettingsStatus, setLogbookSettingsStatus] = useState('pending')
+  const [logbookSettingsUpdating, setLogbookSettingsUpdating] = useState(false)
   const [newLogbookDate, setNewLogbookDate] = useState('')
   const [newLogbookTitle, setNewLogbookTitle] = useState('')
   const [newLogbookCaptureNow, setNewLogbookCaptureNow] = useState(false)
@@ -473,6 +490,11 @@ export default function EventDetailPage() {
   const [savingEntryNotes, setSavingEntryNotes] = useState(false)
   const [autoCreating, setAutoCreating] = useState(false)
   const [logbookViewMode, setLogbookViewMode] = useState<'list' | 'kanban'>('list')
+  // Logbook inline editing
+  const [editingLogbookTitle, setEditingLogbookTitle] = useState(false)
+  const [editLogbookTitleValue, setEditLogbookTitleValue] = useState('')
+  const [editingLogbookDate, setEditingLogbookDate] = useState(false)
+  const [editLogbookDateValue, setEditLogbookDateValue] = useState('')
   // Preview for pending logbooks with saved filter
   const [previewParticipants, setPreviewParticipants] = useState<Array<{ id: string; name: string; phone: string | null; stage_name: string; stage_color: string; stage_id: string | null }>>([])
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -480,9 +502,17 @@ export default function EventDetailPage() {
   const [showFilterConfirmDialog, setShowFilterConfirmDialog] = useState(false)
   const [filterConfirmAction, setFilterConfirmAction] = useState<(() => void) | null>(null)
 
+  // Inline event name editing
+  const [editingEventName, setEditingEventName] = useState(false)
+  const [editNameValue, setEditNameValue] = useState('')
+  const editNameRef = useRef<HTMLInputElement>(null)
+
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
+
+  // Ctrl+drag kanban panning
+  useKanbanPan(kanbanRef, topScrollRef)
 
   // ─── Fetch Functions ─────────────────────────────────────────────────────────
   const fetchEvent = useCallback(async () => {
@@ -789,14 +819,18 @@ export default function EventDetailPage() {
       setDetailParticipant(prev => prev ? { ...prev, ...updatedProps } : null)
     }
     try {
+      // Mark that we initiated this stage change (prevents WebSocket refetch from reverting)
+      ownStageChangeRef.current = true
+      if (ownStageTimerRef.current) clearTimeout(ownStageTimerRef.current)
+      ownStageTimerRef.current = setTimeout(() => { ownStageChangeRef.current = false }, 3000)
       const res = await fetch(`/api/events/${eventId}/participants/${pid}/stage`, {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ stage_id: targetStageId }),
       })
       const data = await res.json()
-      if (!data.success) fetchParticipantsPaginated()
-    } catch { fetchParticipantsPaginated() }
+      if (!data.success) { ownStageChangeRef.current = false; fetchParticipantsPaginated() }
+    } catch { ownStageChangeRef.current = false; fetchParticipantsPaginated() }
   }, [eventId, pipelineStages, stageData, detailParticipant, fetchParticipantsPaginated])
 
   const handleDrop = useCallback((e: React.DragEvent, targetStageId: string) => {
@@ -1054,7 +1088,22 @@ export default function EventDetailPage() {
             body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
           })
         }
-        alert(`Campaña creada con ${data.recipients_count} destinatarios.`)
+        // Add spreadsheet recipients if any
+        if (formResult.recipients && formResult.recipients.length > 0 && data.campaign) {
+          const sheetRecipients = formResult.recipients.map(r => ({
+            jid: r.phone + '@s.whatsapp.net',
+            name: r.name || '',
+            phone: r.phone,
+            metadata: r.metadata || {},
+          }))
+          await fetch(`/api/campaigns/${data.campaign.id}/recipients`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recipients: sheetRecipients }),
+          })
+        }
+        const extraCount = formResult.recipients?.length || 0
+        alert(`Campaña creada con ${(data.recipients_count || 0) + extraCount} destinatarios.`)
         setShowCampaignModal(false)
       } else { alert(data.error || 'Error al crear campaña') }
     } catch (e) { console.error(e); alert('Error de conexión') }
@@ -1137,6 +1186,38 @@ export default function EventDetailPage() {
     finally { setSelectedLogbookLoading(false) }
   }, [eventId, fetchLogbookPreview])
 
+  const handleUpdateLogbookSettings = async (updateFilter: boolean = false) => {
+    if (!selectedLogbook || !logbookSettingsDate || !logbookSettingsTitle.trim()) return
+    setLogbookSettingsUpdating(true)
+    try {
+      const body: any = {
+        title: logbookSettingsTitle.trim(),
+        date: logbookSettingsDate,
+        status: logbookSettingsStatus
+      }
+      if (updateFilter) {
+        body.saved_filter = getSnapshotFilterBody()
+      }
+      const res = await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getToken()}`
+        },
+        body: JSON.stringify(body)
+      })
+      if (!res.ok) throw new Error('Error updating')
+      const updated = await res.json()
+      setSelectedLogbook(updated)
+      setShowLogbookSettingsModal(false)
+      fetchLogbooks()
+    } catch (e) {
+      console.error('Error al guardar configuración', e)
+    } finally {
+      setLogbookSettingsUpdating(false)
+    }
+  }
+
   const handleCreateLogbook = async () => {
     if (!newLogbookDate) return
     // If capture_now is checked AND filters are active, show confirmation first
@@ -1152,6 +1233,7 @@ export default function EventDetailPage() {
   const getSnapshotFilterBody = () => {
     if (activeFilterCount === 0) return {}
     const body: Record<string, unknown> = {}
+    if (debouncedSearch) body.text_search = debouncedSearch
     if (filterStageIds.size > 0) body.stage_ids = Array.from(filterStageIds).join(',')
     if (appliedFormulaType === 'advanced' && appliedFormulaText) {
       body.tag_formula = appliedFormulaText
@@ -1212,10 +1294,16 @@ export default function EventDetailPage() {
     try {
       const filterBody = getSnapshotFilterBody()
       const hasFilters = Object.keys(filterBody).length > 0
+      // If no active UI filters but logbook has saved_filter, send saved_filter
+      let bodyToSend = hasFilters ? filterBody : undefined
+      if (!hasFilters && selectedLogbook?.saved_filter && Object.keys(selectedLogbook.saved_filter).length > 0) {
+        bodyToSend = selectedLogbook.saved_filter as Record<string, unknown>
+      }
+      const sendBody = bodyToSend && Object.keys(bodyToSend).length > 0
       const res = await fetch(`/api/events/${eventId}/logbooks/${lid}/capture`, {
         method: 'POST',
-        headers: { ...(hasFilters ? { 'Content-Type': 'application/json' } : {}), Authorization: `Bearer ${getToken()}` },
-        ...(hasFilters ? { body: JSON.stringify(filterBody) } : {}),
+        headers: { ...(sendBody ? { 'Content-Type': 'application/json' } : {}), Authorization: `Bearer ${getToken()}` },
+        ...(sendBody ? { body: JSON.stringify(bodyToSend) } : {}),
       })
       const data = await res.json()
       if (data.id) {
@@ -1312,8 +1400,10 @@ export default function EventDetailPage() {
   // WebSocket
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
-      const msg = data as { event?: string; action?: string; event_id?: string }
+      const msg = data as { event?: string; action?: string; event_id?: string; lead_id?: string }
       if (msg.event === 'event_participant_update' && msg.event_id === eventId) {
+        // Skip refetch if we just changed a stage ourselves (prevents reverting optimistic update)
+        if (msg.action === 'stage_changed' && ownStageChangeRef.current) return
         fetchParticipantsPaginated()
         fetchEvent()
         if (viewMode === 'list') fetchListParticipants(true)
@@ -1321,9 +1411,24 @@ export default function EventDetailPage() {
       if (msg.event === 'logbook_update' && msg.event_id === eventId) {
         if (viewMode === 'logbook') fetchLogbooks()
       }
+      // Handle interaction updates — invalidate and refetch observations in list view
+      if (msg.event === 'interaction_update' && viewMode === 'list') {
+        // Invalidate all cached observations and refetch visible ones
+        const visibleIds = Array.from(listObservations.keys())
+        if (visibleIds.length > 0) {
+          setListObservations(new Map())
+          setLoadingListObs(new Set())
+          fetchBatchObservations(visibleIds)
+        }
+      }
+      // Handle lead updates — refetch participants to sync lead_stage fields from DB
+      if (msg.event === 'lead_update') {
+        fetchParticipantsPaginated()
+        if (viewMode === 'list') fetchListParticipants(true)
+      }
     })
     return () => unsubscribe()
-  }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants, fetchLogbooks])
+  }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants, fetchLogbooks, listObservations, fetchBatchObservations])
 
   // Escape key
   useEffect(() => {
@@ -1335,10 +1440,14 @@ export default function EventDetailPage() {
       if (showCampaignModal) { setShowCampaignModal(false); return }
       if (showAddModal) { setShowAddModal(false); return }
       if (showDetailPanel) { setShowDetailPanel(false); setShowInlineChat(false); return }
+      // If in logbook mode, return to kanban view instead of leaving the event
+      if (viewMode === 'logbook') { setViewMode('kanban'); setSelectedLogbook(null); return }
+      // No modals open — go back to events list (preserves folder state)
+      router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : ''))
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showDetailPanel])
+  }, [showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showDetailPanel, viewMode, router, folderParam])
 
   // Scroll sync for kanban
   const handleTopScroll = () => {
@@ -1384,7 +1493,7 @@ export default function EventDetailPage() {
     return () => el.removeEventListener('scroll', handleScroll)
   }, [viewMode, listHasMore, listLoading, fetchListParticipants])
 
-  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + (filterHasPhone ? 1 : 0)
+  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + (filterHasPhone ? 1 : 0) + (debouncedSearch ? 1 : 0)
   const displayStages = pipelineStages.length > 0 ? pipelineStages : stageData.map(s => ({ id: s.id, pipeline_id: s.pipeline_id, name: s.name, color: s.color, position: s.position }))
   const allUniqueTags = allTags
 
@@ -1428,13 +1537,54 @@ export default function EventDetailPage() {
       {/* Event Header — compact in logbook mode */}
       <div className={`flex-shrink-0 transition-all duration-300 ease-in-out ${viewMode === 'logbook' ? 'pb-0' : 'pb-3'}`}>
         <div className={`flex items-center gap-3 transition-all duration-300 ${viewMode === 'logbook' ? 'mb-1' : 'mb-2'}`}>
-          <button onClick={() => router.back()} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
+          <button onClick={() => {
+            if (viewMode === 'logbook') { setViewMode('kanban'); setSelectedLogbook(null) }
+            else router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : ''))
+          }} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 group/name">
               <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: event.color }} />
-              <h1 className={`font-bold text-slate-900 truncate transition-all duration-300 ${viewMode === 'logbook' ? 'text-base' : 'text-xl'}`}>{event.name}</h1>
+              {editingEventName ? (
+                <input
+                  ref={editNameRef}
+                  value={editNameValue}
+                  onChange={e => setEditNameValue(e.target.value)}
+                  onBlur={async () => {
+                    const v = editNameValue.trim()
+                    if (v && v !== event.name) {
+                      try {
+                        await fetch(`/api/events/${eventId}`, {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+                          body: JSON.stringify({ name: v }),
+                        })
+                        setEvent(prev => prev ? { ...prev, name: v } : prev)
+                      } catch (e) { console.error('[Event] rename error:', e) }
+                    }
+                    setEditingEventName(false)
+                  }}
+                  onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') { setEditingEventName(false) } }}
+                  className={`font-bold text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0 py-0 transition-all duration-300 ${viewMode === 'logbook' ? 'text-base' : 'text-xl'}`}
+                  autoFocus
+                />
+              ) : (
+                <h1
+                  className={`font-bold text-slate-900 truncate transition-all duration-300 cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded ${viewMode === 'logbook' ? 'text-base' : 'text-xl'}`}
+                  onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
+                  title="Click para editar"
+                >{event.name}</h1>
+              )}
+              {!editingEventName && (
+                <button
+                  onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
+                  className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition"
+                  title="Editar nombre"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                </button>
+              )}
               {viewMode === 'logbook' && (
                 <span className="text-xs text-slate-400 flex-shrink-0 ml-1">· {totalParticipantCount} participantes</span>
               )}
@@ -1459,9 +1609,6 @@ export default function EventDetailPage() {
               </button>
               <button onClick={() => setViewMode('list')} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition text-slate-500 hover:bg-slate-50">
                 <List className="w-3.5 h-3.5" />
-              </button>
-              <button onClick={() => setViewMode('logbook')} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition bg-emerald-50 text-emerald-700" title="Bitácora">
-                <BookOpen className="w-3.5 h-3.5" />
               </button>
             </div>
           )}
@@ -1840,10 +1987,11 @@ export default function EventDetailPage() {
             <button onClick={() => setViewMode('list')} className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
               <List className="w-3.5 h-3.5" />
             </button>
-            <button onClick={() => setViewMode('logbook')} className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${viewMode === 'logbook' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`} title="Bitácora">
-              <BookOpen className="w-3.5 h-3.5" />
-            </button>
           </div>
+
+          <button onClick={() => setViewMode(viewMode === 'logbook' ? 'kanban' : 'logbook')} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium shadow-sm transition ${viewMode === 'logbook' ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
+            <BookOpen className="w-3.5 h-3.5" />Bitácora
+          </button>
 
           {viewMode !== 'logbook' && (
             <>
@@ -2108,8 +2256,8 @@ export default function EventDetailPage() {
                       </div>
                       <div className="flex items-center gap-2 mt-1 ml-4">
                         <span className="text-[11px] text-slate-400">{format(parseLogbookDate(lb.date), 'dd MMM yyyy', { locale: es })}</span>
-                        {lb.status === 'completed' && (
-                          <span className="text-[10px] text-emerald-600 font-medium">{lb.total_participants} part.</span>
+                        {lb.status !== 'pending' && (
+                          <span className={`text-[10px] font-medium ${lb.status === 'completed' ? 'text-emerald-600' : 'text-blue-600'}`}>{lb.total_participants} part.</span>
                         )}
                         {lb.status === 'pending' && (
                           <span className="text-[10px] text-amber-500 font-medium">Pendiente</span>
@@ -2134,31 +2282,110 @@ export default function EventDetailPage() {
                 <div className="px-5 py-2.5 border-b border-slate-200 bg-white flex-shrink-0">
                   <div className="flex items-center justify-between">
                     <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-lg font-semibold text-slate-900">{selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')}</h3>
+                      <div className="flex items-center gap-2 group/lbtitle">
+                        {editingLogbookTitle ? (
+                          <input
+                            value={editLogbookTitleValue}
+                            onChange={e => setEditLogbookTitleValue(e.target.value)}
+                            onBlur={async () => {
+                              const v = editLogbookTitleValue.trim()
+                              if (v && v !== selectedLogbook.title) {
+                                try {
+                                  const res = await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook.id}`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+                                    body: JSON.stringify({ title: v }),
+                                  })
+                                  const data = await res.json()
+                                  if (data.id) { setSelectedLogbook(data); fetchLogbooks() }
+                                } catch (e) { console.error('[Logbook] rename error:', e) }
+                              }
+                              setEditingLogbookTitle(false)
+                            }}
+                            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingLogbookTitle(false) }}
+                            className="text-lg font-semibold text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0"
+                            autoFocus
+                          />
+                        ) : (
+                          <h3
+                            className="text-lg font-semibold text-slate-900 cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded transition"
+                            onClick={() => { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) }}
+                            title="Click para editar"
+                          >{selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')}</h3>
+                        )}
+                        {!editingLogbookTitle && (
+                          <button onClick={() => { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) }}
+                            className="opacity-0 group-hover/lbtitle:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition">
+                            <Edit3 className="w-3 h-3" />
+                          </button>
+                        )}
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          selectedLogbook.status === 'completed' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
+                          selectedLogbook.status === 'completed' ? 'bg-emerald-50 text-emerald-700' :
+                          selectedLogbook.status === 'active' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'
                         }`}>
-                          {selectedLogbook.status === 'completed' ? 'Capturada' : 'Pendiente'}
+                          {selectedLogbook.status === 'completed' ? 'Completada' :
+                           selectedLogbook.status === 'active' ? 'Activa' : 'Pendiente'}
                         </span>
                       </div>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        {format(parseLogbookDate(selectedLogbook.date), "EEEE, d 'de' MMMM yyyy", { locale: es })}
-                        {selectedLogbook.captured_at && <> · Capturada {formatDistanceToNow(new Date(selectedLogbook.captured_at), { locale: es, addSuffix: true })}</>}
-                      </p>
+                      <div className="flex items-center gap-1 mt-0.5">
+                        {editingLogbookDate ? (
+                          <input
+                            type="date"
+                            value={editLogbookDateValue}
+                            onChange={e => setEditLogbookDateValue(e.target.value)}
+                            onBlur={async () => {
+                              if (editLogbookDateValue && editLogbookDateValue !== selectedLogbook.date.slice(0, 10)) {
+                                try {
+                                  const res = await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook.id}`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+                                    body: JSON.stringify({ date: editLogbookDateValue }),
+                                  })
+                                  const data = await res.json()
+                                  if (data.id) { setSelectedLogbook(data); fetchLogbooks() }
+                                } catch (e) { console.error('[Logbook] date error:', e) }
+                              }
+                              setEditingLogbookDate(false)
+                            }}
+                            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingLogbookDate(false) }}
+                            className="text-xs text-slate-500 bg-transparent border-b border-emerald-500 outline-none"
+                            autoFocus
+                          />
+                        ) : (
+                          <p className="text-xs text-slate-400 cursor-pointer hover:text-emerald-600 transition"
+                            onClick={() => { setEditLogbookDateValue(selectedLogbook.date.slice(0, 10)); setEditingLogbookDate(true) }}
+                            title="Click para cambiar fecha">
+                            {format(parseLogbookDate(selectedLogbook.date), "EEEE, d 'de' MMMM yyyy", { locale: es })}
+                          </p>
+                        )}
+                        {selectedLogbook.captured_at && !editingLogbookDate && (
+                          <span className="text-xs text-slate-400"> · Capturada {formatDistanceToNow(new Date(selectedLogbook.captured_at), { locale: es, addSuffix: true })}</span>
+                        )}
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot}
-                        className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
-                        {capturingSnapshot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
-                        {selectedLogbook.status === 'completed' ? 'Re-capturar' : 'Capturar Snapshot'}
-                        {activeFilterCount > 0 && <span className="bg-white/20 rounded px-1 text-[10px]">({totalParticipantCount})</span>}
+                      <button onClick={() => {
+                        setLogbookSettingsTitle(selectedLogbook.title)
+                        setLogbookSettingsDate(selectedLogbook.date.split('T')[0])
+                        setLogbookSettingsStatus(selectedLogbook.status)
+                        setShowLogbookSettingsModal(true)
+                      }} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition" title="Configurar bitácora">
+                        <Settings className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleCaptureSnapshot(selectedLogbook.id)}
+                        disabled={capturingSnapshot || selectedLogbook.status === 'completed'}
+                        className={`flex items-center gap-1.5 px-3 py-2 text-white rounded-lg text-xs font-medium transition shadow-sm disabled:opacity-50 ${selectedLogbook.status === 'completed' ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+                        {capturingSnapshot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> :
+                           selectedLogbook.status === 'completed' ? <Lock className="w-3.5 h-3.5" /> : <Camera className="w-3.5 h-3.5" />}
+                        {selectedLogbook.status === 'completed' ? 'Completado' : selectedLogbook.status === 'active' ? 'Re-capturar' : 'Capturar Snapshot'}
+                        {activeFilterCount > 0 && selectedLogbook.status !== 'completed' && <span className="bg-white/20 rounded px-1 text-[10px]">({totalParticipantCount})</span>}
                       </button>
                     </div>
                   </div>
 
                   {/* Stage snapshot badges */}
-                  {selectedLogbook.status === 'completed' && selectedLogbook.stage_snapshot && Object.keys(selectedLogbook.stage_snapshot).length > 0 && (
+                  {selectedLogbook.status !== 'pending' && selectedLogbook.stage_snapshot && Object.keys(selectedLogbook.stage_snapshot).length > 0 && (
                     <div className="flex flex-wrap gap-1.5 mt-2">
                       {Object.entries(selectedLogbook.stage_snapshot).map(([key, stage]) => (
                         <div key={key} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-white"
@@ -2387,8 +2614,17 @@ export default function EventDetailPage() {
                       <div className="flex-1 overflow-x-auto overflow-y-hidden">
                         <div className="flex gap-3 p-4 h-full min-w-min">
                           {(() => {
-                            // Group entries by stage
+                            // Build columns from stage_snapshot first (includes stages with 0 participants)
                             const grouped: Record<string, { name: string; color: string; entries: typeof selectedLogbook.entries }> = {}
+                            const stageOrder: string[] = []
+                            if (selectedLogbook.stage_snapshot) {
+                              for (const [key, stage] of Object.entries(selectedLogbook.stage_snapshot)) {
+                                if (key === 'unassigned') continue
+                                grouped[stage.name || key] = { name: stage.name || 'Sin etapa', color: stage.color || '#94a3b8', entries: [] }
+                                stageOrder.push(stage.name || key)
+                              }
+                            }
+                            // Assign entries to their stage columns
                             for (const entry of selectedLogbook.entries) {
                               const key = entry.stage_name || '__none__'
                               if (!grouped[key]) {
@@ -2396,8 +2632,7 @@ export default function EventDetailPage() {
                               }
                               grouped[key].entries.push(entry)
                             }
-                            // Sort: named stages first (by stage_snapshot order if available), "Sin etapa" last
-                            const stageOrder = selectedLogbook.stage_snapshot ? Object.keys(selectedLogbook.stage_snapshot) : []
+                            // Sort: snapshot order first, then unnamed, "Sin etapa" last
                             const sortedKeys = Object.keys(grouped).sort((a, b) => {
                               if (a === '__none__') return 1
                               if (b === '__none__') return -1
@@ -2561,6 +2796,95 @@ export default function EventDetailPage() {
         </div>
       )}
 
+      {/* Logbook Settings Modal */}
+      {showLogbookSettingsModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setShowLogbookSettingsModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-100 overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50/50">
+              <h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
+                <Settings className="w-5 h-5 text-slate-400" />
+                Configuración de Bitácora
+              </h2>
+              <button onClick={() => setShowLogbookSettingsModal(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-[13px] font-medium text-slate-700 mb-1">Título</label>
+                <input
+                  type="text"
+                  value={logbookSettingsTitle}
+                  onChange={(e) => setLogbookSettingsTitle(e.target.value)}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
+                />
+              </div>
+              <div>
+                <label className="block text-[13px] font-medium text-slate-700 mb-1">Fecha de la sesión</label>
+                <input
+                  type="date"
+                  value={logbookSettingsDate}
+                  onChange={(e) => setLogbookSettingsDate(e.target.value)}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
+                />
+              </div>
+              <div>
+                <label className="block text-[13px] font-medium text-slate-700 mb-1">Estado</label>
+                <select
+                  value={logbookSettingsStatus}
+                  onChange={(e) => setLogbookSettingsStatus(e.target.value)}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
+                >
+                  <option value="pending">Pendiente (No capturada)</option>
+                  <option value="active">Activa (Capturada, permite Re-capturar)</option>
+                  <option value="completed">Completada (Bloquea Re-capturar)</option>
+                </select>
+                <p className="mt-1.5 text-xs text-slate-500 leading-tight">
+                  {logbookSettingsStatus === 'pending' && 'La bitácora aún no tiene datos.'}
+                  {logbookSettingsStatus === 'active' && 'Permite actualizar la foto mediante el botón de Re-capturar.'}
+                  {logbookSettingsStatus === 'completed' && 'Oculta el botón de Re-capturar para evitar sobreescribir los datos.'}
+                </p>
+              </div>
+
+              <div className="pt-4 border-t border-slate-100 flex flex-col gap-2">
+                <p className="text-xs font-medium text-slate-700 mb-1">Filtro asociado</p>
+                {selectedLogbook?.saved_filter && Object.keys(selectedLogbook.saved_filter).length > 0 ? (
+                  <div className="bg-slate-50 p-3 rounded-lg border border-slate-100 font-mono text-[10px] text-slate-600 overflow-x-auto max-h-24 overflow-y-auto">
+                    {JSON.stringify(selectedLogbook.saved_filter, null, 2)}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500 italic">No hay filtro guardado</p>
+                )}
+
+                <button
+                  onClick={() => handleUpdateLogbookSettings(true)}
+                  disabled={logbookSettingsUpdating}
+                  className="mt-1 flex items-center justify-center gap-1.5 w-full px-3 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium hover:bg-slate-200 transition"
+                  title="Actualizar el filtro guardado con el filtro aplicado actualmente en la pantalla"
+                >
+                  <Filter className="w-3.5 h-3.5" />
+                  Sobreescribir con el Filtro Actual
+                </button>
+              </div>
+
+            </div>
+            <div className="px-6 py-4 bg-slate-50/50 border-t border-slate-100 flex gap-2">
+              <button onClick={() => setShowLogbookSettingsModal(false)}
+                className="flex-1 px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition">
+                Cancelar
+              </button>
+              <button
+                onClick={() => handleUpdateLogbookSettings(false)}
+                disabled={logbookSettingsUpdating}
+                className="flex-1 flex justify-center items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm disabled:opacity-50">
+                {logbookSettingsUpdating && <Loader2 className="w-4 h-4 animate-spin" />}
+                Guardar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ═══ List History Modal ═══ */}
       {listHistoryParticipant && (() => {
         const historyObs = listObservations.get(listHistoryParticipant.id) || []
@@ -2683,44 +3007,93 @@ export default function EventDetailPage() {
                   // Map back from Lead shape to Participant update
                   updateParticipantInStages(detailParticipant.id, p => ({
                     ...p,
-                    name: updatedLead.name || p.name,
-                    last_name: updatedLead.last_name || p.last_name,
-                    short_name: updatedLead.short_name || p.short_name,
-                    phone: updatedLead.phone || p.phone,
-                    email: updatedLead.email || p.email,
-                    age: updatedLead.age || p.age,
-                    dni: updatedLead.dni || p.dni,
-                    birth_date: updatedLead.birth_date || p.birth_date,
+                    name: updatedLead.name ?? p.name,
+                    last_name: updatedLead.last_name ?? p.last_name,
+                    short_name: updatedLead.short_name ?? p.short_name,
+                    phone: updatedLead.phone ?? p.phone,
+                    email: updatedLead.email ?? p.email,
+                    age: updatedLead.age ?? p.age,
+                    dni: updatedLead.dni ?? p.dni,
+                    birth_date: updatedLead.birth_date ?? p.birth_date,
                     notes: updatedLead.notes ?? p.notes,
                     stage_id: updatedLead.stage_id || p.stage_id,
                     stage_name: updatedLead.stage_name || p.stage_name,
                     stage_color: updatedLead.stage_color || p.stage_color,
+                    lead_pipeline_id: updatedLead.lead_pipeline_id ?? p.lead_pipeline_id,
+                    lead_stage_id: updatedLead.lead_stage_id ?? p.lead_stage_id,
+                    lead_stage_name: updatedLead.lead_stage_name ?? p.lead_stage_name,
+                    lead_stage_color: updatedLead.lead_stage_color ?? p.lead_stage_color,
                     structured_tags: updatedLead.structured_tags,
                     tags: updatedLead.structured_tags?.map((t: any) => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color, created_at: '' })),
                   }))
                   setDetailParticipant(prev => prev ? {
                     ...prev,
-                    name: updatedLead.name || prev.name,
-                    last_name: updatedLead.last_name || prev.last_name,
-                    short_name: updatedLead.short_name || prev.short_name,
-                    phone: updatedLead.phone || prev.phone,
-                    email: updatedLead.email || prev.email,
-                    age: updatedLead.age || prev.age,
-                    dni: updatedLead.dni || prev.dni,
-                    birth_date: updatedLead.birth_date || prev.birth_date,
+                    name: updatedLead.name ?? prev.name,
+                    last_name: updatedLead.last_name ?? prev.last_name,
+                    short_name: updatedLead.short_name ?? prev.short_name,
+                    phone: updatedLead.phone ?? prev.phone,
+                    email: updatedLead.email ?? prev.email,
+                    age: updatedLead.age ?? prev.age,
+                    dni: updatedLead.dni ?? prev.dni,
+                    birth_date: updatedLead.birth_date ?? prev.birth_date,
                     notes: updatedLead.notes ?? prev.notes,
                     stage_id: updatedLead.stage_id || prev.stage_id,
                     stage_name: updatedLead.stage_name || prev.stage_name,
                     stage_color: updatedLead.stage_color || prev.stage_color,
+                    lead_pipeline_id: updatedLead.lead_pipeline_id ?? prev.lead_pipeline_id,
+                    lead_stage_id: updatedLead.lead_stage_id ?? prev.lead_stage_id,
+                    lead_stage_name: updatedLead.lead_stage_name ?? prev.lead_stage_name,
+                    lead_stage_color: updatedLead.lead_stage_color ?? prev.lead_stage_color,
                     tags: updatedLead.structured_tags?.map((t: any) => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color, created_at: '' })),
                   } : null)
                 }}
                 onStageChange={(stageId: string, stageName: string, stageColor: string) => {
-                  // Move participant between stages in kanban
-                  handleStageChange(detailParticipant.id, stageId)
+                  // Optimistic kanban move — LeadDetailPanel already sent the PATCH
+                  const updatedProps = { stage_id: stageId, stage_name: stageName || undefined, stage_color: stageColor || undefined }
+                  setStageData(prev => {
+                    let movedP: Participant | undefined
+                    const afterRemove = prev.map(s => {
+                      const idx = s.participants.findIndex(p => p.id === detailParticipant.id)
+                      if (idx >= 0) {
+                        movedP = { ...s.participants[idx], ...updatedProps }
+                        return { ...s, participants: s.participants.filter(p => p.id !== detailParticipant.id), total_count: Math.max(0, s.total_count - 1) }
+                      }
+                      return s
+                    })
+                    if (movedP) {
+                      return afterRemove.map(s => s.id === stageId
+                        ? { ...s, participants: [movedP!, ...s.participants], total_count: s.total_count + 1 }
+                        : s
+                      )
+                    }
+                    return afterRemove
+                  })
+                  setUnassignedData(prev => {
+                    const idx = prev.participants.findIndex(p => p.id === detailParticipant.id)
+                    if (idx >= 0) {
+                      const movedP = { ...prev.participants[idx], ...updatedProps }
+                      setStageData(sd => sd.map(s => s.id === stageId
+                        ? { ...s, participants: [movedP, ...s.participants], total_count: s.total_count + 1 }
+                        : s
+                      ))
+                      return { ...prev, participants: prev.participants.filter(p => p.id !== detailParticipant.id), total_count: Math.max(0, prev.total_count - 1) }
+                    }
+                    return prev
+                  })
+                  setListParticipants(prev => prev.map(p => p.id === detailParticipant.id ? { ...p, ...updatedProps } : p))
+                  // Block incoming WebSocket refetch
+                  ownStageChangeRef.current = true
+                  if (ownStageTimerRef.current) clearTimeout(ownStageTimerRef.current)
+                  ownStageTimerRef.current = setTimeout(() => { ownStageChangeRef.current = false }, 3000)
                 }}
                 onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
                 onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                onObservationChange={() => {
+                  if (viewMode === 'list') {
+                    setListObservations(new Map())
+                    setLoadingListObs(new Set())
+                  }
+                }}
                 onDelete={(id: string) => {
                   removeParticipantFromStages(detailParticipant.id)
                   setShowDetailPanel(false)

@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
-import ErosAssistant from '@/components/ErosAssistant'
+// import ErosAssistant from '@/components/ErosAssistant' // Disabled — Eros AI paused
 import {
   MessageSquare,
   Smartphone,
@@ -24,8 +24,12 @@ import {
   Shield,
   ChevronsUpDown,
   Building2,
-  BookOpen
+  BookOpen,
+  Zap,
+  ClipboardList,
+  Sparkles
 } from 'lucide-react'
+// import ErosCat from '@/components/ErosCat' // Disabled — Eros AI paused
 
 interface User {
   id: string
@@ -151,11 +155,14 @@ export default function DashboardLayout({
     '/dashboard/chats': 'chats',
     '/dashboard/contacts': 'contacts',
     '/dashboard/programs': 'programs',
+    '/dashboard/automations': 'leads',
     '/dashboard/devices': 'devices',
     '/dashboard/leads': 'leads',
     '/dashboard/events': 'events',
     '/dashboard/broadcasts': 'broadcasts',
-    '/dashboard/tags': 'tags',
+    '/dashboard/surveys': 'surveys',
+    '/dashboard/dynamics': 'dynamics',
+      '/dashboard/tags': 'tags',
     '/dashboard/settings': 'settings',
   }
 
@@ -173,10 +180,13 @@ export default function DashboardLayout({
     { href: '/dashboard/chats', icon: MessageSquare, label: 'Chats' },
     { href: '/dashboard/contacts', icon: BookUser, label: 'Contactos' },
     { href: '/dashboard/programs', icon: BookOpen, label: 'Programas' },
+    { href: '/dashboard/automations', icon: Zap, label: 'Automatizaciones' },
     { href: '/dashboard/leads', icon: Users, label: 'Leads' },
     { href: '/dashboard/events', icon: CalendarDays, label: 'Eventos' },
     { href: '/dashboard/broadcasts', icon: Radio, label: 'Difusión' },
-    { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas' },
+    { href: '/dashboard/surveys', icon: ClipboardList, label: 'Encuestas' },
+    { href: '/dashboard/dynamics', icon: Sparkles, label: 'Dinámicas' },
+      { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas' },
     { href: '/dashboard/settings', icon: Settings, label: 'Configuración' },
     ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin' }] : []),
   ].filter(item => hasPermission(item.href))
@@ -233,13 +243,15 @@ export default function DashboardLayout({
           >
             <X className="w-5 h-5 text-slate-500" />
           </button>
-          <button
-            onClick={toggleSidebarCollapsed}
-            className="hidden lg:flex p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors"
-            title={sidebarCollapsed ? 'Expandir menú' : 'Colapsar menú'}
-          >
-            {sidebarCollapsed ? <PanelLeftOpen className="w-[18px] h-[18px]" /> : <PanelLeftClose className="w-[18px] h-[18px]" />}
-          </button>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={toggleSidebarCollapsed}
+              className="hidden lg:flex p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors"
+              title={sidebarCollapsed ? 'Expandir menú' : 'Colapsar menú'}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen className="w-[18px] h-[18px]" /> : <PanelLeftClose className="w-[18px] h-[18px]" />}
+            </button>
+          </div>
         </div>
 
         {/* Navigation */}
@@ -373,7 +385,7 @@ export default function DashboardLayout({
           >
             <Menu className="w-5 h-5 text-slate-600" />
           </button>
-          <div className="ml-3 flex items-center gap-2">
+          <div className="ml-3 flex items-center gap-2 flex-1">
             <div className="w-6 h-6 bg-emerald-600 rounded-md flex items-center justify-center">
               <MessageSquare className="w-3.5 h-3.5 text-white" />
             </div>
@@ -388,8 +400,9 @@ export default function DashboardLayout({
           {children}
         </main>
       </div>
+
     </div>
-    <ErosAssistant />
+
     </NotificationProvider>
   )
 }

@@ -1,8 +1,8 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3, Trash2, MapPin, Phone, Eye, Ban, Pencil, Plus } from 'lucide-react'
+import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3, Trash2, MapPin, Phone, Eye, Ban, Pencil, Plus, ChevronDown } from 'lucide-react'
 import { renderFormattedText } from '@/lib/whatsappFormat'
 import { Message, Reaction, PollOption } from '@/types/chat'
 import { splitEmojiSegments, getAppleEmojiUrl } from '@/utils/appleEmoji'
@@ -59,15 +59,20 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
   const [imageError, setImageError] = useState(false)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [showFullPicker, setShowFullPicker] = useState(false)
+  const [showContextMenu, setShowContextMenu] = useState(false)
+  const [menuDropUp, setMenuDropUp] = useState(false)
   const [pickerPos, setPickerPos] = useState({ top: 0, left: 0 })
   const emojiPickerRef = useRef<HTMLDivElement>(null)
   const plusBtnRef = useRef<HTMLButtonElement>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
+  const chevronBtnRef = useRef<HTMLButtonElement>(null)
 
   const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏']
 
   const closeAllPickers = () => {
     setShowEmojiPicker(false)
     setShowFullPicker(false)
+    setShowContextMenu(false)
   }
 
   const handleOpenFullPicker = () => {
@@ -86,13 +91,16 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     setShowFullPicker(true)
   }
 
-  // Close emoji picker on outside click
+  // Close emoji picker / context menu on outside click
   useEffect(() => {
-    if (!showEmojiPicker && !showFullPicker) return
+    if (!showEmojiPicker && !showFullPicker && !showContextMenu) return
     const handleClick = (e: MouseEvent) => {
       if (showFullPicker) return // Full picker has its own backdrop
-      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
-        closeAllPickers()
+      if (showContextMenu && contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        setShowContextMenu(false)
+      }
+      if (showEmojiPicker && emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+        setShowEmojiPicker(false)
       }
     }
     const handleKey = (e: KeyboardEvent) => {
@@ -104,7 +112,19 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
       document.removeEventListener('mousedown', handleClick)
       document.removeEventListener('keydown', handleKey)
     }
-  }, [showEmojiPicker, showFullPicker])
+  }, [showEmojiPicker, showFullPicker, showContextMenu])
+
+  // Measure menu position after render and flip if it overflows viewport (runs before paint = no flicker)
+  useLayoutEffect(() => {
+    if (showContextMenu && contextMenuRef.current) {
+      const rect = contextMenuRef.current.getBoundingClientRect()
+      if (!menuDropUp && rect.bottom > window.innerHeight - 10) {
+        setMenuDropUp(true)
+      } else if (menuDropUp && rect.top < 10) {
+        setMenuDropUp(false)
+      }
+    }
+  }, [showContextMenu, menuDropUp])
 
   // Use contactName (resolved by parent via getChatDisplayName) as the sender name for incoming messages
   const senderDisplayName = !message.is_from_me
@@ -490,52 +510,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
 
   return (
     <div className={`group flex ${message.is_from_me ? 'justify-end' : 'justify-start'}`}>
-      {/* Action buttons - visible on mobile, hover on desktop (for outgoing: left side) */}
-      {message.is_from_me && !isOptimistic && (
-        <div className="flex md:hidden md:group-hover:flex items-center gap-1 mr-1 self-center">
-          {onEdit && message.is_from_me && message.message_type === 'text' && !message.is_revoked && (
-            <button
-              onClick={() => onEdit(message)}
-              className="p-1.5 rounded-full bg-white shadow-md hover:bg-blue-50 text-gray-500 hover:text-blue-500 transition-all"
-              title="Editar mensaje"
-            >
-              <Pencil className="w-4 h-4" />
-            </button>
-          )}
-          {onDelete && (
-            <button
-              onClick={() => onDelete(message)}
-              className="p-1.5 rounded-full bg-white shadow-md hover:bg-red-50 text-gray-500 hover:text-red-500 transition-all"
-              title="Eliminar para todos"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          )}
-          <button
-            onClick={() => onForward?.(message)}
-            className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
-            title="Reenviar"
-          >
-            <Forward className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => onReply?.(message)}
-            className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
-            title="Responder"
-          >
-            <Reply className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
-            title="Reaccionar"
-          >
-            <SmilePlus className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {/* Wrapper for message bubble + reaction popup */}
+      {/* Wrapper for message bubble + hover controls + reaction popup */}
       <div className="relative max-w-[85%] sm:max-w-[70%]">
       <div
         className={`${
@@ -659,6 +634,76 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         {renderReactions()}
       </div>
 
+      {/* WhatsApp Web-style hover trigger bar — emoji + chevron at top-right of bubble */}
+      {!isOptimistic && message.message_type !== 'sticker' && !isEmojiOnly && (
+        <div className={`absolute top-1 right-1 z-10 flex items-center rounded-md transition-opacity duration-150 ${showContextMenu || showEmojiPicker ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${message.is_from_me ? 'bg-[#d9fdd3]/90' : 'bg-white/90'}`}>
+          <button
+            onClick={(e) => { e.stopPropagation(); setShowEmojiPicker(!showEmojiPicker); setShowContextMenu(false) }}
+            className="p-1 rounded-md hover:bg-black/5 text-slate-500 hover:text-slate-700 transition-colors"
+            title="Reaccionar"
+          >
+            <SmilePlus className="w-4 h-4" />
+          </button>
+          <button
+            ref={chevronBtnRef}
+            onClick={(e) => {
+              e.stopPropagation()
+              if (!showContextMenu) setMenuDropUp(false)
+              setShowContextMenu(!showContextMenu)
+              setShowEmojiPicker(false)
+            }}
+            className="p-1 rounded-md hover:bg-black/5 text-slate-500 hover:text-slate-700 transition-colors"
+            title="Más opciones"
+          >
+            <ChevronDown className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Context menu dropdown */}
+      {showContextMenu && (
+        <div
+          ref={contextMenuRef}
+          className={`absolute z-50 ${message.is_from_me ? 'right-0' : 'left-0'} ${menuDropUp ? 'bottom-full mb-1' : 'top-8'} bg-white rounded-lg shadow-xl border border-slate-200 py-1 min-w-[170px]`}
+        >
+          <button
+            onClick={() => { onReply?.(message); closeAllPickers() }}
+            className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+          >
+            <Reply className="w-4 h-4 text-slate-400" />
+            Responder
+          </button>
+          <button
+            onClick={() => { onForward?.(message); closeAllPickers() }}
+            className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+          >
+            <Forward className="w-4 h-4 text-slate-400" />
+            Reenviar
+          </button>
+          {onEdit && message.is_from_me && message.message_type === 'text' && !message.is_revoked && (
+            <button
+              onClick={() => { onEdit(message); closeAllPickers() }}
+              className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+            >
+              <Pencil className="w-4 h-4 text-slate-400" />
+              Editar
+            </button>
+          )}
+          {onDelete && message.is_from_me && (
+            <>
+              <div className="border-t border-slate-100 my-1" />
+              <button
+                onClick={() => { onDelete(message); closeAllPickers() }}
+                className="w-full flex items-center gap-3 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+                Eliminar
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Quick reaction bar - positioned above message bubble like WhatsApp Web */}
       {showEmojiPicker && !showFullPicker && (
         <div
@@ -713,33 +758,6 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         document.body
       )}
       </div>
-
-      {/* Action buttons - visible on mobile, hover on desktop (for incoming: right side) */}
-      {!message.is_from_me && !isOptimistic && (
-        <div className="flex md:hidden md:group-hover:flex items-center gap-1 ml-1 self-center">
-          <button
-            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
-            title="Reaccionar"
-          >
-            <SmilePlus className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => onReply?.(message)}
-            className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
-            title="Responder"
-          >
-            <Reply className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => onForward?.(message)}
-            className="p-1.5 rounded-full bg-white shadow-md hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-all"
-            title="Reenviar"
-          >
-            <Forward className="w-4 h-4" />
-          </button>
-        </div>
-      )}
     </div>
   )
 }

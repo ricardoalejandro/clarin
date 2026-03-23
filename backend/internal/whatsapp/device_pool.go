@@ -66,14 +66,15 @@ type DeviceHealthSummary struct {
 
 // DeviceInstance represents a single WhatsApp connection
 type DeviceInstance struct {
-	ID        uuid.UUID
-	AccountID uuid.UUID
-	Client    *whatsmeow.Client
-	JID       string
-	Status    string
-	QRCode    string
-	Metrics   DeviceHealthMetrics
-	mu        sync.RWMutex
+	ID              uuid.UUID
+	AccountID       uuid.UUID
+	Client          *whatsmeow.Client
+	JID             string
+	Status          string
+	QRCode          string
+	ReceiveMessages bool // when false, incoming messages are silently dropped
+	Metrics         DeviceHealthMetrics
+	mu              sync.RWMutex
 	// reconnect control
 	reconnecting    bool
 	stopReconnect   chan struct{}
@@ -137,6 +138,18 @@ func (p *DevicePool) SetStorage(s *storage.Storage) {
 // SetCache sets the Redis cache for invalidation on data changes
 func (p *DevicePool) SetCache(c *cache.Cache) {
 	p.cache = c
+}
+
+// SetReceiveMessages updates the in-memory receive flag for a connected device
+func (p *DevicePool) SetReceiveMessages(deviceID uuid.UUID, value bool) {
+	p.mu.RLock()
+	instance, ok := p.devices[deviceID]
+	p.mu.RUnlock()
+	if ok {
+		instance.mu.Lock()
+		instance.ReceiveMessages = value
+		instance.mu.Unlock()
+	}
 }
 
 // LoadExistingDevices loads all existing devices and connects them
@@ -262,10 +275,11 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 
 	// Create device instance
 	instance := &DeviceInstance{
-		ID:        deviceID,
-		AccountID: device.AccountID,
-		Client:    client,
-		Status:    domain.DeviceStatusConnecting,
+		ID:              deviceID,
+		AccountID:       device.AccountID,
+		Client:          client,
+		Status:          domain.DeviceStatusConnecting,
+		ReceiveMessages: device.ReceiveMessages,
 	}
 	p.devices[deviceID] = instance
 
@@ -715,6 +729,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 
 	// Skip newsletter/channel messages
 	if evt.Info.Chat.Server == "newsletter" {
+		return
+	}
+
+	// If receive_messages is disabled, silently drop incoming messages (but allow sent messages through)
+	if !evt.Info.IsFromMe && !instance.ReceiveMessages {
 		return
 	}
 
@@ -1407,6 +1426,12 @@ func (p *DevicePool) handlePushName(ctx context.Context, instance *DeviceInstanc
 
 // handleHistorySync processes history sync events
 func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInstance, evt *events.HistorySync) {
+	// If receive_messages is disabled, skip importing historical messages
+	if !instance.ReceiveMessages {
+		log.Printf("[HistorySync] Skipping history sync for device %s (receive_messages disabled)", instance.ID)
+		return
+	}
+
 	totalConversations := len(evt.Data.Conversations)
 	syncType := evt.Data.GetSyncType().String()
 	log.Printf("[HistorySync] Received %d conversations for device %s (type=%s)", totalConversations, instance.ID, syncType)
@@ -3153,6 +3178,19 @@ func (p *DevicePool) GetConnectedCount() int {
 		}
 	}
 	return count
+}
+
+// GetFirstConnectedDeviceForAccount returns the ID of the first connected device for a given account
+func (p *DevicePool) GetFirstConnectedDeviceForAccount(accountID uuid.UUID) (uuid.UUID, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	for _, instance := range p.devices {
+		if instance.AccountID == accountID && instance.Client != nil && instance.Client.IsConnected() {
+			return instance.ID, nil
+		}
+	}
+	return uuid.Nil, fmt.Errorf("no connected device found for account %s", accountID)
 }
 
 // GetTotalCount returns the total number of devices in the pool

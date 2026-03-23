@@ -45,6 +45,8 @@ const (
 	EventEventParticipantUpdate  = "event_participant_update"
 	EventHistorySyncComplete     = "history_sync_complete"
 	EventLogbookUpdate           = "logbook_update"
+	EventDynamicRegistration     = "dynamic_registration"
+	EventContactUpdate           = "contact_update"
 )
 
 // Message represents a WebSocket message

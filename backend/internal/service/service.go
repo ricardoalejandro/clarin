@@ -35,6 +35,8 @@ type Services struct {
 	QuickReply  *QuickReplyService
 	Program     *ProgramService
 	Role        *RoleService
+	Automation  *AutomationService
+	Survey      *SurveyService
 }
 
 func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub *ws.Hub) *Services {
@@ -53,6 +55,8 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		QuickReply:  &QuickReplyService{repos: repos},
 		Program:     NewProgramService(repos),
 		Role:        &RoleService{repos: repos},
+		Automation:  NewAutomationService(repos, pool, hub, nil), // cache injected after Init
+		Survey:      NewSurveyService(repos),
 	}
 }
 
@@ -707,6 +711,26 @@ func (s *LeadService) DeleteAll(ctx context.Context, accountID uuid.UUID) error 
 	return s.repos.Lead.DeleteAll(ctx, accountID)
 }
 
+func (s *LeadService) ArchiveLead(ctx context.Context, id uuid.UUID, archive bool) error {
+	return s.repos.Lead.ArchiveLead(ctx, id, archive)
+}
+
+func (s *LeadService) ArchiveLeadsBatch(ctx context.Context, ids []uuid.UUID, archive bool) error {
+	return s.repos.Lead.ArchiveLeadsBatch(ctx, ids, archive)
+}
+
+func (s *LeadService) BlockLead(ctx context.Context, id uuid.UUID, block bool, reason string) error {
+	return s.repos.Lead.BlockLead(ctx, id, block, reason)
+}
+
+func (s *LeadService) BlockLeadsBatch(ctx context.Context, ids []uuid.UUID, block bool, reason string) error {
+	return s.repos.Lead.BlockLeadsBatch(ctx, ids, block, reason)
+}
+
+func (s *LeadService) GetArchivedBlockedCounts(ctx context.Context, accountID uuid.UUID) (int, int, int, error) {
+	return s.repos.Lead.GetArchivedBlockedCounts(ctx, accountID)
+}
+
 // PipelineService handles pipeline operations
 type PipelineService struct {
 	repos *repository.Repositories
@@ -759,6 +783,10 @@ type TagService struct {
 
 func (s *TagService) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Tag, error) {
 	return s.repos.Tag.GetByAccountID(ctx, accountID)
+}
+
+func (s *TagService) ListPaginated(ctx context.Context, accountID uuid.UUID, search string, limit, offset int) ([]*domain.Tag, int, error) {
+	return s.repos.Tag.ListPaginated(ctx, accountID, search, limit, offset)
 }
 
 func (s *TagService) Create(ctx context.Context, tag *domain.Tag) error {
@@ -1590,6 +1618,12 @@ func (s *EventService) reconcileWithMatchedLeads(ctx context.Context, eventID uu
 // It checks if any active events have this tag configured and, depending on formula mode,
 // adds the lead as participant only if it matches the full formula.
 func (s *EventService) HandleLeadTagAssigned(ctx context.Context, accountID, leadID, tagID uuid.UUID) {
+	// Skip event sync for archived or blocked leads
+	lead, err := s.repos.Lead.GetByID(ctx, leadID)
+	if err == nil && lead != nil && (lead.IsArchived || lead.IsBlocked) {
+		return
+	}
+
 	// 1. Handle simple-formula events that reference this tag
 	events, err := s.repos.Event.FindActiveEventsByTagID(ctx, tagID)
 	if err != nil {

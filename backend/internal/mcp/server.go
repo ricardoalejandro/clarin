@@ -1,1113 +1,337 @@
 package mcp
 
 import (
-	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"html/template"
-	"log"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
+"context"
+"crypto/sha256"
+"encoding/hex"
+"encoding/json"
+"fmt"
+"log"
+"net/http"
+"strings"
+"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
-	"github.com/naperu/clarin/internal/domain"
-	"github.com/naperu/clarin/internal/repository"
-	"github.com/naperu/clarin/internal/service"
-	"golang.org/x/crypto/bcrypt"
+"github.com/google/uuid"
+"github.com/jackc/pgx/v5"
+"github.com/mark3labs/mcp-go/mcp"
+"github.com/mark3labs/mcp-go/server"
+"github.com/naperu/clarin/internal/domain"
+"github.com/naperu/clarin/internal/repository"
+"github.com/naperu/clarin/internal/service"
 )
 
 // MCPServer wraps the MCP SDK server and Clarin repositories.
+// Authentication is handled exclusively via API keys generated from the dashboard.
 type MCPServer struct {
-	mcpServer           *server.MCPServer
-	repos               *repository.Repositories
-	services            *service.Services
-	jwtSecret           string
-	authCodes           map[string]*authCode // temporary OAuth2 authorization codes
-	authCodeMu          sync.Mutex
-	registeredClients   map[string]*registeredClient // dynamic client registration (RFC 7591)
-	registeredClientsMu sync.Mutex
-	pendingAuths        map[string]*pendingAuth // 2-step: login → account selection
-	pendingAuthsMu      sync.Mutex
-}
-
-// authCode represents a temporary OAuth2 authorization code.
-type authCode struct {
-	AccountID     uuid.UUID
-	AccountName   string
-	UserID        uuid.UUID
-	ExpiresAt     time.Time
-	ClientID      string
-	CodeChallenge string // PKCE S256 challenge
-	RedirectURI   string // bound redirect_uri
-}
-
-// pendingAuth stores a validated login pending account selection.
-type pendingAuth struct {
-	UserID              uuid.UUID
-	ExpiresAt           time.Time
-	RedirectURI         string
-	State               string
-	ClientID            string
-	CodeChallenge       string
-	CodeChallengeMethod string
-}
-
-// registeredClient represents a dynamically registered OAuth client (RFC 7591).
-type registeredClient struct {
-	ClientID     string   `json:"client_id"`
-	ClientSecret string   `json:"client_secret,omitempty"`
-	RedirectURIs []string `json:"redirect_uris,omitempty"`
-	ClientName   string   `json:"client_name,omitempty"`
-	CreatedAt    time.Time
+mcpServer *server.MCPServer
+repos     *repository.Repositories
+services  *service.Services
 }
 
 // New creates a new MCP server with all Clarin CRM tools registered.
 func New(repos *repository.Repositories, services *service.Services, jwtSecret string) *MCPServer {
-	s := &MCPServer{
-		repos:             repos,
-		services:          services,
-		jwtSecret:         jwtSecret,
-		authCodes:         make(map[string]*authCode),
-		registeredClients: make(map[string]*registeredClient),
-		pendingAuths:      make(map[string]*pendingAuth),
-	}
-
-	mcpSrv := server.NewMCPServer(
-		"Clarin CRM",
-		"1.0.0",
-		server.WithToolCapabilities(true),
-	)
-
-	// ──────────────── Category A: Data Queries ────────────────
-
-	mcpSrv.AddTool(mcp.NewTool("get_crm_stats",
-		mcp.WithDescription("Resumen general del CRM: total de leads por etapa, contactos, eventos activos, programas. Úsalo PRIMERO para dar una vista rápida del estado actual. Después usa get_lead_analytics para análisis detallado o analyze_leads para scoring de conversión."),
-	), s.toolGetCRMStats)
-
-	mcpSrv.AddTool(mcp.NewTool("list_events",
-		mcp.WithDescription("Busca y lista eventos por nombre, estado o fecha. Devuelve nombre, fecha, ubicación, total de participantes y conteos por etapa. Úsalo para encontrar un evento antes de consultar sus detalles o participantes."),
-		mcp.WithString("search", mcp.Description("Buscar evento por nombre, descripción o ubicación (ej: 'amistad', 'iquitos')")),
-		mcp.WithString("status", mcp.Description("Filtrar por estado: active, draft, completed, cancelled. Vacío = todos.")),
-		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 100)")),
-	), s.toolListEvents)
-
-	mcpSrv.AddTool(mcp.NewTool("get_event_summary",
-		mcp.WithDescription("Resumen detallado de un evento específico: participantes por etapa (confirmados, contactados, declinados, etc.), descripción, fechas. Necesitas el event_id, obtenlo primero con list_events."),
-		mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
-	), s.toolGetEventSummary)
-
-	mcpSrv.AddTool(mcp.NewTool("search_leads",
-		mcp.WithDescription("Busca leads específicos con filtros precisos. Devuelve nombre, tags, etapa y fecha de creación. IMPORTANTE: Usa SIEMPRE filtros específicos (tag, etapa, fecha, nombre). Para análisis de todos los leads, usa primero get_lead_analytics o analyze_leads. Esta herramienta es para consultas puntuales como 'leads con tag matemáticas creados esta semana' o 'buscar a Juan Pérez'."),
-		mcp.WithString("query", mcp.Description("Texto de búsqueda (nombre, teléfono, email)")),
-		mcp.WithString("tag", mcp.Description("Filtrar por nombre de tag")),
-		mcp.WithString("stage", mcp.Description("Filtrar por nombre de etapa")),
-		mcp.WithString("created_after", mcp.Description("Fecha de creación desde (formato YYYY-MM-DD, ej: '2026-03-01'). Inclusive.")),
-		mcp.WithString("created_before", mcp.Description("Fecha de creación hasta (formato YYYY-MM-DD, ej: '2026-03-05'). Inclusive.")),
-		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 100)")),
-		mcp.WithNumber("offset", mcp.Description("Desplazamiento para paginación (default 0).")),
-	), s.toolSearchLeads)
-
-	mcpSrv.AddTool(mcp.NewTool("get_lead_detail",
-		mcp.WithDescription("Información completa de un lead: datos personales, todos los tags, etapa actual, notas, fuente, campos personalizados, edad, fecha de creación. Necesitas el lead_id, obtenlo con search_leads."),
-		mcp.WithString("lead_id", mcp.Required(), mcp.Description("UUID del lead")),
-	), s.toolGetLeadDetail)
-
-	mcpSrv.AddTool(mcp.NewTool("list_tags",
-		mcp.WithDescription("Lista todos los tags disponibles en el CRM con nombre y color. Útil para saber qué tags existen antes de filtrar leads o eventos."),
-	), s.toolListTags)
-
-	mcpSrv.AddTool(mcp.NewTool("list_pipelines",
-		mcp.WithDescription("Lista los pipelines de ventas con sus etapas, colores y posiciones. Útil para conocer las etapas disponibles antes de filtrar leads."),
-	), s.toolListPipelines)
-
-	mcpSrv.AddTool(mcp.NewTool("search_contacts",
-		mcp.WithDescription("Busca contactos de WhatsApp por nombre o teléfono. Útil para verificar si alguien tiene WhatsApp o encontrar su chat."),
-		mcp.WithString("query", mcp.Required(), mcp.Description("Texto de búsqueda (nombre o teléfono)")),
-		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 50)")),
-	), s.toolSearchContacts)
-
-	// ──────────────── Category A.2: Event Participants ────────────────
-
-	mcpSrv.AddTool(mcp.NewTool("list_event_participants",
-		mcp.WithDescription("Lista los participantes de un evento con su nombre, teléfono, etapa, estado y notas. Ideal para reportes como 'lista de confirmados del evento X' o 'participantes en etapa Y'. Necesitas el event_id, obtenlo con list_events."),
-		mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
-		mcp.WithString("status", mcp.Description("Filtrar por estado: invited, contacted, confirmed, declined, attended, no_show")),
-		mcp.WithString("stage", mcp.Description("Filtrar por nombre de etapa del evento")),
-		mcp.WithString("search", mcp.Description("Buscar participante por nombre o teléfono")),
-		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 50, max 200)")),
-	), s.toolListEventParticipants)
-
-	// ──────────────── Category A.3: Lead Analytics ────────────────
-
-	mcpSrv.AddTool(mcp.NewTool("get_lead_analytics",
-		mcp.WithDescription("Estadísticas agregadas de leads SIN datos personales. Devuelve: distribución por tags (top 30 con conteo), distribución por etapa, leads por mes (últimos 6), leads con/sin WhatsApp, con/sin teléfono, por fuente. ÚSALO para entender la composición de la base antes de filtrar. Ideal para '¿cuántos leads tienen tag X?', '¿tags más comunes?', '¿cuántos leads nuevos por mes?'. No devuelve datos individuales — para eso usa search_leads con filtros específicos."),
-		mcp.WithString("tag", mcp.Description("Filtrar análisis solo a leads con este tag")),
-		mcp.WithString("stage", mcp.Description("Filtrar análisis solo a leads en esta etapa")),
-		mcp.WithString("created_after", mcp.Description("Solo analizar leads creados desde esta fecha (YYYY-MM-DD)")),
-		mcp.WithString("created_before", mcp.Description("Solo analizar leads creados hasta esta fecha (YYYY-MM-DD)")),
-	), s.toolGetLeadAnalytics)
-
-	mcpSrv.AddTool(mcp.NewTool("analyze_leads",
-		mcp.WithDescription("Análisis avanzado de leads con scoring de conversión calculado en el servidor. Puntúa cada lead según: posición en pipeline (etapas avanzadas = mayor score), actividad de WhatsApp (tiene chat activo), cantidad de mensajes recientes, presencia de notas, cantidad de tags, y antigüedad. Devuelve un ranking con score, factores explicados, etapa y tags — SIN teléfonos ni emails. Úsalo para responder preguntas como '¿cuáles leads tienen más probabilidad de convertir?', 'top 20 leads más comprometidos', 'leads que debería contactar primero'. Para ver datos de contacto de un lead específico, usa get_lead_detail con su ID."),
-		mcp.WithString("tag", mcp.Description("Filtrar solo leads con este tag (ej: 'matemáticas', 'iquitos')")),
-		mcp.WithString("stage", mcp.Description("Filtrar solo leads en esta etapa (ej: 'CONFIRMADO', 'PRE-INSCRITO')")),
-		mcp.WithString("created_after", mcp.Description("Solo leads creados desde esta fecha (YYYY-MM-DD)")),
-		mcp.WithString("created_before", mcp.Description("Solo leads creados hasta esta fecha (YYYY-MM-DD)")),
-		mcp.WithString("sort_by", mcp.Description("Criterio de ranking: 'score' (default, score compuesto), 'chat_activity' (más mensajes recientes), 'stage' (etapa más avanzada), 'recent' (leads más nuevos)")),
-		mcp.WithNumber("limit", mcp.Description("Top N leads a devolver (default 20, max 50)")),
-	), s.toolAnalyzeLeads)
-
-	// ──────────────── Category B: Logbooks ────────────────
-
-	mcpSrv.AddTool(mcp.NewTool("list_event_logbooks",
-		mcp.WithDescription("Lista las bitácoras de un evento con fecha, estado, notas generales y snapshot de etapas."),
-		mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
-	), s.toolListEventLogbooks)
-
-	mcpSrv.AddTool(mcp.NewTool("get_logbook_detail",
-		mcp.WithDescription("Detalle de una bitácora: entradas por participante con su etapa y notas de ese día."),
-		mcp.WithString("logbook_id", mcp.Required(), mcp.Description("UUID de la bitácora")),
-	), s.toolGetLogbookDetail)
-
-	// ──────────────── Category C: Chats ────────────────
-
-	mcpSrv.AddTool(mcp.NewTool("get_chat_history",
-		mcp.WithDescription("Obtiene los últimos mensajes de WhatsApp con un contacto o lead. Útil para analizar intención, hacer resumen de conversación o verificar último contacto."),
-		mcp.WithString("contact_name", mcp.Description("Nombre del contacto a buscar")),
-		mcp.WithString("phone", mcp.Description("Teléfono del contacto (con o sin código de país)")),
-		mcp.WithNumber("limit", mcp.Description("Número de mensajes a obtener (default 50, max 200)")),
-	), s.toolGetChatHistory)
-
-	mcpSrv.AddTool(mcp.NewTool("get_leads_with_chats",
-		mcp.WithDescription("Obtiene un grupo PEQUEÑO de leads con sus mensajes de WhatsApp para análisis de conversación. REQUIERE al menos un filtro (evento, tag, etapa o nombre). Evalúa las conversaciones para determinar intención, interés u objeciones. Para análisis de muchos leads, usa primero analyze_leads para identificar los más relevantes y luego consulta sus chats aquí."),
-		mcp.WithString("event_id", mcp.Description("UUID del evento para filtrar participantes")),
-		mcp.WithString("tag", mcp.Description("Nombre de tag para filtrar leads")),
-		mcp.WithString("stage", mcp.Description("Nombre de etapa para filtrar")),
-		mcp.WithString("query", mcp.Description("Texto de búsqueda (nombre, teléfono, email)")),
-		mcp.WithNumber("messages_per_lead", mcp.Description("Mensajes por lead (default 20, max 50)")),
-		mcp.WithNumber("max_leads", mcp.Description("Máximo de leads a incluir (default 10, max 30)")),
-	), s.toolGetLeadsWithChats)
-
-	s.mcpServer = mcpSrv
-	return s
+s := &MCPServer{
+repos:    repos,
+services: services,
 }
 
-// SSEHandler returns an http.Handler that serves MCP over SSE transport.
+mcpSrv := server.NewMCPServer(
+"Clarin CRM",
+"1.0.0",
+server.WithToolCapabilities(true),
+)
+
+// ──────────────── Category A: Data Queries ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("get_crm_stats",
+mcp.WithDescription("Resumen general del CRM: total de leads por etapa, contactos, eventos activos, programas. Úsalo PRIMERO para dar una vista rápida del estado actual. Después usa get_lead_analytics para análisis detallado o analyze_leads para scoring de conversión."),
+), s.toolGetCRMStats)
+
+mcpSrv.AddTool(mcp.NewTool("list_events",
+mcp.WithDescription("Busca y lista eventos por nombre, estado o fecha. Devuelve nombre, fecha, ubicación, total de participantes y conteos por etapa. Úsalo para encontrar un evento antes de consultar sus detalles o participantes."),
+mcp.WithString("search", mcp.Description("Buscar evento por nombre, descripción o ubicación (ej: 'amistad', 'iquitos')")),
+mcp.WithString("status", mcp.Description("Filtrar por estado: active, draft, completed, cancelled. Vacío = todos.")),
+mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 100)")),
+), s.toolListEvents)
+
+mcpSrv.AddTool(mcp.NewTool("get_event_summary",
+mcp.WithDescription("Resumen detallado de un evento específico: participantes por etapa (confirmados, contactados, declinados, etc.), descripción, fechas. Necesitas el event_id, obtenlo primero con list_events."),
+mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
+), s.toolGetEventSummary)
+
+mcpSrv.AddTool(mcp.NewTool("search_leads",
+mcp.WithDescription("Busca leads específicos con filtros precisos. Devuelve nombre, tags, etapa y fecha de creación. IMPORTANTE: Usa SIEMPRE filtros específicos (tag, etapa, fecha, nombre). Para análisis de todos los leads, usa primero get_lead_analytics o analyze_leads. Esta herramienta es para consultas puntuales como 'leads con tag matemáticas creados esta semana' o 'buscar a Juan Pérez'."),
+mcp.WithString("query", mcp.Description("Texto de búsqueda (nombre, teléfono, email)")),
+mcp.WithString("tag", mcp.Description("Filtrar por nombre de tag")),
+mcp.WithString("stage", mcp.Description("Filtrar por nombre de etapa")),
+mcp.WithString("created_after", mcp.Description("Fecha de creación desde (formato YYYY-MM-DD, ej: '2026-03-01'). Inclusive.")),
+mcp.WithString("created_before", mcp.Description("Fecha de creación hasta (formato YYYY-MM-DD, ej: '2026-03-05'). Inclusive.")),
+mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 100)")),
+mcp.WithNumber("offset", mcp.Description("Desplazamiento para paginación (default 0).")),
+), s.toolSearchLeads)
+
+mcpSrv.AddTool(mcp.NewTool("get_lead_detail",
+mcp.WithDescription("Información completa de un lead: datos personales, todos los tags, etapa actual, notas, fuente, campos personalizados, edad, fecha de creación. Necesitas el lead_id, obtenlo con search_leads."),
+mcp.WithString("lead_id", mcp.Required(), mcp.Description("UUID del lead")),
+), s.toolGetLeadDetail)
+
+mcpSrv.AddTool(mcp.NewTool("list_tags",
+mcp.WithDescription("Lista todos los tags disponibles en el CRM con nombre y color. Útil para saber qué tags existen antes de filtrar leads o eventos."),
+), s.toolListTags)
+
+mcpSrv.AddTool(mcp.NewTool("list_pipelines",
+mcp.WithDescription("Lista los pipelines de ventas con sus etapas, colores y posiciones. Útil para conocer las etapas disponibles antes de filtrar leads."),
+), s.toolListPipelines)
+
+mcpSrv.AddTool(mcp.NewTool("search_contacts",
+mcp.WithDescription("Busca contactos de WhatsApp por nombre o teléfono. Útil para verificar si alguien tiene WhatsApp o encontrar su chat."),
+mcp.WithString("query", mcp.Required(), mcp.Description("Texto de búsqueda (nombre o teléfono)")),
+mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 50)")),
+), s.toolSearchContacts)
+
+// ──────────────── Category A.2: Event Participants ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("list_event_participants",
+mcp.WithDescription("Lista los participantes de un evento con su nombre, teléfono, etapa, estado y notas. Ideal para reportes como 'lista de confirmados del evento X' o 'participantes en etapa Y'. Necesitas el event_id, obtenlo con list_events."),
+mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
+mcp.WithString("status", mcp.Description("Filtrar por estado: invited, contacted, confirmed, declined, attended, no_show")),
+mcp.WithString("stage", mcp.Description("Filtrar por nombre de etapa del evento")),
+mcp.WithString("search", mcp.Description("Buscar participante por nombre o teléfono")),
+mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 50, max 200)")),
+), s.toolListEventParticipants)
+
+// ──────────────── Category A.3: Lead Analytics ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("get_lead_analytics",
+mcp.WithDescription("Estadísticas agregadas de leads SIN datos personales. Devuelve: distribución por tags (top 30 con conteo), distribución por etapa, leads por mes (últimos 6), leads con/sin WhatsApp, con/sin teléfono, por fuente. ÚSALO para entender la composición de la base antes de filtrar. Ideal para '¿cuántos leads tienen tag X?', '¿tags más comunes?', '¿cuántos leads nuevos por mes?'. No devuelve datos individuales — para eso usa search_leads con filtros específicos."),
+mcp.WithString("tag", mcp.Description("Filtrar análisis solo a leads con este tag")),
+mcp.WithString("stage", mcp.Description("Filtrar análisis solo a leads en esta etapa")),
+mcp.WithString("created_after", mcp.Description("Solo analizar leads creados desde esta fecha (YYYY-MM-DD)")),
+mcp.WithString("created_before", mcp.Description("Solo analizar leads creados hasta esta fecha (YYYY-MM-DD)")),
+), s.toolGetLeadAnalytics)
+
+mcpSrv.AddTool(mcp.NewTool("analyze_leads",
+mcp.WithDescription("Análisis avanzado de leads con scoring de conversión calculado en el servidor. Puntúa cada lead según: posición en pipeline (etapas avanzadas = mayor score), actividad de WhatsApp (tiene chat activo), cantidad de mensajes recientes, presencia de notas, cantidad de tags, y antigüedad. Devuelve un ranking con score, factores explicados, etapa y tags — SIN teléfonos ni emails. Úsalo para responder preguntas como '¿cuáles leads tienen más probabilidad de convertir?', 'top 20 leads más comprometidos', 'leads que debería contactar primero'. Para ver datos de contacto de un lead específico, usa get_lead_detail con su ID."),
+mcp.WithString("tag", mcp.Description("Filtrar solo leads con este tag (ej: 'matemáticas', 'iquitos')")),
+mcp.WithString("stage", mcp.Description("Filtrar solo leads en esta etapa (ej: 'CONFIRMADO', 'PRE-INSCRITO')")),
+mcp.WithString("created_after", mcp.Description("Solo leads creados desde esta fecha (YYYY-MM-DD)")),
+mcp.WithString("created_before", mcp.Description("Solo leads creados hasta esta fecha (YYYY-MM-DD)")),
+mcp.WithString("sort_by", mcp.Description("Criterio de ranking: 'score' (default, score compuesto), 'chat_activity' (más mensajes recientes), 'stage' (etapa más avanzada), 'recent' (leads más nuevos)")),
+mcp.WithNumber("limit", mcp.Description("Top N leads a devolver (default 20, max 50)")),
+), s.toolAnalyzeLeads)
+
+// ──────────────── Category B: Logbooks ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("list_event_logbooks",
+mcp.WithDescription("Lista las bitácoras de un evento con fecha, estado, notas generales y snapshot de etapas."),
+mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
+), s.toolListEventLogbooks)
+
+mcpSrv.AddTool(mcp.NewTool("get_logbook_detail",
+mcp.WithDescription("Detalle de una bitácora: entradas por participante con su etapa y notas de ese día."),
+mcp.WithString("logbook_id", mcp.Required(), mcp.Description("UUID de la bitácora")),
+), s.toolGetLogbookDetail)
+
+// ──────────────── Category C: Chats ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("get_chat_history",
+mcp.WithDescription("Obtiene los últimos mensajes de WhatsApp con un contacto o lead. Útil para analizar intención, hacer resumen de conversación o verificar último contacto."),
+mcp.WithString("contact_name", mcp.Description("Nombre del contacto a buscar")),
+mcp.WithString("phone", mcp.Description("Teléfono del contacto (con o sin código de país)")),
+mcp.WithNumber("limit", mcp.Description("Número de mensajes a obtener (default 50, max 200)")),
+), s.toolGetChatHistory)
+
+mcpSrv.AddTool(mcp.NewTool("get_leads_with_chats",
+mcp.WithDescription("Obtiene un grupo PEQUEÑO de leads con sus mensajes de WhatsApp para análisis de conversación. REQUIERE al menos un filtro (evento, tag, etapa o nombre). Evalúa las conversaciones para determinar intención, interés u objeciones. Para análisis de muchos leads, usa primero analyze_leads para identificar los más relevantes y luego consulta sus chats aquí."),
+mcp.WithString("event_id", mcp.Description("UUID del evento para filtrar participantes")),
+mcp.WithString("tag", mcp.Description("Nombre de tag para filtrar leads")),
+mcp.WithString("stage", mcp.Description("Nombre de etapa para filtrar")),
+mcp.WithString("query", mcp.Description("Texto de búsqueda (nombre, teléfono, email)")),
+mcp.WithNumber("messages_per_lead", mcp.Description("Mensajes por lead (default 20, max 50)")),
+mcp.WithNumber("max_leads", mcp.Description("Máximo de leads a incluir (default 10, max 30)")),
+), s.toolGetLeadsWithChats)
+
+// ──────────────── Category D: Programs ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("list_programs",
+mcp.WithDescription("Lista los programas educativos de la cuenta con nombre, estado, participantes y sesiones. Úsalo para ver los programas disponibles antes de consultar detalle."),
+mcp.WithString("status", mcp.Description("Filtrar por estado: active, completed, archived. Vacío = todos.")),
+), s.toolListPrograms)
+
+mcpSrv.AddTool(mcp.NewTool("get_program_detail",
+mcp.WithDescription("Detalle completo de un programa educativo: descripción, horarios, participantes inscritos con estado, y sesiones programadas con estadísticas de asistencia."),
+mcp.WithString("program_id", mcp.Required(), mcp.Description("UUID del programa")),
+), s.toolGetProgramDetail)
+
+mcpSrv.AddTool(mcp.NewTool("get_program_attendance",
+mcp.WithDescription("Asistencia detallada de una sesión de programa: lista de participantes con su estado (present, absent, late, excused) y notas."),
+mcp.WithString("session_id", mcp.Required(), mcp.Description("UUID de la sesión")),
+), s.toolGetProgramAttendance)
+
+// ──────────────── Category E: Campaigns ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("list_campaigns",
+mcp.WithDescription("Lista las campañas de mensajes masivos de WhatsApp con nombre, estado, totales de envío y fechas."),
+), s.toolListCampaigns)
+
+mcpSrv.AddTool(mcp.NewTool("get_campaign_detail",
+mcp.WithDescription("Detalle de una campaña de mensajes: template, estado de cada destinatario (enviado, fallido, pendiente), adjuntos, y estadísticas."),
+mcp.WithString("campaign_id", mcp.Required(), mcp.Description("UUID de la campaña")),
+mcp.WithNumber("recipient_limit", mcp.Description("Máximo de destinatarios a devolver (default 50, max 200)")),
+), s.toolGetCampaignDetail)
+
+// ──────────────── Category F: Surveys ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("list_surveys",
+mcp.WithDescription("Lista las encuestas creadas en la cuenta con nombre, estado, slug y total de respuestas."),
+), s.toolListSurveys)
+
+mcpSrv.AddTool(mcp.NewTool("get_survey_detail",
+mcp.WithDescription("Detalle de una encuesta: preguntas con tipo, opciones y configuración. Necesitas el survey_id, obtenlo con list_surveys."),
+mcp.WithString("survey_id", mcp.Required(), mcp.Description("UUID de la encuesta")),
+), s.toolGetSurveyDetail)
+
+mcpSrv.AddTool(mcp.NewTool("get_survey_analytics",
+mcp.WithDescription("Analytics agregado de una encuesta: total de respuestas, tasa de completado, tiempo promedio y distribución de respuestas por pregunta."),
+mcp.WithString("survey_id", mcp.Required(), mcp.Description("UUID de la encuesta")),
+), s.toolGetSurveyAnalytics)
+
+// ──────────────── Category G: Automations ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("list_automations",
+mcp.WithDescription("Lista las automatizaciones configuradas con nombre, tipo de trigger, estado activo/inactivo y conteo de ejecuciones."),
+), s.toolListAutomations)
+
+mcpSrv.AddTool(mcp.NewTool("get_automation_detail",
+mcp.WithDescription("Detalle de una automatización: trigger, configuración, últimas ejecuciones con estado y estadísticas generales."),
+mcp.WithString("automation_id", mcp.Required(), mcp.Description("UUID de la automatización")),
+), s.toolGetAutomationDetail)
+
+// ──────────────── Category H: Contacts & Chats ────────────────
+
+mcpSrv.AddTool(mcp.NewTool("get_contact_detail",
+mcp.WithDescription("Información completa de un contacto de WhatsApp: nombre, nombre personalizado, teléfono, email, empresa, notas, tags, lead vinculado y último mensaje."),
+mcp.WithString("contact_id", mcp.Description("UUID del contacto")),
+mcp.WithString("phone", mcp.Description("Teléfono del contacto (alternativa al ID)")),
+), s.toolGetContactDetail)
+
+mcpSrv.AddTool(mcp.NewTool("list_chats",
+mcp.WithDescription("Lista los chats de WhatsApp activos de la cuenta: contacto, último mensaje, mensajes no leídos y fecha. Ordenados por último mensaje."),
+mcp.WithNumber("limit", mcp.Description("Máximo de chats (default 30, max 100)")),
+), s.toolListChats)
+
+mcpSrv.AddTool(mcp.NewTool("search_chat_messages",
+mcp.WithDescription("Busca mensajes por texto en todas las conversaciones de la cuenta. Devuelve el mensaje, contacto y fecha. Máximo 50 resultados."),
+mcp.WithString("query", mcp.Required(), mcp.Description("Texto a buscar en los mensajes")),
+mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 30, max 50)")),
+), s.toolSearchChatMessages)
+
+s.mcpServer = mcpSrv
+return s
+}
+
+// sseHandler returns an http.Handler that serves MCP over SSE transport.
 // It validates the API key from the Authorization header on every request.
 func (s *MCPServer) sseHandler() http.Handler {
-	sseServer := server.NewSSEServer(s.mcpServer,
-		server.WithBasePath("/mcp"),
-		server.WithBaseURL("https://clarin.naperu.cloud"),
-	)
+sseServer := server.NewSSEServer(s.mcpServer,
+server.WithBasePath("/mcp"),
+server.WithBaseURL("https://clarin.naperu.cloud"),
+)
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract and validate API key
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			w.Header().Set("WWW-Authenticate", `Bearer`)
-			http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
-			return
-		}
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if token == authHeader {
-			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-			http.Error(w, `{"error":"invalid Authorization format, expected: Bearer <api_key>"}`, http.StatusUnauthorized)
-			return
-		}
-
-		keyHash := hashKey(token)
-		apiKey, err := s.repos.APIKey.ValidateKeyHash(r.Context(), keyHash)
-		if err != nil || apiKey == nil {
-			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-			http.Error(w, `{"error":"invalid or inactive API key"}`, http.StatusUnauthorized)
-			return
-		}
-
-		// Update last_used_at asynchronously
-		go s.repos.APIKey.UpdateLastUsed(context.Background(), apiKey.ID)
-
-		// Inject account_id into request context
-		ctx := context.WithValue(r.Context(), ctxKeyAccountID, apiKey.AccountID)
-		r = r.WithContext(ctx)
-
-		sseServer.ServeHTTP(w, r)
-	})
+return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+authHeader := r.Header.Get("Authorization")
+if authHeader == "" {
+w.Header().Set("WWW-Authenticate", `Bearer`)
+http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
+return
+}
+token := strings.TrimPrefix(authHeader, "Bearer ")
+if token == authHeader {
+w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+http.Error(w, `{"error":"invalid Authorization format, expected: Bearer <api_key>"}`, http.StatusUnauthorized)
+return
 }
 
-// ═══════════════════════════════════════════════════════════════
-// OAuth2 Flow for ChatGPT MCP
-// ═══════════════════════════════════════════════════════════════
-
-// handleAuthorizeGET shows the login form for OAuth2 authorization.
-func (s *MCPServer) handleAuthorizeGET(w http.ResponseWriter, r *http.Request) {
-	redirectURI := r.URL.Query().Get("redirect_uri")
-	state := r.URL.Query().Get("state")
-	clientID := r.URL.Query().Get("client_id")
-	codeChallenge := r.URL.Query().Get("code_challenge")
-	codeChallengeMethod := r.URL.Query().Get("code_challenge_method")
-
-	log.Printf("[MCP] OAuth authorize GET: client_id=%s redirect_uri=%s code_challenge_method=%s", clientID, redirectURI, codeChallengeMethod)
-
-	data := map[string]string{
-		"RedirectURI":         redirectURI,
-		"State":               state,
-		"ClientID":            clientID,
-		"CodeChallenge":       codeChallenge,
-		"CodeChallengeMethod": codeChallengeMethod,
-		"Error":               "",
-	}
-	renderLoginPage(w, data)
+keyHash := hashKey(token)
+apiKey, err := s.repos.APIKey.ValidateKeyHash(r.Context(), keyHash)
+if err != nil || apiKey == nil {
+w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+http.Error(w, `{"error":"invalid or inactive API key"}`, http.StatusUnauthorized)
+return
 }
 
-// handleAuthorizePOST processes the login form submission.
-func (s *MCPServer) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
+go s.repos.APIKey.UpdateLastUsed(context.Background(), apiKey.ID)
 
-	username := r.FormValue("username")
-	password := r.FormValue("password")
-	redirectURI := r.FormValue("redirect_uri")
-	state := r.FormValue("state")
-	clientID := r.FormValue("client_id")
-	codeChallenge := r.FormValue("code_challenge")
-	codeChallengeMethod := r.FormValue("code_challenge_method")
+ctx := context.WithValue(r.Context(), ctxKeyAccountID, apiKey.AccountID)
+r = r.WithContext(ctx)
 
-	log.Printf("[MCP] OAuth authorize POST: user=%s client_id=%s code_challenge_method=%s", username, clientID, codeChallengeMethod)
-
-	// Validate credentials
-	user, err := s.repos.User.GetByUsername(r.Context(), username)
-	if err != nil || user == nil {
-		data := map[string]string{
-			"RedirectURI":         redirectURI,
-			"State":               state,
-			"ClientID":            clientID,
-			"CodeChallenge":       codeChallenge,
-			"CodeChallengeMethod": codeChallengeMethod,
-			"Error":               "Usuario o contraseña incorrectos",
-		}
-		renderLoginPage(w, data)
-		return
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		data := map[string]string{
-			"RedirectURI":         redirectURI,
-			"State":               state,
-			"ClientID":            clientID,
-			"CodeChallenge":       codeChallenge,
-			"CodeChallengeMethod": codeChallengeMethod,
-			"Error":               "Usuario o contraseña incorrectos",
-		}
-		renderLoginPage(w, data)
-		return
-	}
-
-	// Check admin role
-	if user.Role != "admin" && user.Role != "super_admin" {
-		data := map[string]string{
-			"RedirectURI":         redirectURI,
-			"State":               state,
-			"ClientID":            clientID,
-			"CodeChallenge":       codeChallenge,
-			"CodeChallengeMethod": codeChallengeMethod,
-			"Error":               "Solo administradores pueden conectar servicios MCP",
-		}
-		renderLoginPage(w, data)
-		return
-	}
-
-	// Fetch user's accounts and filter to MCP-enabled only
-	allUserAccounts, _ := s.repos.UserAccount.GetByUserID(r.Context(), user.ID)
-	var userAccounts []*domain.UserAccount
-	for _, ua := range allUserAccounts {
-		if ua.AccountMCPEnabled {
-			userAccounts = append(userAccounts, ua)
-		}
-	}
-
-	if len(userAccounts) == 0 {
-		data := map[string]string{
-			"RedirectURI":         redirectURI,
-			"State":               state,
-			"ClientID":            clientID,
-			"CodeChallenge":       codeChallenge,
-			"CodeChallengeMethod": codeChallengeMethod,
-			"Error":               "No tienes cuentas con acceso MCP habilitado. Contacta al administrador.",
-		}
-		renderLoginPage(w, data)
-		return
-	}
-
-	// If user has exactly 1 MCP-enabled account, skip account selection
-	if len(userAccounts) == 1 {
-		s.issueAuthCodeAndRedirect(w, r, userAccounts[0].AccountID, userAccounts[0].AccountName, user.ID, redirectURI, state, clientID, codeChallenge)
-		return
-	}
-
-	// Multiple accounts → show account selector
-	pendingToken := generateRandomHex(32)
-	s.pendingAuthsMu.Lock()
-	s.pendingAuths[pendingToken] = &pendingAuth{
-		UserID:              user.ID,
-		ExpiresAt:           time.Now().Add(5 * time.Minute),
-		RedirectURI:         redirectURI,
-		State:               state,
-		ClientID:            clientID,
-		CodeChallenge:       codeChallenge,
-		CodeChallengeMethod: codeChallengeMethod,
-	}
-	s.pendingAuthsMu.Unlock()
-
-	log.Printf("[MCP] OAuth: user %s has %d accounts, showing selector", username, len(userAccounts))
-	renderAccountSelectPage(w, pendingToken, userAccounts)
-}
-
-// handleAccountSelect processes the account selection step.
-func (s *MCPServer) handleAccountSelect(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-
-	pendingToken := r.FormValue("pending_token")
-	selectedAccountID := r.FormValue("account_id")
-
-	s.pendingAuthsMu.Lock()
-	pa, exists := s.pendingAuths[pendingToken]
-	if exists {
-		delete(s.pendingAuths, pendingToken) // one-time use
-	}
-	s.pendingAuthsMu.Unlock()
-
-	if !exists || time.Now().After(pa.ExpiresAt) {
-		http.Error(w, "Sesión expirada. Vuelve a iniciar el proceso.", http.StatusBadRequest)
-		return
-	}
-
-	accountID, err := uuid.Parse(selectedAccountID)
-	if err != nil {
-		http.Error(w, "Cuenta inválida", http.StatusBadRequest)
-		return
-	}
-
-	// Verify the user actually has access to this account and it has MCP enabled
-	userAccounts, _ := s.repos.UserAccount.GetByUserID(r.Context(), pa.UserID)
-	var accountName string
-	hasAccess := false
-	for _, ua := range userAccounts {
-		if ua.AccountID == accountID && ua.AccountMCPEnabled {
-			hasAccess = true
-			accountName = ua.AccountName
-			break
-		}
-	}
-	if !hasAccess {
-		http.Error(w, "No tienes acceso a esta cuenta o no tiene MCP habilitado", http.StatusForbidden)
-		return
-	}
-
-	log.Printf("[MCP] OAuth: user selected account %s (%s)", accountName, accountID)
-	s.issueAuthCodeAndRedirect(w, r, accountID, accountName, pa.UserID, pa.RedirectURI, pa.State, pa.ClientID, pa.CodeChallenge)
-}
-
-// issueAuthCodeAndRedirect generates an auth code and redirects to the callback.
-func (s *MCPServer) issueAuthCodeAndRedirect(w http.ResponseWriter, r *http.Request, accountID uuid.UUID, accountName string, userID uuid.UUID, redirectURI, state, clientID, codeChallenge string) {
-	code := generateRandomHex(32)
-	s.authCodeMu.Lock()
-	s.authCodes[code] = &authCode{
-		AccountID:     accountID,
-		AccountName:   accountName,
-		UserID:        userID,
-		ExpiresAt:     time.Now().Add(5 * time.Minute),
-		ClientID:      clientID,
-		CodeChallenge: codeChallenge,
-		RedirectURI:   redirectURI,
-	}
-	s.authCodeMu.Unlock()
-
-	go s.cleanExpiredCodes()
-
-	separator := "?"
-	if strings.Contains(redirectURI, "?") {
-		separator = "&"
-	}
-	redirectURL := fmt.Sprintf("%s%scode=%s", redirectURI, separator, code)
-	if state != "" {
-		redirectURL += "&state=" + state
-	}
-
-	log.Printf("[MCP] OAuth authorize: account=%s (%s) → redirect to callback", accountName, accountID)
-	http.Redirect(w, r, redirectURL, http.StatusFound)
-}
-
-// handleToken exchanges an authorization code for an access token (API key).
-func (s *MCPServer) handleToken(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
-		return
-	}
-
-	grantType := r.FormValue("grant_type")
-	code := r.FormValue("code")
-	codeVerifier := r.FormValue("code_verifier")
-	redirectURI := r.FormValue("redirect_uri")
-
-	log.Printf("[MCP] OAuth token: grant_type=%s code_verifier_len=%d redirect_uri=%s", grantType, len(codeVerifier), redirectURI)
-
-	if grantType != "authorization_code" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported_grant_type"})
-		return
-	}
-
-	// Validate code
-	s.authCodeMu.Lock()
-	ac, exists := s.authCodes[code]
-	if exists {
-		delete(s.authCodes, code) // one-time use
-	}
-	s.authCodeMu.Unlock()
-
-	if !exists || time.Now().After(ac.ExpiresAt) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "authorization code expired or invalid"})
-		return
-	}
-
-	// Validate redirect_uri matches (if one was bound)
-	if ac.RedirectURI != "" && redirectURI != "" && ac.RedirectURI != redirectURI {
-		log.Printf("[MCP] OAuth token: redirect_uri mismatch: stored=%s got=%s", ac.RedirectURI, redirectURI)
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "redirect_uri mismatch"})
-		return
-	}
-
-	// Validate PKCE code_verifier if code_challenge was stored
-	if ac.CodeChallenge != "" {
-		if codeVerifier == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "error_description": "code_verifier required"})
-			return
-		}
-		// S256: BASE64URL(SHA256(code_verifier)) must match stored code_challenge
-		h := sha256.Sum256([]byte(codeVerifier))
-		computed := base64.RawURLEncoding.EncodeToString(h[:])
-		if computed != ac.CodeChallenge {
-			log.Printf("[MCP] OAuth token: PKCE verification failed (computed=%s expected=%s)", computed, ac.CodeChallenge)
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant", "error_description": "PKCE verification failed"})
-			return
-		}
-		log.Printf("[MCP] OAuth token: PKCE verification passed")
-	}
-
-	// Generate API key for this account
-	rawKey, err := generateAPIKey()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
-		return
-	}
-
-	keyName := "ChatGPT MCP (OAuth)"
-	if ac.AccountName != "" {
-		keyName = fmt.Sprintf("ChatGPT MCP - %s", ac.AccountName)
-	}
-
-	now := time.Now()
-	apiKey := &domain.APIKey{
-		ID:          uuid.New(),
-		AccountID:   ac.AccountID,
-		Name:        keyName,
-		KeyHash:     hashKey(rawKey),
-		KeyPrefix:   rawKey[:15] + "...",
-		Permissions: "read",
-		IsActive:    true,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-
-	if err := s.repos.APIKey.Create(r.Context(), apiKey); err != nil {
-		log.Printf("[MCP] Error creating OAuth API key: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
-		return
-	}
-
-	log.Printf("[MCP] OAuth token: created API key %s for account %s", apiKey.KeyPrefix, ac.AccountID)
-
-	// Return OAuth2 token response
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"access_token": rawKey,
-		"token_type":   "bearer",
-		"expires_in":   0, // no expiration
-	})
-}
-
-func (s *MCPServer) cleanExpiredCodes() {
-	s.authCodeMu.Lock()
-	now := time.Now()
-	for code, ac := range s.authCodes {
-		if now.After(ac.ExpiresAt) {
-			delete(s.authCodes, code)
-		}
-	}
-	s.authCodeMu.Unlock()
-
-	s.pendingAuthsMu.Lock()
-	for token, pa := range s.pendingAuths {
-		if now.After(pa.ExpiresAt) {
-			delete(s.pendingAuths, token)
-		}
-	}
-	s.pendingAuthsMu.Unlock()
+sseServer.ServeHTTP(w, r)
+})
 }
 
 // Start launches the MCP HTTP server on the given port in a background goroutine.
 func (s *MCPServer) Start(port string) {
-	mux := http.NewServeMux()
+mux := http.NewServeMux()
 
-	baseURL := "https://clarin.naperu.cloud"
+// MCP SSE transport (protected by Bearer token)
+sseHandler := s.sseHandler()
+mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
+setCORSHeaders(w, r)
+if r.Method == http.MethodOptions {
+w.WriteHeader(http.StatusNoContent)
+return
+}
+sseHandler.ServeHTTP(w, r)
+})
 
-	// OAuth2 Authorization Server Metadata (RFC 8414)
-	// ChatGPT and other MCP clients discover auth endpoints via this well-known URL
-	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[MCP] OAuth discovery: %s %s from %s (User-Agent: %s)", r.Method, r.URL.String(), r.RemoteAddr, r.Header.Get("User-Agent"))
-		setCORSHeaders(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"issuer":                 baseURL,
-			"authorization_endpoint": baseURL + "/mcp/authorize",
-			"token_endpoint":         baseURL + "/mcp/token",
-			"registration_endpoint":  baseURL + "/mcp/register",
-			"response_types_supported": []string{"code"},
-			"grant_types_supported":    []string{"authorization_code"},
-			"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
-			"code_challenge_methods_supported":      []string{"S256"},
-			"scopes_supported":                      []string{"read"},
-		})
-	})
-
-	// OAuth2 Protected Resource Metadata (RFC 9728)
-	// Some MCP clients look for this before the auth server metadata
-	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[MCP] Protected resource metadata: %s %s from %s", r.Method, r.URL.String(), r.RemoteAddr)
-		setCORSHeaders(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"resource":              baseURL + "/mcp/sse",
-			"authorization_servers": []string{baseURL},
-			"bearer_methods_supported": []string{"header"},
-			"scopes_supported":        []string{"read"},
-		})
-	})
-
-	// Dynamic Client Registration (RFC 7591)
-	// ChatGPT and other MCP clients register as OAuth clients dynamically
-	mux.HandleFunc("/mcp/register", func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeaders(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		s.handleRegister(w, r)
-	})
-
-	// OAuth2 endpoints
-	mux.HandleFunc("/mcp/authorize", func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeaders(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if r.Method == http.MethodPost {
-			s.handleAuthorizePOST(w, r)
-		} else {
-			s.handleAuthorizeGET(w, r)
-		}
-	})
-	mux.HandleFunc("/mcp/select-account", func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeaders(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		s.handleAccountSelect(w, r)
-	})
-	mux.HandleFunc("/mcp/token", func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeaders(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		s.handleToken(w, r)
-	})
-
-	// MCP SSE transport (protected by Bearer token)
-	sseHandler := s.sseHandler()
-	mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeaders(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		sseHandler.ServeHTTP(w, r)
-	})
-
-	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  0, // SSE needs no read timeout
-		WriteTimeout: 0, // SSE needs no write timeout
-	}
-	go func() {
-		log.Printf("[MCP] ✅ MCP server starting on port %s (SSE + OAuth2 + Dynamic Registration)", port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[MCP] Server error: %v", err)
-		}
-	}()
+srv := &http.Server{
+Addr:         ":" + port,
+Handler:      mux,
+ReadTimeout:  0,
+WriteTimeout: 0,
+}
+go func() {
+log.Printf("[MCP] ✅ MCP server starting on port %s (SSE, API key auth)", port)
+if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+log.Printf("[MCP] Server error: %v", err)
+}
+}()
 }
 
-// handleRegister implements OAuth 2.0 Dynamic Client Registration (RFC 7591).
-func (s *MCPServer) handleRegister(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		RedirectURIs            []string `json:"redirect_uris"`
-		ClientName              string   `json:"client_name"`
-		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
-		GrantTypes              []string `json:"grant_types"`
-		ResponseTypes           []string `json:"response_types"`
-		Scope                   string   `json:"scope"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Allow empty body — some clients send minimal registration
-		req.ClientName = "MCP Client"
-	}
-
-	clientID := "clarin_client_" + generateRandomHex(16)
-	clientSecret := generateRandomHex(32)
-
-	if req.ClientName == "" {
-		req.ClientName = "MCP Client"
-	}
-
-	client := &registeredClient{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		RedirectURIs: req.RedirectURIs,
-		ClientName:   req.ClientName,
-		CreatedAt:    time.Now(),
-	}
-
-	s.registeredClientsMu.Lock()
-	s.registeredClients[clientID] = client
-	s.registeredClientsMu.Unlock()
-
-	log.Printf("[MCP] Dynamic client registration: client_id=%s name=%s redirect_uris=%v", clientID, req.ClientName, req.RedirectURIs)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"client_id":                  clientID,
-		"client_secret":              clientSecret,
-		"client_name":                req.ClientName,
-		"redirect_uris":              req.RedirectURIs,
-		"grant_types":                []string{"authorization_code"},
-		"response_types":             []string{"code"},
-		"token_endpoint_auth_method": "client_secret_post",
-		"client_id_issued_at":        time.Now().Unix(),
-		"client_secret_expires_at":   0, // does not expire
-	})
-}
-
-// setCORSHeaders adds CORS headers for OAuth endpoints.
+// setCORSHeaders adds CORS headers for MCP endpoints.
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		origin = "*"
-	}
-	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, MCP-Protocol-Version")
-	w.Header().Set("Access-Control-Max-Age", "86400")
+origin := r.Header.Get("Origin")
+if origin == "" {
+origin = "*"
+}
+w.Header().Set("Access-Control-Allow-Origin", origin)
+w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, MCP-Protocol-Version")
+w.Header().Set("Access-Control-Max-Age", "86400")
 }
 
 // ═══════════════════════════════════════════════════════════════
-// OAuth2 helpers
+// Helpers
 // ═══════════════════════════════════════════════════════════════
-
-func generateRandomHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func generateAPIKey() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "clarin_" + hex.EncodeToString(b), nil
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func renderLoginPage(w http.ResponseWriter, data map[string]string) {
-	tmpl := template.Must(template.New("login").Parse(loginPageHTML))
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tmpl.Execute(w, data)
-}
-
-const loginPageHTML = `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clarin CRM — Autorizar MCP</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 50%, #f8fafc 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 1rem;
-    }
-    .card {
-      background: white;
-      border-radius: 1rem;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
-      padding: 2.5rem;
-      max-width: 400px;
-      width: 100%;
-    }
-    .logo {
-      text-align: center;
-      margin-bottom: 1.5rem;
-    }
-    .logo h1 {
-      font-size: 1.5rem;
-      color: #059669;
-      font-weight: 700;
-    }
-    .logo p {
-      font-size: 0.85rem;
-      color: #64748b;
-      margin-top: 0.25rem;
-    }
-    .info-box {
-      background: #ecfdf5;
-      border: 1px solid #a7f3d0;
-      border-radius: 0.75rem;
-      padding: 0.75rem 1rem;
-      margin-bottom: 1.5rem;
-      font-size: 0.8rem;
-      color: #065f46;
-      line-height: 1.5;
-    }
-    .field {
-      margin-bottom: 1rem;
-    }
-    label {
-      display: block;
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: #334155;
-      margin-bottom: 0.35rem;
-    }
-    input[type="text"], input[type="password"] {
-      width: 100%;
-      padding: 0.65rem 0.85rem;
-      border: 1px solid #e2e8f0;
-      border-radius: 0.5rem;
-      font-size: 0.9rem;
-      outline: none;
-      transition: border-color 0.15s;
-    }
-    input:focus {
-      border-color: #10b981;
-      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
-    }
-    .error {
-      background: #fef2f2;
-      border: 1px solid #fecaca;
-      color: #991b1b;
-      padding: 0.65rem 0.85rem;
-      border-radius: 0.5rem;
-      font-size: 0.8rem;
-      margin-bottom: 1rem;
-    }
-    button {
-      width: 100%;
-      padding: 0.7rem;
-      background: #059669;
-      color: white;
-      border: none;
-      border-radius: 0.5rem;
-      font-size: 0.9rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s;
-    }
-    button:hover { background: #047857; }
-    .footer {
-      text-align: center;
-      font-size: 0.7rem;
-      color: #94a3b8;
-      margin-top: 1.5rem;
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo">
-      <h1>🔗 Clarin CRM</h1>
-      <p>Autorizar conexión MCP</p>
-    </div>
-    <div class="info-box">
-      Un servicio de IA quiere conectarse a tu CRM para consultar datos de leads, eventos, contactos y conversaciones. Solo se otorgará acceso de <strong>lectura</strong>.
-    </div>
-    {{if .Error}}
-    <div class="error">{{.Error}}</div>
-    {{end}}
-    <form method="POST" action="/mcp/authorize">
-      <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
-      <input type="hidden" name="state" value="{{.State}}">
-      <input type="hidden" name="client_id" value="{{.ClientID}}">
-      <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
-      <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
-      <div class="field">
-        <label>Usuario</label>
-        <input type="text" name="username" required autocomplete="username" autofocus>
-      </div>
-      <div class="field">
-        <label>Contraseña</label>
-        <input type="password" name="password" required autocomplete="current-password">
-      </div>
-      <button type="submit">Autorizar Acceso</button>
-    </form>
-    <div class="footer">Solo administradores pueden autorizar conexiones MCP</div>
-  </div>
-</body>
-</html>`
 
 type contextKey string
 
 const ctxKeyAccountID contextKey = "mcp_account_id"
 
-func renderAccountSelectPage(w http.ResponseWriter, pendingToken string, accounts []*domain.UserAccount) {
-	tmpl := template.Must(template.New("accounts").Parse(accountSelectHTML))
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	type acctData struct {
-		ID   string
-		Name string
-		Slug string
-		Role string
-	}
-	data := struct {
-		PendingToken string
-		Accounts     []acctData
-	}{PendingToken: pendingToken}
-
-	for _, ua := range accounts {
-		data.Accounts = append(data.Accounts, acctData{
-			ID:   ua.AccountID.String(),
-			Name: ua.AccountName,
-			Slug: ua.AccountSlug,
-			Role: ua.Role,
-		})
-	}
-	tmpl.Execute(w, data)
-}
-
-const accountSelectHTML = `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clarin CRM — Seleccionar Cuenta</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 50%, #f8fafc 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 1rem;
-    }
-    .card {
-      background: white;
-      border-radius: 1rem;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
-      padding: 2.5rem;
-      max-width: 440px;
-      width: 100%;
-    }
-    .logo {
-      text-align: center;
-      margin-bottom: 1.5rem;
-    }
-    .logo h1 {
-      font-size: 1.5rem;
-      color: #059669;
-      font-weight: 700;
-    }
-    .logo p {
-      font-size: 0.85rem;
-      color: #64748b;
-      margin-top: 0.25rem;
-    }
-    .info-box {
-      background: #ecfdf5;
-      border: 1px solid #a7f3d0;
-      border-radius: 0.75rem;
-      padding: 0.75rem 1rem;
-      margin-bottom: 1.5rem;
-      font-size: 0.8rem;
-      color: #065f46;
-      line-height: 1.5;
-    }
-    .account-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-    }
-    .account-btn {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      width: 100%;
-      padding: 0.85rem 1rem;
-      background: #f8fafc;
-      border: 2px solid #e2e8f0;
-      border-radius: 0.75rem;
-      cursor: pointer;
-      font-size: 0.9rem;
-      text-align: left;
-      transition: all 0.15s;
-    }
-    .account-btn:hover {
-      border-color: #10b981;
-      background: #ecfdf5;
-    }
-    .account-icon {
-      width: 40px;
-      height: 40px;
-      border-radius: 0.5rem;
-      background: #059669;
-      color: white;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 700;
-      font-size: 1.1rem;
-      flex-shrink: 0;
-    }
-    .account-info { flex: 1; }
-    .account-name {
-      font-weight: 600;
-      color: #1e293b;
-    }
-    .account-role {
-      font-size: 0.75rem;
-      color: #64748b;
-      margin-top: 0.1rem;
-    }
-    .account-arrow {
-      color: #94a3b8;
-      font-size: 1.2rem;
-    }
-    .footer {
-      text-align: center;
-      font-size: 0.7rem;
-      color: #94a3b8;
-      margin-top: 1.5rem;
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo">
-      <h1>🔗 Clarin CRM</h1>
-      <p>Seleccionar cuenta</p>
-    </div>
-    <div class="info-box">
-      Tienes acceso a múltiples cuentas. Selecciona a cuál quieres conectar este servicio de IA. <strong>Solo verá datos de la cuenta seleccionada.</strong>
-    </div>
-    <div class="account-list">
-      {{range .Accounts}}
-      <form method="POST" action="/mcp/select-account" style="margin:0">
-        <input type="hidden" name="pending_token" value="{{$.PendingToken}}">
-        <input type="hidden" name="account_id" value="{{.ID}}">
-        <button type="submit" class="account-btn">
-          <div class="account-icon">{{slice .Name 0 1}}</div>
-          <div class="account-info">
-            <div class="account-name">{{.Name}}</div>
-            <div class="account-role">{{.Role}}</div>
-          </div>
-          <div class="account-arrow">→</div>
-        </button>
-      </form>
-      {{end}}
-    </div>
-    <div class="footer">Cada conexión MCP tiene acceso solo a una cuenta</div>
-  </div>
-</body>
-</html>`
-
-// getAccountID extracts account_id from the MCP tool call context.
-// Falls back to querying the first active account if context is unavailable.
 func (s *MCPServer) getAccountID(ctx context.Context) (uuid.UUID, error) {
-	if aid, ok := ctx.Value(ctxKeyAccountID).(uuid.UUID); ok {
-		return aid, nil
-	}
-	// Fallback: get first account (for development/testing)
-	var aid uuid.UUID
-	err := s.repos.DB().QueryRow(ctx, `SELECT id FROM accounts WHERE is_active = true LIMIT 1`).Scan(&aid)
-	return aid, err
+if aid, ok := ctx.Value(ctxKeyAccountID).(uuid.UUID); ok {
+return aid, nil
+}
+var aid uuid.UUID
+err := s.repos.DB().QueryRow(ctx, `SELECT id FROM accounts WHERE is_active = true LIMIT 1`).Scan(&aid)
+return aid, err
 }
 
 func hashKey(key string) string {
-	h := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(h[:])
+h := sha256.Sum256([]byte(key))
+return hex.EncodeToString(h[:])
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Tool Implementations
-// ═══════════════════════════════════════════════════════════════
-
-// ──── get_crm_stats ────
 func (s *MCPServer) toolGetCRMStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	accountID, err := s.getAccountID(ctx)
 	if err != nil {
@@ -1307,21 +531,22 @@ func (s *MCPServer) toolSearchLeads(ctx context.Context, req mcp.CallToolRequest
 
 	// Build dynamic query
 	baseWhere := ` FROM leads l
+		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
-		LEFT JOIN lead_tags lt ON lt.lead_id = l.id
-		LEFT JOIN tags t ON t.id = lt.tag_id
+		LEFT JOIN contact_tags ct ON ct.contact_id = l.contact_id
+		LEFT JOIN tags t ON t.id = ct.tag_id
 		WHERE l.account_id = $1
 	`
 	args := []interface{}{accountID}
 	argN := 2
 
 	if query != "" {
-		baseWhere += fmt.Sprintf(` AND (l.name ILIKE $%d OR l.last_name ILIKE $%d OR l.phone ILIKE $%d OR l.email ILIKE $%d)`, argN, argN, argN, argN)
+		baseWhere += fmt.Sprintf(` AND (COALESCE(c.name, l.name) ILIKE $%d OR COALESCE(c.last_name, l.last_name) ILIKE $%d OR COALESCE(c.phone, l.phone) ILIKE $%d OR COALESCE(c.email, l.email) ILIKE $%d)`, argN, argN, argN, argN)
 		args = append(args, "%"+query+"%")
 		argN++
 	}
 	if tag != "" {
-		baseWhere += fmt.Sprintf(` AND l.id IN (SELECT lt2.lead_id FROM lead_tags lt2 JOIN tags t2 ON t2.id = lt2.tag_id WHERE t2.name ILIKE $%d AND t2.account_id = $1)`, argN)
+		baseWhere += fmt.Sprintf(` AND l.id IN (SELECT l3.id FROM leads l3 JOIN contact_tags ct3 ON ct3.contact_id = l3.contact_id JOIN tags t2 ON t2.id = ct3.tag_id WHERE t2.name ILIKE $%d AND t2.account_id = $1)`, argN)
 		args = append(args, "%"+tag+"%")
 		argN++
 	}
@@ -1353,11 +578,11 @@ func (s *MCPServer) toolSearchLeads(ctx context.Context, req mcp.CallToolRequest
 	countSQL := `SELECT COUNT(DISTINCT l.id)` + baseWhere
 	_ = s.repos.DB().QueryRow(ctx, countSQL, args...).Scan(&total)
 
-	sql := `SELECT l.id, l.name, l.last_name, l.phone, l.email, l.source, l.notes,
+	sql := `SELECT l.id, COALESCE(c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), l.source, COALESCE(c.notes, l.notes),
 		       COALESCE(ps.name, '') as stage_name,
 		       COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') as tags,
 		       l.created_at` + baseWhere
-	sql += ` GROUP BY l.id, l.name, l.last_name, l.phone, l.email, l.source, l.notes, ps.name, ps.position, l.created_at
+	sql += ` GROUP BY l.id, c.name, l.name, c.last_name, l.last_name, c.phone, l.phone, c.email, l.email, l.source, c.notes, l.notes, ps.name, ps.position, l.created_at
 	         ORDER BY l.created_at DESC LIMIT ` + fmt.Sprintf("%d", limit) + ` OFFSET ` + fmt.Sprintf("%d", offset)
 
 	rows, err := s.repos.DB().Query(ctx, sql, args...)
@@ -1633,7 +858,7 @@ func (s *MCPServer) toolGetLeadAnalytics(ctx context.Context, req mcp.CallToolRe
 	argN := 2
 
 	if tag != "" {
-		baseWhere += fmt.Sprintf(` AND l.id IN (SELECT lt2.lead_id FROM lead_tags lt2 JOIN tags t2 ON t2.id = lt2.tag_id WHERE t2.name ILIKE $%d AND t2.account_id = $1)`, argN)
+		baseWhere += fmt.Sprintf(` AND l.id IN (SELECT l3.id FROM leads l3 JOIN contact_tags ct3 ON ct3.contact_id = l3.contact_id JOIN tags t2 ON t2.id = ct3.tag_id WHERE t2.name ILIKE $%d AND t2.account_id = $1)`, argN)
 		args = append(args, "%"+tag+"%")
 		argN++
 	}
@@ -1688,8 +913,8 @@ func (s *MCPServer) toolGetLeadAnalytics(ctx context.Context, req mcp.CallToolRe
 	tagRows, err := s.repos.DB().Query(ctx, `
 		SELECT t.name, COUNT(DISTINCT l.id) as cnt
 		FROM leads l
-		JOIN lead_tags lt ON lt.lead_id = l.id
-		JOIN tags t ON t.id = lt.tag_id
+		JOIN contact_tags ct ON ct.contact_id = l.contact_id
+		JOIN tags t ON t.id = ct.tag_id
 	`+baseWhere+` GROUP BY t.name ORDER BY cnt DESC LIMIT 30`, args...)
 	if err == nil {
 		defer tagRows.Close()
@@ -1743,13 +968,13 @@ func (s *MCPServer) toolGetLeadAnalytics(ctx context.Context, req mcp.CallToolRe
 	// Leads with vs without active chat
 	var withChat, withPhone int
 	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l`+baseWhere+` AND l.jid != '' AND l.jid IS NOT NULL`, args...).Scan(&withChat)
-	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l`+baseWhere+` AND l.phone IS NOT NULL AND l.phone != ''`, args...).Scan(&withPhone)
+	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id`+baseWhere+` AND COALESCE(c.phone, l.phone) IS NOT NULL AND COALESCE(c.phone, l.phone) != ''`, args...).Scan(&withPhone)
 	result["with_whatsapp"] = withChat
 	result["with_phone"] = withPhone
 
 	// Leads with notes
 	var withNotes int
-	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l`+baseWhere+` AND l.notes IS NOT NULL AND l.notes != ''`, args...).Scan(&withNotes)
+	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id`+baseWhere+` AND COALESCE(c.notes, l.notes) IS NOT NULL AND COALESCE(c.notes, l.notes) != ''`, args...).Scan(&withNotes)
 	result["with_notes"] = withNotes
 
 	return jsonResult(result), nil
@@ -1779,7 +1004,7 @@ func (s *MCPServer) toolAnalyzeLeads(ctx context.Context, req mcp.CallToolReques
 	argN := 2
 
 	if tag != "" {
-		baseWhere += fmt.Sprintf(` AND l.id IN (SELECT lt2.lead_id FROM lead_tags lt2 JOIN tags t2 ON t2.id = lt2.tag_id WHERE t2.name ILIKE $%d AND t2.account_id = $1)`, argN)
+		baseWhere += fmt.Sprintf(` AND l.id IN (SELECT l3.id FROM leads l3 JOIN contact_tags ct3 ON ct3.contact_id = l3.contact_id JOIN tags t2 ON t2.id = ct3.tag_id WHERE t2.name ILIKE $%d AND t2.account_id = $1)`, argN)
 		args = append(args, "%"+tag+"%")
 		argN++
 	}
@@ -1816,8 +1041,8 @@ func (s *MCPServer) toolAnalyzeLeads(ctx context.Context, req mcp.CallToolReques
 		WITH lead_scores AS (
 			SELECT
 				l.id,
-				l.name,
-				l.last_name,
+				COALESCE(c.name, l.name) AS name,
+				COALESCE(c.last_name, l.last_name) AS last_name,
 				COALESCE(ps.name, 'Sin etapa') AS stage_name,
 				COALESCE(ps.position, 0) AS stage_position,
 				(CASE
@@ -1831,15 +1056,15 @@ func (s *MCPServer) toolAnalyzeLeads(ctx context.Context, req mcp.CallToolReques
 				COALESCE((
 					SELECT LEAST(COUNT(*)::int, 10)
 					FROM messages m
-					JOIN chats c ON c.id = m.chat_id
-					WHERE c.account_id = l.account_id
-					AND c.jid = l.jid
+					JOIN chats ch ON ch.id = m.chat_id
+					WHERE ch.account_id = l.account_id
+					AND ch.jid = l.jid
 					AND l.jid IS NOT NULL AND l.jid != ''
 					AND m.timestamp > NOW() - INTERVAL '30 days'
 				), 0) AS chat_score,
-				(CASE WHEN l.notes IS NOT NULL AND l.notes != '' THEN 3 ELSE 0 END) AS notes_score,
+				(CASE WHEN COALESCE(c.notes, l.notes) IS NOT NULL AND COALESCE(c.notes, l.notes) != '' THEN 3 ELSE 0 END) AS notes_score,
 				LEAST(COALESCE((
-					SELECT COUNT(*)::int FROM lead_tags lt3 WHERE lt3.lead_id = l.id
+					SELECT COUNT(*)::int FROM contact_tags ct3 WHERE ct3.contact_id = l.contact_id
 				), 0), 5) AS tag_score,
 				(CASE
 					WHEN l.created_at > NOW() - INTERVAL '7 days' THEN 5
@@ -1850,11 +1075,12 @@ func (s *MCPServer) toolAnalyzeLeads(ctx context.Context, req mcp.CallToolReques
 				COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
 				l.created_at
 			FROM leads l
+			LEFT JOIN contacts c ON c.id = l.contact_id
 			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
-			LEFT JOIN lead_tags lt ON lt.lead_id = l.id
-			LEFT JOIN tags t ON t.id = lt.tag_id
+			LEFT JOIN contact_tags ct ON ct.contact_id = l.contact_id
+			LEFT JOIN tags t ON t.id = ct.tag_id
 		` + baseWhere + `
-			GROUP BY l.id, l.name, l.last_name, ps.name, ps.position, l.jid, l.notes, l.created_at, l.account_id
+			GROUP BY l.id, c.name, l.name, c.last_name, l.last_name, c.notes, l.notes, ps.name, ps.position, l.jid, l.created_at, l.account_id
 		)
 		SELECT
 			id, name, last_name, stage_name, stage_position,
@@ -2283,13 +1509,13 @@ func (s *MCPServer) toolGetLeadsWithChats(ctx context.Context, req mcp.CallToolR
 		       COALESCE(array_agg(DISTINCT t2.name) FILTER (WHERE t2.name IS NOT NULL), '{}') as tags
 		FROM leads l
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
-		LEFT JOIN lead_tags lt2 ON lt2.lead_id = l.id
-		LEFT JOIN tags t2 ON t2.id = lt2.tag_id`
+		LEFT JOIN contact_tags ct2 ON ct2.contact_id = l.contact_id
+		LEFT JOIN tags t2 ON t2.id = ct2.tag_id`
 	args := []interface{}{accountID}
 	argN := 2
 
 	if tag != "" {
-		sql += ` JOIN lead_tags lt ON lt.lead_id = l.id JOIN tags t ON t.id = lt.tag_id`
+		sql += ` JOIN contact_tags ct ON ct.contact_id = l.contact_id JOIN tags t ON t.id = ct.tag_id`
 		sql += fmt.Sprintf(` WHERE l.account_id = $1 AND t.name ILIKE $%d`, argN)
 		args = append(args, "%"+tag+"%")
 		argN++
@@ -2415,75 +1641,65 @@ func (s *MCPServer) toolGetLeadsWithChats(ctx context.Context, req mcp.CallToolR
 	}), nil
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════
-
 func jsonResult(data interface{}) *mcp.CallToolResult {
-	b, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return errResult("error al serializar resultado: " + err.Error())
-	}
-	return mcp.NewToolResultText(string(b))
+b, err := json.MarshalIndent(data, "", "  ")
+if err != nil {
+return errResult("error al serializar resultado: " + err.Error())
+}
+return mcp.NewToolResultText(string(b))
 }
 
 func errResult(msg string) *mcp.CallToolResult {
-	return mcp.NewToolResultError(msg)
+return mcp.NewToolResultError(msg)
 }
 
-// getArgs safely extracts the Arguments map from a CallToolRequest.
 func getArgs(req mcp.CallToolRequest) map[string]any {
-	if m, ok := req.Params.Arguments.(map[string]any); ok {
-		return m
-	}
-	return map[string]any{}
+if m, ok := req.Params.Arguments.(map[string]any); ok {
+return m
+}
+return map[string]any{}
 }
 
 func stringArg(req mcp.CallToolRequest, key string) string {
-	v, _ := getArgs(req)[key].(string)
-	return v
+v, _ := getArgs(req)[key].(string)
+return v
 }
 
 func uuidArg(req mcp.CallToolRequest, key string) (uuid.UUID, error) {
-	return uuid.Parse(stringArg(req, key))
+return uuid.Parse(stringArg(req, key))
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal, maxVal int) int {
-	v, ok := getArgs(req)[key].(float64)
-	if !ok || int(v) <= 0 {
-		return defaultVal
-	}
-	n := int(v)
-	if n > maxVal {
-		return maxVal
-	}
-	return n
+v, ok := getArgs(req)[key].(float64)
+if !ok || int(v) <= 0 {
+return defaultVal
+}
+n := int(v)
+if n > maxVal {
+return maxVal
+}
+return n
 }
 
-// normalizePhone normalizes a Peruvian phone number to the format: 51XXXXXXXXX
 func normalizePhone(phone string) string {
-	// Strip non-digits
-	digits := ""
-	for _, c := range phone {
-		if c >= '0' && c <= '9' {
-			digits += string(c)
-		}
-	}
-	// If 9 digits starting with 9 → prepend 51
-	if len(digits) == 9 && digits[0] == '9' {
-		return "51" + digits
-	}
-	// If starts with + then it's already international
-	if len(digits) >= 11 {
-		return digits
-	}
-	return digits
+digits := ""
+for _, c := range phone {
+if c >= '0' && c <= '9' {
+digits += string(c)
+}
+}
+if len(digits) == 9 && digits[0] == '9' {
+return "51" + digits
+}
+if len(digits) >= 11 {
+return digits
+}
+return digits
 }
 
-// init logs MCP server creation
 func init() {
-	log.Println("[MCP] Module loaded")
+log.Println("[MCP] Module loaded")
 }
 
-// Ensure pgx import works (used indirectly)
 var _ = pgx.ErrNoRows
+

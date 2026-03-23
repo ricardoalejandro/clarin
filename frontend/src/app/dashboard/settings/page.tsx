@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink } from 'lucide-react'
+import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings } from 'lucide-react'
 import { subscribeWebSocket } from '@/lib/api'
 import {
   getNotificationSettings,
@@ -315,7 +315,7 @@ export default function SettingsPage() {
 
   // Devices state
   interface DeviceItem {
-    id: string; name: string; phone: string; jid: string; status: string; qr_code: string; last_seen_at: string
+    id: string; name: string; phone: string; jid: string; status: string; qr_code: string; last_seen_at: string; receive_messages: boolean
   }
   const [devDevices, setDevDevices] = useState<DeviceItem[]>([])
   const [devLoading, setDevLoading] = useState(true)
@@ -1141,6 +1141,23 @@ export default function SettingsPage() {
     finally { setDevSaving(false) }
   }
 
+  const handleToggleReceiveMessages = async (device: DeviceItem) => {
+    const token = localStorage.getItem('token')
+    const newValue = !device.receive_messages
+    // Optimistic update
+    setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: newValue } : d))
+    try {
+      const res = await fetch(`/api/devices/${device.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ receive_messages: newValue }) })
+      const data = await res.json()
+      if (!data.success) {
+        // Revert on failure
+        setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: !newValue } : d))
+      }
+    } catch {
+      setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: !newValue } : d))
+    }
+  }
+
   const getDevStatusBadge = (status: string) => {
     switch (status) {
       case 'connected': return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-700"><Wifi className="w-3.5 h-3.5" /> Conectado</span>
@@ -1174,23 +1191,30 @@ export default function SettingsPage() {
   ]
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 overflow-y-auto flex-1 min-h-0">
+    <div className="h-full flex flex-col min-h-0 gap-3">
       {/* Header */}
-      <div>
-        <h1 className="text-xl font-semibold text-slate-900">Configuración</h1>
-        <p className="text-sm text-slate-500 mt-0.5">Administra tu perfil y preferencias</p>
+      <div className="flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-2.5">
+          <div className="w-9 h-9 bg-emerald-50 rounded-xl flex items-center justify-center">
+            <Settings className="w-5 h-5 text-emerald-600" />
+          </div>
+          <div>
+            <h1 className="text-lg font-semibold text-slate-900">Configuración</h1>
+            <p className="text-xs text-slate-500">Administra tu perfil y preferencias</p>
+          </div>
+        </div>
       </div>
 
       {/* Message */}
       {message && (
-        <div className={`px-4 py-3 rounded-xl text-sm ${message.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-red-50 text-red-700 border border-red-100'}`}>
+        <div className={`px-3 py-2 rounded-xl text-xs shrink-0 ${message.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-red-50 text-red-700 border border-red-100'}`}>
           {message.text}
         </div>
       )}
 
       {/* Tabs */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="flex overflow-x-auto border-b border-slate-200">
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden flex-1 min-h-0 flex flex-col">
+        <div className="flex overflow-x-auto border-b border-slate-200 shrink-0">
           {tabs.map((tab) => {
             const Icon = tab.icon
             return (
@@ -1210,7 +1234,7 @@ export default function SettingsPage() {
           })}
         </div>
 
-        <div className="p-6">
+        <div className="p-6 flex-1 overflow-y-auto">
           {/* Profile Tab */}
           {activeTab === 'profile' && (
             <div className="space-y-6">
@@ -1936,6 +1960,16 @@ export default function SettingsPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         {getDevStatusBadge(device.status)}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-slate-400 hidden sm:inline">{device.receive_messages ? 'Recibe' : 'No recibe'}</span>
+                          <button
+                            onClick={() => handleToggleReceiveMessages(device)}
+                            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${device.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                            title={device.receive_messages ? 'Recepción activa — clic para desactivar' : 'Recepción desactivada — clic para activar'}
+                          >
+                            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${device.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} />
+                          </button>
+                        </div>
                         <button onClick={() => { setDevEditing(device); setDevEditName(device.name || '') }} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition" title="Editar"><Edit className="w-3.5 h-3.5" /></button>
                         {device.status === 'connected' ? (
                           <>
@@ -1990,6 +2024,18 @@ export default function SettingsPage() {
                       <div><label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label><input type="text" value={devEditName} onChange={(e) => setDevEditName(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') handleDevUpdate() }} /></div>
                       <div><label className="block text-xs font-medium text-slate-600 mb-1">Teléfono</label><input type="text" value={devEditing.phone || 'Sin número'} disabled className="w-full px-3 py-2.5 border border-slate-100 rounded-xl bg-slate-50 text-sm text-slate-400" /><p className="text-[10px] text-slate-400 mt-1">Se asigna automáticamente al conectar</p></div>
                       <div><label className="block text-xs font-medium text-slate-600 mb-1">Estado</label><div className="px-3 py-2">{getDevStatusBadge(devEditing.status)}</div></div>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-600">Recibir mensajes</label>
+                          <p className="text-[10px] text-slate-400 mt-0.5">Si se desactiva, los mensajes entrantes se ignoran silenciosamente</p>
+                        </div>
+                        <button
+                          onClick={() => { handleToggleReceiveMessages(devEditing); setDevEditing({ ...devEditing, receive_messages: !devEditing.receive_messages }) }}
+                          className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${devEditing.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                        >
+                          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${devEditing.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} />
+                        </button>
+                      </div>
                     </div>
                     <div className="flex gap-3 mt-5">
                       <button onClick={() => setDevEditing(null)} className="flex-1 px-4 py-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>

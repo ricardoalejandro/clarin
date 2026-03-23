@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { Search, Plus, X, Trash2, CheckSquare, Square, MessageCircle } from 'lucide-react'
+import { Search, Plus, X, Trash2, CheckSquare, Square, MessageCircle, ShieldBan } from 'lucide-react'
 import { formatTime } from '@/utils/format'
 import { subscribeWebSocket } from '@/lib/api'
 import DeviceSelector from '@/components/chat/DeviceSelector'
@@ -431,6 +431,12 @@ export default function ChatsPage() {
                                  {formatPhone(chat.jid, chat.contact_phone) && formatPhone(chat.jid, chat.contact_phone) !== getChatDisplayName(chat) && (
                                     <span className="text-[10px] text-slate-400 truncate">
                                         {formatPhone(chat.jid, chat.contact_phone)}
+                                    </span>
+                                 )}
+                                 {chat.lead_is_blocked && (
+                                    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 border border-red-200">
+                                        <ShieldBan className="w-3 h-3" />
+                                        Bloqueado
                                     </span>
                                  )}
                             </div>

@@ -439,6 +439,44 @@ return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Err
 return c.JSON(attendance)
 }
 
+func (s *Server) handleBatchMarkAttendance(c *fiber.Ctx) error {
+	sessionID, err := uuid.Parse(c.Params("sessionId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
+	}
+
+	var req struct {
+		Records []struct {
+			ParticipantID uuid.UUID `json:"participant_id"`
+			Status        string    `json:"status"`
+			Notes         string    `json:"notes"`
+		} `json:"records"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+	if len(req.Records) == 0 {
+		return c.JSON(fiber.Map{"success": true, "count": 0})
+	}
+
+	var attendances []*domain.ProgramAttendance
+	for _, r := range req.Records {
+		notes := r.Notes
+		attendances = append(attendances, &domain.ProgramAttendance{
+			SessionID:     sessionID,
+			ParticipantID: r.ParticipantID,
+			Status:        r.Status,
+			Notes:         &notes,
+		})
+	}
+
+	if err := s.services.Program.BatchMarkAttendance(c.Context(), attendances); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "count": len(attendances)})
+}
+
 func (s *Server) handleGetAttendance(c *fiber.Ctx) error {
 sessionID, err := uuid.Parse(c.Params("sessionId"))
 if err != nil {
@@ -616,5 +654,145 @@ func (s *Server) handleCreateCampaignFromProgram(c *fiber.Ctx) error {
 		"success":          true,
 		"campaign":         campaign,
 		"recipients_count": len(recipients),
+	})
+}
+
+// =================== Program Folders ===================
+
+func (s *Server) handleGetProgramFolders(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	folders, err := s.services.Program.GetFolders(c.Context(), accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if folders == nil {
+		folders = make([]*domain.ProgramFolder, 0)
+	}
+	return c.JSON(fiber.Map{"success": true, "folders": folders})
+}
+
+func (s *Server) handleCreateProgramFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	var req struct {
+		ParentID *string `json:"parent_id"`
+		Name     string  `json:"name"`
+		Color    string  `json:"color"`
+		Icon     string  `json:"icon"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	folder := &domain.ProgramFolder{
+		AccountID: accountID,
+		Name:      req.Name,
+		Color:     req.Color,
+		Icon:      req.Icon,
+	}
+	if req.ParentID != nil && *req.ParentID != "" {
+		pid, err := uuid.Parse(*req.ParentID)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid parent folder ID"})
+		}
+		folder.ParentID = &pid
+	}
+	if err := s.services.Program.CreateFolder(c.Context(), folder); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "folder": folder})
+}
+
+func (s *Server) handleUpdateProgramFolder(c *fiber.Ctx) error {
+	fid, err := uuid.Parse(c.Params("fid"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
+	}
+	folder, err := s.services.Program.GetFolderByID(c.Context(), fid)
+	if err != nil || folder == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Folder not found"})
+	}
+	var req struct {
+		Name  *string `json:"name"`
+		Color *string `json:"color"`
+		Icon  *string `json:"icon"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Name != nil {
+		folder.Name = *req.Name
+	}
+	if req.Color != nil {
+		folder.Color = *req.Color
+	}
+	if req.Icon != nil {
+		folder.Icon = *req.Icon
+	}
+	if err := s.services.Program.UpdateFolder(c.Context(), folder); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "folder": folder})
+}
+
+func (s *Server) handleDeleteProgramFolder(c *fiber.Ctx) error {
+	fid, err := uuid.Parse(c.Params("fid"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
+	}
+	if err := s.services.Program.DeleteFolder(c.Context(), fid); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleMoveProgramToFolder(c *fiber.Ctx) error {
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	var req struct {
+		FolderID *string `json:"folder_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	var folderID *uuid.UUID
+	if req.FolderID != nil && *req.FolderID != "" {
+		fid, err := uuid.Parse(*req.FolderID)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
+		}
+		folderID = &fid
+	}
+	if err := s.services.Program.MoveProgramToFolder(c.Context(), programID, folderID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// =================== Attendance Stats ===================
+
+func (s *Server) handleGetAttendanceStats(c *fiber.Ctx) error {
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	months := c.Query("months", "") // comma-separated YYYY-MM
+	sessionStats, participantStats, err := s.services.Program.GetAttendanceStats(c.Context(), programID, months)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if sessionStats == nil {
+		sessionStats = make([]map[string]interface{}, 0)
+	}
+	if participantStats == nil {
+		participantStats = make([]map[string]interface{}, 0)
+	}
+	return c.JSON(fiber.Map{
+		"success":           true,
+		"session_stats":     sessionStats,
+		"participant_stats": participantStats,
 	})
 }

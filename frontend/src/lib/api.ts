@@ -31,7 +31,19 @@ export async function api<T>(
       headers,
     })
 
-    const data = await res.json()
+    // Handle empty responses (204 No Content, etc.)
+    if (res.status === 204 || res.headers.get('content-length') === '0') {
+      return { success: true, data: undefined as unknown as T }
+    }
+
+    let data: any
+    try {
+      data = await res.json()
+    } catch {
+      // Response body is not JSON (empty or non-JSON)
+      if (res.ok) return { success: true, data: undefined as unknown as T }
+      return { success: false, error: `Error ${res.status}` }
+    }
 
     if (!res.ok) {
       // Handle 401 - redirect to login
@@ -40,10 +52,10 @@ export async function api<T>(
         window.location.href = '/'
         return { success: false, error: 'Sesión expirada' }
       }
-      return { success: false, error: data.error || `Error ${res.status}` }
+      return { success: false, error: data?.error || `Error ${res.status}` }
     }
 
-    return { success: true, data }
+    return { success: true, data: data as T }
   } catch (err) {
     console.error('API Error:', err)
     return { success: false, error: 'Error de conexión' }

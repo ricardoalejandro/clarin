@@ -1,7 +1,7 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import {
   CalendarDays, Plus, Search, MapPin, Users, Clock, Edit2, Trash2,
   Eye, LayoutGrid, List, ChevronRight, Home, FolderPlus, MoreHorizontal,
@@ -90,6 +90,7 @@ interface Event {
   created_at: string
   total_participants: number
   participant_counts?: Record<string, number>
+  stage_counts?: Record<string, number>
   tags?: TagItem[]
 }
 
@@ -128,13 +129,13 @@ const PARTICIPANT_STATUSES = [
   { key: 'confirmed', label: 'Confirmados', color: 'bg-green-500' },
   { key: 'declined', label: 'Declinados', color: 'bg-red-500' },
   { key: 'attended', label: 'Asistieron', color: 'bg-emerald-600' },
-  { key: 'no_show', label: 'No asistieron', color: 'bg-slate-400' },
 ]
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function EventsPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   // Events & Folders state
   const [events, setEvents] = useState<Event[]>([])
   const [folders, setFolders] = useState<EventFolder[]>([])
@@ -148,7 +149,11 @@ export default function EventsPage() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [hideCancelled, setHideCancelled] = useState(true)
-  const [viewMode, setViewMode] = useState<'grid' | 'compact' | 'list'>('compact')
+  const [viewMode, setViewMode] = useState<'grid' | 'compact' | 'list'>('list')
+
+  // Sort state for list view
+  const [sortField, setSortField] = useState<string | null>('name')
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
 
   // Event modal
   const [showCreate, setShowCreate] = useState(false)
@@ -227,6 +232,30 @@ export default function EventsPage() {
     }
   }, [token, search, statusFilter, currentFolderID])
 
+  // Restore folder from URL on mount
+  useEffect(() => {
+    const folderFromUrl = searchParams.get('folder')
+    if (folderFromUrl && !currentFolderID) {
+      setCurrentFolderID(folderFromUrl)
+      // Build folder path by fetching folder ancestors
+      fetch('/api/events/folders', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json())
+        .then(data => {
+          if (!data.success) return
+          const allFolders: EventFolder[] = data.folders || []
+          const path: EventFolder[] = []
+          let fid: string | null | undefined = folderFromUrl
+          while (fid) {
+            const f = allFolders.find(x => x.id === fid)
+            if (f) { path.unshift(f); fid = f.parent_id } else break
+          }
+          setFolderPath(path)
+        })
+        .catch(() => {})
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   useEffect(() => {
     setLoading(true)
     fetchFolders()
@@ -282,6 +311,42 @@ export default function EventsPage() {
 
   // Filter out cancelled events when hideCancelled is true
   const filteredEvents = hideCancelled && !statusFilter ? events.filter(ev => ev.status !== 'cancelled') : events
+
+  // Sorted events for list view
+  const sortedEvents = useMemo(() => {
+    if (!sortField) return filteredEvents
+    return [...filteredEvents].sort((a, b) => {
+      let va: string | number = 0, vb: string | number = 0
+      switch (sortField) {
+        case 'name': va = a.name.toLowerCase(); vb = b.name.toLowerCase(); break
+        case 'status': va = a.status; vb = b.status; break
+        case 'formula': va = (a.tag_formula || (a.tags && a.tags.length > 0)) ? 1 : 0; vb = (b.tag_formula || (b.tags && b.tags.length > 0)) ? 1 : 0; break
+        case 'participants': va = a.total_participants; vb = b.total_participants; break
+        case 'asistentes': va = a.stage_counts?.['Asistieron'] || 0; vb = b.stage_counts?.['Asistieron'] || 0; break
+        case 'preinscritos': va = a.stage_counts?.['Pre inscritos'] || 0; vb = b.stage_counts?.['Pre inscritos'] || 0; break
+        case 'inscritos': va = a.stage_counts?.['Inscrito'] || 0; vb = b.stage_counts?.['Inscrito'] || 0; break
+      }
+      if (va < vb) return sortDirection === 'asc' ? -1 : 1
+      if (va > vb) return sortDirection === 'asc' ? 1 : -1
+      return 0
+    })
+  }, [filteredEvents, sortField, sortDirection])
+
+  const toggleSort = (field: string) => {
+    if (sortField === field) {
+      setSortDirection(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortField(field)
+      setSortDirection('asc')
+    }
+  }
+
+  const SortIcon = ({ field }: { field: string }) => (
+    <span className="inline-flex flex-col ml-1 -space-y-1 text-[8px] leading-none">
+      <span className={sortField === field && sortDirection === 'asc' ? 'text-emerald-600' : 'text-slate-300'}>▲</span>
+      <span className={sortField === field && sortDirection === 'desc' ? 'text-emerald-600' : 'text-slate-300'}>▼</span>
+    </span>
+  )
 
   const navigateIntoFolder = (folder: EventFolder) => {
     setCurrentFolderID(folder.id)
@@ -1137,22 +1202,23 @@ export default function EventsPage() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50">
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Evento</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Fecha</th>
-                <th className="hidden sm:table-cell text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Ubicación</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Estado</th>
-                <th className="hidden md:table-cell text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Fórmula</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Part.</th>
+                <th onClick={() => toggleSort('name')} className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Evento<SortIcon field="name" /></th>
+                <th onClick={() => toggleSort('status')} className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Estado<SortIcon field="status" /></th>
+                <th onClick={() => toggleSort('formula')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Fórmula<SortIcon field="formula" /></th>
+                <th onClick={() => toggleSort('participants')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Part.<SortIcon field="participants" /></th>
+                <th onClick={() => toggleSort('asistentes')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Asistentes<SortIcon field="asistentes" /></th>
+                <th onClick={() => toggleSort('preinscritos')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Pre inscritos<SortIcon field="preinscritos" /></th>
+                <th onClick={() => toggleSort('inscritos')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Inscritos<SortIcon field="inscritos" /></th>
                 <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredEvents.map(ev => {
+              {sortedEvents.map(ev => {
                 const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
                 return (
                   <tr key={ev.id} draggable onDragStart={e => handleDragStart(e, ev.id)}
                     className="hover:bg-slate-50 transition-colors cursor-pointer"
-                    onClick={() => router.push(`/dashboard/events/${ev.id}`)}>
+                    onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2.5">
                         <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ev.color }} />
@@ -1162,29 +1228,33 @@ export default function EventsPage() {
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-sm text-slate-600">
-                      {ev.event_date ? format(new Date(ev.event_date), "d MMM yyyy", { locale: es }) : '-'}
-                    </td>
-                    <td className="hidden sm:table-cell px-4 py-3 text-sm text-slate-600 max-w-[140px] truncate">
-                      {ev.location || '-'}
-                    </td>
                     <td className="px-4 py-3">
                       {statusOpt && (
                         <span className={`${statusOpt.color} text-xs font-medium px-2 py-1 rounded-full`}>{statusOpt.label}</span>
                       )}
                     </td>
-                    <td className="hidden md:table-cell px-4 py-3">
-                      <FormulaTagDisplay ev={ev} maxTags={2} size="xs" />
+                    <td className="px-4 py-3 text-center">
+                      {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-100 text-emerald-700">Sí</span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-400">No</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <span className="text-sm font-medium text-slate-700">{ev.total_participants}</span>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <span className="text-sm font-medium text-emerald-600">{ev.stage_counts?.['Asistieron'] || 0}</span>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <span className="text-sm font-medium text-amber-600">{ev.stage_counts?.['Pre inscritos'] || 0}</span>
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <span className="text-sm font-medium text-indigo-600">{ev.stage_counts?.['Inscrito'] || 0}</span>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
-                        <Users className="w-3.5 h-3.5 text-slate-400" />
-                        <span className="text-sm text-slate-600">{ev.total_participants}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1">
-                        <button onClick={e => { e.stopPropagation(); router.push(`/dashboard/events/${ev.id}`) }}
+                        <button onClick={e => { e.stopPropagation(); router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`) }}
                           className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Ver detalle">
                           <Eye className="w-4 h-4" />
                         </button>
@@ -1235,7 +1305,7 @@ export default function EventsPage() {
             return (
               <div key={ev.id} draggable onDragStart={e => handleDragStart(e, ev.id)}
                 className="bg-white border border-slate-200 rounded-xl overflow-hidden hover:shadow-md hover:border-slate-300 transition-all group cursor-pointer"
-                onClick={() => router.push(`/dashboard/events/${ev.id}`)}>
+                onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}>
                 <div className="h-1.5" style={{ backgroundColor: ev.color }} />
                 <div className="p-3.5">
                   <div className="flex items-start justify-between gap-1">
@@ -1297,7 +1367,7 @@ export default function EventsPage() {
                         </button>
                         {menuEventID === ev.id && (
                           <div className="absolute right-0 top-7 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" onClick={e => e.stopPropagation()}>
-                            <button onClick={() => { router.push(`/dashboard/events/${ev.id}`); setMenuEventID(null) }}
+                            <button onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }}
                               className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                               <Eye className="w-3.5 h-3.5" /> Ver detalle
                             </button>
@@ -1373,7 +1443,7 @@ export default function EventsPage() {
                   )}
 
                   <div className="flex items-center gap-2 pt-3 border-t border-slate-100">
-                    <button onClick={() => router.push(`/dashboard/events/${ev.id}`)}
+                    <button onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}
                       className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors font-medium">
                       <Eye className="w-3.5 h-3.5" />
                       Ver detalle

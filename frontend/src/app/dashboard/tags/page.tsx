@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { Plus, Trash2, Edit, Tag, X, Check, LayoutGrid, List, Grid3X3, Search } from 'lucide-react'
 
 interface TagItem {
@@ -19,11 +19,19 @@ const PRESET_COLORS = [
   '#0d9488', '#059669', '#dc2626', '#9333ea', '#c026d3', '#db2777',
 ]
 
+const PAGE_SIZE = 50
+
 type ViewMode = 'grid' | 'list' | 'compact'
 
 export default function TagsPage() {
   const [tags, setTags] = useState<TagItem[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const offsetRef = useRef(0)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [editingTag, setEditingTag] = useState<TagItem | null>(null)
   const [formName, setFormName] = useState('')
@@ -31,24 +39,90 @@ export default function TagsPage() {
   const [customColor, setCustomColor] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('grid')
   const [searchQuery, setSearchQuery] = useState('')
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
-  const fetchTags = useCallback(async () => {
+  const fetchTags = useCallback(async (reset: boolean = true) => {
+    if (!token) return
+    const offset = reset ? 0 : offsetRef.current
+    if (reset) setLoading(true)
+    else setLoadingMore(true)
+
     try {
-      const res = await fetch('/api/tags', {
+      const params = new URLSearchParams()
+      params.set('limit', String(PAGE_SIZE))
+      params.set('offset', String(offset))
+      if (searchQuery) params.set('search', searchQuery)
+
+      const res = await fetch(`/api/tags?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) setTags(data.tags || [])
+      if (data.success) {
+        const newTags: TagItem[] = data.tags || []
+        const serverTotal: number = data.total ?? 0
+        setTotal(serverTotal)
+
+        if (reset) {
+          setTags(newTags)
+          offsetRef.current = newTags.length
+        } else {
+          setTags(prev => {
+            const existingIds = new Set(prev.map(t => t.id))
+            const unique = newTags.filter(t => !existingIds.has(t.id))
+            return [...prev, ...unique]
+          })
+          offsetRef.current = offset + newTags.length
+        }
+        setHasMore((offset + newTags.length) < serverTotal)
+      }
     } catch (err) {
       console.error('Failed to fetch tags:', err)
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
-  }, [token])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, searchQuery])
+
+  const loadMore = useCallback(() => {
+    if (loadingMore || !hasMore) return
+    fetchTags(false)
+  }, [loadingMore, hasMore, fetchTags])
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current
+    if (!el || !hasMore || loadingMore) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) {
+      loadMore()
+    }
+  }, [hasMore, loadingMore, loadMore])
+
+  // IntersectionObserver sentinel for cases where content doesn't overflow (e.g. grid view)
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) loadMore() },
+      { threshold: 0 }
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [loadMore])
 
   useEffect(() => { fetchTags() }, [fetchTags])
+
+  // Debounced search
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+    searchTimerRef.current = setTimeout(() => {
+      fetchTags(true)
+    }, 300)
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery])
 
   // Close modals on Escape
   useEffect(() => {
@@ -73,7 +147,7 @@ export default function TagsPage() {
         setFormName('')
         setFormColor('#6366f1')
         setCustomColor('')
-        fetchTags()
+        fetchTags(true)
       } else {
         alert(data.error || 'Error al crear etiqueta')
       }
@@ -96,7 +170,7 @@ export default function TagsPage() {
         setFormName('')
         setFormColor('#6366f1')
         setCustomColor('')
-        fetchTags()
+        fetchTags(true)
       } else {
         alert(data.error || 'Error al actualizar etiqueta')
       }
@@ -113,7 +187,7 @@ export default function TagsPage() {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) fetchTags()
+      if (data.success) fetchTags(true)
       else alert(data.error || 'Error al eliminar etiqueta')
     } catch {
       alert('Error al eliminar etiqueta')
@@ -141,10 +215,6 @@ export default function TagsPage() {
     }
   }
 
-  const filteredTags = searchQuery
-    ? tags.filter(t => t.name.toLowerCase().includes(searchQuery.toLowerCase()))
-    : tags
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -154,12 +224,12 @@ export default function TagsPage() {
   }
 
   return (
-    <div className="space-y-6 overflow-y-auto flex-1 min-h-0">
+    <div className="flex flex-col gap-4 flex-1 min-h-0">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 shrink-0">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Etiquetas</h1>
-          <p className="text-gray-600 mt-1">{tags.length} etiquetas globales — se comparten en contactos, leads y chats</p>
+          <p className="text-gray-600 mt-1">{total} etiquetas globales — se comparten en contactos, leads y chats</p>
         </div>
         <button
           onClick={openCreate}
@@ -171,7 +241,7 @@ export default function TagsPage() {
       </div>
 
       {/* Search & View Toggle */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 shrink-0">
         <div className="relative flex-1 max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
@@ -207,8 +277,20 @@ export default function TagsPage() {
         </div>
       </div>
 
-      {/* Tags display */}
-      {filteredTags.length === 0 ? (
+      {/* Counter */}
+      <div className="px-1 shrink-0">
+        <p className="text-xs text-gray-500">
+          Mostrando {tags.length} de {total.toLocaleString()} etiquetas
+        </p>
+      </div>
+
+      {/* Tags display - scrollable container */}
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="overflow-y-auto flex-1 min-h-0"
+      >
+      {tags.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
           <Tag className="w-12 h-12 text-gray-300 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-gray-900">{searchQuery ? 'Sin resultados' : 'Sin etiquetas'}</h3>
@@ -219,7 +301,7 @@ export default function TagsPage() {
       ) : viewMode === 'grid' ? (
         /* Grid View */
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
-          {filteredTags.map(tag => (
+          {tags.map(tag => (
             <div
               key={tag.id}
               className="bg-white rounded-lg border border-gray-200 px-3 py-2.5 hover:shadow-sm transition group flex items-center gap-2"
@@ -240,7 +322,7 @@ export default function TagsPage() {
       ) : viewMode === 'list' ? (
         /* List View */
         <div className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
-          {filteredTags.map(tag => (
+          {tags.map(tag => (
             <div
               key={tag.id}
               className="flex items-center gap-4 px-4 py-3 hover:bg-gray-50 transition group"
@@ -263,7 +345,7 @@ export default function TagsPage() {
       ) : (
         /* Compact View - colored chips */
         <div className="flex flex-wrap gap-2">
-          {filteredTags.map(tag => (
+          {tags.map(tag => (
             <div
               key={tag.id}
               className="inline-flex items-center gap-1.5 pl-3 pr-1 py-1 rounded-full text-white text-sm font-medium group cursor-default"
@@ -288,6 +370,15 @@ export default function TagsPage() {
           ))}
         </div>
       )}
+      {/* Sentinel for IntersectionObserver — triggers loadMore when visible */}
+      {hasMore && <div ref={sentinelRef} className="h-4" />}
+      {loadingMore && (
+        <div className="flex items-center justify-center py-4 gap-2 text-sm text-green-600">
+          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-600" />
+          Cargando más...
+        </div>
+      )}
+      </div>
 
       {/* Create/Edit Modal */}
       {(showCreateModal || editingTag) && (

@@ -65,13 +65,15 @@ const (
 	PermTags       = "tags"
 	PermSettings     = "settings"
 	PermIntegrations = "integrations"
+	PermSurveys      = "surveys"
+	PermDynamics     = "dynamics"
 	PermAll          = "*"
 )
 
 // AllPermissions contains all available permission modules in display order
 var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
-	PermDevices, PermEvents, PermBroadcasts, PermTags, PermSettings, PermIntegrations,
+	PermDevices, PermEvents, PermBroadcasts, PermTags, PermSettings, PermIntegrations, PermSurveys, PermDynamics,
 }
 
 // Role represents a named set of module permissions
@@ -105,16 +107,17 @@ type UserAccount struct {
 
 // Device represents a WhatsApp connection
 type Device struct {
-	ID         uuid.UUID  `json:"id"`
-	AccountID  uuid.UUID  `json:"account_id"`
-	Name       *string    `json:"name,omitempty"`
-	Phone      *string    `json:"phone,omitempty"`
-	JID        *string    `json:"jid,omitempty"`
-	Status     *string    `json:"status,omitempty"` // disconnected, connecting, connected, logged_out
-	QRCode     *string    `json:"qr_code,omitempty"`
-	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ID              uuid.UUID  `json:"id"`
+	AccountID       uuid.UUID  `json:"account_id"`
+	Name            *string    `json:"name,omitempty"`
+	Phone           *string    `json:"phone,omitempty"`
+	JID             *string    `json:"jid,omitempty"`
+	Status          *string    `json:"status,omitempty"` // disconnected, connecting, connected, logged_out
+	QRCode          *string    `json:"qr_code,omitempty"`
+	ReceiveMessages bool       `json:"receive_messages"`
+	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // DeviceStatus constants
@@ -226,6 +229,9 @@ type Chat struct {
 	ContactAvatarURL  *string `json:"contact_avatar_url,omitempty"`
 	ContactCustomName *string `json:"contact_custom_name,omitempty"`
 	ContactName       *string `json:"contact_name,omitempty"`
+
+	// Lead blocked status (populated via JOIN on JID)
+	LeadIsBlocked bool `json:"lead_is_blocked"`
 
 	// Relations (populated on demand)
 	Contact  *Contact   `json:"contact,omitempty"`
@@ -367,6 +373,11 @@ type Lead struct {
 	CustomFields map[string]interface{} `json:"custom_fields,omitempty"`
 	AssignedTo   *uuid.UUID             `json:"assigned_to,omitempty"`
 	KommoID      *int64                 `json:"kommo_id,omitempty"`
+	IsArchived   bool                   `json:"is_archived"`
+	ArchivedAt   *time.Time             `json:"archived_at,omitempty"`
+	IsBlocked    bool                   `json:"is_blocked"`
+	BlockedAt    *time.Time             `json:"blocked_at,omitempty"`
+	BlockReason  string                 `json:"block_reason,omitempty"`
 	CreatedAt    time.Time              `json:"created_at"`
 	UpdatedAt    time.Time              `json:"updated_at"`
 
@@ -560,6 +571,7 @@ type Event struct {
 
 	// Populated on demand
 	ParticipantCounts map[string]int `json:"participant_counts,omitempty"`
+	StageCounts       map[string]int `json:"stage_counts,omitempty"`
 	TotalParticipants int            `json:"total_participants"`
 	PipelineName      *string        `json:"pipeline_name,omitempty"`
 	Tags              []*Tag         `json:"tags,omitempty"`
@@ -618,6 +630,11 @@ type EventParticipant struct {
 	Tags            []*Tag       `json:"tags,omitempty"`
 	StageName       *string      `json:"stage_name,omitempty"`
 	StageColor      *string      `json:"stage_color,omitempty"`
+	// Lead pipeline info (populated on demand)
+	LeadPipelineID *uuid.UUID `json:"lead_pipeline_id,omitempty"`
+	LeadStageID    *uuid.UUID `json:"lead_stage_id,omitempty"`
+	LeadStageName  *string    `json:"lead_stage_name,omitempty"`
+	LeadStageColor *string    `json:"lead_stage_color,omitempty"`
 }
 
 // Participant status constants
@@ -738,10 +755,27 @@ func DefaultCampaignSettings() map[string]interface{} {
 
 // --- Programs (Courses, Workshops, etc.) ---
 
+// ProgramFolder represents a folder for organising programs
+type ProgramFolder struct {
+	ID        uuid.UUID  `json:"id"`
+	AccountID uuid.UUID  `json:"account_id"`
+	ParentID  *uuid.UUID `json:"parent_id,omitempty"`
+	Name      string     `json:"name"`
+	Color     string     `json:"color"`
+	Icon      string     `json:"icon"`
+	Position  int        `json:"position"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+
+	// Populated on demand
+	ProgramCount int `json:"program_count,omitempty"`
+}
+
 // Program represents an educational program, course, or workshop
 type Program struct {
 	ID          uuid.UUID  `json:"id"`
 	AccountID   uuid.UUID  `json:"account_id"`
+	FolderID    *uuid.UUID `json:"folder_id,omitempty"`
 	Name        string     `json:"name"`
 	Description *string    `json:"description,omitempty"`
 	Status      string     `json:"status"` // active, completed, archived
@@ -902,3 +936,348 @@ type ErosMessage struct {
 	Content        string    `json:"content"`
 	CreatedAt      time.Time `json:"created_at"`
 }
+
+// AITokenLog represents a log of AI tokens consumed by a user
+type AITokenLog struct {
+	ID            uuid.UUID `json:"id"`
+	AccountID     uuid.UUID `json:"account_id"`
+	UserID        uuid.UUID `json:"user_id"`
+	APIKeyPreview string    `json:"api_key_preview"`
+	Model         string    `json:"model"`
+	InputTokens   int       `json:"input_tokens"`
+	OutputTokens  int       `json:"output_tokens"`
+	TotalTokens   int       `json:"total_tokens"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// ── Automations ───────────────────────────────────────────────────────────
+
+// Automation trigger type constants
+const (
+	AutoTriggerLeadCreated      = "lead_created"
+	AutoTriggerLeadStageChanged = "lead_stage_changed"
+	AutoTriggerTagAssigned      = "tag_assigned"
+	AutoTriggerTagRemoved       = "tag_removed"
+	AutoTriggerMessageReceived  = "message_received"
+	AutoTriggerManual           = "manual"
+)
+
+// Automation node type constants
+const (
+	AutoNodeSendWhatsApp = "send_whatsapp"
+	AutoNodeChangeStage  = "change_stage"
+	AutoNodeAssignTag    = "assign_tag"
+	AutoNodeRemoveTag    = "remove_tag"
+	AutoNodeDelay        = "delay"
+	AutoNodeCondition    = "condition"
+)
+
+// Automation execution status constants
+const (
+	AutoExecPending   = "pending"
+	AutoExecRunning   = "running"
+	AutoExecPaused    = "paused"
+	AutoExecCompleted = "completed"
+	AutoExecFailed    = "failed"
+)
+
+// AutomationGraph is the ReactFlow-compatible graph stored as JSONB
+type AutomationGraph struct {
+	Nodes []AutomationNode `json:"nodes"`
+	Edges []AutomationEdge `json:"edges"`
+}
+
+// AutomationNode represents a single node in the automation graph (ReactFlow format)
+type AutomationNode struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`      // trigger, action, condition, delay
+	Position map[string]float64     `json:"position"`  // {x, y}
+	Data     map[string]interface{} `json:"data"`      // node config: {nodeType, label, config}
+}
+
+// AutomationEdge represents a connection between nodes (ReactFlow format)
+type AutomationEdge struct {
+	ID           string `json:"id"`
+	Source       string `json:"source"`
+	Target       string `json:"target"`
+	SourceHandle string `json:"sourceHandle,omitempty"` // "true" or "false" for condition nodes
+}
+
+// Automation represents a workflow automation definition
+type Automation struct {
+	ID              uuid.UUID              `json:"id"`
+	AccountID       uuid.UUID              `json:"account_id"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description"`
+	TriggerType     string                 `json:"trigger"`
+	TriggerConfig   map[string]interface{} `json:"trigger_config"`
+	Config          AutomationGraph        `json:"graph"`
+	IsActive        bool                   `json:"is_active"`
+	ExecutionCount  int                    `json:"execution_count"`
+	LastTriggeredAt *time.Time             `json:"last_triggered_at,omitempty"`
+	CreatedAt       time.Time              `json:"created_at"`
+	UpdatedAt       time.Time              `json:"updated_at"`
+}
+
+// AutomationExecution represents a single run of an automation for a lead
+type AutomationExecution struct {
+	ID             uuid.UUID              `json:"id"`
+	AutomationID   uuid.UUID              `json:"automation_id"`
+	AccountID      uuid.UUID              `json:"account_id"`
+	LeadID         *uuid.UUID             `json:"lead_id,omitempty"`
+	Status         string                 `json:"status"`
+	CurrentNodeID  string                 `json:"current_node_id"`
+	NextNodeID     string                 `json:"next_node_id,omitempty"`
+	ResumeAt       *time.Time             `json:"resume_at,omitempty"`
+	ConfigSnapshot *AutomationGraph       `json:"config_snapshot,omitempty"`
+	ContextData    map[string]interface{} `json:"context_data"`
+	ErrorMessage   string                 `json:"error_message,omitempty"`
+	StartedAt      time.Time              `json:"started_at"`
+	CompletedAt    *time.Time             `json:"completed_at,omitempty"`
+	CreatedAt      time.Time              `json:"created_at"`
+
+	// Populated on demand
+	AutomationName string `json:"automation_name,omitempty"`
+}
+
+// AutomationExecutionLog records the result of each node execution
+type AutomationExecutionLog struct {
+	ID          uuid.UUID `json:"id"`
+	ExecutionID uuid.UUID `json:"execution_id"`
+	NodeID      string    `json:"node_id"`
+	NodeType    string    `json:"node_type"`
+	Status      string    `json:"status"` // success, failed, skipped
+	DurationMs  int       `json:"duration_ms"`
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// AutomationStats summarizes an automation's execution history
+type AutomationStats struct {
+	TotalExecutions     int `json:"total_executions"`
+	CompletedExecutions int `json:"completed"`
+	FailedExecutions    int `json:"failed"`
+	ActiveExecutions    int `json:"active"`
+}
+
+// ─── Surveys / Forms ──────────────────────────────────────────────────────────
+
+// SurveyBranding holds visual customization for the public form
+type SurveyBranding struct {
+	LogoURL       string `json:"logo_url,omitempty"`
+	BgColor       string `json:"bg_color,omitempty"`
+	AccentColor   string `json:"accent_color,omitempty"`
+	BgImageURL    string `json:"bg_image_url,omitempty"`
+	FontFamily    string `json:"font_family,omitempty"`    // Inter, Poppins, Playfair Display, etc.
+	TitleSize     string `json:"title_size,omitempty"`     // sm, md, lg, xl
+	TextColor     string `json:"text_color,omitempty"`     // custom text color for titles
+	ButtonStyle   string `json:"button_style,omitempty"`   // rounded, pill, square
+	BgOverlay     string `json:"bg_overlay,omitempty"`     // overlay opacity: 0, 0.2, 0.4, 0.6
+	QuestionAlign string `json:"question_align,omitempty"` // left, center
+}
+
+// Survey represents a form/survey that can be shared via a public link
+type Survey struct {
+	ID                  uuid.UUID       `json:"id"`
+	AccountID           uuid.UUID       `json:"account_id"`
+	Name                string          `json:"name"`
+	Description         string          `json:"description"`
+	Slug                string          `json:"slug"`
+	Status              string          `json:"status"` // draft, active, closed
+	WelcomeTitle        string          `json:"welcome_title"`
+	WelcomeDescription  string          `json:"welcome_description"`
+	ThankYouTitle       string          `json:"thank_you_title"`
+	ThankYouMessage     string          `json:"thank_you_message"`
+	ThankYouRedirectURL string          `json:"thank_you_redirect_url"`
+	Branding            SurveyBranding  `json:"branding"`
+	IsTemplate          bool            `json:"is_template"`
+	CreatedBy           *uuid.UUID      `json:"created_by,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	// Populated on demand
+	QuestionCount int `json:"question_count,omitempty"`
+	ResponseCount int `json:"response_count,omitempty"`
+}
+
+// SurveyQuestionConfig holds type-specific configuration for a question
+type SurveyQuestionConfig struct {
+	Options     []string `json:"options,omitempty"`      // single_choice, multiple_choice
+	MaxRating   int      `json:"max_rating,omitempty"`   // rating (default 5)
+	LikertScale int      `json:"likert_scale,omitempty"` // likert scale points (default 5)
+	LikertMin   string   `json:"likert_min,omitempty"`   // likert min label
+	LikertMax   string   `json:"likert_max,omitempty"`   // likert max label
+	AllowedTypes []string `json:"allowed_types,omitempty"` // file_upload mime types
+	MaxSizeMB   int      `json:"max_size_mb,omitempty"`  // file_upload max size
+	Placeholder string   `json:"placeholder,omitempty"`  // text input placeholder
+}
+
+// SurveyLogicRule defines a conditional jump based on an answer value
+type SurveyLogicRule struct {
+	Value      string    `json:"value"`                  // answer value to match
+	Operator   string    `json:"operator,omitempty"`     // eq, neq, contains, gt, lt (default: eq)
+	JumpTo     uuid.UUID `json:"jump_to"`                // question ID to jump to
+}
+
+// SurveyQuestion represents a single question in a survey
+type SurveyQuestion struct {
+	ID          uuid.UUID             `json:"id"`
+	SurveyID    uuid.UUID             `json:"survey_id"`
+	OrderIndex  int                   `json:"order_index"`
+	Type        string                `json:"type"` // short_text, long_text, single_choice, multiple_choice, rating, likert, date, email, phone, file_upload
+	Title       string                `json:"title"`
+	Description string                `json:"description"`
+	Required    bool                  `json:"required"`
+	Config      SurveyQuestionConfig  `json:"config"`
+	LogicRules  []SurveyLogicRule     `json:"logic_rules"`
+	CreatedAt   time.Time             `json:"created_at"`
+	UpdatedAt   time.Time             `json:"updated_at"`
+}
+
+// SurveyResponse represents a complete submission by one respondent
+type SurveyResponse struct {
+	ID              uuid.UUID  `json:"id"`
+	SurveyID        uuid.UUID  `json:"survey_id"`
+	AccountID       uuid.UUID  `json:"account_id"`
+	RespondentToken string     `json:"respondent_token"`
+	LeadID          *uuid.UUID `json:"lead_id,omitempty"`
+	Source          string     `json:"source,omitempty"` // direct, ws, ig, email, qr
+	IPAddress       string     `json:"-"`
+	UserAgent       string     `json:"-"`
+	StartedAt       time.Time  `json:"started_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	// Populated on demand
+	Answers []SurveyAnswer `json:"answers,omitempty"`
+}
+
+// SurveyAnswer represents the answer to a single question within a response
+type SurveyAnswer struct {
+	ID         uuid.UUID `json:"id"`
+	ResponseID uuid.UUID `json:"response_id"`
+	QuestionID uuid.UUID `json:"question_id"`
+	Value      string    `json:"value"`
+	FileURL    string    `json:"file_url,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// SurveyAnalytics holds aggregated data for a survey's results
+type SurveyAnalytics struct {
+	TotalResponses    int                          `json:"total_responses"`
+	CompletionRate    float64                      `json:"completion_rate"`
+	AvgCompletionSec  float64                      `json:"avg_completion_seconds"`
+	QuestionStats     []SurveyQuestionStats        `json:"question_stats"`
+}
+
+// SurveyQuestionStats holds per-question aggregated stats
+type SurveyQuestionStats struct {
+	QuestionID   uuid.UUID          `json:"question_id"`
+	QuestionType string             `json:"question_type"`
+	Title        string             `json:"title"`
+	TotalAnswers int                `json:"total_answers"`
+	// For choice-based questions
+	OptionCounts map[string]int     `json:"option_counts,omitempty"`
+	// For numeric questions (rating, likert)
+	Average      *float64           `json:"average,omitempty"`
+	Distribution map[string]int     `json:"distribution,omitempty"`
+}
+
+// ─── Dynamics (Interactive Activities) ────────────────────────────────────────
+
+// DynamicConfig holds visual configuration for a dynamic activity
+type DynamicConfig struct {
+	Title            string  `json:"title"`
+	ScratchColor     string  `json:"scratch_color"`
+	ScratchThreshold int     `json:"scratch_threshold"`
+	ScratchSound     bool    `json:"scratch_sound"`
+	ShowConfetti     bool    `json:"show_confetti"`
+	VictorySound     bool    `json:"victory_sound"`
+	OverlayImageURL  string  `json:"overlay_image_url"`
+	BgColor          string  `json:"bg_color"`
+}
+
+// Dynamic represents an interactive activity (e.g. scratch card)
+type Dynamic struct {
+	ID          uuid.UUID     `json:"id"`
+	AccountID   uuid.UUID     `json:"account_id"`
+	Type        string        `json:"type"`
+	Name        string        `json:"name"`
+	Slug        string        `json:"slug"`
+	Description string        `json:"description"`
+	Config      DynamicConfig `json:"config"`
+	IsActive    bool          `json:"is_active"`
+	ItemCount   int           `json:"item_count"`
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+}
+
+// DynamicItem represents a single item within a dynamic activity
+type DynamicItem struct {
+	ID          uuid.UUID   `json:"id"`
+	DynamicID   uuid.UUID   `json:"dynamic_id"`
+	OptionIDs   []uuid.UUID `json:"option_ids"`
+	ImageURL    string      `json:"image_url"`
+	ThoughtText string      `json:"thought_text"`
+	Author      string      `json:"author"`
+	Tipo        string      `json:"tipo"`
+	FileSize    int64       `json:"file_size"`
+	SortOrder   int         `json:"sort_order"`
+	IsActive    bool        `json:"is_active"`
+	CreatedAt   time.Time   `json:"created_at"`
+}
+
+// DynamicOption represents a selectable category for items within a dynamic
+type DynamicOption struct {
+	ID        uuid.UUID `json:"id"`
+	DynamicID uuid.UUID `json:"dynamic_id"`
+	Name      string    `json:"name"`
+	Emoji     string    `json:"emoji"`
+	SortOrder int       `json:"sort_order"`
+	ItemCount int       `json:"item_count"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// DynamicLink represents a public link for a dynamic with its own WhatsApp config
+type DynamicLink struct {
+	ID                    uuid.UUID  `json:"id"`
+	DynamicID             uuid.UUID  `json:"dynamic_id"`
+	Slug                  string     `json:"slug"`
+	WhatsAppEnabled       bool       `json:"whatsapp_enabled"`
+	WhatsAppMessage       string     `json:"whatsapp_message"`
+	ExtraMessageText      string     `json:"extra_message_text"`
+	ExtraMessageMediaURL  string     `json:"extra_message_media_url"`
+	ExtraMessageMediaType string     `json:"extra_message_media_type"`
+	StartsAt              *time.Time `json:"starts_at"`
+	EndsAt                *time.Time `json:"ends_at"`
+	IsActive              bool       `json:"is_active"`
+	CreatedAt             time.Time  `json:"created_at"`
+}
+
+// DynamicLinkRegistration represents a participant registration on a public link
+type DynamicLinkRegistration struct {
+	ID        uuid.UUID `json:"id"`
+	LinkID    uuid.UUID `json:"link_id"`
+	FullName  string    `json:"full_name"`
+	Phone     string    `json:"phone"`
+	Age       int       `json:"age"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// DynamicWhatsAppQueue represents a queued WhatsApp message for a dynamic
+type DynamicWhatsAppQueue struct {
+	ID             uuid.UUID  `json:"id"`
+	DynamicID      uuid.UUID  `json:"dynamic_id"`
+	AccountID      uuid.UUID  `json:"account_id"`
+	LinkID         uuid.UUID  `json:"link_id"`
+	Phone          string     `json:"phone"`
+	ItemID         uuid.UUID  `json:"item_id"`
+	ImageURL       string     `json:"image_url"`
+	Caption        string     `json:"caption"`
+	ExtraText      string     `json:"extra_text"`
+	ExtraMediaURL  string     `json:"extra_media_url"`
+	ExtraMediaType string     `json:"extra_media_type"`
+	Status         string     `json:"status"`
+	ErrorMsg       string     `json:"error_msg"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SentAt         *time.Time `json:"sent_at"`
+}
+

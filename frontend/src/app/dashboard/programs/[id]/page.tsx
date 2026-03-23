@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
-  Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive
+  Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program, ProgramParticipant, ProgramSession, ProgramAttendance } from '@/types/program';
 import { Chat } from '@/types/chat';
+import { Contact } from '@/types/contact';
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector';
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal';
 import LeadDetailPanel from '@/components/LeadDetailPanel';
@@ -30,6 +31,39 @@ interface Device {
 const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 const DAY_NAMES_FULL = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
+const contactToLead = (c: Contact) => ({
+  id: c.id,
+  jid: c.jid || '',
+  contact_id: c.id,
+  name: c.custom_name ?? c.name ?? '',
+  last_name: c.last_name ?? null,
+  short_name: c.short_name ?? null,
+  phone: c.phone ?? '',
+  email: c.email ?? '',
+  company: c.company ?? null,
+  age: c.age ?? null,
+  dni: c.dni ?? null,
+  birth_date: c.birth_date ?? null,
+  status: 'new',
+  pipeline_id: null,
+  stage_id: null,
+  stage_name: null,
+  stage_color: null,
+  stage_position: null,
+  notes: c.notes ?? '',
+  tags: c.tags || [],
+  structured_tags: c.structured_tags || null,
+  kommo_id: c.kommo_id ?? null,
+  is_archived: false,
+  archived_at: null,
+  is_blocked: false,
+  blocked_at: null,
+  block_reason: '',
+  assigned_to: '',
+  created_at: c.created_at || '',
+  updated_at: c.updated_at || '',
+}) as any;
+
 export default function ProgramDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -38,7 +72,7 @@ export default function ProgramDetailPage() {
   const [program, setProgram] = useState<Program | null>(null);
   const [participants, setParticipants] = useState<ProgramParticipant[]>([]);
   const [sessions, setSessions] = useState<ProgramSession[]>([]);
-  const [activeTab, setActiveTab] = useState<'participants' | 'sessions'>('participants');
+  const [activeTab, setActiveTab] = useState<'participants' | 'sessions' | 'stats'>('participants');
   const [loading, setLoading] = useState(true);
   const [devices, setDevices] = useState<Device[]>([]);
 
@@ -54,6 +88,11 @@ export default function ProgramDetailPage() {
   const [selectedSession, setSelectedSession] = useState<ProgramSession | null>(null);
   const [attendanceData, setAttendanceData] = useState<Record<string, { status: string, notes: string }>>({});
 
+  // Edit session state
+  const [editingSession, setEditingSession] = useState<ProgramSession | null>(null);
+  const [editSessionForm, setEditSessionForm] = useState({ date: '', topic: '', start_time: '', end_time: '', location: '' });
+  const [savingSession, setSavingSession] = useState(false);
+
   // Campaign state
   const [creatingCampaign, setCreatingCampaign] = useState(false);
 
@@ -66,6 +105,8 @@ export default function ProgramDetailPage() {
   // Participant detail panel
   const [selectedLead, setSelectedLead] = useState<any | null>(null);
   const [loadingLead, setLoadingLead] = useState(false);
+  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+  const [contactPanelMode, setContactPanelMode] = useState(false);
 
   // WhatsApp inline chat
   const [showInlineChat, setShowInlineChat] = useState(false);
@@ -87,12 +128,35 @@ export default function ProgramDetailPage() {
   });
   const [generating, setGenerating] = useState(false);
 
+  // Stats
+  const [statsData, setStatsData] = useState<{ session_stats: any[]; participant_stats: any[] } | null>(null);
+  const [loadingStats, setLoadingStats] = useState(false);
+  const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
+
   useEffect(() => {
     if (programId) {
       fetchProgramData();
       fetchDevices();
     }
   }, [programId]);
+
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (showDeviceSelector) { setShowDeviceSelector(false); return; }
+      if (showInlineChat) { setShowInlineChat(false); return; }
+      if (isAttendanceOpen) { setIsAttendanceOpen(false); return; }
+      if (isGenerateSessionsOpen) { setIsGenerateSessionsOpen(false); return; }
+      if (isCreateSessionOpen) { setIsCreateSessionOpen(false); return; }
+      if (editingSession) { setEditingSession(null); return; }
+      if (isAddParticipantOpen) { setIsAddParticipantOpen(false); return; }
+      if (isEditModalOpen) { setIsEditModalOpen(false); return; }
+      if (showCampaignModal) { setShowCampaignModal(false); return; }
+      if (selectedLead) { setSelectedLead(null); return; }
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [showDeviceSelector, showInlineChat, isAttendanceOpen, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, selectedLead]);
 
   const fetchProgramData = async () => {
     try {
@@ -120,6 +184,30 @@ export default function ProgramDetailPage() {
       if (data.success) setDevices((data.devices || []).filter((d: Device) => d.status === 'connected'));
     } catch (e) { console.error(e); }
   };
+
+  const fetchStats = useCallback(async (months?: string[]) => {
+    setLoadingStats(true);
+    try {
+      const params = new URLSearchParams();
+      const m = months ?? selectedMonths;
+      if (m.length > 0) params.set('months', m.join(','));
+      const qs = params.toString();
+      const res = await fetch(`/api/programs/${programId}/attendance-stats${qs ? '?' + qs : ''}`, { headers: { Authorization: `Bearer ${token()}` } });
+      const data = await res.json();
+      if (data.success) setStatsData({ session_stats: data.session_stats || [], participant_stats: data.participant_stats || [] });
+    } catch (e) { console.error(e); }
+    finally { setLoadingStats(false); }
+  }, [programId, selectedMonths]);
+
+  // Fetch stats when tab is activated
+  useEffect(() => {
+    if (activeTab === 'stats' && !statsData && !loadingStats) fetchStats();
+  }, [activeTab, statsData, loadingStats, fetchStats]);
+
+  // Re-fetch stats when month filter changes
+  useEffect(() => {
+    if (activeTab === 'stats' && statsData) fetchStats(selectedMonths);
+  }, [selectedMonths]);
 
   const handleAddParticipants = async (selected: SelectedPerson[]) => {
     try {
@@ -201,23 +289,39 @@ export default function ProgramDetailPage() {
 
   // Participant detail
   const handleParticipantClick = async (participant: ProgramParticipant) => {
-    if (!participant.lead_id) {
-      // No lead linked — check if there's a lead by contact phone
-      return;
-    }
-    setLoadingLead(true);
-    try {
-      const res = await fetch(`/api/leads/${participant.lead_id}`, {
-        headers: { Authorization: `Bearer ${token()}` }
-      });
-      const data = await res.json();
-      if (data.success && data.lead) {
-        setSelectedLead(data.lead);
+    if (participant.lead_id) {
+      setContactPanelMode(false);
+      setLoadingLead(true);
+      try {
+        const res = await fetch(`/api/leads/${participant.lead_id}`, {
+          headers: { Authorization: `Bearer ${token()}` }
+        });
+        const data = await res.json();
+        if (data.success && data.lead) {
+          setSelectedLead(data.lead);
+        }
+      } catch (error) {
+        console.error('Error fetching lead:', error);
+      } finally {
+        setLoadingLead(false);
       }
-    } catch (error) {
-      console.error('Error fetching lead:', error);
-    } finally {
-      setLoadingLead(false);
+    } else if (participant.contact_id) {
+      setContactPanelMode(true);
+      setLoadingLead(true);
+      try {
+        const res = await fetch(`/api/contacts/${participant.contact_id}`, {
+          headers: { Authorization: `Bearer ${token()}` }
+        });
+        const data = await res.json();
+        if (data.success && data.contact) {
+          setSelectedContact(data.contact);
+          setSelectedLead(contactToLead(data.contact));
+        }
+      } catch (error) {
+        console.error('Error fetching contact:', error);
+      } finally {
+        setLoadingLead(false);
+      }
     }
   };
 
@@ -292,6 +396,42 @@ export default function ProgramDetailPage() {
     }
   };
 
+  const openEditSession = (session: ProgramSession) => {
+    setEditSessionForm({
+      date: session.date ? session.date.split('T')[0] : '',
+      topic: session.topic || '',
+      start_time: session.start_time || '',
+      end_time: session.end_time || '',
+      location: session.location || '',
+    });
+    setEditingSession(session);
+  };
+
+  const handleUpdateSession = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingSession) return;
+    setSavingSession(true);
+    try {
+      const res = await api(`/api/programs/${programId}/sessions/${editingSession.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          ...editSessionForm,
+          start_time: editSessionForm.start_time || undefined,
+          end_time: editSessionForm.end_time || undefined,
+          location: editSessionForm.location || undefined,
+        })
+      });
+      if (res.success) {
+        setEditingSession(null);
+        fetchProgramData();
+      }
+    } catch (error) {
+      console.error('Error updating session:', error);
+    } finally {
+      setSavingSession(false);
+    }
+  };
+
   const handleDeleteSession = async (sessionId: string) => {
     if (!confirm('¿Estás seguro de eliminar esta sesión?')) return;
     try {
@@ -324,15 +464,19 @@ export default function ProgramDetailPage() {
   const saveAttendance = async () => {
     if (!selectedSession) return;
     try {
-      for (const [participantId, data] of Object.entries(attendanceData)) {
-        if (!data.status) continue;
-        await api(`/api/programs/${programId}/sessions/${selectedSession.id}/attendance`, {
+      const records = Object.entries(attendanceData)
+        .filter(([, data]) => data.status || data.notes?.trim())
+        .map(([participantId, data]) => ({
+          participant_id: participantId,
+          status: data.status || '',
+          notes: data.notes || ''
+        }));
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < records.length; i += BATCH_SIZE) {
+        const chunk = records.slice(i, i + BATCH_SIZE);
+        await api(`/api/programs/${programId}/sessions/${selectedSession.id}/attendance/batch`, {
           method: 'POST',
-          body: JSON.stringify({
-            participant_id: participantId,
-            status: data.status,
-            notes: data.notes
-          })
+          body: JSON.stringify({ records: chunk })
         });
       }
       setIsAttendanceOpen(false);
@@ -413,7 +557,22 @@ export default function ProgramDetailPage() {
             body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
           });
         }
-        alert(`Campaña creada con ${data.recipients_count} destinatarios. Puedes verla e iniciarla en Envíos Masivos.`);
+        // Add spreadsheet recipients if any
+        if (formResult.recipients && formResult.recipients.length > 0 && data.campaign) {
+          const sheetRecipients = formResult.recipients.map(r => ({
+            jid: r.phone + '@s.whatsapp.net',
+            name: r.name || '',
+            phone: r.phone,
+            metadata: r.metadata || {},
+          }));
+          await fetch(`/api/campaigns/${data.campaign.id}/recipients`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recipients: sheetRecipients }),
+          });
+        }
+        const extraCount = formResult.recipients?.length || 0;
+        alert(`Campaña creada con ${(data.recipients_count || 0) + extraCount} destinatarios. Puedes verla e iniciarla en Envíos Masivos.`);
         setShowCampaignModal(false);
       } else {
         alert(data.error || 'Error al crear campaña');
@@ -474,24 +633,24 @@ export default function ProgramDetailPage() {
   }
 
   return (
-    <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
+    <div className="h-full flex flex-col min-h-0 overflow-hidden gap-3">
       {/* Header */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3 shrink-0">
         <button
           onClick={() => router.push('/dashboard/programs')}
-          className="p-2 hover:bg-slate-100 rounded-xl transition-colors"
+          className="p-2 hover:bg-slate-100 rounded-xl transition-colors shrink-0"
         >
           <ArrowLeft className="w-5 h-5 text-slate-600" />
         </button>
         <div
-          className="w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-xl shadow-sm"
+          className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-base shadow-sm shrink-0"
           style={{ backgroundColor: program.color || '#10b981' }}
         >
           {program.name.charAt(0).toUpperCase()}
         </div>
         <div className="flex-1 min-w-0">
-          <h1 className="text-2xl font-bold text-slate-800 truncate">{program.name}</h1>
-          <p className="text-slate-500 text-sm truncate">{program.description || 'Sin descripción'}</p>
+          <h1 className="text-lg font-bold text-slate-800 truncate leading-tight">{program.name}</h1>
+          <p className="text-slate-500 text-xs truncate">{program.description || 'Sin descripción'}</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -539,60 +698,35 @@ export default function ProgramDetailPage() {
         </div>
       </div>
 
-      {/* Quick Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-white rounded-xl border border-slate-200 p-3.5 flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-purple-50 flex items-center justify-center">
-            <Users className="w-4 h-4 text-purple-600" />
-          </div>
-          <div>
-            <p className="text-lg font-bold text-slate-800">{participants.length}</p>
-            <p className="text-xs text-slate-500">Participantes</p>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-slate-200 p-3.5 flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center">
-            <Calendar className="w-4 h-4 text-blue-600" />
-          </div>
-          <div>
-            <p className="text-lg font-bold text-slate-800">{sessions.length}</p>
-            <p className="text-xs text-slate-500">Sesiones</p>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-slate-200 p-3.5 flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-emerald-50 flex items-center justify-center">
-            <Phone className="w-4 h-4 text-emerald-600" />
-          </div>
-          <div>
-            <p className="text-lg font-bold text-slate-800">{participantsWithPhone.length}</p>
-            <p className="text-xs text-slate-500">Con teléfono</p>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl border border-slate-200 p-3.5 flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-amber-50 flex items-center justify-center">
-            <CheckCircle2 className="w-4 h-4 text-amber-600" />
-          </div>
-          <div>
-            <p className="text-lg font-bold text-slate-800">
-              {sessions.reduce((sum, s) => sum + (s.attendance_stats?.present || 0), 0)}
-            </p>
-            <p className="text-xs text-slate-500">Asistencias</p>
-          </div>
-        </div>
+      {/* Compact Stats Bar */}
+      <div className="flex items-center gap-3 lg:gap-5 bg-white border border-slate-200 rounded-xl px-4 py-2.5 shrink-0 text-sm flex-wrap">
+        <span className="flex items-center gap-1.5 text-slate-600">
+          <Users className="w-3.5 h-3.5 text-purple-500" />
+          <strong className="text-slate-800 font-semibold">{participants.length}</strong>
+          <span className="hidden sm:inline">participantes</span>
+        </span>
+        <span className="text-slate-200">|</span>
+        <span className="flex items-center gap-1.5 text-slate-600">
+          <Calendar className="w-3.5 h-3.5 text-blue-500" />
+          <strong className="text-slate-800 font-semibold">{sessions.length}</strong>
+          <span className="hidden sm:inline">sesiones</span>
+        </span>
+        <span className="text-slate-200">|</span>
+        <span className="flex items-center gap-1.5 text-slate-600">
+          <Phone className="w-3.5 h-3.5 text-emerald-500" />
+          <strong className="text-slate-800 font-semibold">{participantsWithPhone.length}</strong>
+          <span className="hidden sm:inline">con teléfono</span>
+        </span>
+        <span className="text-slate-200">|</span>
+        <span className="flex items-center gap-1.5 text-slate-600">
+          <CheckCircle2 className="w-3.5 h-3.5 text-amber-500" />
+          <strong className="text-slate-800 font-semibold">{sessions.reduce((sum, s) => sum + (s.attendance_stats?.present || 0), 0)}</strong>
+          <span className="hidden sm:inline">asistencias</span>
+        </span>
       </div>
 
-      {/* Mobile campaign button */}
-      <button
-        onClick={() => setShowCampaignModal(true)}
-        disabled={participantsWithPhone.length === 0}
-        className="sm:hidden w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        <Send className="w-4 h-4" />
-        Envío Masivo ({participantsWithPhone.length} destinatarios)
-      </button>
-
       {/* Tabs */}
-      <div className="flex gap-1 bg-slate-100 rounded-xl p-1">
+      <div className="flex gap-1 bg-slate-100 rounded-xl p-1 shrink-0">
         <button
           onClick={() => setActiveTab('participants')}
           className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
@@ -615,25 +749,37 @@ export default function ProgramDetailPage() {
           <Calendar className="w-4 h-4" />
           Sesiones ({sessions.length})
         </button>
+        <button
+          onClick={() => setActiveTab('stats')}
+          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
+            activeTab === 'stats'
+              ? 'bg-white text-slate-800 shadow-sm'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          <BarChart3 className="w-4 h-4" />
+          Estadísticas
+        </button>
       </div>
 
       {/* Content */}
+      <div className="flex-1 min-h-0 overflow-hidden">
       {activeTab === 'participants' ? (
-        <div className="space-y-4">
-          <div className="flex justify-between items-center">
-            <h2 className="text-lg font-semibold text-slate-800">Lista de Participantes</h2>
+        <div className="h-full flex flex-col gap-3">
+          <div className="flex justify-between items-center shrink-0">
+            <h2 className="text-base font-semibold text-slate-800">Lista de Participantes</h2>
             <button
               onClick={() => setIsAddParticipantOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm"
+              className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm"
             >
               <Plus className="w-4 h-4" />
               Agregar
             </button>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-            <div className="overflow-x-auto">
-              <div className="max-h-[calc(100vh-420px)] overflow-y-auto">
+          <div className="flex-1 min-h-0 bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div className="h-full overflow-x-auto">
+              <div className="h-full overflow-y-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0 z-10">
                     <tr>
@@ -698,10 +844,10 @@ export default function ProgramDetailPage() {
             </div>
           </div>
         </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-            <h2 className="text-lg font-semibold text-slate-800">Sesiones y Asistencia</h2>
+      ) : activeTab === 'sessions' ? (
+        <div className="h-full flex flex-col gap-3">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0">
+            <h2 className="text-base font-semibold text-slate-800">Sesiones y Asistencia</h2>
             <div className="flex gap-2">
               <button
                 onClick={() => setIsGenerateSessionsOpen(true)}
@@ -720,6 +866,7 @@ export default function ProgramDetailPage() {
             </div>
           </div>
 
+          <div className="flex-1 min-h-0 overflow-y-auto">
           {sessions.length === 0 ? (
             <div className="text-center py-16 bg-white rounded-2xl border border-slate-200">
               <div className="w-16 h-16 rounded-2xl bg-blue-50 flex items-center justify-center mx-auto mb-4">
@@ -747,7 +894,7 @@ export default function ProgramDetailPage() {
               </div>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-3 pb-2">
               {sessions.map((session, idx) => {
                 const totalAtt = (session.attendance_stats?.present || 0) + (session.attendance_stats?.absent || 0) + (session.attendance_stats?.late || 0) + (session.attendance_stats?.excused || 0);
                 const isPast = new Date(session.date) < new Date();
@@ -827,6 +974,13 @@ export default function ProgramDetailPage() {
                           Asistencia
                         </button>
                         <button
+                          onClick={() => openEditSession(session)}
+                          className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-slate-100 text-slate-400 hover:text-slate-600"
+                          title="Editar sesión"
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                        <button
                           onClick={() => handleDeleteSession(session.id)}
                           className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-red-50 text-slate-400 hover:text-red-500"
                           title="Eliminar sesión"
@@ -840,8 +994,226 @@ export default function ProgramDetailPage() {
               })}
             </div>
           )}
+          </div>
+        </div>
+      ) : (
+        /* Stats Tab */
+        <div className="h-full overflow-y-auto">
+          {loadingStats ? (
+            <div className="flex items-center justify-center py-20">
+              <div className="w-8 h-8 border-4 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
+            </div>
+          ) : !statsData || (statsData.session_stats.length === 0 && statsData.participant_stats.length === 0) ? (
+            <div className="text-center py-20">
+              <div className="w-16 h-16 rounded-2xl bg-slate-100 flex items-center justify-center mx-auto mb-4">
+                <BarChart3 className="w-8 h-8 text-slate-400" />
+              </div>
+              <h3 className="font-semibold text-slate-700 mb-1">Sin datos de asistencia</h3>
+              <p className="text-sm text-slate-500">Registra asistencia en las sesiones para ver estadísticas.</p>
+            </div>
+          ) : (
+            <div className="space-y-6 pb-4">
+              {/* Month filter */}
+              {(() => {
+                // Extract available months from ALL sessions (not just filtered stats)
+                const allMonths: string[] = [];
+                for (const s of sessions) {
+                  if (s.date) {
+                    const m = s.date.substring(0, 7); // YYYY-MM
+                    if (!allMonths.includes(m)) allMonths.push(m);
+                  }
+                }
+                allMonths.sort();
+                if (allMonths.length <= 1) return null;
+                const monthNames: Record<string, string> = {
+                  '01': 'Ene', '02': 'Feb', '03': 'Mar', '04': 'Abr', '05': 'May', '06': 'Jun',
+                  '07': 'Jul', '08': 'Ago', '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dic'
+                };
+                const toggleMonth = (m: string) => {
+                  setSelectedMonths(prev => prev.includes(m) ? prev.filter(x => x !== m) : [...prev, m]);
+                };
+                return (
+                  <div className="bg-white rounded-xl border border-slate-200 p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="font-semibold text-slate-800 text-sm flex items-center gap-2">
+                        <Calendar className="w-4 h-4 text-emerald-500" />
+                        Filtrar por mes
+                      </h3>
+                      {selectedMonths.length > 0 && (
+                        <button
+                          onClick={() => setSelectedMonths([])}
+                          className="text-xs text-emerald-600 hover:text-emerald-700 font-medium hover:underline transition-colors"
+                        >
+                          Limpiar filtros
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {allMonths.map(m => {
+                        const [year, month] = m.split('-');
+                        const label = `${monthNames[month] || month} ${year}`;
+                        const isSelected = selectedMonths.includes(m);
+                        return (
+                          <button
+                            key={m}
+                            onClick={() => toggleMonth(m)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all border ${
+                              isSelected
+                                ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm shadow-emerald-200'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300 hover:text-emerald-600'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {selectedMonths.length === 0 && (
+                      <p className="text-[11px] text-slate-400 mt-2">Sin filtro = sesiones hasta hoy</p>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Summary cards */}
+              {(() => {
+                const totalPresent = statsData.session_stats.reduce((s, ss) => s + (ss.present || 0), 0);
+                const totalAbsent = statsData.session_stats.reduce((s, ss) => s + (ss.absent || 0), 0);
+                const totalLate = statsData.session_stats.reduce((s, ss) => s + (ss.late || 0), 0);
+                const totalExcused = statsData.session_stats.reduce((s, ss) => s + (ss.excused || 0), 0);
+                const totalAll = totalPresent + totalAbsent + totalLate + totalExcused;
+                const avgRate = totalAll > 0 ? Math.round(((totalPresent + totalLate) / totalAll) * 100) : 0;
+                return (
+                  <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                    <div className="bg-white rounded-xl border border-slate-200 p-4">
+                      <p className="text-xs text-slate-500 mb-1">Tasa promedio</p>
+                      <p className="text-2xl font-bold text-emerald-600">{avgRate}%</p>
+                    </div>
+                    <div className="bg-white rounded-xl border border-slate-200 p-4">
+                      <p className="text-xs text-slate-500 mb-1">Presentes</p>
+                      <p className="text-2xl font-bold text-emerald-600">{totalPresent}</p>
+                    </div>
+                    <div className="bg-white rounded-xl border border-slate-200 p-4">
+                      <p className="text-xs text-slate-500 mb-1">Ausentes</p>
+                      <p className="text-2xl font-bold text-red-500">{totalAbsent}</p>
+                    </div>
+                    <div className="bg-white rounded-xl border border-slate-200 p-4">
+                      <p className="text-xs text-slate-500 mb-1">Tardanzas</p>
+                      <p className="text-2xl font-bold text-amber-500">{totalLate}</p>
+                    </div>
+                    <div className="bg-white rounded-xl border border-slate-200 p-4">
+                      <p className="text-xs text-slate-500 mb-1">Justificados</p>
+                      <p className="text-2xl font-bold text-blue-500">{totalExcused}</p>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Bar chart — Attendance per session */}
+              <div className="bg-white rounded-xl border border-slate-200 p-5">
+                <h3 className="font-semibold text-slate-800 mb-4 text-sm">Asistencia por sesión</h3>
+                <div className="space-y-3">
+                  {statsData.session_stats.map((ss: any, i: number) => {
+                    const total = (ss.present || 0) + (ss.absent || 0) + (ss.late || 0) + (ss.excused || 0);
+                    const pPct = total > 0 ? ((ss.present || 0) / total) * 100 : 0;
+                    const lPct = total > 0 ? ((ss.late || 0) / total) * 100 : 0;
+                    const ePct = total > 0 ? ((ss.excused || 0) / total) * 100 : 0;
+                    const aPct = total > 0 ? ((ss.absent || 0) / total) * 100 : 0;
+                    const label = ss.topic || (ss.date ? format(new Date(ss.date), 'dd MMM', { locale: es }) : `Sesión ${i + 1}`);
+                    return (
+                      <div key={ss.session_id || i}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-slate-600 font-medium truncate max-w-[200px]">{label}</span>
+                          <span className="text-xs text-slate-400">{Math.round(pPct + lPct)}% asistencia</span>
+                        </div>
+                        <div className="flex h-5 rounded-lg overflow-hidden bg-slate-100">
+                          {pPct > 0 && <div className="bg-emerald-500 transition-all" style={{ width: `${pPct}%` }} title={`Presentes: ${ss.present}`} />}
+                          {lPct > 0 && <div className="bg-amber-400 transition-all" style={{ width: `${lPct}%` }} title={`Tardanzas: ${ss.late}`} />}
+                          {ePct > 0 && <div className="bg-blue-400 transition-all" style={{ width: `${ePct}%` }} title={`Justificados: ${ss.excused}`} />}
+                          {aPct > 0 && <div className="bg-red-400 transition-all" style={{ width: `${aPct}%` }} title={`Ausentes: ${ss.absent}`} />}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Legend */}
+                <div className="flex gap-4 mt-4 text-xs text-slate-500">
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-500 inline-block" />Presente</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-400 inline-block" />Tardanza</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-blue-400 inline-block" />Justificado</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-red-400 inline-block" />Ausente</span>
+                </div>
+              </div>
+
+              {/* Trend line */}
+              {statsData.session_stats.length > 1 && (
+                <div className="bg-white rounded-xl border border-slate-200 p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-semibold text-slate-800 text-sm">Tendencia de asistencia</h3>
+                    <span className="text-[11px] text-slate-400">{statsData.session_stats.length} sesiones · desliza →</span>
+                  </div>
+                  <div className="overflow-x-auto pb-2" style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 transparent' }}>
+                    <div className="h-48 flex items-end gap-2" style={{ minWidth: `${Math.max(statsData.session_stats.length * 52, 300)}px` }}>
+                      {statsData.session_stats.map((ss: any, i: number) => {
+                        const total = (ss.present || 0) + (ss.absent || 0) + (ss.late || 0) + (ss.excused || 0);
+                        const rate = total > 0 ? Math.round(((ss.present || 0) + (ss.late || 0)) / total * 100) : 0;
+                        const label = ss.topic || (ss.date ? format(new Date(ss.date), 'dd/MM', { locale: es }) : `S${i + 1}`);
+                        return (
+                          <div key={ss.session_id || i} className="flex flex-col items-center gap-1 w-[44px] shrink-0">
+                            <span className="text-[10px] font-semibold text-slate-700">{rate}%</span>
+                            <div className="w-8 rounded-t-lg transition-all" style={{
+                              height: `${Math.max(rate * 1.6, 4)}px`,
+                              backgroundColor: rate >= 80 ? '#10b981' : rate >= 50 ? '#f59e0b' : '#ef4444'
+                            }} />
+                            <span className="text-[9px] text-slate-400 truncate w-[44px] text-center">{label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Participant ranking (thermometer) */}
+              {statsData.participant_stats.length > 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 p-5">
+                  <h3 className="font-semibold text-slate-800 mb-4 text-sm">Ranking de asistencia por participante</h3>
+                  <div className="space-y-2">
+                    {statsData.participant_stats
+                      .sort((a: any, b: any) => (b.rate || 0) - (a.rate || 0))
+                      .map((ps: any, i: number) => {
+                        const rate = ps.rate || 0;
+                        const color = rate >= 80 ? 'bg-emerald-500' : rate >= 50 ? 'bg-amber-400' : 'bg-red-400';
+                        const textColor = rate >= 80 ? 'text-emerald-700' : rate >= 50 ? 'text-amber-700' : 'text-red-600';
+                        return (
+                          <div key={ps.participant_id || i} className="flex items-center gap-3">
+                            <span className="w-6 text-xs text-slate-400 text-right font-medium">{i + 1}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between mb-0.5">
+                                <span className="text-sm font-medium text-slate-700 truncate">{ps.name || 'Sin nombre'}</span>
+                                <span className={`text-xs font-bold ${textColor}`}>{Math.round(rate)}%</span>
+                              </div>
+                              <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                                <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${rate}%` }} />
+                              </div>
+                              <div className="flex gap-3 mt-0.5 text-[10px] text-slate-400">
+                                <span>{ps.present || 0} presentes</span>
+                                <span>{ps.late || 0} tardanzas</span>
+                                <span>{ps.absent || 0} ausentes</span>
+                                <span>{ps.total_sessions || 0} sesiones</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
+      </div>
 
       {/* =================== MODALS =================== */}
 
@@ -946,6 +1318,91 @@ export default function ProgramDetailPage() {
                   className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium"
                 >
                   Crear Sesión
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Session Modal */}
+      {editingSession && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex justify-between items-center mb-5">
+              <h2 className="text-xl font-bold text-slate-800">Editar Sesión</h2>
+              <button onClick={() => setEditingSession(null)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleUpdateSession}>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
+                  <input
+                    type="date"
+                    required
+                    value={editSessionForm.date}
+                    onChange={(e) => setEditSessionForm({ ...editSessionForm, date: e.target.value })}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Tema / Título</label>
+                  <input
+                    type="text"
+                    required
+                    value={editSessionForm.topic}
+                    onChange={(e) => setEditSessionForm({ ...editSessionForm, topic: e.target.value })}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                    placeholder="Ej: Introducción al curso"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1.5">Hora inicio</label>
+                    <input
+                      type="time"
+                      value={editSessionForm.start_time}
+                      onChange={(e) => setEditSessionForm({ ...editSessionForm, start_time: e.target.value })}
+                      className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1.5">Hora fin</label>
+                    <input
+                      type="time"
+                      value={editSessionForm.end_time}
+                      onChange={(e) => setEditSessionForm({ ...editSessionForm, end_time: e.target.value })}
+                      className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Ubicación (opcional)</label>
+                  <input
+                    type="text"
+                    value={editSessionForm.location}
+                    onChange={(e) => setEditSessionForm({ ...editSessionForm, location: e.target.value })}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                    placeholder="Ej: Sala A, Piso 2"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingSession(null)}
+                  className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingSession}
+                  className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium disabled:opacity-50"
+                >
+                  {savingSession ? 'Guardando...' : 'Guardar Cambios'}
                 </button>
               </div>
             </form>
@@ -1314,16 +1771,16 @@ export default function ProgramDetailPage() {
         </div>
       )}
 
-      {/* Lead Detail Side Panel with Inline Chat */}
+      {/* Lead/Contact Detail Side Panel with Inline Chat */}
       {selectedLead && (
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
-            onClick={() => { setSelectedLead(null); setShowInlineChat(false); }}
+            onClick={() => { setSelectedLead(null); setSelectedContact(null); setContactPanelMode(false); setShowInlineChat(false); }}
           />
-          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
-            {/* Chat Panel - Left Side */}
-            {showInlineChat && inlineChatId && (
+          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat && !contactPanelMode ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
+            {/* Chat Panel - Left Side (only in lead mode) */}
+            {showInlineChat && !contactPanelMode && inlineChatId && (
               <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
                 <ChatPanel
                   chatId={inlineChatId}
@@ -1334,19 +1791,40 @@ export default function ProgramDetailPage() {
                 />
               </div>
             )}
-            {/* Lead Details - Right Side */}
-            <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
-              <LeadDetailPanel
-                lead={selectedLead}
-                onLeadChange={(updated) => {
-                  setSelectedLead(updated);
-                  fetchProgramData();
-                }}
-                onClose={() => { setSelectedLead(null); setShowInlineChat(false); }}
-                onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-                hideDelete
-                hideWhatsApp={showInlineChat}
-              />
+            {/* Detail Panel - Right Side */}
+            <div className={`${showInlineChat && !contactPanelMode ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
+              {contactPanelMode && selectedContact ? (
+                <LeadDetailPanel
+                  contactMode
+                  contactId={selectedContact.id}
+                  lead={contactToLead(selectedContact)}
+                  pushName={selectedContact.push_name}
+                  avatarUrl={selectedContact.avatar_url}
+                  onLeadChange={() => {}}
+                  onContactUpdate={(updated: any) => {
+                    setSelectedContact(updated);
+                    setSelectedLead(contactToLead(updated));
+                    fetchProgramData();
+                  }}
+                  onClose={() => { setSelectedLead(null); setSelectedContact(null); setContactPanelMode(false); }}
+                  onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                  onObservationChange={() => {}}
+                  hideDelete
+                />
+              ) : (
+                <LeadDetailPanel
+                  lead={selectedLead}
+                  onLeadChange={(updated) => {
+                    setSelectedLead(updated);
+                    fetchProgramData();
+                  }}
+                  onClose={() => { setSelectedLead(null); setShowInlineChat(false); }}
+                  onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                  onObservationChange={() => {}}
+                  hideDelete
+                  hideWhatsApp={showInlineChat}
+                />
+              )}
             </div>
           </div>
         </div>

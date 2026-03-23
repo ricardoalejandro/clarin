@@ -1,6 +1,7 @@
 export interface Program {
   id: string;
   account_id: string;
+  folder_id?: string;
   name: string;
   description: string;
   status: 'active' | 'archived' | 'completed';
@@ -16,6 +17,19 @@ export interface Program {
   schedule_days?: number[]; // 0=Sun, 1=Mon, ..., 6=Sat
   schedule_start_time?: string; // "HH:MM"
   schedule_end_time?: string;   // "HH:MM"
+}
+
+export interface ProgramFolder {
+  id: string;
+  account_id: string;
+  parent_id?: string;
+  name: string;
+  color: string;
+  icon: string;
+  position: number;
+  created_at: string;
+  updated_at: string;
+  program_count?: number;
 }
 
 export interface ProgramParticipant {

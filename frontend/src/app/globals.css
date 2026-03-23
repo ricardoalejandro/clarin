@@ -65,6 +65,64 @@
   75% { transform: translateX(18px); }
   100% { transform: translateX(0); }
 }
+@keyframes eros-chart-fade-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes eros-side-tail {
+  0%, 100% { transform: rotate(-10deg) scaleX(1); }
+  50% { transform: rotate(10deg) scaleX(1.05); }
+}
+@keyframes eros-drawer-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@keyframes eros-mobile-open {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes eros-header-bounce {
+  0%, 100% { transform: translateY(0) scale(1); }
+  15% { transform: translateY(-2px) scale(1.05); }
+  30% { transform: translateY(0) scale(1); }
+  45% { transform: translateX(-2px); }
+  60% { transform: translateX(2px); }
+  75% { transform: translateX(0) rotate(5deg); }
+  90% { transform: rotate(-3deg); }
+}
+
+/* Eros dot pattern background */
+.eros-scroll-area {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(16, 185, 129, 0.3) transparent;
+}
+
+.eros-scroll-area::-webkit-scrollbar {
+  width: 5px;
+}
+
+.eros-scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 4px 0;
+}
+
+.eros-scroll-area::-webkit-scrollbar-thumb {
+  background: linear-gradient(to bottom, rgba(16, 185, 129, 0.2), rgba(16, 185, 129, 0.35));
+  border-radius: 10px;
+  transition: background 0.2s;
+}
+
+.eros-scroll-area::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(to bottom, rgba(16, 185, 129, 0.35), rgba(16, 185, 129, 0.55));
+}
+
+.eros-dot-bg {
+  background-image: radial-gradient(circle, #e2e8f0 0.8px, transparent 0.8px);
+  background-size: 16px 16px;
+}
 
 :root {
   --background: #f8fafc;
@@ -216,6 +274,17 @@ textarea::placeholder {
 }
 .kanban-scroll-top::-webkit-scrollbar-thumb:hover {
   background: rgba(0,0,0,0.25);
+}
+
+/* Kanban Ctrl+drag pan cursors — applied on <html> to override ALL children */
+html.kanban-ctrl-held,
+html.kanban-ctrl-held * {
+  cursor: grab !important;
+}
+html.kanban-panning,
+html.kanban-panning * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 
 /* WhatsApp-style chat bubble */

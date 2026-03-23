@@ -26,6 +26,7 @@ type SnapshotFilter struct {
 	DateField       string   `json:"date_field"`
 	DateFrom        string   `json:"date_from"`
 	DateTo          string   `json:"date_to"`
+	TextSearch      string   `json:"text_search"`
 }
 
 var snapshotDateFields = map[string]bool{
@@ -136,9 +137,9 @@ func (r *LogbookRepository) Update(ctx context.Context, lb *domain.EventLogbook)
 	_, err := r.db.Exec(ctx, `
 		UPDATE event_logbooks
 		SET title = $1, general_notes = $2, stage_snapshot = $3,
-		    total_participants = $4, status = $5, captured_at = $6, updated_at = NOW()
-		WHERE id = $7
-	`, lb.Title, lb.GeneralNotes, snapshotJSON, lb.TotalParticipants, lb.Status, lb.CapturedAt, lb.ID)
+		    total_participants = $4, status = $5, captured_at = $6, saved_filter = $7, updated_at = NOW()
+		WHERE id = $8
+	`, lb.Title, lb.GeneralNotes, snapshotJSON, lb.TotalParticipants, lb.Status, lb.CapturedAt, lb.SavedFilter, lb.ID)
 	return err
 }
 
@@ -210,14 +211,14 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, logbookID uuid.
 			if len(filter.TagNames) > 0 {
 				if tagMode == "AND" {
 					whereClauses = append(whereClauses, fmt.Sprintf(
-						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d) GROUP BY p2.id HAVING COUNT(DISTINCT t.name) = $%d)",
+						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d) GROUP BY p2.id HAVING COUNT(DISTINCT t.name) = $%d)",
 						argIdx, argIdx+1,
 					))
 					args = append(args, filter.TagNames, len(filter.TagNames))
 					argIdx += 2
 				} else {
 					whereClauses = append(whereClauses, fmt.Sprintf(
-						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
+						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
 						argIdx,
 					))
 					args = append(args, filter.TagNames)
@@ -226,7 +227,7 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, logbookID uuid.
 			}
 			if len(filter.ExcludeTagNames) > 0 {
 				whereClauses = append(whereClauses, fmt.Sprintf(
-					"ep.id NOT IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
+					"ep.id NOT IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
 					argIdx,
 				))
 				args = append(args, filter.ExcludeTagNames)
@@ -272,9 +273,41 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, logbookID uuid.
 				}
 			}
 		}
+
+		// Text Search
+		if filter.TextSearch != "" {
+			term := "%" + filter.TextSearch + "%"
+			whereClauses = append(whereClauses, fmt.Sprintf("(ep.name ILIKE $%d OR ep.phone ILIKE $%d OR ep.email ILIKE $%d)", argIdx, argIdx, argIdx))
+			args = append(args, term)
+			argIdx++
+		}
 	}
 
 	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// Pre-populate stageCount with ALL pipeline stages (so stages with 0 participants appear)
+	stageCount := make(map[string]map[string]interface{})
+	var eventPipelineID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT pipeline_id FROM events WHERE id = $1`, lb.EventID).Scan(&eventPipelineID); err == nil && eventPipelineID != nil {
+		stageRows, stageErr := tx.Query(ctx, `
+			SELECT id, name, color FROM event_pipeline_stages
+			WHERE pipeline_id = $1 ORDER BY position
+		`, *eventPipelineID)
+		if stageErr == nil {
+			for stageRows.Next() {
+				var sID uuid.UUID
+				var sName, sColor string
+				if err := stageRows.Scan(&sID, &sName, &sColor); err == nil {
+					stageCount[sID.String()] = map[string]interface{}{
+						"name":  sName,
+						"color": sColor,
+						"count": 0,
+					}
+				}
+			}
+			stageRows.Close()
+		}
+	}
 
 	// Query participants with their stage info using dynamic WHERE
 	query := fmt.Sprintf(`
@@ -301,7 +334,6 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, logbookID uuid.
 		phone         *string
 	}
 	var entries []entryData
-	stageCount := make(map[string]map[string]interface{})
 
 	for rows.Next() {
 		var e entryData
@@ -342,7 +374,7 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, logbookID uuid.
 	snapshotOut, _ := json.Marshal(stageCount)
 	_, err = tx.Exec(ctx, `
 		UPDATE event_logbooks
-		SET status = 'completed', stage_snapshot = $1, total_participants = $2,
+		SET status = CASE WHEN status = 'pending' THEN 'completed' ELSE status END, stage_snapshot = $1, total_participants = $2,
 		    captured_at = $3, updated_at = NOW()
 		WHERE id = $4
 	`, snapshotOut, len(entries), now, logbookID)
@@ -477,14 +509,14 @@ func (r *LogbookRepository) PreviewParticipants(ctx context.Context, logbookID u
 			if len(filter.TagNames) > 0 {
 				if tagMode == "AND" {
 					whereClauses = append(whereClauses, fmt.Sprintf(
-						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d) GROUP BY p2.id HAVING COUNT(DISTINCT t.name) = $%d)",
+						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d) GROUP BY p2.id HAVING COUNT(DISTINCT t.name) = $%d)",
 						argIdx, argIdx+1,
 					))
 					args = append(args, filter.TagNames, len(filter.TagNames))
 					argIdx += 2
 				} else {
 					whereClauses = append(whereClauses, fmt.Sprintf(
-						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
+						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
 						argIdx,
 					))
 					args = append(args, filter.TagNames)
@@ -493,7 +525,7 @@ func (r *LogbookRepository) PreviewParticipants(ctx context.Context, logbookID u
 			}
 			if len(filter.ExcludeTagNames) > 0 {
 				whereClauses = append(whereClauses, fmt.Sprintf(
-					"ep.id NOT IN (SELECT p2.id FROM event_participants p2 JOIN lead_tags lt ON lt.lead_id = p2.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
+					"ep.id NOT IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
 					argIdx,
 				))
 				args = append(args, filter.ExcludeTagNames)

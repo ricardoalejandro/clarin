@@ -57,6 +57,7 @@ func (s *Server) handleCreateEventLogbook(c *fiber.Ctx) error {
 		DateField       string   `json:"date_field"`
 		DateFrom        string   `json:"date_from"`
 		DateTo          string   `json:"date_to"`
+		TextSearch      string   `json:"text_search"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
@@ -87,7 +88,7 @@ func (s *Server) handleCreateEventLogbook(c *fiber.Ctx) error {
 	}
 
 	// Always save the filter if any filter params are provided
-	hasFilter := body.StageIDs != "" || len(body.TagNames) > 0 || len(body.ExcludeTagNames) > 0 || body.TagFormula != "" || body.HasPhone || body.DateField != ""
+	hasFilter := body.StageIDs != "" || len(body.TagNames) > 0 || len(body.ExcludeTagNames) > 0 || body.TagFormula != "" || body.HasPhone || body.DateField != "" || body.TextSearch != ""
 	var filter *repository.SnapshotFilter
 	if hasFilter {
 		filter = &repository.SnapshotFilter{
@@ -100,6 +101,7 @@ func (s *Server) handleCreateEventLogbook(c *fiber.Ctx) error {
 			DateField:       body.DateField,
 			DateFrom:        body.DateFrom,
 			DateTo:          body.DateTo,
+			TextSearch:      body.TextSearch,
 		}
 		filterJSON, _ := json.Marshal(filter)
 		lb.SavedFilter = filterJSON
@@ -164,8 +166,11 @@ func (s *Server) handleUpdateEventLogbook(c *fiber.Ctx) error {
 	}
 
 	var body struct {
-		Title        *string `json:"title"`
-		GeneralNotes *string `json:"general_notes"`
+		Title        *string          `json:"title"`
+		GeneralNotes *string          `json:"general_notes"`
+		Date         *string          `json:"date"`
+		SavedFilter  *json.RawMessage `json:"saved_filter"`
+		Status       *string          `json:"status"` // pending, active, completed
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
@@ -176,6 +181,18 @@ func (s *Server) handleUpdateEventLogbook(c *fiber.Ctx) error {
 	}
 	if body.GeneralNotes != nil {
 		lb.GeneralNotes = *body.GeneralNotes
+	}
+	if body.Date != nil {
+		d, err := time.Parse("2006-01-02", *body.Date)
+		if err == nil {
+			lb.Date = d
+		}
+	}
+	if body.SavedFilter != nil {
+		lb.SavedFilter = *body.SavedFilter
+	}
+	if body.Status != nil {
+		lb.Status = *body.Status
 	}
 
 	if err := s.repos.Logbook.Update(c.Context(), lb); err != nil {
@@ -241,11 +258,12 @@ func (s *Server) handleCaptureLogbookSnapshot(c *fiber.Ctx) error {
 		DateField       string   `json:"date_field"`
 		DateFrom        string   `json:"date_from"`
 		DateTo          string   `json:"date_to"`
+		TextSearch      string   `json:"text_search"`
 	}
 	_ = c.BodyParser(&body) // ignore error — body is optional
 
 	var filter *repository.SnapshotFilter
-	if body.StageIDs != "" || len(body.TagNames) > 0 || len(body.ExcludeTagNames) > 0 || body.TagFormula != "" || body.HasPhone || body.DateField != "" {
+	if body.StageIDs != "" || len(body.TagNames) > 0 || len(body.ExcludeTagNames) > 0 || body.TagFormula != "" || body.HasPhone || body.DateField != "" || body.TextSearch != "" {
 		filter = &repository.SnapshotFilter{
 			StageIDs:        body.StageIDs,
 			TagNames:        body.TagNames,
@@ -256,6 +274,20 @@ func (s *Server) handleCaptureLogbookSnapshot(c *fiber.Ctx) error {
 			DateField:       body.DateField,
 			DateFrom:        body.DateFrom,
 			DateTo:          body.DateTo,
+			TextSearch:      body.TextSearch,
+		}
+	}
+
+	// If no filter provided in body, fall back to logbook's saved_filter
+	if filter == nil {
+		lb, err := s.repos.Logbook.GetByID(c.Context(), logbookID)
+		if err == nil && lb.SavedFilter != nil && len(lb.SavedFilter) > 2 {
+			var sf repository.SnapshotFilter
+			if err := json.Unmarshal(lb.SavedFilter, &sf); err == nil {
+				if sf.StageIDs != "" || len(sf.TagNames) > 0 || len(sf.ExcludeTagNames) > 0 || sf.TagFormula != "" || sf.HasPhone || sf.DateField != "" || sf.TextSearch != "" {
+					filter = &sf
+				}
+			}
 		}
 	}
 

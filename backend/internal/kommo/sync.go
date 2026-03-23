@@ -873,15 +873,7 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		}
 	}
 
-	// Determine lead name: prefer contact name over generic Kommo lead name
-	leadName := cleanQuotes(kl.Name)
-	if contactID != nil {
-		var contactName string
-		_ = s.db.QueryRow(ctx, `SELECT COALESCE(name, '') FROM contacts WHERE id = $1`, *contactID).Scan(&contactName)
-		if contactName != "" {
-			leadName = contactName
-		}
-	}
+	// Lead name is managed via contacts table (not stored in leads)
 
 	var leadID uuid.UUID
 	foundByKommoID := false
@@ -909,11 +901,11 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 
 		leadID = uuid.New()
 		_, err = s.db.Exec(ctx, `
-			INSERT INTO leads (id, account_id, contact_id, jid, name, phone, email, status, source, notes,
+			INSERT INTO leads (id, account_id, contact_id, jid, status, source,
 				pipeline_id, stage_id, tags, kommo_id, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 'new', 'kommo', '', $8, $9, $10, $11, NOW(), NOW())
-		`, leadID, accountID, contactID, jid, nilIfEmpty(leadName), nilIfEmpty(phone),
-			nilIfEmpty(email), pipelineID, stageID, tagNames, kommoID)
+			VALUES ($1, $2, $3, $4, 'new', 'kommo', $5, $6, $7, $8, NOW(), NOW())
+		`, leadID, accountID, contactID, jid,
+			pipelineID, stageID, tagNames, kommoID)
 	} else {
 		// Anti-loop: skip update if this is an echo of our own push
 		var lastPushedAt int64
@@ -931,20 +923,16 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		}
 
 		if foundByKommoID {
-			// Already linked — full bidirectional update from Kommo
+			// Already linked — sync CRM fields from Kommo (personal data lives on contacts)
 			_, err = s.db.Exec(ctx, `
 				UPDATE leads SET
-					name = CASE WHEN $1 != '' THEN $1 ELSE name END,
-					phone = COALESCE($2, phone),
-					email = COALESCE($3, email),
-					contact_id = COALESCE($4, contact_id),
-					pipeline_id = $5,
-					stage_id = $6,
-					tags = COALESCE($7, tags),
+					contact_id = COALESCE($1, contact_id),
+					pipeline_id = $2,
+					stage_id = $3,
+					tags = COALESCE($4, tags),
 					updated_at = NOW()
-				WHERE id = $8
-			`, leadName, nilIfEmpty(phone), nilIfEmpty(email),
-				contactID, pipelineID, stageID, tagNames, leadID)
+				WHERE id = $5
+			`, contactID, pipelineID, stageID, tagNames, leadID)
 		} else {
 			// First-time linking (found by JID) — Clarin keeps name/phone/email,
 			// only link kommo_id and sync CRM fields (pipeline, stage, tags)
@@ -965,7 +953,7 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		return err
 	}
 
-	// Sync lead_tags junction table
+	// Sync contact_tags junction table
 	if len(tagNames) > 0 {
 		s.syncLeadTags(ctx, accountID, leadID, tagNames)
 	}
@@ -1313,10 +1301,17 @@ func (s *SyncService) syncLeads(ctx context.Context, accountID uuid.UUID) (int, 
 	return count, nil
 }
 
-// syncLeadTags populates the lead_tags junction table for a lead.
+// syncLeadTags populates the contact_tags junction table for a lead's contact.
 func (s *SyncService) syncLeadTags(ctx context.Context, accountID, leadID uuid.UUID, tagNames []string) {
-	// Clear existing lead_tags for this lead
-	_, _ = s.db.Exec(ctx, `DELETE FROM lead_tags WHERE lead_id = $1`, leadID)
+	// Resolve contact_id for this lead
+	var contactID *uuid.UUID
+	_ = s.db.QueryRow(ctx, `SELECT contact_id FROM leads WHERE id = $1`, leadID).Scan(&contactID)
+	if contactID == nil {
+		return
+	}
+
+	// Clear existing contact_tags for this contact
+	_, _ = s.db.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id = $1`, *contactID)
 
 	for _, name := range tagNames {
 		var tagID uuid.UUID
@@ -1335,8 +1330,8 @@ func (s *SyncService) syncLeadTags(ctx context.Context, accountID, leadID uuid.U
 			}
 		}
 		_, _ = s.db.Exec(ctx, `
-			INSERT INTO lead_tags (lead_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
-		`, leadID, tagID)
+			INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+		`, *contactID, tagID)
 	}
 }
 
@@ -1419,11 +1414,12 @@ func (s *SyncService) PushLeadTagsChange(accountID, leadID uuid.UUID) {
 		return
 	}
 
-	// Get all current tags for this lead with their kommo_id
+	// Get all current tags for this lead with their kommo_id (via contact_tags)
 	rows, err := s.db.Query(ctx, `
-		SELECT t.id, t.name, t.kommo_id FROM lead_tags lt
-		JOIN tags t ON lt.tag_id = t.id
-		WHERE lt.lead_id = $1
+		SELECT t.id, t.name, t.kommo_id FROM contact_tags ct
+		JOIN tags t ON ct.tag_id = t.id
+		JOIN leads l ON l.contact_id = ct.contact_id
+		WHERE l.id = $1
 	`, leadID)
 	if err != nil {
 		log.Printf("[PUSH] Lead %s: failed to fetch tags: %v", leadID, err)
@@ -1531,12 +1527,15 @@ func (s *SyncService) PushNewLead(accountID, leadID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Fetch lead details
+	// Fetch lead details (personal data from linked contact via COALESCE)
 	var leadName, phone, email *string
 	var pipelineID, stageID, contactID *uuid.UUID
 	err := s.db.QueryRow(ctx, `
-		SELECT name, phone, email, pipeline_id, stage_id, contact_id
-		FROM leads WHERE id = $1 AND account_id = $2 AND kommo_id IS NULL
+		SELECT COALESCE(c.custom_name, c.name, l.name), COALESCE(c.phone, l.phone), COALESCE(c.email, l.email),
+		       l.pipeline_id, l.stage_id, l.contact_id
+		FROM leads l
+		LEFT JOIN contacts c ON c.id = l.contact_id
+		WHERE l.id = $1 AND l.account_id = $2 AND l.kommo_id IS NULL
 	`, leadID, accountID).Scan(&leadName, &phone, &email, &pipelineID, &stageID, &contactID)
 	if err != nil {
 		return // Lead not found or already has kommo_id
@@ -1773,7 +1772,7 @@ func (s *SyncService) PushLeadName(accountID, leadID uuid.UUID) {
 
 	var kommoLeadID *int64
 	var leadName *string
-	err := s.db.QueryRow(ctx, `SELECT kommo_id, name FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoLeadID, &leadName)
+	err := s.db.QueryRow(ctx, `SELECT l.kommo_id, COALESCE(c.custom_name, c.name, l.name) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id WHERE l.id = $1 AND l.account_id = $2`, leadID, accountID).Scan(&kommoLeadID, &leadName)
 	if err != nil || kommoLeadID == nil {
 		return // Not a Kommo lead
 	}

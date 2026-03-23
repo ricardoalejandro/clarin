@@ -76,4 +76,5 @@ export interface Chat {
   contact_avatar_url?: string
   contact_custom_name?: string
   contact_name?: string
+  lead_is_blocked?: boolean
 }

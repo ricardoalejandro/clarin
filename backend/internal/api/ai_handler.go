@@ -8,11 +8,13 @@ import (
 "io"
 "log"
 "net/http"
+"regexp"
 "strings"
 "time"
 
 "github.com/gofiber/fiber/v2"
 "github.com/google/uuid"
+"github.com/jackc/pgx/v5"
 "github.com/naperu/clarin/internal/domain"
 )
 
@@ -69,6 +71,7 @@ Sessions     []eventSessionInfo
 }
 
 type eventSessionInfo struct {
+ID     string
 Date   string
 Title  string
 Status string
@@ -137,7 +140,7 @@ Model       string        `json:"model"`
 Messages    []groqMessage `json:"messages"`
 Tools       []groqTool    `json:"tools,omitempty"`
 Temperature float64       `json:"temperature"`
-MaxTokens   int           `json:"max_tokens"`
+MaxTokens   int           `json:"max_completion_tokens"`
 }
 
 type groqResponse struct {
@@ -163,110 +166,8 @@ return []groqTool{
 {
 Type: "function",
 Function: groqFunction{
-Name:        "search_leads",
-Description: "Busca leads por nombre, teléfono, email o etiqueta. Devuelve hasta 10 resultados.",
-Parameters: map[string]interface{}{
-"type": "object",
-"properties": map[string]interface{}{
-"query": map[string]interface{}{
-"type":        "string",
-"description": "Texto de búsqueda (nombre, teléfono, email o etiqueta)",
-},
-},
-"required": []string{"query"},
-},
-},
-},
-{
-Type: "function",
-Function: groqFunction{
-Name:        "get_lead_details",
-Description: "Obtiene información detallada de un lead por nombre o teléfono, con etiquetas e interacciones.",
-Parameters: map[string]interface{}{
-"type": "object",
-"properties": map[string]interface{}{
-"query": map[string]interface{}{
-"type":        "string",
-"description": "Nombre o teléfono del lead",
-},
-},
-"required": []string{"query"},
-},
-},
-},
-{
-Type: "function",
-Function: groqFunction{
-Name:        "get_chat_messages",
-Description: "Obtiene los últimos 20 mensajes de WhatsApp de un contacto por teléfono.",
-Parameters: map[string]interface{}{
-"type": "object",
-"properties": map[string]interface{}{
-"phone": map[string]interface{}{
-"type":        "string",
-"description": "Número de teléfono (ej: 993738489 o 51993738489)",
-},
-},
-"required": []string{"phone"},
-},
-},
-},
-{
-Type: "function",
-Function: groqFunction{
-Name:        "get_event_details",
-Description: "Obtiene detalles de un evento por nombre: participantes, sesiones (logbooks), ubicación. Para detalles con participantes y mensajes WA, usa get_event_report.",
-Parameters: map[string]interface{}{
-"type": "object",
-"properties": map[string]interface{}{
-"name": map[string]interface{}{
-"type":        "string",
-"description": "Nombre o parte del nombre del evento",
-},
-},
-"required": []string{"name"},
-},
-},
-},
-{
-Type: "function",
-Function: groqFunction{
-Name:        "get_daily_activity",
-Description: "Resumen de actividad de un día: mensajes, leads creados, interacciones.",
-Parameters: map[string]interface{}{
-"type": "object",
-"properties": map[string]interface{}{
-"date": map[string]interface{}{
-"type":        "string",
-"description": "Fecha en formato DD/MM/YYYY (ej: 06/03/2026)",
-},
-},
-"required": []string{"date"},
-},
-},
-},
-{
-Type: "function",
-Function: groqFunction{
-Name:        "get_campaign_details",
-Description: "Detalles de una campaña de WhatsApp: envíos, fallos, destinatarios.",
-Parameters: map[string]interface{}{
-"type": "object",
-"properties": map[string]interface{}{
-"name": map[string]interface{}{
-"type":        "string",
-"description": "Nombre o parte del nombre de la campaña",
-},
-},
-"required": []string{"name"},
-},
-},
-},
-{
-Type: "function",
-Function: groqFunction{
-Name:        "get_unanswered_leads",
-Description: "Leads a los que les enviamos mensaje pero NO han respondido en los últimos 7 días.",
+Name:        "get_token_consumption",
+Description: "Obtiene información sobre el consumo de tokens y el uso de la API de AI actual que tiene el usuario.",
 Parameters: map[string]interface{}{
 "type": "object",
 "properties": map[string]interface{}{},
@@ -276,68 +177,36 @@ Parameters: map[string]interface{}{
 {
 Type: "function",
 Function: groqFunction{
-Name:        "get_event_report",
-Description: "Reporte de evento con LISTA DE PARTICIPANTES (nombre, teléfono, etapa, notas, tags, mensajes WA). Úsalo siempre que pidan nombres, observaciones, cuadro de participantes o datos individuales de un evento. Busca por nombre O fecha de sesión (DD/MM/YYYY).",
+Name:        "run_query",
+Description: "Ejecuta consulta SQL SELECT read-only en PostgreSQL. $1=account_id. Máx 100 filas. IMPORTANTE: Para asistencia/asistentes SIEMPRE incluye AND le.stage_name='Asistieron' — sin ese filtro obtienes TODOS los registrados, no solo los que asistieron. Filtra sesiones por lb.id (UUID).",
 Parameters: map[string]interface{}{
 "type": "object",
 "properties": map[string]interface{}{
-"event_name": map[string]interface{}{
+"sql": map[string]interface{}{
 "type":        "string",
-"description": "Nombre o parte del nombre del evento (puede ser vacío si se busca solo por fecha)",
+"description": "Consulta SQL SELECT. Usa $1 para account_id en WHERE.",
 },
-"date": map[string]interface{}{
-"type":        "string",
-"description": "Fecha de sesión en formato DD/MM/YYYY. Busca eventos que tengan una sesión (logbook) en esta fecha. Usar para 'evento de mañana', 'evento del viernes', etc.",
 },
+"required": []string{"sql"},
 },
 },
 },
-},
-		{
-			Type: "function",
-			Function: groqFunction{
-				Name:        "search_chat_messages",
-				Description: "Busca un texto en TODOS los chats de WhatsApp. Devuelve los contactos/leads cuyos mensajes contienen el texto buscado, con snippet del mensaje. Úsalo cuando pidan buscar un nombre, palabra o frase en los chats.",
-				Parameters: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"query": map[string]interface{}{
-							"type":        "string",
-							"description": "Texto a buscar en los mensajes (nombre, palabra clave, frase)",
-						},
-					},
-					"required": []string{"query"},
-				},
-			},
-		},
-	}
+}
 }
 
 // --- Tool Execution ---
 
-func (s *Server) executeTool(ctx context.Context, toolName string, args map[string]interface{}, accountID string) (interface{}, error) {
+func (s *Server) executeTool(ctx context.Context, toolName string, args map[string]interface{}, accountID string, userID ...string) (interface{}, error) {
 	switch toolName {
-	case "search_leads":
-		return s.toolSearchLeads(ctx, args, accountID)
-	case "search_chat_messages":
-		return s.toolSearchChatMessages(ctx, args, accountID)
-	case "get_lead_details":
-return s.toolGetLeadDetails(ctx, args, accountID)
-case "get_chat_messages":
-return s.toolGetChatMessages(ctx, args, accountID)
-case "get_event_details":
-return s.toolGetEventDetails(ctx, args, accountID)
-case "get_daily_activity":
-return s.toolGetDailyActivity(ctx, args, accountID)
-case "get_campaign_details":
-return s.toolGetCampaignDetails(ctx, args, accountID)
-case "get_unanswered_leads":
-return s.toolGetUnansweredLeads(ctx, args, accountID)
-case "get_event_report":
-return s.toolGetEventReport(ctx, args, accountID)
-default:
-return nil, fmt.Errorf("unknown tool: %s", toolName)
-}
+	case "run_query":
+		return s.toolRunQuery(ctx, args, accountID)
+	case "get_token_consumption":
+		u := ""
+		if len(userID) > 0 { u = userID[0] }
+		return s.toolGetTokenConsumption(ctx, args, accountID, u)
+	default:
+		return nil, fmt.Errorf("unknown tool: %s", toolName)
+	}
 }
 
 func (s *Server) toolSearchLeads(ctx context.Context, args map[string]interface{}, accountID string) (interface{}, error) {
@@ -348,19 +217,20 @@ limit = 50
 }
 
 rows, err := s.repos.DB().Query(ctx, `
-SELECT l.name, COALESCE(l.phone, ''), COALESCE(l.email, ''),
+SELECT COALESCE(c.name, l.name), COALESCE(c.phone, l.phone, ''), COALESCE(c.email, l.email, ''),
 COALESCE(ps.name, 'Sin etapa'),
 TO_CHAR(l.created_at, 'DD/MM/YYYY'),
 COALESCE((SELECT STRING_AGG(t.name, ', ' ORDER BY t.name)
-FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id WHERE lt.lead_id = l.id), '')
+FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.contact_id = l.contact_id), '')
 FROM leads l
+LEFT JOIN contacts c ON c.id = l.contact_id
 LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 WHERE l.account_id = $1
-AND (l.name ILIKE '%' || $2 || '%'
-OR l.phone ILIKE '%' || $2 || '%'
-OR l.email ILIKE '%' || $2 || '%'
-OR EXISTS (SELECT 1 FROM lead_tags lt2 JOIN tags t2 ON t2.id = lt2.tag_id
-WHERE lt2.lead_id = l.id AND t2.name ILIKE '%' || $2 || '%'))
+AND (COALESCE(c.name, l.name) ILIKE '%' || $2 || '%'
+OR COALESCE(c.phone, l.phone) ILIKE '%' || $2 || '%'
+OR COALESCE(c.email, l.email) ILIKE '%' || $2 || '%'
+OR EXISTS (SELECT 1 FROM contact_tags ct2 JOIN tags t2 ON t2.id = ct2.tag_id
+WHERE ct2.contact_id = l.contact_id AND t2.name ILIKE '%' || $2 || '%'))
 ORDER BY l.created_at DESC
 LIMIT $3
 `, accountID, query, limit)
@@ -386,15 +256,16 @@ func (s *Server) toolGetLeadDetails(ctx context.Context, args map[string]interfa
 query := getStringArg(args, "query")
 
 row := s.repos.DB().QueryRow(ctx, `
-SELECT l.id, l.name, COALESCE(l.phone, ''), COALESCE(l.email, ''),
+SELECT l.id, COALESCE(c.name, l.name), COALESCE(c.phone, l.phone, ''), COALESCE(c.email, l.email, ''),
 COALESCE(ps.name, 'Sin etapa'),
 TO_CHAR(l.created_at, 'DD/MM/YYYY'),
 COALESCE((SELECT STRING_AGG(t.name, ', ' ORDER BY t.name)
-FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id WHERE lt.lead_id = l.id), '')
+FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.contact_id = l.contact_id), '')
 FROM leads l
+LEFT JOIN contacts c ON c.id = l.contact_id
 LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 WHERE l.account_id = $1
-AND (l.name ILIKE '%' || $2 || '%' OR l.phone ILIKE '%' || $2 || '%')
+AND (COALESCE(c.name, l.name) ILIKE '%' || $2 || '%' OR COALESCE(c.phone, l.phone) ILIKE '%' || $2 || '%')
 ORDER BY l.created_at DESC
 LIMIT 1
 `, accountID, query)
@@ -541,7 +412,7 @@ COALESCE(e.location, 'Sin ubicación'),
 COALESCE(e.tag_formula, ''),
 (SELECT COUNT(*) FROM event_participants ep WHERE ep.event_id = e.id)
 FROM events e
-WHERE e.account_id = $1 AND e.name ILIKE '%' || $2 || '%'
+WHERE e.account_id = $1 AND e.status != 'cancelled' AND e.name ILIKE '%' || $2 || '%'
 ORDER BY e.created_at DESC LIMIT 1
 `, accountID, name)
 
@@ -659,13 +530,13 @@ limit = 100
 }
 
 rows, err := s.repos.DB().Query(ctx, `
-SELECT DISTINCT l.name, COALESCE(l.phone, ''),
+SELECT DISTINCT COALESCE(c.name, l.name), COALESCE(c.phone, l.phone, ''),
 COALESCE(ps.name, 'Sin etapa'),
 TO_CHAR(l.created_at, 'DD/MM/YYYY')
 FROM leads l
+LEFT JOIN contacts c ON c.id = l.contact_id
 LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
-JOIN contacts c ON c.phone = l.phone AND c.account_id = $1
-JOIN chats ch ON ch.jid = c.jid AND ch.account_id = $1
+JOIN chats ch ON ch.jid = l.jid AND ch.account_id = $1
 WHERE l.account_id = $1
 AND EXISTS (
 SELECT 1 FROM messages m WHERE m.chat_id = ch.id AND m.is_from_me = true
@@ -702,7 +573,7 @@ dateStr := getStringArg(args, "date")
 db := s.repos.DB()
 
 var eid, ename, status, edate, location, formula string
-var sessionTitle, sessionStatus string
+var sessionTitle, sessionStatus, targetLogbookID string
 found := false
 
 // Strategy 1: Search by logbook date (for "evento de mañana" type queries)
@@ -716,24 +587,24 @@ if eventName != "" {
 searchQuery = `
 SELECT e.id, e.name, e.status, COALESCE(TO_CHAR(e.event_date, 'DD/MM/YYYY'), 'Sin fecha'),
 COALESCE(e.location, ''), COALESCE(e.tag_formula, ''),
-COALESCE(lb.title, ''), COALESCE(lb.status, '')
+lb.id::text, COALESCE(lb.title, ''), COALESCE(lb.status, '')
 FROM events e
 JOIN event_logbooks lb ON lb.event_id = e.id AND lb.date = $3
-WHERE e.account_id = $1 AND e.name ILIKE '%' || $2 || '%'
+WHERE e.account_id = $1 AND e.status != 'cancelled' AND e.name ILIKE '%' || $2 || '%'
 LIMIT 1`
 searchArgs = []interface{}{accountID, eventName, dateFormatted}
 } else {
 searchQuery = `
 SELECT e.id, e.name, e.status, COALESCE(TO_CHAR(e.event_date, 'DD/MM/YYYY'), 'Sin fecha'),
 COALESCE(e.location, ''), COALESCE(e.tag_formula, ''),
-COALESCE(lb.title, ''), COALESCE(lb.status, '')
+lb.id::text, COALESCE(lb.title, ''), COALESCE(lb.status, '')
 FROM events e
 JOIN event_logbooks lb ON lb.event_id = e.id AND lb.date = $2
-WHERE e.account_id = $1 AND e.status = 'active'
+WHERE e.account_id = $1 AND e.status != 'cancelled'
 LIMIT 1`
 searchArgs = []interface{}{accountID, dateFormatted}
 }
-if err := db.QueryRow(ctx, searchQuery, searchArgs...).Scan(&eid, &ename, &status, &edate, &location, &formula, &sessionTitle, &sessionStatus); err == nil {
+if err := db.QueryRow(ctx, searchQuery, searchArgs...).Scan(&eid, &ename, &status, &edate, &location, &formula, &targetLogbookID, &sessionTitle, &sessionStatus); err == nil {
 found = true
 }
 }
@@ -787,8 +658,8 @@ COALESCE(eps.name, 'Sin etapa'), COALESCE(eps.color, '#6b7280'),
 COALESCE(ep.notes, ''),
 COALESCE((
 SELECT string_agg(t.name, ', ')
-FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id
-WHERE lt.lead_id = ep.lead_id
+FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id
+WHERE ct.contact_id = ep.contact_id
 ), '')
 FROM event_participants ep
 LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
@@ -885,6 +756,45 @@ participants[i]["recent_wa_messages"] = msgs
 }
 }
 
+// When a specific session date was targeted, return ONLY per-session attendance data
+// Do NOT include global participants to prevent AI from mixing data sources
+if targetLogbookID != "" {
+var sessionAttendance []map[string]interface{}
+saRows, saErr := db.Query(ctx, `
+SELECT COALESCE(ep.name, ''), COALESCE(ep.phone, ''), le.stage_name, COALESCE(le.notes, '')
+FROM event_logbook_entries le
+JOIN event_participants ep ON ep.id = le.participant_id
+WHERE le.logbook_id = $1
+ORDER BY le.stage_name, ep.name
+`, targetLogbookID)
+if saErr == nil {
+defer saRows.Close()
+stageCount := make(map[string]int)
+for saRows.Next() {
+var saName, saPhone, saStageName, saNotes string
+if saRows.Scan(&saName, &saPhone, &saStageName, &saNotes) == nil {
+sessionAttendance = append(sessionAttendance, map[string]interface{}{
+"name": saName, "phone": saPhone, "stage": saStageName, "notes": saNotes,
+})
+stageCount[saStageName]++
+}
+}
+return map[string]interface{}{
+"event_name":     ename,
+"status":         status,
+"date":           edate,
+"location":       location,
+"session":        map[string]string{"title": sessionTitle, "status": sessionStatus, "date": dateStr},
+"participants":   sessionAttendance,
+"total":          len(sessionAttendance),
+"stage_summary":  stageCount,
+"sessions":       sessions,
+"NOTE": "Estos son los participantes registrados ESPECÍFICAMENTE en la sesión del " + dateStr + ". El campo 'stage' indica su estado en ESTA sesión (Asistieron=fueron, Confirmados=dijeron que irían, Declinados=no quisieron ir, Contactados=se les contactó). Usa stage_summary para conteos exactos.",
+}, nil
+}
+}
+
+// No session date targeted: return global event participants
 result := map[string]interface{}{
 "event_name":   ename,
 "status":       status,
@@ -895,12 +805,105 @@ result := map[string]interface{}{
 "participants": participants,
 "sessions":     sessions,
 }
-if sessionTitle != "" {
-result["target_session"] = map[string]string{
-"title": sessionTitle, "status": sessionStatus, "date": dateStr,
-}
-}
+
 return result, nil
+}
+
+// --- SQL Direct Query Tool ---
+
+var sqlForbiddenPattern = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXECUTE|COPY|VACUUM|REINDEX|CLUSTER|COMMENT|LOCK|SET\s+ROLE|SET\s+SESSION)\b`)
+
+func (s *Server) toolRunQuery(ctx context.Context, args map[string]interface{}, accountID string) (interface{}, error) {
+	sql := getStringArg(args, "sql")
+	if sql == "" {
+		return map[string]interface{}{"error": "Se requiere una consulta SQL"}, nil
+	}
+
+	// Strip trailing JSON artifacts that GPT sometimes appends (}, ]}, etc)
+	trimmed := strings.TrimSpace(sql)
+	for len(trimmed) > 0 && (trimmed[len(trimmed)-1] == '}' || trimmed[len(trimmed)-1] == ']') {
+		trimmed = strings.TrimSpace(trimmed[:len(trimmed)-1])
+	}
+
+	// Security: only allow SELECT statements
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "SELECT") && !strings.HasPrefix(strings.ToUpper(trimmed), "WITH") {
+		return map[string]interface{}{"error": "Solo se permiten consultas SELECT o WITH (CTE)"}, nil
+	}
+
+	if sqlForbiddenPattern.MatchString(trimmed) {
+		return map[string]interface{}{"error": "Consulta contiene operaciones no permitidas. Solo SELECT read-only."}, nil
+	}
+
+	// Enforce LIMIT if not present
+	upperSQL := strings.ToUpper(trimmed)
+	if !strings.Contains(upperSQL, "LIMIT") {
+		sql = trimmed + " LIMIT 100"
+	}
+
+	// Execute with timeout
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	log.Printf("[AI-SQL] Executing: %s (account=%s)", trimmed, accountID)
+
+	// Pass $1=accountID only if the query uses $1; PK-based queries may not need it
+	var rows pgx.Rows
+	var err error
+	if strings.Contains(sql, "$1") {
+		rows, err = s.repos.DB().Query(queryCtx, sql, accountID)
+	} else {
+		rows, err = s.repos.DB().Query(queryCtx, sql)
+	}
+	if err != nil {
+		log.Printf("[AI-SQL] Error: %v", err)
+		return map[string]interface{}{"error": fmt.Sprintf("Error SQL: %v", err)}, nil
+	}
+	defer rows.Close()
+
+	fieldDescs := rows.FieldDescriptions()
+	columns := make([]string, len(fieldDescs))
+	for i, fd := range fieldDescs {
+		columns[i] = string(fd.Name)
+	}
+
+	var results []map[string]interface{}
+	rowCount := 0
+	for rows.Next() && rowCount < 100 {
+		values, err := rows.Values()
+		if err != nil {
+			continue
+		}
+		row := make(map[string]interface{}, len(columns))
+		for i, col := range columns {
+			if i < len(values) {
+				switch v := values[i].(type) {
+				case time.Time:
+					row[col] = v.Format("02/01/2006 15:04")
+				case []byte:
+					row[col] = string(v)
+				default:
+					row[col] = v
+				}
+			}
+		}
+		results = append(results, row)
+		rowCount++
+	}
+
+	if results == nil {
+		results = []map[string]interface{}{}
+	}
+
+	log.Printf("[AI-SQL] Returned %d rows", len(results))
+
+	result := map[string]interface{}{"columns": columns, "rows": results, "total": len(results)}
+
+	// Server-side guardrail: warn if querying attendance without stage_name filter
+	if strings.Contains(upperSQL, "EVENT_LOGBOOK_ENTRIES") && !strings.Contains(upperSQL, "STAGE_NAME") {
+		result["warning"] = "⚠️ Esta consulta NO filtra por stage_name. Incluye TODOS los registrados (Asistieron, Confirmados, Declinados, etc). Si necesitas solo asistentes, DEBES agregar: AND le.stage_name='Asistieron'"
+	}
+
+	return result, nil
 }
 
 // --- Arg helpers ---
@@ -952,11 +955,10 @@ row := db.QueryRow(ctx, `
 SELECT
 (SELECT COUNT(*) FROM leads WHERE account_id = $1),
 (SELECT COUNT(*) FROM contacts WHERE account_id = $1),
-(SELECT COUNT(*) FROM events WHERE account_id = $1),
+(SELECT COUNT(*) FROM events WHERE account_id = $1 AND status != 'cancelled'),
 (SELECT COUNT(*) FROM leads WHERE account_id = $1 AND created_at >= NOW() - INTERVAL '30 days'),
 (SELECT COUNT(DISTINCT l.id) FROM leads l
- JOIN contacts c ON c.phone = l.phone AND c.account_id = $1
- WHERE l.account_id = $1 AND c.id IS NOT NULL)
+ WHERE l.account_id = $1 AND l.contact_id IS NOT NULL)
 `, accountID)
 if err := row.Scan(
 &data.TotalLeads, &data.TotalContacts, &data.TotalEvents,
@@ -988,10 +990,10 @@ data.ByStage = append(data.ByStage, sc)
 }
 
 tagRows, err := db.Query(ctx, `
-SELECT t.name, COUNT(lt.lead_id) as cnt
+SELECT t.name, COUNT(ct.contact_id) as cnt
 FROM tags t
-JOIN lead_tags lt ON lt.tag_id = t.id
-JOIN leads l ON l.id = lt.lead_id AND l.account_id = $1
+JOIN contact_tags ct ON ct.tag_id = t.id
+JOIN leads l ON l.contact_id = ct.contact_id AND l.account_id = $1
 WHERE t.account_id = $1
 GROUP BY t.name
 ORDER BY cnt DESC
@@ -1014,7 +1016,7 @@ COALESCE(e.location, 'Sin ubicación'),
 (SELECT COUNT(*) FROM event_participants ep WHERE ep.event_id = e.id),
 COALESCE(e.tag_formula, '')
 FROM events e
-WHERE e.account_id = $1 AND e.status = 'active'
+WHERE e.account_id = $1 AND e.status != 'cancelled'
 ORDER BY COALESCE(e.event_date, e.created_at) DESC
 LIMIT 3
 `, accountID)
@@ -1026,7 +1028,7 @@ var ev eventSummary
 if err := eventRows.Scan(&eid, &ev.Name, &ev.Status, &ev.Date, &ev.Location, &ev.Participants, &ev.TagFormula); err == nil {
 // Fetch logbook sessions for this event
 sessRows, serr := db.Query(ctx, `
-SELECT TO_CHAR(lb.date, 'DD/MM/YYYY'), lb.title, lb.status
+SELECT lb.id, TO_CHAR(lb.date, 'DD/MM/YYYY'), lb.title, lb.status
 FROM event_logbooks lb
 WHERE lb.event_id = $1
 ORDER BY lb.date ASC
@@ -1034,7 +1036,7 @@ ORDER BY lb.date ASC
 if serr == nil {
 for sessRows.Next() {
 var si eventSessionInfo
-if sessRows.Scan(&si.Date, &si.Title, &si.Status) == nil {
+if sessRows.Scan(&si.ID, &si.Date, &si.Title, &si.Status) == nil {
 ev.Sessions = append(ev.Sessions, si)
 }
 }
@@ -1144,12 +1146,16 @@ sb.WriteString("\n")
 }
 
 if len(crm.Events) > 0 {
-sb.WriteString("\nEventos recientes:\n")
+totalSessions := 0
+for _, e := range crm.Events {
+totalSessions += len(e.Sessions)
+}
+sb.WriteString(fmt.Sprintf("\nEventos recientes (%d sesiones en total):\n", totalSessions))
 for _, e := range crm.Events {
 sb.WriteString(fmt.Sprintf("  • %s | %s | %s | %d participantes\n", e.Name, e.Status, e.Date, e.Participants))
 if len(e.Sessions) > 0 {
 for _, sess := range e.Sessions {
-sb.WriteString(fmt.Sprintf("    → Sesión %s: \"%s\" (%s)\n", sess.Date, sess.Title, sess.Status))
+sb.WriteString(fmt.Sprintf("    → Sesión %s: \"%s\" [id:%s] (%s)\n", sess.Date, sess.Title, sess.ID, sess.Status))
 }
 }
 }
@@ -1187,23 +1193,258 @@ if currentPage != "" {
 sb.WriteString(fmt.Sprintf("\nEl usuario está en la página: %s\n", currentPage))
 }
 
-sb.WriteString("\nINSTRUCCIONES: Usa herramientas para datos específicos. Saludos: responde como gato juguetón sin herramientas. Emojis siempre 😸🎯📈. Tablas: markdown. Eventos tienen SESIONES con fechas; para 'evento de mañana' usa get_event_report(date=DD/MM/YYYY). get_event_report devuelve NOMBRE, TELÉFONO, ETAPA, NOTAS y TAGS de cada participante — si piden nombres, cuadro de participantes u observaciones, USA get_event_report. search_chat_messages busca texto en TODOS los chats — úsalo cuando pidan buscar un nombre, palabra o frase en conversaciones de WhatsApp. Copywriting WA: corto, persuasivo, emojis, <300 chars.\n")
+sb.WriteString(`
+⚠️⚠️⚠️ REGLA #1 — ASISTENCIA (LEER PRIMERO):
+- Cuando piden "asistentes"/"asistieron"/"los que fueron" → SQL DEBE tener: AND le.stage_name='Asistieron'
+- SIN ese filtro obtienes TODOS los registrados (Asistieron + Confirmados + Declinados + etc). Eso es INCORRECTO.
+- 'Confirmados' ≠ 'Asistieron'. Son categorías DISTINTAS. NUNCA las mezcles.
+- Solo omite el filtro si piden explícitamente "todos los registrados" o "todos los participantes".
+
+INSTRUCCIONES:
+- Usa run_query para TODA consulta de datos. Genera SQL de nivel senior.
+- Saludos: responde como gato juguetón sin herramientas 😸🎯📈.
+- Tablas: markdown. Copywriting WA: corto, persuasivo, emojis, <300 chars.
+- Si el resultado de run_query merece visualización, genera un gráfico usando <chart>.
+
+=== GENERACIÓN DE GRÁFICOS ===
+Puedes generar gráficos inline usando la etiqueta <chart>. El frontend los renderiza automáticamente.
+Formato: <chart>{"type":"...","title":"...","data":[...],"keys":["..."],"indexBy":"..."}</chart>
+
+Tipos disponibles: bar, pie, line, radar, scatter, area, stacked, heatmap, gauge
+Campos:
+- type (obligatorio): tipo de gráfico
+- title (opcional): título del gráfico
+- data (obligatorio excepto gauge): array de objetos, cada uno con el campo indexBy y los campos de keys
+- keys (obligatorio para bar/stacked/line/area/radar): campos numéricos a graficar
+- indexBy (obligatorio para bar/stacked/line/area/radar): campo categoría del eje X
+- colors (opcional): array de colores hex, ej: ["#10b981","#3b82f6"]
+- xLabel, yLabel (opcional): etiquetas de ejes
+- layout (opcional): "vertical" u "horizontal"
+- suggest (opcional): true = muestra botón "Ver gráfico" en vez de renderizar directo. Úsalo cuando el usuario NO pidió gráfico pero crees que sería útil.
+- Gauge: usa value, min, max, unit en lugar de data/keys/indexBy.
+
+Ejemplos:
+1) Leads por etapa (bar):
+<chart>{"type":"bar","title":"Leads por etapa","data":[{"etapa":"Calificado","total":45},{"etapa":"En progreso","total":32},{"etapa":"Nuevo","total":18}],"keys":["total"],"indexBy":"etapa"}</chart>
+
+2) Distribución de asistencia (pie):
+<chart>{"type":"pie","title":"Asistencia sesión","data":[{"id":"Asistieron","value":12},{"id":"Confirmados","value":5},{"id":"Declinados","value":3}]}</chart>
+
+3) Tasa de conversión (gauge):
+<chart>{"type":"gauge","title":"Tasa de conversión","value":68,"min":0,"max":100,"unit":"%"}</chart>
+
+4) Sugerencia proactiva (no pedida por el usuario):
+<chart>{"type":"bar","title":"Leads por etapa","data":[...],"keys":["total"],"indexBy":"etapa","suggest":true}</chart>
+
+Cuándo generar gráficos:
+- El usuario pide explícitamente un gráfico/chart/visualización → genera directo (suggest:false o no incluir suggest)
+- Datos tabulares con 3+ filas numéricas → sugiere gráfico (suggest:true)
+- Comparaciones, tendencias, distribuciones → sugiere gráfico (suggest:true)
+- Respuestas simples de texto/lista corta → NO generes gráfico
+
+=== PROTOCOLO DE DESAMBIGUACIÓN ===
+Cuando hay ambigüedad (ej: 2 sesiones con nombre similar, múltiples leads con mismo nombre):
+1. ⚠️ PREGUNTA POR FECHA: Si el usuario pregunta por una FECHA (ej: "07/03", "ayer", "el viernes") y hay múltiples sesiones ese día → INCLUYE TODAS. NO preguntes cuál. Filtra por lb.date, NO por lb.id. Muestra datos desglosados por sesión.
+2. PREGUNTA POR SESIÓN ESPECÍFICA: Si nombra una sesión concreta (ej: "2da clase", "test01") → usa su UUID del contexto CRM.
+3. Si los DATOS DEL CRM arriba ya tienen la info para resolver, úsala directo SIN preguntar.
+4. Si NO puedes resolver, presenta opciones numeradas al usuario con la opción "Ambas/Todas".
+5. SOLO pregunta cuando es estrictamente necesario. No preguntes cosas obvias.
+6. NUNCA hagas preguntas abiertas. SIEMPRE da opciones.
+7. Si el usuario ya dio suficiente contexto para resolver, NO preguntes — actúa.
+
+=== HERRAMIENTA run_query (SQL DIRECTO) ===
+Eres un experto senior en SQL PostgreSQL. Genera queries óptimas, precisas e indexadas.
+El parámetro $1 = account_id (UUID). Inclúyelo siempre en WHERE.
+Formato fechas en DB: timestamp/date. Usa TO_CHAR(col,'DD/MM/YYYY') para mostrar. Filtrar: col::date = 'YYYY-MM-DD'.
+
+METODOLOGÍA SQL:
+- SESIÓN ESPECÍFICA → PK (UUID): Cuando el usuario pregunta por UNA sesión concreta (ej: "resumen de la 2da clase"), filtra por lb.id='uuid' usando el [id:xxx] del contexto CRM. NUNCA filtres por lb.title ILIKE.
+- PREGUNTA POR FECHA → lb.date: Cuando el usuario pregunta por una FECHA (ej: "cuántos asistieron el 07/03"), filtra por lb.date='YYYY-MM-DD'. Esto incluye TODAS las sesiones de esa fecha automáticamente. NUNCA elijas una sola sesión si hay varias en esa fecha.
+- ⚠️ REGLA CLAVE: Si hay múltiples sesiones en la misma fecha y el usuario pregunta por la fecha, agrega TODAS — NO elijas una. Incluye lb.title y e.name en el SELECT para que el usuario sepa de qué sesión viene cada dato.
+- JOINS EXPLÍCITOS: Siempre usa JOIN ... ON, nunca comas implícitas.
+- ALIASES OBLIGATORIOS: Siempre cualifica columnas con alias de tabla (lb.date, ep.name, le.stage_name).
+- CTEs PARA COMPLEJIDAD: Usa WITH ... AS para queries con 3+ JOINs o cuando necesites reusar un resultado.
+- EXISTS SOBRE IN: Prefiere EXISTS(SELECT 1 FROM ...) sobre IN(SELECT ...) para subqueries correlacionadas.
+- LIMIT SIEMPRE: Agrega LIMIT a toda query para evitar resultados masivos.
+
+SCHEMA:
+events(id uuid PK, account_id uuid, name text, status text, event_date timestamptz, location text, tag_formula text, pipeline_id uuid) -- status: 'active','draft','completed','cancelled'
+event_logbooks(id uuid PK, event_id uuid FK→events, date date, title text, status text, total_participants int, general_notes text) -- SESIONES
+event_logbook_entries(id uuid PK, logbook_id uuid FK→event_logbooks, participant_id uuid FK→event_participants, stage_name text, notes text) -- ASISTENCIA
+event_participants(id uuid PK, event_id uuid FK→events, name text, phone text, email text, stage_id uuid, lead_id uuid, notes text, age int)
+event_pipeline_stages(id uuid PK, pipeline_id uuid, name text, color text, position int)
+
+leads(id uuid PK, account_id uuid, name text, phone text, email text, status text, source text, notes text, company text, age int, dni text, birth_date timestamptz, stage_id uuid, pipeline_id uuid)
+contact_tags(contact_id uuid, tag_id uuid)
+tags(id uuid PK, account_id uuid, name text, color text)
+pipeline_stages(id uuid PK, pipeline_id uuid, name text, position int)
+
+chats(id uuid PK, account_id uuid, contact_id uuid, jid text, name text, last_message text, unread_count int)
+messages(id uuid PK, chat_id uuid FK→chats, body text, is_from_me bool, timestamp timestamptz, message_type text)
+contacts(id uuid PK, account_id uuid, jid text, phone text, name text, email text, notes text, age int, dni text)
+
+campaigns(id uuid PK, account_id uuid, name text, status text, total_recipients int, sent_count int, failed_count int, scheduled_at timestamptz)
+campaign_recipients(id uuid PK, campaign_id uuid, name text, phone text, status text)
+
+interactions(id uuid PK, account_id uuid, contact_id uuid, event_id uuid, participant_id uuid, type text, direction text, outcome text, notes text, lead_id uuid, created_at timestamptz)
+
+programs(id uuid PK, account_id uuid, name text, status text)
+program_sessions(id uuid PK, program_id uuid, date timestamptz, topic text, location text)
+program_participants(id uuid PK, program_id uuid, contact_id uuid, status text, lead_id uuid)
+program_attendance(id uuid PK, session_id uuid, participant_id uuid, status text, notes text)
+
+RELACIONES CLAVE:
+- events → event_logbooks (sesiones) via event_id
+- event_logbooks → event_logbook_entries (asistencia) via logbook_id
+- event_logbook_entries → event_participants via participant_id
+- event_participants.stage_id → event_pipeline_stages.id (etapa GLOBAL)
+- event_logbook_entries.stage_name = etapa EN ESA SESIÓN ('Asistieron','Confirmados','Declinados','Contactados','Interesados','Pre inscritos','Inscrito')
+- leads → contacts → contact_tags → tags
+- leads.stage_id → pipeline_stages.id
+- chats → messages via chat_id; chats.jid formato: 51XXXXXXXXX@s.whatsapp.net
+- contacts.phone = número sin prefijo jid
+
+EJEMPLOS SQL (usando PK):
+-- Asistentes de una sesión por UUID (FORMA CORRECTA — siempre incluye $1 via JOIN a events):
+SELECT ep.phone, ep.name, le.notes, ep.age
+FROM event_logbook_entries le
+JOIN event_participants ep ON ep.id = le.participant_id
+JOIN event_logbooks lb ON lb.id = le.logbook_id
+JOIN events e ON e.id = lb.event_id
+WHERE e.account_id = $1 AND le.logbook_id = 'UUID_DE_SESION' AND le.stage_name = 'Asistieron'
+LIMIT 100
+
+-- Resumen de asistencia de una sesión:
+SELECT le.stage_name, COUNT(*) AS total
+FROM event_logbook_entries le
+JOIN event_logbooks lb ON lb.id = le.logbook_id
+JOIN events e ON e.id = lb.event_id
+WHERE e.account_id = $1 AND le.logbook_id = 'UUID_DE_SESION'
+GROUP BY le.stage_name ORDER BY total DESC
+
+-- Sesiones de un evento:
+SELECT lb.id, lb.date, lb.title, lb.status, lb.total_participants
+FROM event_logbooks lb
+JOIN events e ON e.id = lb.event_id
+WHERE e.account_id = $1 AND e.name ILIKE '%nombre%'
+ORDER BY lb.date
+
+-- Leads por etapa con CTE:
+WITH lead_data AS (
+  SELECT l.id, COALESCE(c.name, l.name) AS name, COALESCE(c.phone, l.phone) AS phone, ps.name AS etapa
+  FROM leads l
+  LEFT JOIN contacts c ON c.id = l.contact_id
+  LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+  WHERE l.account_id = $1
+)
+SELECT etapa, COUNT(*) AS total FROM lead_data GROUP BY etapa ORDER BY total DESC
+
+-- Buscar lead con tags:
+SELECT COALESCE(c.name, l.name) AS name, COALESCE(c.phone, l.phone) AS phone, COALESCE(c.email, l.email) AS email, COALESCE(ps.name,'') AS etapa, STRING_AGG(t.name, ', ') AS tags
+FROM leads l
+LEFT JOIN contacts c ON c.id = l.contact_id
+LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+LEFT JOIN contact_tags ct ON ct.contact_id = l.contact_id
+LEFT JOIN tags t ON t.id = ct.tag_id
+WHERE l.account_id = $1 AND COALESCE(c.name, l.name) ILIKE '%juan%'
+GROUP BY l.id, c.name, l.name, c.phone, l.phone, c.email, l.email, ps.name LIMIT 50
+
+-- Mensajes recientes:
+SELECT m.body, m.is_from_me, TO_CHAR(m.timestamp, 'DD/MM/YYYY HH24:MI') AS fecha
+FROM messages m
+JOIN chats ch ON ch.id = m.chat_id
+WHERE ch.account_id = $1 AND ch.jid LIKE '%993738489%'
+ORDER BY m.timestamp DESC LIMIT 20
+
+-- Reporte diario (UNION ALL):
+SELECT 'leads_nuevos' AS tipo, COUNT(*) AS total FROM leads WHERE account_id=$1 AND created_at::date=CURRENT_DATE
+UNION ALL SELECT 'msgs_enviados', COUNT(*) FROM messages m JOIN chats c ON c.id=m.chat_id WHERE c.account_id=$1 AND m.is_from_me=true AND m.timestamp::date=CURRENT_DATE
+UNION ALL SELECT 'msgs_recibidos', COUNT(*) FROM messages m JOIN chats c ON c.id=m.chat_id WHERE c.account_id=$1 AND m.is_from_me=false AND m.timestamp::date=CURRENT_DATE
+
+-- Interacciones con EXISTS:
+SELECT i.type, i.direction, i.outcome, i.notes, TO_CHAR(i.created_at, 'DD/MM/YYYY HH24:MI') AS fecha
+FROM interactions i
+WHERE i.account_id = $1 AND EXISTS(SELECT 1 FROM contacts c WHERE c.id = i.contact_id AND c.phone LIKE '%993738489%')
+ORDER BY i.created_at DESC LIMIT 50
+
+-- Registrados entre fechas:
+SELECT le.stage_name, COUNT(*) AS total, STRING_AGG(ep.name, ', ' ORDER BY ep.name) AS nombres
+FROM event_logbook_entries le
+JOIN event_participants ep ON ep.id = le.participant_id
+JOIN event_logbooks lb ON lb.id = le.logbook_id
+JOIN events e ON e.id = lb.event_id
+WHERE e.account_id = $1 AND lb.date BETWEEN '2026-03-01' AND '2026-03-15'
+GROUP BY le.stage_name ORDER BY total DESC
+
+-- ⚠️ Asistentes de TODAS las sesiones de una fecha (FORMA CORRECTA para preguntas por fecha):
+SELECT e.name AS evento, lb.title AS sesion, le.stage_name, COUNT(*) AS total
+FROM event_logbook_entries le
+JOIN event_logbooks lb ON lb.id = le.logbook_id
+JOIN events e ON e.id = lb.event_id
+WHERE e.account_id = $1 AND lb.date = '2026-03-07' AND le.stage_name = 'Asistieron'
+GROUP BY e.name, lb.title, le.stage_name ORDER BY total DESC
+
+-- Total asistentes en una fecha (cross-session):
+SELECT COUNT(*) AS total_asistieron
+FROM event_logbook_entries le
+JOIN event_logbooks lb ON lb.id = le.logbook_id
+JOIN events e ON e.id = lb.event_id
+WHERE e.account_id = $1 AND lb.date = '2026-03-07' AND le.stage_name = 'Asistieron'
+
+⚠️ REGLAS SQL OBLIGATORIAS:
+1. SIEMPRE incluye account_id=$1 en WHERE (o via JOIN a tabla que lo tenga).
+1b. ⚠️ EVENTOS: Por defecto SIEMPRE excluye eventos cancelados (e.status != 'cancelled') a menos que el usuario pida explícitamente ver cancelados/eliminados. Esto aplica a cualquier query que toque la tabla events.
+2. Fechas: el usuario dice DD/MM/YYYY → convierte a YYYY-MM-DD en SQL.
+3. stage_name valores: 'Asistieron', 'Confirmados', 'Declinados', 'Contactados', 'Interesados', 'Pre inscritos', 'Inscrito', 'Registrados'.
+4. Teléfonos: LIKE '%XXXXXXXXX%' (últimos 9 dígitos).
+5. Búsqueda texto: ILIKE para nombres, descripciones.
+6. SIEMPRE devuelve name + phone al listar personas.
+7. Usa COUNT(*) para conteos — NUNCA cuentes filas manualmente.
+8. ⚠️ SESIÓN ESPECÍFICA: Filtra por lb.id='uuid' (del contexto CRM). FECHA: Filtra por lb.date='YYYY-MM-DD' (incluye TODAS las sesiones). NUNCA uses lb.title ILIKE.
+9. ⚠️ Si hay MÚLTIPLES sesiones en una fecha y el usuario pregunta por esa fecha → agrega TODAS en UNA query con lb.date. Incluye e.name y lb.title en SELECT para desglosar.
+10. Incluye lb.title o identificador en SELECT cuando consultes event_logbook_entries.
+11. Cualifica TODAS las columnas con alias (ep.name, lb.date, le.stage_name). Nunca columnas ambiguas.
+12. Usa CTEs (WITH) cuando el query tenga 3+ JOINs y lógica compleja.
+13. SIEMPRE agrega LIMIT (máx 100). Usa LIMIT menor si es suficiente.
+
+⚠️⚠️ REGLA CRÍTICA DE ASISTENCIA:
+- 'asistentes'/'asistieron'/'los que fueron' = SOLO stage_name='Asistieron'. NUNCA incluyas 'Confirmados'.
+- 'Confirmados' = dijeron que irían, NO necesariamente asistieron. Son categorías DISTINTAS.
+- 'Declinados' = no quisieron ir. 'Contactados' = se les contactó.
+- Si piden 'asistentes' → filtra EXCLUSIVAMENTE stage_name='Asistieron'.
+- Si piden 'todos los registrados'/'participantes' → incluye TODOS los stage_name.
+- NUNCA mezcles Asistieron con Confirmados a menos que lo pida explícitamente.
+`)
 
 return sb.String()
+}
+
+// --- AI Provider Detection ---
+
+// detectAIProvider returns the base URL and model name based on the API key prefix.
+// Keys starting with "AIza" are Google Gemini; everything else is OpenAI.
+func detectAIProvider(apiKey string) (baseURL, model, provider string) {
+	if strings.HasPrefix(apiKey, "AIza") {
+		return "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "gemini-3.1-flash-lite-preview", "gemini"
+	}
+	return "https://api.openai.com/v1/chat/completions", "gpt-4.1-nano", "openai"
 }
 
 // --- Groq API Call ---
 
 func sendGroqRequest(ctx context.Context, apiKey string, messages []groqMessage, tools []groqTool) (*groqResponse, error) {
-	maxTok := 768 // follow-up: synthesize response from tool results
+	maxTok := 2048 // follow-up: synthesize response from tool results + charts
 	if tools != nil {
-		maxTok = 768 // first call with tools: needs room for tool selection + possible direct answer
+		maxTok = 1024 // first call with tools: SQL generation + tool selection
 	}
+
+	endpointURL, modelName, _ := detectAIProvider(apiKey)
+
 	reqBody := groqRequest{
-		Model:       "meta-llama/llama-4-scout-17b-16e-instruct",
+		Model:       modelName,
 		Messages:    messages,
 		Tools:       tools,
-		Temperature: 0.7,
+		Temperature: 0.2,
 		MaxTokens:   maxTok,
 	}
 
@@ -1214,9 +1455,9 @@ return nil, fmt.Errorf("marshal groq request: %w", err)
 
 // Retry up to 2 times on rate limit (429)
 for attempt := 0; attempt < 2; attempt++ {
-httpCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+httpCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 
-req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, "https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(bodyBytes))
+req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, endpointURL, bytes.NewReader(bodyBytes))
 if err != nil {
 cancel()
 return nil, fmt.Errorf("create groq request: %w", err)
@@ -1252,6 +1493,11 @@ return nil, fmt.Errorf("parse groq response: %w", err)
 }
 
 if groqResp.Error != nil {
+// If max_tokens reached but we got partial content, return it instead of failing
+if len(groqResp.Choices) > 0 && groqResp.Choices[0].Message.Content != nil && *groqResp.Choices[0].Message.Content != "" {
+log.Printf("[AI] Groq partial response (max_tokens reached), returning partial content")
+return &groqResp, nil
+}
 return nil, fmt.Errorf("groq error: %s", groqResp.Error.Message)
 }
 
@@ -1308,13 +1554,16 @@ func (s *Server) handleValidateAIConfig(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "API key is required"})
 	}
 
-	// Make a minimal test request to Groq to validate the key
+	// Make a minimal test request to validate the key
 	testContent := "Hi"
 	testMessages := []groqMessage{
 		{Role: "user", Content: &testContent},
 	}
+
+	endpointURL, modelName, _ := detectAIProvider(body.GroqAPIKey)
+
 	testReq := groqRequest{
-		Model:       "meta-llama/llama-4-scout-17b-16e-instruct",
+		Model:       modelName,
 		Messages:    testMessages,
 		Temperature: 0.1,
 		MaxTokens:   5,
@@ -1324,7 +1573,7 @@ func (s *Server) handleValidateAIConfig(c *fiber.Ctx) error {
 	httpCtx, cancel := context.WithTimeout(c.Context(), 15*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, "https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, endpointURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return c.JSON(fiber.Map{"success": false, "valid": false, "error": "could not create request"})
 	}
@@ -1345,7 +1594,7 @@ func (s *Server) handleValidateAIConfig(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"success": true, "valid": true})
 	}
 	if resp.StatusCode >= 400 {
-		return c.JSON(fiber.Map{"success": true, "valid": false, "error": fmt.Sprintf("Groq returned status %d", resp.StatusCode)})
+		return c.JSON(fiber.Map{"success": true, "valid": false, "error": fmt.Sprintf("API returned status %d", resp.StatusCode)})
 	}
 
 	return c.JSON(fiber.Map{"success": true, "valid": true})
@@ -1429,6 +1678,8 @@ return c.JSON(fiber.Map{
 })
 }
 
+_, modelName, _ := detectAIProvider(apiKey)
+
 // Build initial messages
 systemContent := systemPrompt
 messages := []groqMessage{
@@ -1447,6 +1698,15 @@ log.Printf("[AI] Groq request (account=%s): %q", accountIDStr, req.Message)
 
 // First call — may return tool_calls or direct response
 resp, err := sendGroqRequest(ctx, apiKey, messages, tools)
+
+if resp != nil && resp.Usage != nil {
+    var apiKeyPreview string
+    if len(apiKey) >= 8 {
+        apiKeyPreview = apiKey[:8] + "..."
+    }
+    _ = s.repos.AIToken.Save(ctx, accountID, userID, apiKeyPreview, modelName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+}
+
 if err != nil {
 log.Printf("[AI] Groq error: %v", err)
 if strings.Contains(err.Error(), "rate limit") {
@@ -1493,7 +1753,7 @@ continue
 }
 
 log.Printf("[AI] Tool call: %s(%v)", tc.Function.Name, args)
-result, err := s.executeTool(ctx, tc.Function.Name, args, accountIDStr)
+result, err := s.executeTool(ctx, tc.Function.Name, args, accountIDStr, userID.String())
 if err != nil {
 log.Printf("[AI] Tool error %s: %v", tc.Function.Name, err)
 errContent := fmt.Sprintf("Error: %v", err)
@@ -1511,8 +1771,17 @@ Role: "tool", Content: &resultStr, Name: tc.Function.Name, ToolCallID: tc.ID,
 })
 }
 
-// Call Groq again with tool results
-resp, err = sendGroqRequest(ctx, apiKey, messages, nil) // no tools on follow-up
+// Call Groq again with tool results (pass tools to allow multi-step queries)
+resp, err = sendGroqRequest(ctx, apiKey, messages, tools)
+
+if resp != nil && resp.Usage != nil {
+    var apiKeyPreview string
+    if len(apiKey) >= 8 {
+        apiKeyPreview = apiKey[:8] + "..."
+    }
+    _ = s.repos.AIToken.Save(ctx, accountID, userID, apiKeyPreview, modelName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+}
+
 if err != nil {
 log.Printf("[AI] Groq follow-up error: %v", err)
 if strings.Contains(err.Error(), "rate limit") {
@@ -1600,4 +1869,28 @@ if err := s.repos.ErosConversation.Delete(c.Context(), accountID, convID); err !
 return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 }
 return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) toolGetTokenConsumption(ctx context.Context, args map[string]interface{}, accountIDStr, userIDStr string) (interface{}, error) {
+if accountIDStr == "" || userIDStr == "" {
+return nil, fmt.Errorf("Faltan parámetros de usuario/cuenta para ver consumos.")
+}
+
+accUUID, err := uuid.Parse(accountIDStr)
+if err != nil { return nil, err }
+userUUID, err := uuid.Parse(userIDStr)
+if err != nil { return nil, err }
+
+inTokens, outTokens, total, err := s.repos.AIToken.GetTotalTokensUsage(ctx, accUUID, userUUID)
+if err != nil {
+return nil, fmt.Errorf("No se pudo obtener el uso de la base de datos: %v", err)
+}
+
+return map[string]interface{}{
+"message": "Tokens calculados correctamente",
+"input_tokens": inTokens,
+"output_tokens": outTokens,
+"total_tokens_used": total,
+"hint": "Comunica al usuario de forma amena cuántos tokens ha consumido. Puedes mencionar la suma total y el modelo usado (OpenAI o Gemini según su configuración).",
+}, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -38,10 +39,15 @@ type Repositories struct {
 	CampaignAttachment *CampaignAttachmentRepository
 	QuickReply         *QuickReplyRepository
 	Program           *ProgramRepository
+	ProgramFolder     *ProgramFolderRepository
 	Role              *RoleRepository
 	Logbook           *LogbookRepository
 	APIKey            *APIKeyRepository
 	ErosConversation  *ErosConversationRepository
+	AIToken           *AITokenRepository
+	Automation        *AutomationRepository
+	Survey            *SurveyRepository
+	Dynamic           *DynamicRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -70,10 +76,15 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		CampaignAttachment: &CampaignAttachmentRepository{db: db},
 		QuickReply:         &QuickReplyRepository{db: db},
 		Program:           &ProgramRepository{db: db},
+		ProgramFolder:     &ProgramFolderRepository{db: db},
 		Role:              &RoleRepository{db: db},
 		Logbook:           &LogbookRepository{db: db},
 		APIKey:            &APIKeyRepository{db: db},
 		ErosConversation:  &ErosConversationRepository{db: db},
+		AIToken:           &AITokenRepository{db: db},
+		Automation:        &AutomationRepository{db: db},
+		Survey:            &SurveyRepository{db: db},
+		Dynamic:           &DynamicRepository{db: db},
 	}
 }
 
@@ -423,11 +434,11 @@ func (r *DeviceRepository) Create(ctx context.Context, device *domain.Device) er
 func (r *DeviceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Device, error) {
 	device := &domain.Device{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, name, phone, jid, status, qr_code, last_seen_at, created_at, updated_at
+		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, last_seen_at, created_at, updated_at
 		FROM devices WHERE id = $1
 	`, id).Scan(
 		&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
-		&device.Status, &device.QRCode, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+		&device.Status, &device.QRCode, &device.ReceiveMessages, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -437,7 +448,7 @@ func (r *DeviceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.D
 
 func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Device, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, name, phone, jid, status, qr_code, last_seen_at, created_at, updated_at
+		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, last_seen_at, created_at, updated_at
 		FROM devices WHERE account_id = $1 ORDER BY created_at DESC
 	`, accountID)
 	if err != nil {
@@ -450,7 +461,7 @@ func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UU
 		device := &domain.Device{}
 		if err := rows.Scan(
 			&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
-			&device.Status, &device.QRCode, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+			&device.Status, &device.QRCode, &device.ReceiveMessages, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -461,7 +472,7 @@ func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UU
 
 func (r *DeviceRepository) GetAll(ctx context.Context) ([]*domain.Device, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, name, phone, jid, status, qr_code, last_seen_at, created_at, updated_at
+		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, last_seen_at, created_at, updated_at
 		FROM devices ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -474,7 +485,7 @@ func (r *DeviceRepository) GetAll(ctx context.Context) ([]*domain.Device, error)
 		device := &domain.Device{}
 		if err := rows.Scan(
 			&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
-			&device.Status, &device.QRCode, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+			&device.Status, &device.QRCode, &device.ReceiveMessages, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -499,6 +510,11 @@ func (r *DeviceRepository) UpdateJID(ctx context.Context, id uuid.UUID, jid, pho
 
 func (r *DeviceRepository) UpdateName(ctx context.Context, id uuid.UUID, name string) error {
 	_, err := r.db.Exec(ctx, `UPDATE devices SET name = $1, updated_at = NOW() WHERE id = $2`, name, id)
+	return err
+}
+
+func (r *DeviceRepository) UpdateReceiveMessages(ctx context.Context, id uuid.UUID, receive bool) error {
+	_, err := r.db.Exec(ctx, `UPDATE devices SET receive_messages = $1, updated_at = NOW() WHERE id = $2`, receive, id)
 	return err
 }
 
@@ -625,6 +641,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		FROM chats c
 		LEFT JOIN devices d ON c.device_id = d.id
 		LEFT JOIN contacts ctc ON ctc.account_id = c.account_id AND ctc.jid = c.jid
+		LEFT JOIN leads l ON l.account_id = c.account_id AND l.jid = c.jid
 		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast' AND c.jid NOT LIKE '%@lid'
 	`
 	args := []interface{}{accountID}
@@ -673,7 +690,8 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
 		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
 		       d.name, d.phone,
-		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
+		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name,
+		       COALESCE(l.is_blocked, false)
 	` + baseQuery + " ORDER BY c.is_pinned DESC, c.last_message_at DESC NULLS LAST"
 
 	// Apply pagination
@@ -699,6 +717,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 			&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
 			&chat.DeviceName, &chat.DevicePhone,
 			&chat.ContactPhone, &chat.ContactAvatarURL, &chat.ContactCustomName, &chat.ContactName,
+			&chat.LeadIsBlocked,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -1182,35 +1201,53 @@ func (r *ContactRepository) Update(ctx context.Context, contact *domain.Contact)
 	return err
 }
 
-// SyncToParticipants propagates shared contact fields to all linked event_participants
+// SyncToParticipants propagates contact fields to all linked event_participants and campaign_recipients
 func (r *ContactRepository) SyncToParticipants(ctx context.Context, contact *domain.Contact) error {
+	name := contact.DisplayName()
 	_, err := r.db.Exec(ctx, `
 		UPDATE event_participants SET
-			name = COALESCE($1, name), last_name = $2, short_name = $3, phone = $4, email = $5, age = $6, updated_at = NOW()
-		WHERE contact_id = $7
-	`, contact.Name, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Age, contact.ID)
-	return err
+			name = $2,
+			last_name = COALESCE($3, last_name),
+			short_name = COALESCE($4, short_name),
+			phone = COALESCE($5, phone),
+			email = COALESCE($6, email),
+			age = COALESCE($7, age),
+			updated_at = NOW()
+		WHERE contact_id = $1
+	`, contact.ID, name, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Age)
+	if err != nil {
+		log.Printf("[SYNC] Error syncing contact %s to event_participants: %v", contact.ID, err)
+	}
+	_, err = r.db.Exec(ctx, `
+		UPDATE campaign_recipients SET name = $2, phone = COALESCE($3, phone)
+		WHERE contact_id = $1
+	`, contact.ID, name, contact.Phone)
+	if err != nil {
+		log.Printf("[SYNC] Error syncing contact %s to campaign_recipients: %v", contact.ID, err)
+	}
+	return nil
 }
 
-// SyncToLead propagates shared contact fields to the linked lead
+// SyncToLead propagates contact name to linked lead
 func (r *ContactRepository) SyncToLead(ctx context.Context, contact *domain.Contact) error {
-	displayName := contact.DisplayName()
+	name := contact.DisplayName()
 	_, err := r.db.Exec(ctx, `
 		UPDATE leads SET
-			name = COALESCE($1, name),
-			last_name = COALESCE($2, last_name),
-			short_name = COALESCE($3, short_name),
-			phone = COALESCE($4, phone),
-			email = COALESCE($5, email),
-			company = COALESCE($6, company),
+			name = $2,
+			last_name = COALESCE($3, last_name),
+			short_name = COALESCE($4, short_name),
+			phone = COALESCE($5, phone),
+			email = COALESCE($6, email),
 			age = COALESCE($7, age),
-			notes = COALESCE($8, notes),
-			dni = COALESCE($9, dni),
-			birth_date = COALESCE($10, birth_date),
+			dni = COALESCE($8, dni),
+			birth_date = COALESCE($9, birth_date),
 			updated_at = NOW()
-		WHERE account_id = $11 AND jid = $12
-	`, &displayName, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Company, contact.Age, contact.Notes, contact.DNI, contact.BirthDate, contact.AccountID, contact.JID)
-	return err
+		WHERE contact_id = $1
+	`, contact.ID, name, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Age, contact.DNI, contact.BirthDate)
+	if err != nil {
+		log.Printf("[SYNC] Error syncing contact %s to leads: %v", contact.ID, err)
+	}
+	return nil
 }
 
 func (r *ContactRepository) UpdateAvatarURL(ctx context.Context, accountID uuid.UUID, jid, avatarURL string) error {
@@ -1378,20 +1415,25 @@ type LeadRepository struct {
 
 func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 	return r.db.QueryRow(ctx, `
-		INSERT INTO leads (account_id, contact_id, jid, name, last_name, short_name, phone, email, company, age, dni, birth_date, status, source, notes, pipeline_id, stage_id, tags)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		INSERT INTO leads (account_id, contact_id, jid, name, phone, email, notes, dni, birth_date, status, source, pipeline_id, stage_id, tags, custom_fields, assigned_to)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		RETURNING id, created_at, updated_at
-	`, lead.AccountID, lead.ContactID, lead.JID, lead.Name, lead.LastName, lead.ShortName, lead.Phone,
-		lead.Email, lead.Company, lead.Age, lead.DNI, lead.BirthDate, lead.Status, lead.Source, lead.Notes, lead.PipelineID, lead.StageID, lead.Tags,
+	`, lead.AccountID, lead.ContactID, lead.JID, lead.Name, lead.Phone, lead.Email, lead.Notes, lead.DNI, lead.BirthDate, lead.Status, lead.Source, lead.PipelineID, lead.StageID, lead.Tags, lead.CustomFields, lead.AssignedTo,
 	).Scan(&lead.ID, &lead.CreatedAt, &lead.UpdatedAt)
 }
 
 func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Lead, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.dni, l.birth_date, l.status, l.source, l.notes,
+		SELECT l.id, l.account_id, l.contact_id, l.jid,
+		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
+		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
+		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date),
+		       l.status, l.source, COALESCE(c.notes, l.notes),
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-		       ps.name, ps.color, ps.position, l.kommo_id
+		       ps.name, ps.color, ps.position, l.kommo_id,
+		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason
 		FROM leads l
+		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.account_id = $1 ORDER BY l.created_at DESC
 	`, accountID)
@@ -1408,6 +1450,7 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 			&lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 			&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 			&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
+			&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
 		); err != nil {
 			return nil, err
 		}
@@ -1419,10 +1462,16 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Lead, error) {
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
-		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.dni, l.birth_date, l.status, l.source, l.notes,
+		SELECT l.id, l.account_id, l.contact_id, l.jid,
+		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
+		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
+		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date),
+		       l.status, l.source, COALESCE(c.notes, l.notes),
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-		       ps.name, ps.color, ps.position, l.kommo_id
+		       ps.name, ps.color, ps.position, l.kommo_id,
+		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason
 		FROM leads l
+		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.account_id = $1 AND l.jid = $2
 		ORDER BY l.updated_at DESC LIMIT 1
@@ -1431,6 +1480,7 @@ func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid 
 		&lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 		&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
+		&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1446,10 +1496,16 @@ func (r *LeadRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status 
 func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lead, error) {
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
-		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.dni, l.birth_date, l.status, l.source, l.notes,
+		SELECT l.id, l.account_id, l.contact_id, l.jid,
+		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
+		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
+		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date),
+		       l.status, l.source, COALESCE(c.notes, l.notes),
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-		       ps.name, ps.color, ps.position, l.kommo_id
+		       ps.name, ps.color, ps.position, l.kommo_id,
+		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason
 		FROM leads l
+		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.id = $1
 	`, id).Scan(
@@ -1457,6 +1513,7 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 		&lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 		&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
+		&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1465,17 +1522,28 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 }
 
 func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
+	// CRM fields stay on leads table; personal data is written to contacts separately
 	_, err := r.db.Exec(ctx, `
 		UPDATE leads SET
-			name = $1, last_name = $2, short_name = $3, phone = $4, email = $5, company = $6, age = $7,
-			dni = $8, birth_date = $9,
-			status = $10, source = $11, notes = $12, tags = $13, custom_fields = $14, assigned_to = $15,
-			pipeline_id = $16, stage_id = $17, updated_at = NOW()
-		WHERE id = $18
-	`, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email, lead.Company, lead.Age,
-		lead.DNI, lead.BirthDate,
-		lead.Status, lead.Source, lead.Notes, lead.Tags, lead.CustomFields, lead.AssignedTo,
+			status = $1, source = $2, tags = $3, custom_fields = $4, assigned_to = $5,
+			pipeline_id = $6, stage_id = $7, updated_at = NOW()
+		WHERE id = $8
+	`, lead.Status, lead.Source, lead.Tags, lead.CustomFields, lead.AssignedTo,
 		lead.PipelineID, lead.StageID, lead.ID)
+	if err != nil {
+		return err
+	}
+	// Write personal data to linked contact (source of truth)
+	if lead.ContactID != nil {
+		_, err = r.db.Exec(ctx, `
+			UPDATE contacts SET
+				custom_name = $1, last_name = $2, short_name = $3, phone = $4, email = $5,
+				company = $6, age = $7, dni = $8, birth_date = $9, notes = $10,
+				updated_at = NOW()
+			WHERE id = $11
+		`, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email,
+			lead.Company, lead.Age, lead.DNI, lead.BirthDate, lead.Notes, *lead.ContactID)
+	}
 	return err
 }
 
@@ -1485,44 +1553,33 @@ func (r *LeadRepository) UpdateStage(ctx context.Context, id uuid.UUID, stageID 
 	return err
 }
 
-// SyncToContact propagates shared lead fields to the linked contact
+// SyncToContact is now a no-op — Contact is the source of truth and Lead.Update writes to contacts directly.
 func (r *LeadRepository) SyncToContact(ctx context.Context, lead *domain.Lead) error {
-	if lead.ContactID == nil {
-		return nil
-	}
-	_, err := r.db.Exec(ctx, `
-		UPDATE contacts SET
-			custom_name = COALESCE($1, custom_name),
-			last_name = COALESCE($2, last_name),
-			short_name = COALESCE($3, short_name),
-			phone = COALESCE($4, phone),
-			email = COALESCE($5, email),
-			company = COALESCE($6, company),
-			age = COALESCE($7, age),
-			notes = COALESCE($8, notes),
-			dni = COALESCE($9, dni),
-			birth_date = COALESCE($10, birth_date),
-			updated_at = NOW()
-		WHERE id = $11
-	`, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email, lead.Company, lead.Age, lead.Notes, lead.DNI, lead.BirthDate, *lead.ContactID)
-	return err
+	return nil
 }
 
 // GetByContactID finds a lead linked to a specific contact
 func (r *LeadRepository) GetByContactID(ctx context.Context, contactID uuid.UUID) (*domain.Lead, error) {
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
-		SELECT l.id, l.account_id, l.contact_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.dni, l.birth_date, l.status, l.source, l.notes,
+		SELECT l.id, l.account_id, l.contact_id, l.jid,
+		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
+		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
+		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date),
+		       l.status, l.source, COALESCE(c.notes, l.notes),
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
-		       ps.name, ps.color, ps.position
+		       ps.name, ps.color, ps.position, l.kommo_id,
+		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason
 		FROM leads l
+		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.contact_id = $1
 	`, contactID).Scan(
 		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
 		&lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
-		&lead.StageName, &lead.StageColor, &lead.StagePosition,
+		&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
+		&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1543,6 +1600,58 @@ func (r *LeadRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) error
 func (r *LeadRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM leads WHERE account_id = $1`, accountID)
 	return err
+}
+
+// ArchiveLead sets or clears the archived flag on a lead.
+func (r *LeadRepository) ArchiveLead(ctx context.Context, id uuid.UUID, archive bool) error {
+	if archive {
+		_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = true, archived_at = NOW(), updated_at = NOW() WHERE id = $1`, id)
+		return err
+	}
+	_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = false, archived_at = NULL, updated_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
+// ArchiveLeadsBatch sets or clears the archived flag on multiple leads.
+func (r *LeadRepository) ArchiveLeadsBatch(ctx context.Context, ids []uuid.UUID, archive bool) error {
+	if archive {
+		_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = true, archived_at = NOW(), updated_at = NOW() WHERE id = ANY($1)`, ids)
+		return err
+	}
+	_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = false, archived_at = NULL, updated_at = NOW() WHERE id = ANY($1)`, ids)
+	return err
+}
+
+// BlockLead sets or clears the blocked flag on a lead.
+func (r *LeadRepository) BlockLead(ctx context.Context, id uuid.UUID, block bool, reason string) error {
+	if block {
+		_, err := r.db.Exec(ctx, `UPDATE leads SET is_blocked = true, blocked_at = NOW(), block_reason = $2, updated_at = NOW() WHERE id = $1`, id, reason)
+		return err
+	}
+	_, err := r.db.Exec(ctx, `UPDATE leads SET is_blocked = false, blocked_at = NULL, block_reason = '', updated_at = NOW() WHERE id = $1`, id)
+	return err
+}
+
+// BlockLeadsBatch sets or clears the blocked flag on multiple leads.
+func (r *LeadRepository) BlockLeadsBatch(ctx context.Context, ids []uuid.UUID, block bool, reason string) error {
+	if block {
+		_, err := r.db.Exec(ctx, `UPDATE leads SET is_blocked = true, blocked_at = NOW(), block_reason = $2, updated_at = NOW() WHERE id = ANY($1)`, ids, reason)
+		return err
+	}
+	_, err := r.db.Exec(ctx, `UPDATE leads SET is_blocked = false, blocked_at = NULL, block_reason = '', updated_at = NOW() WHERE id = ANY($1)`, ids)
+	return err
+}
+
+// GetArchivedBlockedCounts returns the count of archived and blocked leads for an account.
+func (r *LeadRepository) GetArchivedBlockedCounts(ctx context.Context, accountID uuid.UUID) (active, archived, blocked int, err error) {
+	err = r.db.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE NOT is_archived AND NOT is_blocked),
+			COUNT(*) FILTER (WHERE is_archived AND NOT is_blocked),
+			COUNT(*) FILTER (WHERE is_blocked)
+		FROM leads WHERE account_id = $1
+	`, accountID).Scan(&active, &archived, &blocked)
+	return
 }
 
 // PipelineRepository handles pipeline data access
@@ -1765,6 +1874,41 @@ func (r *TagRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID)
 	return tags, nil
 }
 
+func (r *TagRepository) ListPaginated(ctx context.Context, accountID uuid.UUID, search string, limit, offset int) ([]*domain.Tag, int, error) {
+	args := []interface{}{accountID}
+	where := "WHERE account_id = $1"
+	idx := 2
+	if search != "" {
+		where += fmt.Sprintf(" AND name ILIKE $%d", idx)
+		args = append(args, "%"+search+"%")
+		idx++
+	}
+
+	var total int
+	err := r.db.QueryRow(ctx, "SELECT COUNT(*) FROM tags "+where, args...).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	args = append(args, limit, offset)
+	query := fmt.Sprintf("SELECT id, account_id, name, color, created_at, updated_at FROM tags %s ORDER BY name LIMIT $%d OFFSET $%d", where, idx, idx+1)
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var tags []*domain.Tag
+	for rows.Next() {
+		t := &domain.Tag{}
+		if err := rows.Scan(&t.ID, &t.AccountID, &t.Name, &t.Color, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, 0, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, total, nil
+}
+
 func (r *TagRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Tag, error) {
 	t := &domain.Tag{}
 	err := r.db.QueryRow(ctx, `SELECT id, account_id, name, color, created_at, updated_at FROM tags WHERE id = $1`, id).
@@ -1798,7 +1942,6 @@ func (r *TagRepository) Update(ctx context.Context, tag *domain.Tag) error {
 func (r *TagRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	// Delete associations first
 	r.db.Exec(ctx, `DELETE FROM contact_tags WHERE tag_id = $1`, id)
-	r.db.Exec(ctx, `DELETE FROM lead_tags WHERE tag_id = $1`, id)
 	r.db.Exec(ctx, `DELETE FROM chat_tags WHERE tag_id = $1`, id)
 	_, err := r.db.Exec(ctx, `DELETE FROM tags WHERE id = $1`, id)
 	return err
@@ -1807,15 +1950,20 @@ func (r *TagRepository) Delete(ctx context.Context, id uuid.UUID) error {
 func (r *TagRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
 	// Delete all tag associations for this account's tags
 	r.db.Exec(ctx, `DELETE FROM contact_tags WHERE tag_id IN (SELECT id FROM tags WHERE account_id = $1)`, accountID)
-	r.db.Exec(ctx, `DELETE FROM lead_tags WHERE tag_id IN (SELECT id FROM tags WHERE account_id = $1)`, accountID)
 	r.db.Exec(ctx, `DELETE FROM chat_tags WHERE tag_id IN (SELECT id FROM tags WHERE account_id = $1)`, accountID)
 	_, err := r.db.Exec(ctx, `DELETE FROM tags WHERE account_id = $1`, accountID)
 	return err
 }
 
-// SyncLeadTagsByNames populates the lead_tags junction table for a lead from tag names.
+// SyncLeadTagsByNames populates contact_tags for a lead's linked contact from tag names.
 // Creates tags that don't exist yet. Used by CSV import.
 func (r *TagRepository) SyncLeadTagsByNames(ctx context.Context, accountID, leadID uuid.UUID, tagNames []string) error {
+	// Resolve contact_id for this lead
+	var contactID *uuid.UUID
+	_ = r.db.QueryRow(ctx, `SELECT contact_id FROM leads WHERE id = $1`, leadID).Scan(&contactID)
+	if contactID == nil {
+		return nil // cannot assign tags without a linked contact
+	}
 	for _, name := range tagNames {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -1834,7 +1982,7 @@ func (r *TagRepository) SyncLeadTagsByNames(ctx context.Context, accountID, lead
 				_ = r.db.QueryRow(ctx, `SELECT id FROM tags WHERE account_id = $1 AND name = $2`, accountID, name).Scan(&tagID)
 			}
 		}
-		_, _ = r.db.Exec(ctx, `INSERT INTO lead_tags (lead_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, leadID, tagID)
+		_, _ = r.db.Exec(ctx, `INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, *contactID, tagID)
 	}
 	return nil
 }
@@ -1853,13 +2001,17 @@ func (r *TagRepository) RemoveFromContact(ctx context.Context, contactID, tagID 
 
 func (r *TagRepository) AssignToLead(ctx context.Context, leadID, tagID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO lead_tags (lead_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
+		INSERT INTO contact_tags (contact_id, tag_id)
+		SELECT l.contact_id, $2 FROM leads l WHERE l.id = $1 AND l.contact_id IS NOT NULL
+		ON CONFLICT DO NOTHING
 	`, leadID, tagID)
 	return err
 }
 
 func (r *TagRepository) RemoveFromLead(ctx context.Context, leadID, tagID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM lead_tags WHERE lead_id = $1 AND tag_id = $2`, leadID, tagID)
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM contact_tags WHERE contact_id = (SELECT contact_id FROM leads WHERE id = $1) AND tag_id = $2
+	`, leadID, tagID)
 	return err
 }
 
@@ -1899,8 +2051,10 @@ func (r *TagRepository) GetByContact(ctx context.Context, contactID uuid.UUID) (
 func (r *TagRepository) GetByLead(ctx context.Context, leadID uuid.UUID) ([]*domain.Tag, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT t.id, t.account_id, t.name, t.color, t.created_at, t.updated_at
-		FROM tags t JOIN lead_tags lt ON lt.tag_id = t.id
-		WHERE lt.lead_id = $1 ORDER BY t.name
+		FROM tags t
+		JOIN contact_tags ct ON ct.tag_id = t.id
+		JOIN leads l ON l.contact_id = ct.contact_id
+		WHERE l.id = $1 ORDER BY t.name
 	`, leadID)
 	if err != nil {
 		return nil, err
@@ -2369,6 +2523,7 @@ func (r *EventRepository) GetByAccountID(ctx context.Context, accountID uuid.UUI
 		counts, total, _ := r.GetParticipantCounts(ctx, ev.ID)
 		ev.ParticipantCounts = counts
 		ev.TotalParticipants = total
+		ev.StageCounts, _ = r.GetStageNameCounts(ctx, ev.ID)
 	}
 
 	return events, total, nil
@@ -2389,6 +2544,7 @@ func (r *EventRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Ev
 	counts, total, _ := r.GetParticipantCounts(ctx, ev.ID)
 	ev.ParticipantCounts = counts
 	ev.TotalParticipants = total
+	ev.StageCounts, _ = r.GetStageNameCounts(ctx, ev.ID)
 	return ev, nil
 }
 
@@ -2442,6 +2598,29 @@ func (r *EventRepository) GetParticipantCounts(ctx context.Context, eventID uuid
 		total += count
 	}
 	return counts, total, nil
+}
+
+func (r *EventRepository) GetStageNameCounts(ctx context.Context, eventID uuid.UUID) (map[string]int, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT eps.name, COUNT(*) FROM event_participants ep
+		JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
+		WHERE ep.event_id = $1 AND ep.stage_id IS NOT NULL
+		GROUP BY eps.name
+	`, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]int)
+	for rows.Next() {
+		var name string
+		var count int
+		if err := rows.Scan(&name, &count); err != nil {
+			return nil, err
+		}
+		counts[name] = count
+	}
+	return counts, nil
 }
 
 func (r *EventRepository) GetByContactID(ctx context.Context, accountID, contactID uuid.UUID) ([]*domain.Event, error) {
@@ -2654,10 +2833,10 @@ func (r *EventRepository) GetLeadIDsByFormulaText(ctx context.Context, sql strin
 	return ids, nil
 }
 
-// GetLeadTagNames returns the lowercase tag names for a lead.
+// GetLeadTagNames returns the lowercase tag names for a lead (via its linked contact).
 func (r *EventRepository) GetLeadTagNames(ctx context.Context, leadID uuid.UUID) ([]string, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT LOWER(t.name) FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id WHERE lt.lead_id = $1
+		SELECT LOWER(t.name) FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id JOIN leads l ON l.contact_id = ct.contact_id WHERE l.id = $1
 	`, leadID)
 	if err != nil {
 		return nil, err
@@ -2686,21 +2865,21 @@ func (r *EventRepository) GetLeadIDsByTagFormula(ctx context.Context, accountID 
 	if mode == "AND" {
 		// Leads must have ALL include tags
 		query = `
-			SELECT lt.lead_id
-			FROM lead_tags lt
-			JOIN leads l ON l.id = lt.lead_id
-			WHERE l.account_id = $1 AND lt.tag_id = ANY($2)
-			GROUP BY lt.lead_id
-			HAVING COUNT(DISTINCT lt.tag_id) = $3
+			SELECT l.id AS lead_id
+			FROM leads l
+			JOIN contact_tags ct ON ct.contact_id = l.contact_id
+			WHERE l.account_id = $1 AND l.is_archived = false AND l.is_blocked = false AND ct.tag_id = ANY($2)
+			GROUP BY l.id
+			HAVING COUNT(DISTINCT ct.tag_id) = $3
 		`
 		args = append(args, len(includes))
 	} else {
 		// OR mode: leads with ANY include tag
 		query = `
-			SELECT DISTINCT lt.lead_id
-			FROM lead_tags lt
-			JOIN leads l ON l.id = lt.lead_id
-			WHERE l.account_id = $1 AND lt.tag_id = ANY($2)
+			SELECT DISTINCT l.id AS lead_id
+			FROM leads l
+			JOIN contact_tags ct ON ct.contact_id = l.contact_id
+			WHERE l.account_id = $1 AND l.is_archived = false AND l.is_blocked = false AND ct.tag_id = ANY($2)
 		`
 	}
 
@@ -2708,7 +2887,7 @@ func (r *EventRepository) GetLeadIDsByTagFormula(ctx context.Context, accountID 
 	if len(excludes) > 0 {
 		excArgNum := len(args) + 1
 		query = `SELECT lead_id FROM (` + query + `) inc WHERE lead_id NOT IN (
-			SELECT lead_id FROM lead_tags WHERE tag_id = ANY($` + fmt.Sprintf("%d", excArgNum) + `)
+			SELECT l2.id FROM leads l2 JOIN contact_tags ct2 ON ct2.contact_id = l2.contact_id WHERE ct2.tag_id = ANY($` + fmt.Sprintf("%d", excArgNum) + `)
 		)`
 		args = append(args, excludes)
 	}
@@ -2762,16 +2941,14 @@ func (r *EventRepository) BulkAddParticipantsFromLeads(ctx context.Context, even
 	if len(leadIDs) == 0 {
 		return 0, nil
 	}
-	// Use INSERT...SELECT with ON CONFLICT DO NOTHING to safely skip duplicates.
-	// Only dedup by lead_id — if a lead matches the formula, it MUST appear as participant.
-	// No phone/email dedup: two different leads with same phone both get added.
 	tag, err := r.db.Exec(ctx, `
 		INSERT INTO event_participants (id, event_id, lead_id, contact_id, stage_id, name, last_name, short_name, phone, email, age, status, auto_tag_sync, invited_at, created_at, updated_at)
-		SELECT gen_random_uuid(), $1, l.id, NULL, $3,
-		       COALESCE(l.name, ''), COALESCE(l.last_name, ''), COALESCE(l.short_name, ''),
-		       COALESCE(l.phone, ''), COALESCE(l.email, ''), COALESCE(l.age, 0),
+		SELECT gen_random_uuid(), $1, l.id, l.contact_id, $3,
+		       COALESCE(c.custom_name, c.name, l.name, ''), COALESCE(c.last_name, l.last_name, ''), COALESCE(c.short_name, l.short_name, ''),
+		       COALESCE(c.phone, l.phone, ''), COALESCE(c.email, l.email, ''), COALESCE(c.age, l.age, 0),
 		       'invited', TRUE, NOW(), NOW(), NOW()
 		FROM leads l
+		LEFT JOIN contacts c ON c.id = l.contact_id
 		WHERE l.id = ANY($2)
 		AND NOT EXISTS (
 			SELECT 1 FROM event_participants ep
@@ -2800,11 +2977,11 @@ func (r *EventRepository) RemoveAutoSyncParticipantsByLeadIDs(ctx context.Contex
 	return int(tag.RowsAffected()), nil
 }
 
-// LeadHasAnyTag checks if a lead still has at least one of the given tags.
+// LeadHasAnyTag checks if a lead still has at least one of the given tags (via contact_tags).
 func (r *EventRepository) LeadHasAnyTag(ctx context.Context, leadID uuid.UUID, tagIDs []uuid.UUID) (bool, error) {
 	var exists bool
 	err := r.db.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM lead_tags WHERE lead_id = $1 AND tag_id = ANY($2))
+		SELECT EXISTS(SELECT 1 FROM contact_tags ct JOIN leads l ON l.contact_id = ct.contact_id WHERE l.id = $1 AND ct.tag_id = ANY($2))
 	`, leadID, tagIDs).Scan(&exists)
 	return exists, err
 }
@@ -2815,7 +2992,7 @@ func (r *EventRepository) LeadMatchesFormula(ctx context.Context, leadID uuid.UU
 	if len(excludes) > 0 {
 		var hasExclude bool
 		err := r.db.QueryRow(ctx, `
-			SELECT EXISTS(SELECT 1 FROM lead_tags WHERE lead_id = $1 AND tag_id = ANY($2))
+			SELECT EXISTS(SELECT 1 FROM contact_tags ct JOIN leads l ON l.contact_id = ct.contact_id WHERE l.id = $1 AND ct.tag_id = ANY($2))
 		`, leadID, excludes).Scan(&hasExclude)
 		if err != nil {
 			return false, err
@@ -2833,7 +3010,7 @@ func (r *EventRepository) LeadMatchesFormula(ctx context.Context, leadID uuid.UU
 		// Lead must have ALL include tags
 		var cnt int
 		err := r.db.QueryRow(ctx, `
-			SELECT COUNT(DISTINCT tag_id) FROM lead_tags WHERE lead_id = $1 AND tag_id = ANY($2)
+			SELECT COUNT(DISTINCT ct.tag_id) FROM contact_tags ct JOIN leads l ON l.contact_id = ct.contact_id WHERE l.id = $1 AND ct.tag_id = ANY($2)
 		`, leadID, includes).Scan(&cnt)
 		if err != nil {
 			return false, err
@@ -2843,7 +3020,7 @@ func (r *EventRepository) LeadMatchesFormula(ctx context.Context, leadID uuid.UU
 	// OR mode: lead has at least one include tag
 	var exists bool
 	err := r.db.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM lead_tags WHERE lead_id = $1 AND tag_id = ANY($2))
+		SELECT EXISTS(SELECT 1 FROM contact_tags ct JOIN leads l ON l.contact_id = ct.contact_id WHERE l.id = $1 AND ct.tag_id = ANY($2))
 	`, leadID, includes).Scan(&exists)
 	return exists, err
 }
@@ -3181,7 +3358,7 @@ func (r *ParticipantRepository) Add(ctx context.Context, p *domain.EventParticip
 	`, p.ID, p.EventID, p.ContactID, p.LeadID, p.StageID, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Status, p.Notes, p.NextAction, p.NextActionDate, p.InvitedAt, p.CreatedAt, p.UpdatedAt).Scan(&p.ID); err != nil {
 		return err
 	}
-	// Tags are now derived from lead_tags via lead_id — no separate participant_tags copy needed
+	// Tags are now derived from contact_tags via contact_id
 	return nil
 }
 
@@ -3197,16 +3374,16 @@ func (r *ParticipantRepository) BulkAdd(ctx context.Context, eventID uuid.UUID, 
 
 func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.UUID, search, statusFilter string, tagIDs []uuid.UUID, hasPhone *bool) ([]*domain.EventParticipant, error) {
 	useDistinct := len(tagIDs) > 0
-	selectClause := `SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color`
+	selectClause := `SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color`
 	if useDistinct {
-		selectClause = `SELECT DISTINCT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color`
+		selectClause = `SELECT DISTINCT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color`
 	}
-	query := selectClause + ` FROM event_participants p LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id`
+	query := selectClause + ` FROM event_participants p LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id LEFT JOIN leads l ON l.id = p.lead_id LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id`
 	args := []interface{}{eventID}
 	argNum := 2
 
 	if useDistinct {
-		query += ` JOIN lead_tags lt ON lt.lead_id = p.lead_id`
+		query += ` JOIN contact_tags ct ON ct.contact_id = p.contact_id`
 	}
 	query += ` WHERE p.event_id = $1`
 
@@ -3235,7 +3412,7 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 			args = append(args, tid)
 			argNum++
 		}
-		query += fmt.Sprintf(" AND lt.tag_id IN (%s)", placeholders)
+		query += fmt.Sprintf(" AND ct.tag_id IN (%s)", placeholders)
 	}
 	if hasPhone != nil && *hasPhone {
 		query += " AND p.phone IS NOT NULL AND p.phone != ''"
@@ -3251,24 +3428,24 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 	var participants []*domain.EventParticipant
 	for rows.Next() {
 		p := &domain.EventParticipant{}
-		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt, &p.StageName, &p.StageColor); err != nil {
+		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt, &p.StageName, &p.StageColor, &p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor); err != nil {
 			return nil, err
 		}
 		participants = append(participants, p)
 	}
 
-	// Load tags for each participant from lead_tags (via lead_id)
+	// Load tags for each participant from contact_tags (via contact_id)
 	for _, p := range participants {
-		if p.LeadID == nil {
+		if p.ContactID == nil {
 			p.Tags = make([]*domain.Tag, 0)
 			continue
 		}
 		tags, err := r.db.Query(ctx, `
 			SELECT t.id, t.account_id, t.name, t.color, t.created_at
 			FROM tags t
-			JOIN lead_tags lt ON lt.tag_id = t.id
-			WHERE lt.lead_id = $1
-		`, *p.LeadID)
+			JOIN contact_tags ct ON ct.tag_id = t.id
+			WHERE ct.contact_id = $1
+		`, *p.ContactID)
 		if err == nil {
 			defer tags.Close()
 			for tags.Next() {
@@ -3368,7 +3545,19 @@ func (r *ParticipantRepository) Update(ctx context.Context, p *domain.EventParti
 		UPDATE event_participants SET name=$1, last_name=$2, short_name=$3, phone=$4, email=$5, age=$6, notes=$7, next_action=$8, next_action_date=$9, updated_at=$10
 		WHERE id=$11
 	`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Notes, p.NextAction, p.NextActionDate, p.UpdatedAt, p.ID)
-	return err
+	if err != nil {
+		return err
+	}
+	// Sync personal data back to Contact (source of truth)
+	if p.ContactID != nil {
+		_, _ = r.db.Exec(ctx, `
+			UPDATE contacts SET
+				name = COALESCE($1, name), last_name = $2, short_name = $3,
+				phone = COALESCE($4, phone), email = $5, age = $6, updated_at = NOW()
+			WHERE id = $7
+		`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, *p.ContactID)
+	}
+	return nil
 }
 
 // SyncToContact propagates shared participant fields back to the linked contact

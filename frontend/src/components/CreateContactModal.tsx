@@ -198,6 +198,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
                 onChange={e => handleChange('name', e.target.value)}
                 className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-900 text-sm placeholder-slate-400 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/25 transition-all"
               />
+              <p className="text-[10px] text-slate-400 mt-0.5">Se guarda como nombre personalizado</p>
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1.5">Apellido</label>

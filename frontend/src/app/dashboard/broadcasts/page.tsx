@@ -15,6 +15,8 @@ import { es } from 'date-fns/locale'
 import MessageBubble from '@/components/chat/MessageBubble'
 import CreateCampaignModal, { CampaignFormResult, CampaignAttachment } from '@/components/CreateCampaignModal'
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
+import LeadDetailPanel from '@/components/LeadDetailPanel'
+import type { Lead, Contact as FullContact } from '@/types/contact'
 import { renderFormattedText } from '@/lib/whatsappFormat'
 import * as XLSX from 'xlsx'
 
@@ -53,6 +55,7 @@ interface Recipient {
   id: string
   campaign_id: string
   contact_id: string | null
+  lead_id: string | null
   jid: string
   name: string | null
   phone: string | null
@@ -78,6 +81,39 @@ interface Contact {
   push_name: string | null
   structured_tags?: { id: string; name: string; color: string }[] | null
 }
+
+const contactToLead = (c: FullContact): Lead => ({
+  id: c.id,
+  jid: c.jid || '',
+  contact_id: c.id,
+  name: c.custom_name ?? c.name ?? '',
+  last_name: c.last_name ?? null,
+  short_name: c.short_name ?? null,
+  phone: c.phone ?? '',
+  email: c.email ?? '',
+  company: c.company ?? null,
+  age: c.age ?? null,
+  dni: c.dni ?? null,
+  birth_date: c.birth_date ?? null,
+  status: 'new',
+  pipeline_id: null,
+  stage_id: null,
+  stage_name: null,
+  stage_color: null,
+  stage_position: null,
+  notes: c.notes ?? '',
+  tags: c.tags || [],
+  structured_tags: c.structured_tags || null,
+  kommo_id: c.kommo_id ?? null,
+  is_archived: false,
+  archived_at: null,
+  is_blocked: false,
+  blocked_at: null,
+  block_reason: '',
+  assigned_to: '',
+  created_at: c.created_at || '',
+  updated_at: c.updated_at || '',
+} as Lead)
 
 interface BroadcastTag {
   id: string
@@ -158,6 +194,10 @@ export default function BroadcastsPage() {
   const [editRecField, setEditRecField] = useState<string | null>(null)
   const [editRecValues, setEditRecValues] = useState<Record<string, string>>({})
   const [savingRecEdit, setSavingRecEdit] = useState(false)
+
+  // LeadDetailPanel for enriched recipient view
+  const [recipientLead, setRecipientLead] = useState<Lead | null>(null)
+  const [loadingRecipientLead, setLoadingRecipientLead] = useState(false)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -264,11 +304,27 @@ export default function BroadcastsPage() {
             body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
           })
         }
+        // Add spreadsheet recipients if any
+        if (formResult.recipients && formResult.recipients.length > 0 && data.campaign) {
+          const sheetRecipients = formResult.recipients.map(r => ({
+            jid: r.phone + '@s.whatsapp.net',
+            name: r.name || '',
+            phone: r.phone,
+            metadata: r.metadata || {},
+          }))
+          await fetch(`/api/campaigns/${data.campaign.id}/recipients`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ recipients: sheetRecipients }),
+          })
+        }
         setShowCreateModal(false)
         fetchCampaigns()
         if (data.campaign) {
           setSelectedCampaign(data.campaign)
-          setShowRecipientsModal(true)
+          if (!formResult.recipients || formResult.recipients.length === 0) {
+            setShowRecipientsModal(true)
+          }
         }
       } else {
         alert(data.error || 'Error al crear campaña')
@@ -430,10 +486,42 @@ export default function BroadcastsPage() {
     }
   }
 
-  const openEditRecipient = (rec: Recipient) => {
+  const openEditRecipient = async (rec: Recipient) => {
     setEditingRecipient(rec)
     setEditRecField(null)
     setEditRecValues({})
+    setRecipientLead(null)
+    if (rec.lead_id) {
+      setLoadingRecipientLead(true)
+      try {
+        const res = await fetch(`/api/leads/${rec.lead_id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (data.success && data.lead) {
+          setRecipientLead(data.lead)
+        }
+      } catch (e) {
+        console.error('Failed to fetch recipient lead:', e)
+      } finally {
+        setLoadingRecipientLead(false)
+      }
+    } else if (rec.contact_id) {
+      setLoadingRecipientLead(true)
+      try {
+        const res = await fetch(`/api/contacts/${rec.contact_id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (data.success && data.contact) {
+          setRecipientLead(contactToLead(data.contact))
+        }
+      } catch (e) {
+        console.error('Failed to fetch recipient contact:', e)
+      } finally {
+        setLoadingRecipientLead(false)
+      }
+    }
   }
 
   const startEditRecField = (field: string, value: string) => {
@@ -1835,120 +1923,134 @@ export default function BroadcastsPage() {
       {/* Edit Recipient Panel (Slide-over) */}
       {editingRecipient && selectedCampaign && (
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
-          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setEditingRecipient(null); setEditRecField(null) }} />
-          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200">
-            {/* Header */}
-            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
-              <h2 className="text-sm font-semibold text-slate-900">Editar Destinatario</h2>
-              <button onClick={() => { setEditingRecipient(null); setEditRecField(null) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
-                <X className="w-4 h-4 text-slate-400" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-6">
-              {/* Avatar & Name */}
-              <div className="text-center">
-                <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
-                  <span className="text-emerald-700 font-bold text-base">
-                    {(editingRecipient.name || editingRecipient.jid?.replace('@s.whatsapp.net', '') || '?').charAt(0).toUpperCase()}
-                  </span>
-                </div>
-                {editRecField === 'name' ? (
-                  <input
-                    autoFocus
-                    value={editRecValues.name ?? ''}
-                    onChange={(e) => setEditRecValues(prev => ({ ...prev, name: e.target.value }))}
-                    onKeyDown={(e) => handleRecFieldKeyDown(e, 'name')}
-                    onBlur={() => saveRecField('name')}
-                    className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
-                    placeholder="Nombre"
-                  />
-                ) : (
-                  <h3
-                    className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
-                    onClick={() => startEditRecField('name', editingRecipient.name || '')}
-                    title="Clic para editar nombre"
-                  >
-                    {editingRecipient.name || editingRecipient.jid?.replace('@s.whatsapp.net', '') || 'Sin nombre'}
-                  </h3>
-                )}
-                <span className={`inline-block px-2 py-0.5 text-xs rounded-full mt-1 ${
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setEditingRecipient(null); setEditRecField(null); setRecipientLead(null) }} />
+          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200 flex flex-col">
+            {/* Campaign status header */}
+            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 px-4 py-3 z-10">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-sm font-semibold text-slate-900">Destinatario</h2>
+                <button onClick={() => { setEditingRecipient(null); setEditRecField(null); setRecipientLead(null) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                  <X className="w-4 h-4 text-slate-400" />
+                </button>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap text-xs">
+                <span className={`inline-block px-2 py-0.5 rounded-full font-medium ${
                   editingRecipient.status === 'sent' ? 'bg-green-100 text-green-700' :
                   editingRecipient.status === 'failed' ? 'bg-red-100 text-red-700' :
                   'bg-gray-100 text-gray-600'
                 }`}>
                   {editingRecipient.status === 'sent' ? 'Enviado' : editingRecipient.status === 'failed' ? 'Fallido' : 'Pendiente'}
                 </span>
-              </div>
-
-              {/* Inline editable fields */}
-              <div className="space-y-3">
-                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
-
-                {/* Phone */}
-                <div className="flex items-center gap-3 group">
-                  <Phone className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editRecField === 'phone' ? (
-                    <input autoFocus value={editRecValues.phone ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, phone: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, 'phone')} onBlur={() => saveRecField('phone')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Teléfono" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingRecipient.phone ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditRecField('phone', editingRecipient.phone || '')} title="Clic para editar">
-                      {editingRecipient.phone || editingRecipient.jid?.replace('@s.whatsapp.net', '') || 'Sin teléfono'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Nombre Corto (stored in metadata) */}
-                <div className="flex items-center gap-3 group">
-                  <Pencil className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editRecField === 'nombre_corto' ? (
-                    <input autoFocus value={editRecValues.nombre_corto ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, nombre_corto: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, 'nombre_corto')} onBlur={() => saveRecField('nombre_corto')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Nombre corto" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingRecipient.metadata?.nombre_corto ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditRecField('nombre_corto', (editingRecipient.metadata?.nombre_corto as string) || '')} title="Clic para editar">
-                      {(editingRecipient.metadata?.nombre_corto as string) || 'Agregar nombre corto'}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Metadata / Custom Variables */}
-              {editingRecipient.metadata && Object.keys(editingRecipient.metadata).filter(k => k !== 'nombre_corto').length > 0 && (
-                <div className="space-y-3">
-                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Variables personalizadas</h5>
-                  {Object.entries(editingRecipient.metadata).filter(([k]) => k !== 'nombre_corto').map(([key, val]) => (
-                    <div key={key} className="flex items-center gap-3 group">
-                      <FileText className="w-4 h-4 text-emerald-600 shrink-0" />
-                      {editRecField === key ? (
-                        <input autoFocus value={editRecValues[key] ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, [key]: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, key)} onBlur={() => saveRecField(key)} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder={key} />
-                      ) : (
-                        <span className="text-sm flex-1 cursor-pointer hover:text-emerald-700 text-slate-800" onClick={() => startEditRecField(key, String(val || ''))} title="Clic para editar">
-                          <span className="text-slate-400 text-xs">{key}:</span> {String(val)}
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
-                {editingRecipient.status === 'pending' && (
-                  <button
-                    onClick={() => { handleDeleteRecipient(editingRecipient.id); setEditingRecipient(null) }}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-sm"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                    Eliminar destinatario
-                  </button>
+                {editingRecipient.sent_at && (
+                  <span className="text-slate-400">Enviado: {format(new Date(editingRecipient.sent_at), 'dd/MM/yyyy HH:mm', { locale: es })}</span>
+                )}
+                {editingRecipient.error_message && (
+                  <span className="text-red-400 truncate max-w-[200px]" title={editingRecipient.error_message}>Error: {editingRecipient.error_message}</span>
                 )}
               </div>
-
-              {/* Info */}
-              <div className="text-xs text-slate-400 space-y-1">
-                <p>JID: {editingRecipient.jid}</p>
-                {editingRecipient.sent_at && <p>Enviado: {format(new Date(editingRecipient.sent_at), 'dd/MM/yyyy HH:mm:ss', { locale: es })}</p>}
-                {editingRecipient.error_message && <p className="text-red-400">Error: {editingRecipient.error_message}</p>}
-              </div>
+              {editingRecipient.status === 'pending' && (
+                <button
+                  onClick={() => { handleDeleteRecipient(editingRecipient.id); setEditingRecipient(null); setRecipientLead(null) }}
+                  className="mt-2 flex items-center gap-1.5 px-3 py-1.5 border border-red-200 text-red-500 rounded-lg hover:bg-red-50 text-xs"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Eliminar destinatario
+                </button>
+              )}
             </div>
+
+            {/* Lead detail or basic panel */}
+            {loadingRecipientLead ? (
+              <div className="flex-1 flex items-center justify-center p-8">
+                <Loader2 className="w-6 h-6 text-emerald-500 animate-spin" />
+              </div>
+            ) : recipientLead ? (
+              <div className="flex-1 overflow-y-auto">
+                <LeadDetailPanel
+                  lead={recipientLead}
+                  onLeadChange={(updated) => setRecipientLead(updated)}
+                  onClose={() => { setEditingRecipient(null); setEditRecField(null); setRecipientLead(null) }}
+                  hideHeader
+                  hideDelete
+                />
+              </div>
+            ) : (
+              <div className="p-6 space-y-6">
+                {/* Fallback: basic recipient panel for recipients without a linked lead */}
+                <div className="text-center">
+                  <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
+                    <span className="text-emerald-700 font-bold text-base">
+                      {(editingRecipient.name || editingRecipient.jid?.replace('@s.whatsapp.net', '') || '?').charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  {editRecField === 'name' ? (
+                    <input
+                      autoFocus
+                      value={editRecValues.name ?? ''}
+                      onChange={(e) => setEditRecValues(prev => ({ ...prev, name: e.target.value }))}
+                      onKeyDown={(e) => handleRecFieldKeyDown(e, 'name')}
+                      onBlur={() => saveRecField('name')}
+                      className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
+                      placeholder="Nombre"
+                    />
+                  ) : (
+                    <h3
+                      className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
+                      onClick={() => startEditRecField('name', editingRecipient.name || '')}
+                      title="Clic para editar nombre"
+                    >
+                      {editingRecipient.name || editingRecipient.jid?.replace('@s.whatsapp.net', '') || 'Sin nombre'}
+                    </h3>
+                  )}
+                </div>
+
+                <div className="space-y-3">
+                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
+                  <div className="flex items-center gap-3 group">
+                    <Phone className="w-4 h-4 text-emerald-600 shrink-0" />
+                    {editRecField === 'phone' ? (
+                      <input autoFocus value={editRecValues.phone ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, phone: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, 'phone')} onBlur={() => saveRecField('phone')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Teléfono" />
+                    ) : (
+                      <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingRecipient.phone ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditRecField('phone', editingRecipient.phone || '')} title="Clic para editar">
+                        {editingRecipient.phone || editingRecipient.jid?.replace('@s.whatsapp.net', '') || 'Sin teléfono'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 group">
+                    <Pencil className="w-4 h-4 text-emerald-600 shrink-0" />
+                    {editRecField === 'nombre_corto' ? (
+                      <input autoFocus value={editRecValues.nombre_corto ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, nombre_corto: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, 'nombre_corto')} onBlur={() => saveRecField('nombre_corto')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Nombre corto" />
+                    ) : (
+                      <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${editingRecipient.metadata?.nombre_corto ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditRecField('nombre_corto', (editingRecipient.metadata?.nombre_corto as string) || '')} title="Clic para editar">
+                        {(editingRecipient.metadata?.nombre_corto as string) || 'Agregar nombre corto'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {editingRecipient.metadata && Object.keys(editingRecipient.metadata).filter(k => k !== 'nombre_corto').length > 0 && (
+                  <div className="space-y-3">
+                    <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Variables personalizadas</h5>
+                    {Object.entries(editingRecipient.metadata).filter(([k]) => k !== 'nombre_corto').map(([key, val]) => (
+                      <div key={key} className="flex items-center gap-3 group">
+                        <FileText className="w-4 h-4 text-emerald-600 shrink-0" />
+                        {editRecField === key ? (
+                          <input autoFocus value={editRecValues[key] ?? ''} onChange={(e) => setEditRecValues(prev => ({ ...prev, [key]: e.target.value }))} onKeyDown={(e) => handleRecFieldKeyDown(e, key)} onBlur={() => saveRecField(key)} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder={key} />
+                        ) : (
+                          <span className="text-sm flex-1 cursor-pointer hover:text-emerald-700 text-slate-800" onClick={() => startEditRecField(key, String(val || ''))} title="Clic para editar">
+                            <span className="text-slate-400 text-xs">{key}:</span> {String(val)}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="text-xs text-slate-400 pt-4 border-t border-slate-100">
+                  <p>JID: {editingRecipient.jid}</p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

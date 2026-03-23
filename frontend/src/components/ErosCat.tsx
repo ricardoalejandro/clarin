@@ -8,9 +8,285 @@ export type CatMood = 'idle' | 'thinking' | 'typing' | 'happy' | 'greeting' |
 interface ErosCatProps {
   mood: CatMood
   size?: number
+  direction?: 'front' | 'side'
 }
 
-export default function ErosCat({ mood, size = 80 }: ErosCatProps) {
+/* ───── Side-view cat component ───── */
+function SideViewCat({ mood, size }: { mood: CatMood; size: number }) {
+  const isWalking = mood === 'walking' || mood === 'walking_ball'
+  const eyesClosed = mood === 'sleeping' || mood === 'washing' || mood === 'yawning'
+  const eyesHappy = mood === 'happy' || mood === 'greeting' || mood === 'excited' || mood === 'love'
+  const isBig = mood === 'excited' || mood === 'curious'
+
+  const tailSpeed = mood === 'happy' || mood === 'greeting' || mood === 'excited' || mood === 'dancing'
+    ? '0.4s' : mood === 'idle' || mood === 'curious' ? '2.5s' : isWalking ? '0.6s' : undefined
+  const breatheSpeed = mood === 'idle' || mood === 'sleeping' ? '3s' : mood === 'thinking' ? '1.5s' : undefined
+
+  return (
+    <svg viewBox="0 0 140 130" width={size} height={size} xmlns="http://www.w3.org/2000/svg"
+      style={{ overflow: 'visible', filter: 'drop-shadow(0px 2px 4px rgba(100, 116, 139, 0.25))' }}>
+      <g style={{
+        transformOrigin: '70px 65px',
+        animation: mood === 'jumping' ? 'eros-hop 0.6s ease-in-out infinite'
+          : mood === 'dancing' ? 'eros-sway 0.5s ease-in-out infinite'
+          : isWalking ? 'eros-walk-bob 0.5s ease-in-out infinite'
+          : undefined,
+      }}>
+        {/* Tail — curves up and back */}
+        <path
+          d="M 20 72 Q 8 55 12 38 Q 15 28 22 32"
+          stroke="#e2e8f0" strokeWidth="7" strokeLinecap="round" fill="none"
+          style={{
+            transformOrigin: '20px 72px',
+            animation: tailSpeed ? `eros-side-tail ${tailSpeed} ease-in-out infinite` : undefined,
+          }}
+        />
+
+        {/* Body — elongated ellipse, cat seen from side */}
+        <ellipse cx="58" cy="78" rx="38" ry="22" fill="white" stroke="#e2e8f0" strokeWidth="1.5"
+          style={{
+            transformOrigin: '58px 78px',
+            animation: breatheSpeed ? `eros-breathe ${breatheSpeed} ease-in-out infinite` : undefined,
+          }}
+        />
+        {/* Belly */}
+        <ellipse cx="58" cy="84" rx="22" ry="10" fill="#f8fafc" />
+
+        {/* Back legs (behind body) */}
+        {isWalking ? (
+          <g>
+            <ellipse cx="32" cy="100" rx="5" ry="3" fill="#f1f5f9" stroke="#e2e8f0" strokeWidth="1">
+              <animate attributeName="cy" values="100;96;100" dur="0.5s" repeatCount="indefinite" />
+              <animate attributeName="cx" values="32;28;32" dur="0.5s" repeatCount="indefinite" />
+            </ellipse>
+            <ellipse cx="40" cy="100" rx="5" ry="3" fill="#f1f5f9" stroke="#e2e8f0" strokeWidth="1">
+              <animate attributeName="cy" values="100;96;100" dur="0.5s" begin="0.25s" repeatCount="indefinite" />
+              <animate attributeName="cx" values="40;36;40" dur="0.5s" begin="0.25s" repeatCount="indefinite" />
+            </ellipse>
+          </g>
+        ) : mood !== 'jumping' && (
+          <g>
+            <ellipse cx="34" cy="100" rx="5" ry="3" fill="#f1f5f9" stroke="#e2e8f0" strokeWidth="1" />
+            <ellipse cx="42" cy="100" rx="5" ry="3" fill="#f1f5f9" stroke="#e2e8f0" strokeWidth="1" />
+          </g>
+        )}
+
+        {/* Front legs */}
+        {isWalking ? (
+          <g>
+            <ellipse cx="72" cy="100" rx="5" ry="3" fill="white" stroke="#e2e8f0" strokeWidth="1">
+              <animate attributeName="cy" values="100;96;100" dur="0.5s" begin="0.12s" repeatCount="indefinite" />
+              <animate attributeName="cx" values="72;76;72" dur="0.5s" begin="0.12s" repeatCount="indefinite" />
+            </ellipse>
+            <ellipse cx="80" cy="100" rx="5" ry="3" fill="white" stroke="#e2e8f0" strokeWidth="1">
+              <animate attributeName="cy" values="100;96;100" dur="0.5s" begin="0.37s" repeatCount="indefinite" />
+              <animate attributeName="cx" values="80;84;80" dur="0.5s" begin="0.37s" repeatCount="indefinite" />
+            </ellipse>
+          </g>
+        ) : mood === 'jumping' ? (
+          <g>
+            <ellipse cx="72" cy="96" rx="5" ry="3" fill="white" stroke="#e2e8f0" strokeWidth="1" />
+            <ellipse cx="80" cy="96" rx="5" ry="3" fill="white" stroke="#e2e8f0" strokeWidth="1" />
+          </g>
+        ) : (
+          <g>
+            <ellipse cx="72" cy="100" rx="5" ry="3" fill="white" stroke="#e2e8f0" strokeWidth="1" />
+            <ellipse cx="80" cy="100" rx="5" ry="3" fill="white" stroke="#e2e8f0" strokeWidth="1" />
+          </g>
+        )}
+
+        {/* Ear (single visible from side) */}
+        <polygon
+          points="80,30 72,10 90,22"
+          fill="white" stroke="#e2e8f0" strokeWidth="1.5" strokeLinejoin="round"
+          style={{
+            transformOrigin: '80px 30px',
+            animation: mood === 'greeting' || mood === 'curious'
+              ? 'eros-wave 0.5s ease-in-out infinite alternate' : undefined,
+          }}
+        />
+        <polygon points="81,29 76,16 87,24" fill="#fecdd3" />
+
+        {/* Head — profile circle, shifted right */}
+        <g style={{
+          transformOrigin: '85px 50px',
+          transform: mood === 'curious' ? 'rotate(8deg)' : undefined,
+        }}>
+          <ellipse cx="85" cy="50" rx="22" ry="20" fill="white" stroke="#e2e8f0" strokeWidth="1.5" />
+
+          {/* Eye — single visible */}
+          {eyesClosed ? (
+            <ellipse cx="92" cy="48" rx={isBig ? 6 : 5} ry="0.5" fill="#059669" />
+          ) : eyesHappy ? (
+            <ellipse cx="92" cy="48" rx={isBig ? 6 : 5} ry="3" fill="#059669"
+              style={{ transformOrigin: '92px 48px', animation: 'eros-blink 4s ease-in-out infinite' }}
+            />
+          ) : (
+            <g>
+              <ellipse cx="92" cy="48" rx={isBig ? 6.5 : 5.5} ry={isBig ? 6 : 5} fill="#059669"
+                style={{ transformOrigin: '92px 48px', animation: mood === 'idle' ? 'eros-blink 4s ease-in-out infinite' : undefined }}
+              />
+              <ellipse cx="93" cy="48" rx={mood === 'thinking' ? 1.5 : isBig ? 3 : 2.5}
+                ry={isBig ? 4.5 : 3.5} fill="#0f172a"
+                style={{ transformOrigin: '92px 48px', animation: mood === 'idle' ? 'eros-blink 4s ease-in-out infinite' : undefined }}
+              />
+              <circle cx="94" cy="46" r="1" fill="white" />
+            </g>
+          )}
+
+          {/* Nose — side profile triangle */}
+          <polygon points="107,54 103,57 103,51" fill="#fb7185" />
+
+          {/* Mouth */}
+          {mood === 'yawning' || mood === 'meowing' ? (
+            <ellipse cx="104" cy="59" rx="3" ry="2.5" fill="#fda4af" stroke="#94a3b8" strokeWidth="0.8" />
+          ) : eyesHappy ? (
+            <path d="M 101 58 Q 104 61 107 58" stroke="#94a3b8" strokeWidth="1" fill="none" strokeLinecap="round" />
+          ) : (
+            <path d="M 101 58 Q 104 60 107 58" stroke="#94a3b8" strokeWidth="1" fill="none" strokeLinecap="round" />
+          )}
+
+          {/* Whiskers — only the side ones */}
+          <line x1="107" y1="52" x2="125" y2="49" stroke="#cbd5e1" strokeWidth="0.8" strokeLinecap="round" />
+          <line x1="107" y1="55" x2="126" y2="55" stroke="#cbd5e1" strokeWidth="0.8" strokeLinecap="round" />
+          <line x1="107" y1="58" x2="125" y2="61" stroke="#cbd5e1" strokeWidth="0.8" strokeLinecap="round" />
+
+          {/* Blush */}
+          {eyesHappy && (
+            <ellipse cx="96" cy="55" rx="5" ry="3" fill="#fda4af" opacity="0.35" />
+          )}
+        </g>
+
+        {/* Thinking dots */}
+        {mood === 'thinking' && (
+          <g>
+            <circle cx="110" cy="32" r="2" fill="#059669" opacity="0.4">
+              <animate attributeName="opacity" values="0.4;1;0.4" dur="0.8s" begin="0s" repeatCount="indefinite" />
+            </circle>
+            <circle cx="117" cy="26" r="2.5" fill="#059669" opacity="0.6">
+              <animate attributeName="opacity" values="0.4;1;0.4" dur="0.8s" begin="0.3s" repeatCount="indefinite" />
+            </circle>
+            <circle cx="125" cy="20" r="3" fill="#059669" opacity="0.8">
+              <animate attributeName="opacity" values="0.4;1;0.4" dur="0.8s" begin="0.6s" repeatCount="indefinite" />
+            </circle>
+          </g>
+        )}
+
+        {/* Sleeping Zzz */}
+        {mood === 'sleeping' && (
+          <g>
+            <text x="105" y="30" fontSize="10" fill="#059669" fontWeight="bold" opacity="0.6">
+              <animate attributeName="opacity" values="0.6;0;0.6" dur="2.5s" repeatCount="indefinite" />
+              <animate attributeName="y" values="30;20" dur="2.5s" repeatCount="indefinite" />
+              Z
+            </text>
+            <text x="115" y="22" fontSize="8" fill="#059669" fontWeight="bold" opacity="0.4">
+              <animate attributeName="opacity" values="0.4;0;0.4" dur="2.5s" begin="0.8s" repeatCount="indefinite" />
+              <animate attributeName="y" values="22;12" dur="2.5s" begin="0.8s" repeatCount="indefinite" />
+              z
+            </text>
+          </g>
+        )}
+
+        {/* Love hearts */}
+        {mood === 'love' && (
+          <g>
+            <text x="108" y="28" fontSize="11" opacity="0.8">
+              <animate attributeName="y" values="28;14" dur="1.5s" repeatCount="indefinite" />
+              <animate attributeName="opacity" values="0.8;0" dur="1.5s" repeatCount="indefinite" />
+              ❤️
+            </text>
+            <text x="118" y="34" fontSize="9" opacity="0.6">
+              <animate attributeName="y" values="34;20" dur="1.5s" begin="0.5s" repeatCount="indefinite" />
+              <animate attributeName="opacity" values="0.6;0" dur="1.5s" begin="0.5s" repeatCount="indefinite" />
+              💕
+            </text>
+          </g>
+        )}
+
+        {/* Studying glasses */}
+        {mood === 'studying' && (
+          <g>
+            <circle cx="92" cy="48" r="7" fill="none" stroke="#64748b" strokeWidth="1.5" />
+            <line x1="85" y1="47" x2="76" y2="44" stroke="#64748b" strokeWidth="1.5" />
+            <rect x="60" y="96" width="25" height="10" rx="2" fill="#93c5fd" stroke="#60a5fa" strokeWidth="1" />
+            <line x1="72" y1="96" x2="72" y2="106" stroke="#60a5fa" strokeWidth="1" />
+          </g>
+        )}
+
+        {/* Playing ball */}
+        {mood === 'playing_ball' && (
+          <circle cx="110" cy="95" r="6" fill="#fbbf24" stroke="#f59e0b" strokeWidth="1">
+            <animate attributeName="cy" values="95;86;95" dur="0.8s" repeatCount="indefinite" />
+          </circle>
+        )}
+
+        {/* Walking ball */}
+        {mood === 'walking_ball' && (
+          <g>
+            <circle cx="110" cy="98" r="7" fill="#fbbf24" stroke="#f59e0b" strokeWidth="1">
+              <animate attributeName="cx" values="110;118;110" dur="0.8s" repeatCount="indefinite" />
+            </circle>
+            <circle cx="110" cy="96" r="2" fill="#f59e0b" opacity="0.4">
+              <animate attributeName="cx" values="110;118;110" dur="0.8s" repeatCount="indefinite" />
+            </circle>
+          </g>
+        )}
+
+        {/* Meowing waves */}
+        {mood === 'meowing' && (
+          <g>
+            <circle cx="107" cy="56" r="0" fill="none" stroke="#059669" strokeWidth="0.8" opacity="0">
+              <animate attributeName="r" values="0;12" dur="1s" repeatCount="indefinite" />
+              <animate attributeName="opacity" values="0.6;0" dur="1s" repeatCount="indefinite" />
+            </circle>
+          </g>
+        )}
+
+        {/* Stargazing */}
+        {mood === 'stargazing' && (
+          <g>
+            <text x="30" y="12" fontSize="8" opacity="0.3">
+              <animate attributeName="opacity" values="0.3;1;0.3" dur="1.5s" repeatCount="indefinite" />
+              ⭐
+            </text>
+            <text x="60" y="5" fontSize="10" opacity="0.5">
+              <animate attributeName="opacity" values="0.5;1;0.5" dur="1.5s" begin="0.5s" repeatCount="indefinite" />
+              ✨
+            </text>
+            <text x="100" y="10" fontSize="7" opacity="0.4">
+              <animate attributeName="opacity" values="0.4;1;0.4" dur="1.5s" begin="1s" repeatCount="indefinite" />
+              ⭐
+            </text>
+          </g>
+        )}
+
+        {/* Fishing */}
+        {mood === 'fishing' && (
+          <g>
+            <line x1="98" y1="42" x2="120" y2="18" stroke="#92400e" strokeWidth="2" strokeLinecap="round" />
+            <path d="M120 18 Q125 30 120 45" stroke="#94a3b8" strokeWidth="0.8" fill="none" strokeDasharray="2,2">
+              <animate attributeName="d" values="M120 18 Q125 30 120 45;M120 18 Q128 28 120 45;M120 18 Q125 30 120 45" dur="2s" repeatCount="indefinite" />
+            </path>
+            <text x="116" y="50" fontSize="8">🐟</text>
+          </g>
+        )}
+
+        {/* Pawing */}
+        {mood === 'pawing' && (
+          <ellipse cx="88" cy="96" rx="5" ry="3" fill="white" stroke="#e2e8f0" strokeWidth="1">
+            <animate attributeName="cy" values="96;89;96" dur="0.7s" repeatCount="indefinite" />
+            <animate attributeName="cx" values="88;92;88" dur="0.7s" repeatCount="indefinite" />
+          </ellipse>
+        )}
+      </g>
+    </svg>
+  )
+}
+
+/* ───── Front-view cat component (original) ───── */
+export default function ErosCat({ mood, size = 80, direction = 'front' }: ErosCatProps) {
+  if (direction === 'side') return <SideViewCat mood={mood} size={size} />
   const isWalking = mood === 'walking' || mood === 'walking_ball'
   const eyesClosed = mood === 'sleeping' || mood === 'washing' || mood === 'yawning'
   const eyesSquint = mood === 'happy' || mood === 'winking'
@@ -37,7 +313,7 @@ export default function ErosCat({ mood, size = 80 }: ErosCatProps) {
       width={size}
       height={size}
       xmlns="http://www.w3.org/2000/svg"
-      style={{ overflow: 'visible', filter: 'drop-shadow(0px 1px 2px rgba(148, 163, 184, 0.4))' }}
+      style={{ overflow: 'visible', filter: 'drop-shadow(0px 2px 4px rgba(100, 116, 139, 0.25))' }}
     >
       <g style={{
         transformOrigin: '60px 70px',

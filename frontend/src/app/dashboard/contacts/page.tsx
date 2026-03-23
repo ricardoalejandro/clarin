@@ -16,6 +16,8 @@ import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import CreateContactModal from '@/components/CreateContactModal'
 import PasteFromExcelModal from '@/components/PasteFromExcelModal'
+import LeadDetailPanel from '@/components/LeadDetailPanel'
+import type { Lead } from '@/types/contact'
 
 interface ContactDeviceName {
   id: string
@@ -71,18 +73,6 @@ interface Device {
   status: string
 }
 
-interface Observation {
-  id: string
-  contact_id: string | null
-  lead_id: string | null
-  type: string
-  direction: string | null
-  outcome: string | null
-  notes: string | null
-  created_by_name: string | null
-  created_at: string
-}
-
 function getDisplayName(c: Contact): string {
   return c.custom_name || c.name || c.push_name || c.phone || c.jid || '?'
 }
@@ -96,6 +86,45 @@ function getInitials(c: Contact): string {
   const parts = cleaned.split(/\s+/)
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
   return cleaned.substring(0, 2).toUpperCase()
+}
+
+function contactToLead(c: Contact): Lead {
+  return {
+    id: c.id,
+    account_id: c.account_id,
+    contact_id: c.id,
+    jid: c.jid,
+    name: c.custom_name ?? c.name ?? c.push_name ?? null,
+    last_name: c.last_name ?? null,
+    short_name: c.short_name ?? null,
+    phone: c.phone ?? null,
+    email: c.email ?? null,
+    company: c.company ?? null,
+    age: c.age ?? null,
+    dni: c.dni ?? null,
+    birth_date: c.birth_date ?? null,
+    notes: c.notes ?? null,
+    tags: c.tags || null,
+    structured_tags: c.structured_tags || null,
+    status: 'active',
+    source: c.source ?? null,
+    pipeline_id: null,
+    stage_id: null,
+    stage_name: null,
+    stage_color: null,
+    stage_position: null,
+    kommo_id: c.kommo_id ?? null,
+    is_archived: false,
+    is_blocked: false,
+    archived_at: null,
+    blocked_at: null,
+    block_reason: null,
+    assigned_to: null,
+    assigned_to_name: null,
+    custom_fields: null,
+    created_at: c.created_at,
+    updated_at: c.updated_at,
+  } as unknown as Lead
 }
 
 export default function ContactsPage() {
@@ -124,7 +153,6 @@ export default function ContactsPage() {
   // Detail / Edit
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null)
   const [showDetailPanel, setShowDetailPanel] = useState(false)
-  const [syncingKommo, setSyncingKommo] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [editForm, setEditForm] = useState({
     custom_name: '',
@@ -173,25 +201,6 @@ export default function ContactsPage() {
   const [sendDeviceId, setSendDeviceId] = useState('')
   const [sendLoading, setSendLoading] = useState(false)
   const router = useRouter()
-
-  // Observations
-  const [observations, setObservations] = useState<Observation[]>([])
-  const [loadingObservations, setLoadingObservations] = useState(false)
-  const [newObservation, setNewObservation] = useState('')
-  const [savingObservation, setSavingObservation] = useState(false)
-  const [obsDisplayCount, setObsDisplayCount] = useState(5)
-  const [showHistoryModal, setShowHistoryModal] = useState(false)
-  const [historyFilterType, setHistoryFilterType] = useState('')
-  const [historyFilterFrom, setHistoryFilterFrom] = useState('')
-  const [historyFilterTo, setHistoryFilterTo] = useState('')
-
-  // Inline editing
-  const [editingField, setEditingField] = useState<string | null>(null)
-  const [editValues, setEditValues] = useState<Record<string, string>>({})
-  const [savingField, setSavingField] = useState(false)
-  const [editingNotes, setEditingNotes] = useState(false)
-  const [notesValue, setNotesValue] = useState('')
-  const [savingNotes, setSavingNotes] = useState(false)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -318,15 +327,14 @@ export default function ContactsPage() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (showHistoryModal) { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo(''); return }
       if (showSendMessage) { setShowSendMessage(false); setSendDeviceId(''); return }
       if (showDuplicates) { setShowDuplicates(false); return }
       if (showEditModal) { setShowEditModal(false); setSelectedContact(null); return }
-      if (showDetailPanel) { setShowDetailPanel(false); setEditingField(null); setEditingNotes(false); return }
+      if (showDetailPanel) { setShowDetailPanel(false); return }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showHistoryModal, showSendMessage, showDuplicates, showEditModal, showDetailPanel])
+  }, [showSendMessage, showDuplicates, showEditModal, showDetailPanel])
 
   const openDetail = async (contact: Contact) => {
     // Fetch full contact with device names
@@ -338,182 +346,10 @@ export default function ContactsPage() {
       if (data.success) {
         setSelectedContact(data.contact)
         setShowDetailPanel(true)
-        setObsDisplayCount(5)
-        setEditingField(null)
-        setEditingNotes(false)
-        setNotesValue(data.contact.notes || '')
-        fetchObservations(data.contact.id)
       }
     } catch {
       setSelectedContact(contact)
       setShowDetailPanel(true)
-      setObsDisplayCount(5)
-      setEditingField(null)
-      setEditingNotes(false)
-      setNotesValue(contact.notes || '')
-      fetchObservations(contact.id)
-    }
-  }
-
-  const startEditingContact = (field: string, currentValue: string) => {
-    setEditingField(field)
-    setEditValues({ ...editValues, [field]: currentValue })
-  }
-
-  const cancelEditingContact = () => {
-    setEditingField(null)
-  }
-
-  const saveContactField = async (field: string) => {
-    if (!selectedContact?.id) return
-    setSavingField(true)
-    try {
-      const payload: Record<string, string | number | null> = {}
-      const val = editValues[field]?.trim() ?? ''
-      if (field === 'age') {
-        payload[field] = val ? parseInt(val, 10) : null
-      } else if (field === 'custom_name') {
-        payload[field] = val || null
-      } else {
-        payload[field] = val || null
-      }
-      const res = await fetch(`/api/contacts/${selectedContact.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
-      })
-      const data = await res.json()
-      if (data.success && data.contact) {
-        setSelectedContact(data.contact)
-        fetchContacts()
-      }
-    } catch (err) {
-      console.error('Failed to save contact field:', err)
-    } finally {
-      setSavingField(false)
-      setEditingField(null)
-    }
-  }
-
-  const handleContactFieldKeyDown = (e: React.KeyboardEvent, field: string) => {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      saveContactField(field)
-    } else if (e.key === 'Escape') {
-      cancelEditingContact()
-    }
-  }
-
-  const handleSyncKommo = async () => {
-    if (!selectedContact) return
-    setSyncingKommo(true)
-    try {
-      const res = await fetch(`/api/contacts/${selectedContact.id}/sync-kommo`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success && data.contact) {
-        setSelectedContact(data.contact)
-        fetchContacts()
-      } else {
-        alert(data.error || 'Error al sincronizar')
-      }
-    } catch (err) {
-      console.error('Sync error:', err)
-      alert('Error de conexión al sincronizar')
-    } finally {
-      setSyncingKommo(false)
-    }
-  }
-
-  const saveContactNotes = async () => {
-    if (!selectedContact) return
-    setSavingNotes(true)
-    try {
-      const res = await fetch(`/api/contacts/${selectedContact.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ notes: notesValue }),
-      })
-      const data = await res.json()
-      if (data.success && data.contact) {
-        setSelectedContact(data.contact)
-        fetchContacts()
-      }
-      setEditingNotes(false)
-    } catch (err) {
-      console.error('Failed to save notes:', err)
-    } finally {
-      setSavingNotes(false)
-    }
-  }
-
-  const fetchObservations = async (contactId: string) => {
-    setLoadingObservations(true)
-    try {
-      const res = await fetch(`/api/contacts/${contactId}/interactions?limit=100`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        setObservations(data.interactions || [])
-      }
-    } catch (err) {
-      console.error('Failed to fetch observations:', err)
-    } finally {
-      setLoadingObservations(false)
-    }
-  }
-
-  const handleAddObservation = async () => {
-    if (!selectedContact || !newObservation.trim()) return
-    setSavingObservation(true)
-    try {
-      const res = await fetch('/api/interactions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          contact_id: selectedContact.id,
-          type: 'note',
-          notes: newObservation.trim(),
-        }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setNewObservation('')
-        fetchObservations(selectedContact.id)
-      }
-    } catch (err) {
-      console.error('Failed to add observation:', err)
-    } finally {
-      setSavingObservation(false)
-    }
-  }
-
-  const handleDeleteObservation = async (obsId: string) => {
-    if (!selectedContact) return
-    if (!confirm('¿Eliminar esta observación?')) return
-    try {
-      const res = await fetch(`/api/interactions/${obsId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        fetchObservations(selectedContact.id)
-      }
-    } catch (err) {
-      console.error('Failed to delete observation:', err)
     }
   }
 
@@ -799,6 +635,21 @@ export default function ContactsPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ recipients: recipientsList }),
+        })
+      }
+
+      // Add spreadsheet recipients if any
+      if (formResult.recipients && formResult.recipients.length > 0) {
+        const sheetRecipients = formResult.recipients.map(r => ({
+          jid: r.phone + '@s.whatsapp.net',
+          name: r.name || '',
+          phone: r.phone,
+          metadata: r.metadata || {},
+        }))
+        await fetch(`/api/campaigns/${campaignId}/recipients`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ recipients: sheetRecipients }),
         })
       }
 
@@ -1223,375 +1074,56 @@ export default function ContactsPage() {
       {/* Detail Panel (Slide-over) */}
       {showDetailPanel && selectedContact && (
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
-          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setShowDetailPanel(false); setEditingField(null); setEditingNotes(false) }} />
-          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200">
-            {/* Detail Header */}
-            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10">
-              <h2 className="text-sm font-semibold text-slate-900">Detalle del Contacto</h2>
-              <div className="flex items-center gap-1">
-                {selectedContact.kommo_id && (
-                  <button
-                    onClick={handleSyncKommo}
-                    disabled={syncingKommo}
-                    title="Sincronizar desde Kommo"
-                    className="p-1.5 hover:bg-emerald-50 rounded-lg text-slate-400 hover:text-emerald-600 transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-4 h-4 ${syncingKommo ? 'animate-spin' : ''}`} />
-                  </button>
-                )}
-                <button onClick={() => { setShowDetailPanel(false); setEditingField(null); setEditingNotes(false) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
-                  <X className="w-4 h-4 text-slate-400" />
-                </button>
-              </div>
-            </div>
-
-            <div className="p-6 space-y-6">
-              {/* Avatar + Name */}
-              <div className="text-center">
-                {selectedContact.avatar_url ? (
-                  <img src={selectedContact.avatar_url} alt="" className="w-14 h-14 rounded-full object-cover mx-auto mb-2" />
-                ) : (
-                  <div className="w-14 h-14 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
-                    <span className="text-emerald-700 font-bold text-lg">{getInitials(selectedContact)}</span>
-                  </div>
-                )}
-                {editingField === 'custom_name' ? (
-                  <input
-                    autoFocus
-                    value={editValues.custom_name ?? ''}
-                    onChange={(e) => setEditValues({ ...editValues, custom_name: e.target.value })}
-                    onKeyDown={(e) => handleContactFieldKeyDown(e, 'custom_name')}
-                    onBlur={() => saveContactField('custom_name')}
-                    className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
-                    placeholder="Nombre"
-                  />
-                ) : (
-                  <h3
-                    className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
-                    onClick={() => startEditingContact('custom_name', selectedContact.custom_name || getDisplayName(selectedContact))}
-                    title="Clic para editar nombre"
-                  >
-                    {getDisplayName(selectedContact)}
-                  </h3>
-                )}
-                {selectedContact.push_name && selectedContact.push_name !== getDisplayName(selectedContact) && (
-                  <p className="text-xs text-slate-400 mt-0.5">Push: {selectedContact.push_name}</p>
-                )}
-                <p className="text-xs text-slate-400">{selectedContact.jid}</p>
-              </div>
-
-              {/* Inline editable info fields */}
-              <div className="space-y-3">
-                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
-
-                {/* Phone */}
-                <div className="flex items-center gap-3 group">
-                  <Phone className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'phone' ? (
-                    <input autoFocus value={editValues.phone ?? ''} onChange={(e) => setEditValues({ ...editValues, phone: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'phone')} onBlur={() => saveContactField('phone')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Teléfono" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.phone ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('phone', selectedContact.phone || '')} title="Clic para editar">
-                      {selectedContact.phone || 'Agregar teléfono'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Email */}
-                <div className="flex items-center gap-3 group">
-                  <Mail className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'email' ? (
-                    <input autoFocus value={editValues.email ?? ''} onChange={(e) => setEditValues({ ...editValues, email: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'email')} onBlur={() => saveContactField('email')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="correo@ejemplo.com" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.email ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('email', selectedContact.email || '')} title="Clic para editar">
-                      {selectedContact.email || 'Agregar email'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Last Name */}
-                <div className="flex items-center gap-3 group">
-                  <User className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'last_name' ? (
-                    <input autoFocus value={editValues.last_name ?? ''} onChange={(e) => setEditValues({ ...editValues, last_name: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'last_name')} onBlur={() => saveContactField('last_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Apellido" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.last_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('last_name', selectedContact.last_name || '')} title="Clic para editar">
-                      {selectedContact.last_name || 'Agregar apellido'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Short Name */}
-                <div className="flex items-center gap-3 group">
-                  <Edit2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'short_name' ? (
-                    <input autoFocus value={editValues.short_name ?? ''} onChange={(e) => setEditValues({ ...editValues, short_name: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'short_name')} onBlur={() => saveContactField('short_name')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Nombre corto" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.short_name ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('short_name', selectedContact.short_name || '')} title="Clic para editar">
-                      {selectedContact.short_name || 'Agregar nombre corto'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Company */}
-                <div className="flex items-center gap-3 group">
-                  <Building2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'company' ? (
-                    <input autoFocus value={editValues.company ?? ''} onChange={(e) => setEditValues({ ...editValues, company: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'company')} onBlur={() => saveContactField('company')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Empresa" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.company ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('company', selectedContact.company || '')} title="Clic para editar">
-                      {selectedContact.company || 'Agregar empresa'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Age */}
-                <div className="flex items-center gap-3 group">
-                  <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'age' ? (
-                    <input autoFocus type="number" value={editValues.age ?? ''} onChange={(e) => setEditValues({ ...editValues, age: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'age')} onBlur={() => saveContactField('age')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Edad" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.age ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('age', selectedContact.age?.toString() || '')} title="Clic para editar">
-                      {selectedContact.age ? `${selectedContact.age} años` : 'Agregar edad'}
-                    </span>
-                  )}
-                </div>
-
-                {/* DNI */}
-                <div className="flex items-center gap-3 group">
-                  <Hash className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'dni' ? (
-                    <input autoFocus value={editValues.dni ?? ''} onChange={(e) => setEditValues({ ...editValues, dni: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'dni')} onBlur={() => saveContactField('dni')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="DNI" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.dni ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('dni', selectedContact.dni || '')} title="Clic para editar">
-                      {selectedContact.dni ? `DNI: ${selectedContact.dni}` : 'Agregar DNI'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Fecha de nacimiento */}
-                <div className="flex items-center gap-3 group">
-                  <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
-                  {editingField === 'birth_date' ? (
-                    <input autoFocus type="date" value={editValues.birth_date ?? ''} onChange={(e) => setEditValues({ ...editValues, birth_date: e.target.value })} onKeyDown={(e) => handleContactFieldKeyDown(e, 'birth_date')} onBlur={() => saveContactField('birth_date')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" />
-                  ) : (
-                    <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${selectedContact.birth_date ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditingContact('birth_date', selectedContact.birth_date ? selectedContact.birth_date.split('T')[0] : '')} title="Clic para editar">
-                      {selectedContact.birth_date ? `Nac: ${new Date(selectedContact.birth_date).toLocaleDateString('es-PE')}` : 'Agregar fecha de nacimiento'}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Tags — Editable with TagInput */}
-              <div className="space-y-2">
-                <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
-                <TagInput
-                  entityType="contact"
-                  entityId={selectedContact.id}
-                  assignedTags={selectedContact.structured_tags || []}
-                  onTagsChange={(newTags) => {
-                    setSelectedContact({ ...selectedContact, structured_tags: newTags })
-                    // Update the contact in the grid immediately
-                    setContacts(prev => prev.map(c =>
-                      c.id === selectedContact.id ? { ...c, structured_tags: newTags } : c
-                    ))
-                    fetchAllTags()
-                  }}
-                />
-              </div>
-
-              {/* Notes */}
-              <div className="border-t border-slate-100 pt-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Notas</h5>
-                  {editingNotes ? (
-                    <button onClick={saveContactNotes} disabled={savingNotes} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
-                      <Save className="w-3.5 h-3.5" />
-                      {savingNotes ? 'Guardando...' : 'Guardar'}
-                    </button>
-                  ) : (
-                    <button onClick={() => { setEditingNotes(true); setNotesValue(selectedContact.notes || '') }} className="flex items-center gap-1 text-xs font-semibold text-emerald-600 hover:text-emerald-700">
-                      <Edit2 className="w-3.5 h-3.5" />
-                      Editar
-                    </button>
-                  )}
-                </div>
-                {editingNotes ? (
-                  <textarea
-                    value={notesValue}
-                    onChange={(e) => setNotesValue(e.target.value)}
-                    className="w-full h-28 p-3 text-sm text-slate-800 border-2 border-emerald-500 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent resize-none placeholder:text-slate-400"
-                    placeholder="Escribe notas sobre este contacto..."
-                  />
-                ) : (
-                  <div className="text-sm text-slate-700 bg-slate-50 rounded-xl p-3 min-h-[50px] border border-slate-100">
-                    {selectedContact.notes || <span className="text-slate-400 italic">Sin notas</span>}
-                  </div>
-                )}
-              </div>
-
-              {/* Device Names */}
-              {selectedContact.device_names && selectedContact.device_names.length > 0 && (
-                <div className="border-t border-slate-100 pt-4">
-                  <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2">
-                    <Smartphone className="w-3.5 h-3.5" />
-                    Nombres por Dispositivo
-                  </h5>
-                  <div className="space-y-2">
-                    {selectedContact.device_names.map((dn) => (
-                      <div key={dn.id} className="p-3 bg-slate-50 rounded-xl text-sm border border-slate-100">
-                        <p className="font-medium text-slate-700">{dn.device_name || 'Dispositivo'}</p>
-                        <div className="text-slate-500 mt-1 space-y-0.5">
-                          {dn.name && <p>Nombre: {dn.name}</p>}
-                          {dn.push_name && <p>Push: {dn.push_name}</p>}
-                          {dn.business_name && <p>Negocio: {dn.business_name}</p>}
-                        </div>
-                        <p className="text-[10px] text-slate-400 mt-1">
-                          Sincronizado {formatDistanceToNow(new Date(dn.synced_at), { locale: es, addSuffix: true })}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
-                <button
-                  onClick={() => {
-                    const connDevices = devices.filter(d => d.status === 'connected')
-                    if (connDevices.length === 0) {
-                      alert('No hay dispositivos conectados')
-                      return
-                    }
-                    if (connDevices.length === 1) {
-                      setSendDeviceId(connDevices[0].id)
-                    } else {
-                      setSendDeviceId('')
-                    }
-                    setShowSendMessage(true)
-                  }}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition text-sm font-medium shadow-sm"
-                >
-                  <MessageSquare className="w-4 h-4" />
-                  Enviar Mensaje
-                </button>
-                <button
-                  onClick={() => handleResetFromDevice(selectedContact.id)}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  Restaurar del Dispositivo
-                </button>
-                <button
-                  onClick={() => handleDeleteContact(selectedContact.id)}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-sm"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  Eliminar
-                </button>
-              </div>
-
-              {/* Observations / History */}
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-sm font-semibold text-slate-600 flex items-center gap-2">
-                    <FileText className="w-4 h-4" />
-                    Historial de Observaciones
-                  </h4>
-                  {observations.length > 0 && (
-                    <button
-                      onClick={() => setShowHistoryModal(true)}
-                      className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition"
-                      title="Ver historial completo"
-                    >
-                      <Maximize2 className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-
-                {/* Add new observation */}
-                <div className="mb-3">
-                  <textarea
-                    value={newObservation}
-                    onChange={(e) => setNewObservation(e.target.value)}
-                    placeholder="Escribir una observación..."
-                    rows={2}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
-                  />
-                  <button
-                    onClick={handleAddObservation}
-                    disabled={!newObservation.trim() || savingObservation}
-                    className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition"
-                  >
-                    {savingObservation ? (
-                      <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" />
-                    ) : (
-                      <Plus className="w-3.5 h-3.5" />
-                    )}
-                    Agregar
-                  </button>
-                </div>
-
-                {/* Observations list */}
-                {loadingObservations ? (
-                  <div className="flex justify-center py-4">
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-emerald-600" />
-                  </div>
-                ) : observations.length === 0 ? (
-                  <p className="text-sm text-slate-400 text-center py-3">Sin observaciones aún</p>
-                ) : (
-                  <div className="space-y-2">
-                    {observations.slice(0, obsDisplayCount).map((obs) => (
-                      <div key={obs.id} className="p-3 bg-slate-50 rounded-lg group relative">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words">
-                              {obs.notes || '(sin contenido)'}
-                            </p>
-                            <div className="flex items-center gap-2 mt-1.5">
-                              <Clock className="w-3 h-3 text-slate-400" />
-                              <span className="text-xs text-slate-400">
-                                {formatDistanceToNow(new Date(obs.created_at), { locale: es, addSuffix: true })}
-                              </span>
-                              {obs.created_by_name && (
-                                <span className="text-xs text-slate-500">
-                                  &mdash; {obs.created_by_name}
-                                </span>
-                              )}
-                              {obs.type !== 'note' && (
-                                <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
-                                  {obs.type}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => handleDeleteObservation(obs.id)}
-                            className="p-1 text-slate-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
-                            title="Eliminar"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                    {observations.length > obsDisplayCount && (
-                      <button
-                        onClick={() => setObsDisplayCount(prev => prev + 10)}
-                        className="w-full py-2 text-sm text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition font-medium"
-                      >
-                        Mostrar más ({observations.length - obsDisplayCount} restantes)
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="text-xs text-slate-400 space-y-1">
-                <p>Creado: {new Date(selectedContact.created_at).toLocaleDateString('es')}</p>
-                <p>Actualizado: {formatDistanceToNow(new Date(selectedContact.updated_at), { locale: es, addSuffix: true })}</p>
-              </div>
-            </div>
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => setShowDetailPanel(false)} />
+          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-hidden border-l border-slate-200">
+            <LeadDetailPanel
+              contactMode
+              contactId={selectedContact.id}
+              lead={contactToLead(selectedContact)}
+              onLeadChange={(updatedLead) => {
+                setSelectedContact({
+                  ...selectedContact,
+                  name: updatedLead.name,
+                  last_name: updatedLead.last_name,
+                  short_name: updatedLead.short_name,
+                  phone: updatedLead.phone,
+                  email: updatedLead.email,
+                  company: updatedLead.company,
+                  age: updatedLead.age,
+                  dni: updatedLead.dni,
+                  birth_date: updatedLead.birth_date,
+                  notes: updatedLead.notes,
+                  structured_tags: updatedLead.structured_tags,
+                })
+              }}
+              onClose={() => setShowDetailPanel(false)}
+              onDelete={() => {
+                setShowDetailPanel(false)
+                setSelectedContact(null)
+                fetchContacts()
+              }}
+              deviceNames={selectedContact.device_names}
+              pushName={selectedContact.push_name}
+              avatarUrl={selectedContact.avatar_url}
+              onResetFromDevice={() => handleResetFromDevice(selectedContact.id)}
+              onSendMessage={() => {
+                const connDevices = devices.filter(d => d.status === 'connected')
+                if (connDevices.length === 0) {
+                  alert('No hay dispositivos conectados')
+                  return
+                }
+                if (connDevices.length === 1) {
+                  setSendDeviceId(connDevices[0].id)
+                } else {
+                  setSendDeviceId('')
+                }
+                setShowSendMessage(true)
+              }}
+              onContactUpdate={(contact) => {
+                setSelectedContact(contact)
+                fetchContacts()
+              }}
+            />
           </div>
         </div>
       )}
@@ -1823,121 +1355,6 @@ export default function ContactsPage() {
             >
               Cancelar
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* Full History Modal */}
-      {showHistoryModal && selectedContact && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900">Historial Completo</h2>
-                <p className="text-sm text-slate-500">{getDisplayName(selectedContact)} &mdash; {observations.length} registros</p>
-              </div>
-              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-1 text-slate-400 hover:text-slate-600 rounded">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Filters */}
-            <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
-              <div className="flex items-center gap-3 flex-wrap">
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Tipo</label>
-                  <select
-                    value={historyFilterType}
-                    onChange={(e) => setHistoryFilterType(e.target.value)}
-                    className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500"
-                  >
-                    <option value="">Todos</option>
-                    <option value="note">Nota</option>
-                    <option value="call">Llamada</option>
-                    <option value="whatsapp">WhatsApp</option>
-                    <option value="email">Email</option>
-                    <option value="meeting">Reunión</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Desde</label>
-                  <input
-                    type="date"
-                    value={historyFilterFrom}
-                    onChange={(e) => setHistoryFilterFrom(e.target.value)}
-                    className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block">Hasta</label>
-                  <input
-                    type="date"
-                    value={historyFilterTo}
-                    onChange={(e) => setHistoryFilterTo(e.target.value)}
-                    className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500"
-                  />
-                </div>
-                {(historyFilterType || historyFilterFrom || historyFilterTo) && (
-                  <button
-                    onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }}
-                    className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1"
-                  >
-                    <XCircle className="w-3.5 h-3.5" />
-                    Limpiar
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* History list */}
-            <div className="flex-1 overflow-y-auto p-6">
-              {(() => {
-                const filtered = observations.filter(obs => {
-                  if (historyFilterType && obs.type !== historyFilterType) return false
-                  if (historyFilterFrom && new Date(obs.created_at) < new Date(historyFilterFrom)) return false
-                  if (historyFilterTo) {
-                    const to = new Date(historyFilterTo)
-                    to.setDate(to.getDate() + 1)
-                    if (new Date(obs.created_at) >= to) return false
-                  }
-                  return true
-                })
-                if (filtered.length === 0) return <p className="text-sm text-slate-400 text-center py-8">No hay registros con los filtros seleccionados</p>
-                return (
-                  <div className="space-y-3">
-                    {filtered.map((obs) => (
-                      <div key={obs.id} className="p-4 bg-slate-50 rounded-lg group relative border border-slate-100">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className={`px-2 py-0.5 text-xs rounded font-medium ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
-                                {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
-                              </span>
-                              <span className="text-xs text-slate-400">
-                                {format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}
-                              </span>
-                            </div>
-                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words">
-                              {obs.notes || '(sin contenido)'}
-                            </p>
-                            {obs.created_by_name && (
-                              <p className="text-xs text-slate-400 mt-1.5">por {obs.created_by_name}</p>
-                            )}
-                          </div>
-                          <button
-                            onClick={() => handleDeleteObservation(obs.id)}
-                            className="p-1 text-slate-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
-                            title="Eliminar"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )
-              })()}
-            </div>
           </div>
         </div>
       )}

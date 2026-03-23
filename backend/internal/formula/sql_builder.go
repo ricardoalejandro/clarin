@@ -6,7 +6,7 @@ import (
 )
 
 // BuildSQL converts an AST into a parameterized SQL subquery that returns lead_ids
-// matching the formula. The query operates on lead_tags + tags tables.
+// matching the formula. The query operates on contact_tags + tags tables.
 //
 // Parameters:
 //   - node: AST root from Parse()
@@ -56,7 +56,7 @@ func buildNode(node *Node, args []interface{}, argIdx int) (string, []interface{
 	}
 }
 
-// buildLiteral produces: SELECT lt.lead_id FROM lead_tags lt JOIN tags t ... WHERE LOWER(t.name) = $N AND t.account_id = $1
+// buildLiteral produces a query that finds lead IDs matching a tag via contact_tags
 func buildLiteral(node *Node, args []interface{}, argIdx int) (string, []interface{}, int, error) {
 	var cond string
 	if node.IsLike {
@@ -66,7 +66,7 @@ func buildLiteral(node *Node, args []interface{}, argIdx int) (string, []interfa
 	}
 
 	sql := fmt.Sprintf(
-		`SELECT DISTINCT lt.lead_id FROM lead_tags lt JOIN tags t ON t.id = lt.tag_id JOIN leads l ON l.id = lt.lead_id WHERE l.account_id = $1 AND %s`,
+		`SELECT DISTINCT l.id AS lead_id FROM leads l JOIN contact_tags ct ON ct.contact_id = l.contact_id JOIN tags t ON t.id = ct.tag_id WHERE l.account_id = $1 AND l.is_archived = false AND l.is_blocked = false AND %s`,
 		cond,
 	)
 
@@ -83,7 +83,7 @@ func buildNot(node *Node, args []interface{}, argIdx int) (string, []interface{}
 
 	// All leads in the account EXCEPT those matching the child
 	sql := fmt.Sprintf(
-		`(SELECT id AS lead_id FROM leads WHERE account_id = $1 EXCEPT (%s))`,
+		`(SELECT id AS lead_id FROM leads WHERE account_id = $1 AND is_archived = false AND is_blocked = false EXCEPT (%s))`,
 		childSQL,
 	)
 
@@ -127,7 +127,7 @@ func BuildCountSQL(node *Node, accountID interface{}) (string, []interface{}, er
 // ─── Participant variant ────────────────────────────────────────────────────
 
 // BuildSQLForParticipants converts an AST into a SQL subquery that returns participant IDs
-// matching the formula. Uses lead_tags through event_participants.lead_id to match by the lead's real tags.
+// matching the formula. Uses contact_tags through event_participants.contact_id.
 // $1 = eventID in the generated SQL.
 func BuildSQLForParticipants(node *Node, eventID interface{}) (string, []interface{}, error) {
 	if node == nil {
@@ -168,7 +168,7 @@ func buildParticipantLiteral(node *Node, args []interface{}, argIdx int) (string
 		cond = fmt.Sprintf("LOWER(t.name) = $%d", argIdx)
 	}
 	sql := fmt.Sprintf(
-		`SELECT DISTINCT p.id AS participant_id FROM event_participants p JOIN lead_tags lt ON lt.lead_id = p.lead_id JOIN tags t ON t.id = lt.tag_id WHERE p.event_id = $1 AND %s`,
+		`SELECT DISTINCT p.id AS participant_id FROM event_participants p JOIN contact_tags ct ON ct.contact_id = p.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p.event_id = $1 AND %s`,
 		cond,
 	)
 	args = append(args, node.Value)
