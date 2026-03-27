@@ -20,6 +20,8 @@ interface TagInputProps {
   onBeforeAssign?: (tagId: string) => Promise<boolean>
   /** Called before removing a tag. Return false to cancel the removal. */
   onBeforeRemove?: (tagId: string) => Promise<boolean>
+  /** When true, tags are managed locally without API assign/remove calls. Useful when entity doesn't exist yet. */
+  localMode?: boolean
 }
 
 const PRESET_COLORS = [
@@ -27,7 +29,9 @@ const PRESET_COLORS = [
   '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#6b7280',
 ]
 
-export default function TagInput({ entityType, entityId, assignedTags, onTagsChange, className = '', onBeforeAssign, onBeforeRemove }: TagInputProps) {
+export type { Tag as TagItem }
+
+export default function TagInput({ entityType, entityId, assignedTags, onTagsChange, className = '', onBeforeAssign, onBeforeRemove, localMode }: TagInputProps) {
   const [allTags, setAllTags] = useState<Tag[]>([])
   const [inputValue, setInputValue] = useState('')
   const [isOpen, setIsOpen] = useState(false)
@@ -82,6 +86,11 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
       const allowed = await onBeforeAssign(tag.id)
       if (!allowed) return
     }
+    if (localMode) {
+      onTagsChange?.([...assignedTags, tag])
+      setInputValue('')
+      return
+    }
     const token = localStorage.getItem('token')
     try {
       const res = await fetch('/api/tags/assign', {
@@ -111,6 +120,10 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
     if (onBeforeRemove) {
       const allowed = await onBeforeRemove(tag.id)
       if (!allowed) return
+    }
+    if (localMode) {
+      onTagsChange?.(assignedTags.filter(t => t.id !== tag.id))
+      return
     }
     const token = localStorage.getItem('token')
     try {

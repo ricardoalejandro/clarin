@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/naperu/clarin/internal/api"
+	googleclient "github.com/naperu/clarin/internal/google"
 	"github.com/naperu/clarin/internal/kommo"
 	clarinMCP "github.com/naperu/clarin/internal/mcp"
 	"github.com/naperu/clarin/internal/repository"
@@ -22,7 +23,14 @@ import (
 	"github.com/naperu/clarin/pkg/database"
 )
 
+// Version and BuildTime are set via ldflags at build time
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+)
+
 func main() {
+	log.Printf("🚀 Clarin CRM v%s (built %s)", Version, BuildTime)
 	// Load configuration
 	cfg := config.Load()
 
@@ -132,8 +140,15 @@ func main() {
 		log.Printf("✅ Kommo integration configured for %s.kommo.com", cfg.KommoSubdomain)
 	}
 
+	// Initialize Google Contacts client (optional)
+	var googleClient *googleclient.Client
+	if cfg.GoogleClientID != "" && cfg.GoogleClientSecret != "" {
+		googleClient = googleclient.NewClient(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleRedirectURI)
+		log.Printf("✅ Google Contacts integration configured")
+	}
+
 	// Initialize API server
-	server := api.NewServer(cfg, services, repos, hub, devicePool, store, kommoSyncSvc, redisCache)
+	server := api.NewServer(cfg, services, repos, hub, devicePool, store, kommoSyncSvc, redisCache, googleClient, Version)
 
 	// Initialize and start MCP server (Model Context Protocol) for ChatGPT/Claude/Copilot integration
 	mcpServer := clarinMCP.New(repos, services, cfg.JWTSecret)

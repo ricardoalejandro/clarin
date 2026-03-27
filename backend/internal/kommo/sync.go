@@ -266,20 +266,15 @@ func (s *SyncService) spawnAccountSync(accountID uuid.UUID, updatedSince int64) 
 			}
 		} else if count > 0 {
 			log.Printf("[Kommo Sync] Account %s: synced %d leads", accountID, count)
-			if s.hub != nil {
-				s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{
-					"action": "synced",
-					"count":  count,
-				})
-			}
 		}
 
 		_, _ = s.db.Exec(context.Background(),
 			`UPDATE kommo_connected_pipelines SET last_synced_at = NOW() WHERE account_id = $1 AND enabled = TRUE`,
 			accountID)
 
-		// Trigger event participant reconciliation after tag sync
-		if s.OnLeadTagsChanged != nil {
+		// Only trigger event reconciliation if leads were actually synced
+		// (avoids running expensive reconciliation every 5s when nothing changed)
+		if s.OnLeadTagsChanged != nil && count > 0 {
 			log.Printf("[Kommo Sync] Triggering event reconciliation for account %s", accountID)
 			s.OnLeadTagsChanged(context.Background(), accountID)
 		}
@@ -442,7 +437,7 @@ func (s *SyncService) ConnectPipeline(ctx context.Context, accountID uuid.UUID, 
 			accountID, kommoPipelineID)
 		if s.hub != nil && count > 0 {
 			s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{
-				"action": "synced",
+				"action": "initial_sync",
 			})
 		}
 	}()
@@ -630,11 +625,14 @@ func (s *SyncService) syncGlobalLeads(ctx context.Context, accountID uuid.UUID, 
 		}
 
 		for _, kl := range leads {
-			if err := s.upsertLead(ctx, accountID, kl); err != nil {
+			changed, err := s.upsertLead(ctx, accountID, kl)
+			if err != nil {
 				log.Printf("[Kommo Sync] lead %d error: %v", kl.ID, err)
 				continue
 			}
-			count++
+			if changed {
+				count++
+			}
 		}
 
 		if !hasMore || len(leads) == 0 {
@@ -729,7 +727,7 @@ func (s *SyncService) syncUnsortedLeads(ctx context.Context, accountID uuid.UUID
 			continue
 		}
 
-		if err := s.upsertLead(ctx, accountID, *kl); err != nil {
+		if _, err := s.upsertLead(ctx, accountID, *kl); err != nil {
 			log.Printf("[Kommo Sync] unsorted lead %d upsert error: %v", leadID, err)
 			continue
 		}
@@ -775,7 +773,7 @@ func (s *SyncService) syncPipelineLeads(ctx context.Context, accountID uuid.UUID
 		}
 
 		for _, kl := range leads {
-			if err := s.upsertLead(ctx, accountID, kl); err != nil {
+			if _, err := s.upsertLead(ctx, accountID, kl); err != nil {
 				log.Printf("[Kommo Sync] lead %d error: %v", kl.ID, err)
 				continue
 			}
@@ -792,7 +790,8 @@ func (s *SyncService) syncPipelineLeads(ctx context.Context, accountID uuid.UUID
 }
 
 // upsertLead inserts or updates a single lead and its associated contact.
-func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl KommoLead) error {
+// upsertLead syncs a Kommo lead into the local DB. Returns true if data was actually changed.
+func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl KommoLead) (bool, error) {
 	kommoID := int64(kl.ID)
 	pipelineKommoID := int64(kl.PipelineID)
 	statusKommoID := int64(kl.StatusID)
@@ -832,7 +831,7 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM leads WHERE account_id = $1 AND kommo_id = $2)`,
 			accountID, kommoID).Scan(&existsInAccount)
 		if !existsInAccount {
-			return nil // Lead not in a synced pipeline and doesn't exist → skip completely
+			return false, nil // Lead not in a synced pipeline and doesn't exist → skip completely
 		}
 	}
 
@@ -893,10 +892,10 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		// NEW lead — only import if it belongs to a synced pipeline.
 		// Leads from non-synced pipelines are completely ignored.
 		if pipelineID == nil {
-			return nil // Pipeline not synced in Clarin → skip
+			return false, nil // Pipeline not synced in Clarin → skip
 		}
 		if jid == "" || strings.HasPrefix(jid, "kommo_") {
-			return nil // No valid WhatsApp phone → skip
+			return false, nil // No valid WhatsApp phone → skip
 		}
 
 		leadID = uuid.New()
@@ -906,51 +905,85 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 			VALUES ($1, $2, $3, $4, 'new', 'kommo', $5, $6, $7, $8, NOW(), NOW())
 		`, leadID, accountID, contactID, jid,
 			pipelineID, stageID, tagNames, kommoID)
-	} else {
-		// Anti-loop: skip update if this is an echo of our own push
-		var lastPushedAt int64
-		_ = s.db.QueryRow(ctx, `SELECT COALESCE(kommo_last_pushed_at, 0) FROM leads WHERE id = $1`, leadID).Scan(&lastPushedAt)
-		if lastPushedAt > 0 && lastPushedAt == kl.UpdatedAt {
-			// This update was caused by our own push — reset and skip
-			_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = 0 WHERE id = $1`, leadID)
-			return nil
+		if err != nil {
+			return false, err
 		}
-
-		// Only update if the lead is in a synced pipeline.
-		// If moved to a non-synced pipeline in Kommo, don't touch the local lead.
-		if pipelineID == nil {
-			return nil
+		// New lead inserted — sync tags and calls
+		if len(tagNames) > 0 {
+			s.syncLeadTags(ctx, accountID, leadID, tagNames)
 		}
+		s.syncCallsFromKommo(ctx, accountID, leadID, contactID, kl.CustomFields)
+		return true, nil
+	}
 
-		if foundByKommoID {
-			// Already linked — sync CRM fields from Kommo (personal data lives on contacts)
-			_, err = s.db.Exec(ctx, `
-				UPDATE leads SET
-					contact_id = COALESCE($1, contact_id),
-					pipeline_id = $2,
-					stage_id = $3,
-					tags = COALESCE($4, tags),
-					updated_at = NOW()
-				WHERE id = $5
-			`, contactID, pipelineID, stageID, tagNames, leadID)
-		} else {
-			// First-time linking (found by JID) — Clarin keeps name/phone/email,
-			// only link kommo_id and sync CRM fields (pipeline, stage, tags)
-			_, err = s.db.Exec(ctx, `
-				UPDATE leads SET
-					kommo_id = $1,
-					contact_id = COALESCE($2, contact_id),
-					pipeline_id = $3,
-					stage_id = $4,
-					tags = COALESCE($5, tags),
-					updated_at = NOW()
-				WHERE id = $6
-			`, kommoID, contactID, pipelineID, stageID, tagNames, leadID)
-			log.Printf("[Kommo Sync] Linked existing Clarin lead %s to Kommo ID %d (preserved Clarin name/phone/email)", leadID, kommoID)
+	// Anti-loop: skip update if this is an echo of our own push
+	var lastPushedAt int64
+	_ = s.db.QueryRow(ctx, `SELECT COALESCE(kommo_last_pushed_at, 0) FROM leads WHERE id = $1`, leadID).Scan(&lastPushedAt)
+	if lastPushedAt > 0 && lastPushedAt == kl.UpdatedAt {
+		// This update was caused by our own push — reset and skip
+		_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = 0 WHERE id = $1`, leadID)
+		return false, nil
+	}
+
+	// Only update if the lead is in a synced pipeline.
+	// If moved to a non-synced pipeline in Kommo, don't touch the local lead.
+	if pipelineID == nil {
+		return false, nil
+	}
+
+	// Check if data actually changed before updating (avoid unnecessary writes + broadcasts)
+	var curPipelineID, curStageID *uuid.UUID
+	var curTags []string
+	_ = s.db.QueryRow(ctx, `SELECT pipeline_id, stage_id, tags FROM leads WHERE id = $1`, leadID).Scan(&curPipelineID, &curStageID, &curTags)
+	tagsSame := len(curTags) == len(tagNames)
+	if tagsSame {
+		curTagSet := make(map[string]bool, len(curTags))
+		for _, t := range curTags {
+			curTagSet[t] = true
+		}
+		for _, t := range tagNames {
+			if !curTagSet[t] {
+				tagsSame = false
+				break
+			}
 		}
 	}
+	pipelineSame := (curPipelineID != nil && pipelineID != nil && *curPipelineID == *pipelineID) || (curPipelineID == nil && pipelineID == nil)
+	stageSame := (curStageID != nil && stageID != nil && *curStageID == *stageID) || (curStageID == nil && stageID == nil)
+
+	if foundByKommoID && pipelineSame && stageSame && tagsSame {
+		// No actual changes — skip update entirely
+		return false, nil
+	}
+
+	if foundByKommoID {
+		// Already linked — sync CRM fields from Kommo (personal data lives on contacts)
+		_, err = s.db.Exec(ctx, `
+			UPDATE leads SET
+				contact_id = COALESCE($1, contact_id),
+				pipeline_id = $2,
+				stage_id = $3,
+				tags = COALESCE($4, tags),
+				updated_at = NOW()
+			WHERE id = $5
+		`, contactID, pipelineID, stageID, tagNames, leadID)
+	} else {
+		// First-time linking (found by JID) — Clarin keeps name/phone/email,
+		// only link kommo_id and sync CRM fields (pipeline, stage, tags)
+		_, err = s.db.Exec(ctx, `
+			UPDATE leads SET
+				kommo_id = $1,
+				contact_id = COALESCE($2, contact_id),
+				pipeline_id = $3,
+				stage_id = $4,
+				tags = COALESCE($5, tags),
+				updated_at = NOW()
+			WHERE id = $6
+		`, kommoID, contactID, pipelineID, stageID, tagNames, leadID)
+		log.Printf("[Kommo Sync] Linked existing Clarin lead %s to Kommo ID %d (preserved Clarin name/phone/email)", leadID, kommoID)
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Sync contact_tags junction table
@@ -961,7 +994,7 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	// Sync call observations from Kommo custom fields → Clarin interactions
 	s.syncCallsFromKommo(ctx, accountID, leadID, contactID, kl.CustomFields)
 
-	return nil
+	return true, nil
 }
 
 // syncCallsFromKommo reads the 10 call slots from Kommo custom fields and upserts
@@ -1285,7 +1318,7 @@ func (s *SyncService) syncLeads(ctx context.Context, accountID uuid.UUID) (int, 
 		}
 
 		for _, kl := range leads {
-			if err := s.upsertLead(ctx, accountID, kl); err != nil {
+			if _, err := s.upsertLead(ctx, accountID, kl); err != nil {
 				log.Printf("[Kommo Sync] lead %d error: %v", kl.ID, err)
 				continue
 			}
@@ -1935,7 +1968,7 @@ func (s *SyncService) SyncSingleLead(ctx context.Context, accountID, leadID uuid
 	// Clear anti-loop flag so the upsert performs a full update
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = 0 WHERE id = $1`, leadID)
 
-	if err := s.upsertLead(ctx, accountID, *kl); err != nil {
+	if _, err := s.upsertLead(ctx, accountID, *kl); err != nil {
 		return fmt.Errorf("failed to update from Kommo: %w", err)
 	}
 

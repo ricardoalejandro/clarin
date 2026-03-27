@@ -96,6 +96,10 @@ services:
       # AI Assistant (Eros)
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # Google Contacts sync
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
       # SOCKS5 proxy for WhatsApp CDN media uploads (Cloudflare WARP)
       MEDIA_SOCKS5_PROXY: socks5://host-gateway:40001
     extra_hosts:

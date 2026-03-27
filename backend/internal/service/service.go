@@ -629,6 +629,10 @@ func (s *ContactService) FindDuplicates(ctx context.Context, accountID uuid.UUID
 	return s.repos.Contact.FindDuplicates(ctx, accountID)
 }
 
+func (s *ContactService) GetDuplicateLeadsCount(ctx context.Context, accountID uuid.UUID) (int, error) {
+	return s.repos.Contact.GetContactsWithDuplicateLeads(ctx, accountID)
+}
+
 func (s *ContactService) MergeContacts(ctx context.Context, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
 	return s.repos.Contact.MergeContacts(ctx, keepID, mergeIDs)
 }
@@ -711,12 +715,54 @@ func (s *LeadService) DeleteAll(ctx context.Context, accountID uuid.UUID) error 
 	return s.repos.Lead.DeleteAll(ctx, accountID)
 }
 
-func (s *LeadService) ArchiveLead(ctx context.Context, id uuid.UUID, archive bool) error {
-	return s.repos.Lead.ArchiveLead(ctx, id, archive)
+func (s *LeadService) ArchiveLead(ctx context.Context, id uuid.UUID, archive bool, reason string) error {
+	if err := s.repos.Lead.ArchiveLead(ctx, id, archive, reason); err != nil {
+		return err
+	}
+
+	// After archiving, clean up tags and event participants
+	if archive {
+		// Get the contact linked to this lead
+		contactID, err := s.repos.Lead.GetContactIDForLead(ctx, id)
+		if err == nil && contactID != nil {
+			// Recalculate contact tags — remove tags that only came from this lead
+			if err := s.repos.Tag.RecalculateContactTags(ctx, *contactID); err != nil {
+				log.Printf("[LEAD] Error recalculating contact tags after archive: %v", err)
+			}
+		}
+		// Remove auto-synced event participants for this lead across all events
+		removed, err := s.repos.Event.RemoveAutoSyncParticipantsByLeadID(ctx, id)
+		if err != nil {
+			log.Printf("[LEAD] Error removing event participants after archive: %v", err)
+		} else if removed > 0 {
+			log.Printf("[LEAD] Removed %d auto-sync event participants for archived lead %s", removed, id)
+		}
+	}
+	return nil
 }
 
-func (s *LeadService) ArchiveLeadsBatch(ctx context.Context, ids []uuid.UUID, archive bool) error {
-	return s.repos.Lead.ArchiveLeadsBatch(ctx, ids, archive)
+func (s *LeadService) ArchiveLeadsBatch(ctx context.Context, ids []uuid.UUID, archive bool, reason string) error {
+	if err := s.repos.Lead.ArchiveLeadsBatch(ctx, ids, archive, reason); err != nil {
+		return err
+	}
+
+	// After batch archive, clean up tags and event participants
+	if archive {
+		for _, id := range ids {
+			contactID, err := s.repos.Lead.GetContactIDForLead(ctx, id)
+			if err == nil && contactID != nil {
+				if err := s.repos.Tag.RecalculateContactTags(ctx, *contactID); err != nil {
+					log.Printf("[LEAD] Error recalculating contact tags after batch archive: %v", err)
+				}
+			}
+			if removed, err := s.repos.Event.RemoveAutoSyncParticipantsByLeadID(ctx, id); err != nil {
+				log.Printf("[LEAD] Error removing event participants after batch archive: %v", err)
+			} else if removed > 0 {
+				log.Printf("[LEAD] Removed %d auto-sync event participants for archived lead %s", removed, id)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *LeadService) BlockLead(ctx context.Context, id uuid.UUID, block bool, reason string) error {

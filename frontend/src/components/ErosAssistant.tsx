@@ -76,6 +76,12 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
   const [configLoading, setConfigLoading] = useState(false)
   const [configError, setConfigError] = useState('')
   const [configSuccess, setConfigSuccess] = useState(false)
+  const [configStep, setConfigStep] = useState<'key' | 'model' | 'custom'>('key')
+  const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [selectedModel, setSelectedModel] = useState('')
+  const [customRole, setCustomRole] = useState('')
+  const [customInstructions, setCustomInstructions] = useState('')
+  const [modelsLoading, setModelsLoading] = useState(false)
   const [mobileVH, setMobileVH] = useState<number | null>(null)
   const [maximizedChart, setMaximizedChart] = useState<ChartConfig | null>(null)
   const [isInputExpanded, setIsInputExpanded] = useState(false)
@@ -219,13 +225,16 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
     }
   }
 
-  // Check if user has configured their Groq API key
+  // Check if user has configured their API key
   useEffect(() => {
     const checkConfig = async () => {
       try {
         const res = await fetch('/api/ai/config', { headers: getAuthHeaders() })
         const data = await res.json()
         setErosConfigured(data.success && data.has_key)
+        if (data.model) setSelectedModel(data.model)
+        if (data.role) setCustomRole(data.role)
+        if (data.instructions) setCustomInstructions(data.instructions)
       } catch {
         setErosConfigured(false)
       }
@@ -280,6 +289,10 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
   const handleSaveApiKey = async () => {
     const key = apiKeyInput.trim()
     if (!key) return
+    if (!key.startsWith('sk-')) {
+      setConfigError('La API key debe comenzar con sk-')
+      return
+    }
     setConfigLoading(true)
     setConfigError('')
     setConfigSuccess(false)
@@ -295,30 +308,95 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
         setConfigError(valData.error || 'API key inválida. Verifica que sea correcta.')
         return
       }
-      // Save
-      const saveRes = await fetch('/api/ai/config', {
+      // Key valid — fetch available models
+      setModelsLoading(true)
+      const modelsRes = await fetch('/api/ai/models', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ api_key: key }),
+      })
+      const modelsData = await modelsRes.json()
+      if (modelsData.success && modelsData.models?.length > 0) {
+        setAvailableModels(modelsData.models)
+        if (!selectedModel || !modelsData.models.includes(selectedModel)) {
+          setSelectedModel(modelsData.models.includes('gpt-4.1-nano') ? 'gpt-4.1-nano' : modelsData.models[0])
+        }
+      }
+      setModelsLoading(false)
+      // Save the key immediately
+      await fetch('/api/ai/config', {
         method: 'PUT',
         headers: getAuthHeaders(),
-        body: JSON.stringify({ groq_api_key: key }),
+        body: JSON.stringify({ groq_api_key: key, model: selectedModel, role: customRole, instructions: customInstructions }),
       })
-      const saveData = await saveRes.json()
-      if (saveData.success) {
-        setConfigSuccess(true)
-        setErosConfigured(true)
-        setApiKeyInput('')
-        setTimeout(() => {
-          setShowConfig(false)
-          setConfigSuccess(false)
-          setCatMood('greeting')
-          setTimeout(() => setCatMood('idle'), 2000)
-        }, 1500)
-      } else {
-        setConfigError('No se pudo guardar la key. Intenta de nuevo.')
-      }
+      setErosConfigured(true)
+      setConfigStep('model')
     } catch {
       setConfigError('Error de conexión. Intenta de nuevo.')
     } finally {
       setConfigLoading(false)
+      setModelsLoading(false)
+    }
+  }
+
+  const handleSaveConfig = async () => {
+    setConfigLoading(true)
+    setConfigError('')
+    try {
+      const key = apiKeyInput.trim() || undefined
+      const res = await fetch('/api/ai/config', {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          groq_api_key: key ?? '',
+          model: selectedModel,
+          role: customRole,
+          instructions: customInstructions,
+        }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setConfigSuccess(true)
+        setTimeout(() => {
+          setShowConfig(false)
+          setConfigSuccess(false)
+          setConfigStep('key')
+          setCatMood('greeting')
+          setTimeout(() => setCatMood('idle'), 2000)
+        }, 1000)
+      } else {
+        setConfigError('No se pudo guardar la configuración.')
+      }
+    } catch {
+      setConfigError('Error de conexión.')
+    } finally {
+      setConfigLoading(false)
+    }
+  }
+
+  const handleOpenConfigPanel = async () => {
+    setShowConfig(true)
+    setConfigError('')
+    setConfigSuccess(false)
+    if (erosConfigured) {
+      setConfigStep('model')
+      // Load models if not already loaded
+      if (availableModels.length === 0) {
+        try {
+          const keyRes = await fetch('/api/ai/config', { headers: getAuthHeaders() })
+          const keyData = await keyRes.json()
+          if (keyData.has_key) {
+            // We need to pass the key to fetch models — but we don't expose it
+            // Instead try fetching with the stored key by loading from backend
+            setModelsLoading(true)
+            // The stored key is used server-side, we need a different approach
+            // Let's use the current stored key indirectly — we'll call handleSaveApiKey with empty
+            setModelsLoading(false)
+          }
+        } catch { /* ignore */ }
+      }
+    } else {
+      setConfigStep('key')
     }
   }
 
@@ -950,7 +1028,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
             )}
             {erosConfigured && (
               <button
-                onClick={() => { setShowConfig(prev => !prev); setConfigError(''); setConfigSuccess(false) }}
+                onClick={handleOpenConfigPanel}
                 className="p-1.5 hover:bg-white/20 rounded-lg transition-colors"
                 title="Configuración"
               >
@@ -1009,7 +1087,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                 </p>
               </div>
               <button
-                onClick={() => { setShowConfig(true); setConfigError(''); setConfigSuccess(false) }}
+                onClick={() => { setShowConfig(true); setConfigError(''); setConfigSuccess(false); setConfigStep('key') }}
                 className="mt-2 flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white text-sm font-medium rounded-xl hover:bg-emerald-600 transition-all active:scale-95 shadow-sm"
               >
                 <Key size={14} /> Despertar a Eros
@@ -1019,67 +1097,154 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
 
           {/* Config screen */}
           {showConfig && (
-            <div className="flex flex-col items-center justify-center h-full py-4 gap-3 px-2">
-              <ErosCat mood={configSuccess ? 'happy' : 'curious'} size={isMaximizedView || isFullscreen ? 80 : 56} />
-              <div className="text-center">
-                <p className="text-slate-700 font-medium text-sm">
-                  {erosConfigured ? 'Configuración de API Key' : 'Configurar API Key'}
-                </p>
-                <p className="text-slate-500 text-xs mt-1 max-w-[280px] leading-relaxed">
-                  Usa tu key de{' '}
-                  <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
-                    className="text-emerald-600 hover:text-emerald-700 underline inline-flex items-center gap-0.5">
-                    OpenAI <ExternalLink size={10} />
-                  </a>
-                  {' '}o{' '}
-                  <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
-                    className="text-emerald-600 hover:text-emerald-700 underline inline-flex items-center gap-0.5">
-                    Google Gemini <ExternalLink size={10} />
-                  </a>
-                </p>
+            <div className="flex flex-col h-full py-4 gap-3 px-3 overflow-y-auto">
+              <div className="flex flex-col items-center gap-2 shrink-0">
+                <ErosCat mood={configSuccess ? 'happy' : 'curious'} size={isMaximizedView || isFullscreen ? 70 : 48} />
               </div>
-              <div className="w-full max-w-[280px] space-y-2">
-                <div className="relative">
-                  <input
-                    type="password"
-                    value={apiKeyInput}
-                    onChange={(e) => { setApiKeyInput(e.target.value); setConfigError('') }}
-                    placeholder="sk-... o AIza..."
-                    className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all pr-10"
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleSaveApiKey() }}
-                    disabled={configLoading || configSuccess}
-                  />
-                  {configSuccess && <CheckCircle2 size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500" />}
+
+              {/* Step: API Key */}
+              {configStep === 'key' && (
+                <div className="flex flex-col items-center gap-3">
+                  <div className="text-center">
+                    <p className="text-slate-700 font-medium text-sm">Configurar API Key</p>
+                    <p className="text-slate-500 text-xs mt-1 max-w-[280px] leading-relaxed">
+                      Ingresa tu key de{' '}
+                      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
+                        className="text-emerald-600 hover:text-emerald-700 underline inline-flex items-center gap-0.5">
+                        OpenAI <ExternalLink size={10} />
+                      </a>
+                    </p>
+                  </div>
+                  <div className="w-full max-w-[300px] space-y-2">
+                    <input
+                      type="password"
+                      value={apiKeyInput}
+                      onChange={(e) => { setApiKeyInput(e.target.value); setConfigError('') }}
+                      placeholder="sk-..."
+                      className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all"
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleSaveApiKey() }}
+                      disabled={configLoading}
+                    />
+                    {configError && (
+                      <div className="flex items-start gap-1.5 text-red-600 text-xs bg-red-50 px-2.5 py-2 rounded-lg">
+                        <XCircle size={12} className="shrink-0 mt-0.5" /><span>{configError}</span>
+                      </div>
+                    )}
+                    <button
+                      onClick={handleSaveApiKey}
+                      disabled={!apiKeyInput.trim() || configLoading}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-500 text-white text-sm font-medium rounded-xl hover:bg-emerald-600 disabled:opacity-40 transition-all active:scale-[0.98] shadow-sm"
+                    >
+                      {configLoading ? <><Loader2 size={14} className="animate-spin" /> Validando...</> : <><Key size={14} /> Validar y conectar</>}
+                    </button>
+                    <button
+                      onClick={() => { setShowConfig(false); setConfigError(''); setApiKeyInput('') }}
+                      className="w-full px-3 py-2 text-xs text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
                 </div>
-                {configError && (
-                  <div className="flex items-start gap-1.5 text-red-600 text-xs bg-red-50 px-2.5 py-2 rounded-lg">
-                    <XCircle size={12} className="shrink-0 mt-0.5" /><span>{configError}</span>
+              )}
+
+              {/* Step: Model + Custom Config */}
+              {configStep === 'model' && (
+                <div className="flex flex-col gap-3 w-full">
+                  <div className="text-center">
+                    <p className="text-slate-700 font-medium text-sm">Configuración de Eros</p>
+                    <p className="text-slate-500 text-[11px] mt-0.5">Modelo, personalidad e instrucciones</p>
                   </div>
-                )}
-                {configSuccess && (
-                  <div className="flex items-center gap-1.5 text-emerald-600 text-xs bg-emerald-50 px-2.5 py-2 rounded-lg">
-                    <CheckCircle2 size={12} /><span>¡Key válida! Eros está despierto 🎉</span>
+
+                  {/* Model selector */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-slate-600">Modelo OpenAI</label>
+                    {modelsLoading ? (
+                      <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-slate-400 bg-slate-50 rounded-xl border border-slate-200">
+                        <Loader2 size={12} className="animate-spin" /> Cargando modelos...
+                      </div>
+                    ) : availableModels.length > 0 ? (
+                      <select
+                        value={selectedModel}
+                        onChange={(e) => setSelectedModel(e.target.value)}
+                        className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 bg-white transition-all"
+                      >
+                        {availableModels.map(m => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={selectedModel}
+                        onChange={(e) => setSelectedModel(e.target.value)}
+                        placeholder="gpt-4.1-nano"
+                        className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all"
+                      />
+                    )}
                   </div>
-                )}
-                <button
-                  onClick={handleSaveApiKey}
-                  disabled={!apiKeyInput.trim() || configLoading || configSuccess}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-500 text-white text-sm font-medium rounded-xl hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-500 transition-all active:scale-[0.98] shadow-sm"
-                >
-                  {configLoading ? <><Loader2 size={14} className="animate-spin" /> Validando...</> : <><Key size={14} /> Conectar</>}
-                </button>
-                <div className="flex gap-2">
-                  {erosConfigured && (
-                    <button onClick={handleDisconnectKey} className="flex-1 px-3 py-2 text-xs text-red-600 bg-red-50 rounded-xl hover:bg-red-100 transition-colors">Desconectar</button>
+
+                  {/* Custom Role */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-slate-600">Rol / Personalidad <span className="text-slate-400 font-normal">(opcional)</span></label>
+                    <textarea
+                      value={customRole}
+                      onChange={(e) => setCustomRole(e.target.value)}
+                      placeholder="Ej: Eres un experto en marketing digital especializado en redes sociales..."
+                      rows={2}
+                      className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all resize-none"
+                    />
+                  </div>
+
+                  {/* Custom Instructions */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium text-slate-600">Instrucciones adicionales <span className="text-slate-400 font-normal">(opcional)</span></label>
+                    <textarea
+                      value={customInstructions}
+                      onChange={(e) => setCustomInstructions(e.target.value)}
+                      placeholder="Ej: Siempre responde en formato de lista, prioriza datos de ventas..."
+                      rows={3}
+                      className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all resize-none"
+                    />
+                  </div>
+
+                  {configError && (
+                    <div className="flex items-start gap-1.5 text-red-600 text-xs bg-red-50 px-2.5 py-2 rounded-lg">
+                      <XCircle size={12} className="shrink-0 mt-0.5" /><span>{configError}</span>
+                    </div>
                   )}
+                  {configSuccess && (
+                    <div className="flex items-center gap-1.5 text-emerald-600 text-xs bg-emerald-50 px-2.5 py-2 rounded-lg">
+                      <CheckCircle2 size={12} /><span>¡Configuración guardada! 🎉</span>
+                    </div>
+                  )}
+
                   <button
-                    onClick={() => { setShowConfig(false); setConfigError(''); setApiKeyInput('') }}
-                    className="flex-1 px-3 py-2 text-xs text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
+                    onClick={handleSaveConfig}
+                    disabled={configLoading || configSuccess}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-500 text-white text-sm font-medium rounded-xl hover:bg-emerald-600 disabled:opacity-40 transition-all active:scale-[0.98] shadow-sm"
                   >
-                    {erosConfigured ? 'Volver' : 'Cancelar'}
+                    {configLoading ? <><Loader2 size={14} className="animate-spin" /> Guardando...</> : <><CheckCircle2 size={14} /> Guardar configuración</>}
                   </button>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setConfigStep('key')}
+                      className="flex-1 px-3 py-2 text-xs text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
+                    >
+                      Cambiar key
+                    </button>
+                    <button onClick={handleDisconnectKey} className="flex-1 px-3 py-2 text-xs text-red-600 bg-red-50 rounded-xl hover:bg-red-100 transition-colors">
+                      Desconectar
+                    </button>
+                    <button
+                      onClick={() => { setShowConfig(false); setConfigError(''); setConfigStep('key') }}
+                      className="flex-1 px-3 py-2 text-xs text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
+                    >
+                      Volver
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
 

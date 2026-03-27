@@ -8,6 +8,25 @@ import { Message, Reaction, PollOption } from '@/types/chat'
 import { splitEmojiSegments, getAppleEmojiUrl } from '@/utils/appleEmoji'
 import dynamic from 'next/dynamic'
 
+/** Reconstruct WhatsApp-formatted text from DOM nodes (preserves *, _, ~, ` markers on copy) */
+function domToWhatsApp(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent || ''
+  if (node.nodeType !== Node.ELEMENT_NODE) return ''
+  const el = node as HTMLElement
+  const tag = el.tagName.toLowerCase()
+  const inner = Array.from(el.childNodes).map(domToWhatsApp).join('')
+  switch (tag) {
+    case 'strong': case 'b': return `*${inner}*`
+    case 'em': case 'i': return `_${inner}_`
+    case 'del': case 's': return `~${inner}~`
+    case 'code': return el.parentElement?.tagName.toLowerCase() === 'pre' ? inner : `\`${inner}\``
+    case 'pre': return `\`\`\`${inner}\`\`\``
+    case 'img': return (el as HTMLImageElement).alt || ''
+    case 'br': return '\n'
+    default: return inner
+  }
+}
+
 const EmojiPickerReact = dynamic(() => import('emoji-picker-react'), {
   ssr: false,
   loading: () => (
@@ -600,7 +619,19 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
               ))}
             </div>
           ) : (
-            <p className={`text-slate-900 whitespace-pre-wrap break-words text-[14.5px] leading-[19px] ${hasVisualMedia ? 'px-3 pt-1' : ''}`}>
+            <p
+              className={`text-slate-900 whitespace-pre-wrap break-words text-[14.5px] leading-[19px] ${hasVisualMedia ? 'px-3 pt-1' : ''}`}
+              onCopy={(e) => {
+                const sel = window.getSelection()
+                if (!sel || sel.rangeCount === 0) return
+                const fragment = sel.getRangeAt(0).cloneContents()
+                const text = Array.from(fragment.childNodes).map(domToWhatsApp).join('')
+                if (text) {
+                  e.preventDefault()
+                  e.clipboardData.setData('text/plain', text)
+                }
+              }}
+            >
               {renderFormattedText(message.body)}
             </p>
           )

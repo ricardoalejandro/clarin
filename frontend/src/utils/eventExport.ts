@@ -65,23 +65,6 @@ export function exportToExcel(event: ExportEvent, participants: ExportParticipan
 
   const wb = XLSX.utils.book_new()
 
-  // Summary sheet
-  const summaryData = [
-    ['Evento', event.name],
-    ['Descripción', event.description || ''],
-    ['Fecha', formatDate(event.event_date)],
-    ['Fin', formatDate(event.event_end)],
-    ['Ubicación', event.location || ''],
-    ['Estado', event.status],
-    ['Total Participantes', event.total_participants],
-    [''],
-    ['Estado', 'Cantidad'],
-    ...Object.entries(event.participant_counts || {}).map(([k, v]) => [STATUS_LABELS[k] || k, v]),
-  ]
-  const summaryWs = XLSX.utils.aoa_to_sheet(summaryData)
-  summaryWs['!cols'] = [{ wch: 22 }, { wch: 40 }]
-  XLSX.utils.book_append_sheet(wb, summaryWs, 'Resumen')
-
   // Participants sheet
   const ws = XLSX.utils.json_to_sheet(rows)
   ws['!cols'] = [

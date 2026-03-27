@@ -47,6 +47,7 @@ const (
 	EventLogbookUpdate           = "logbook_update"
 	EventDynamicRegistration     = "dynamic_registration"
 	EventContactUpdate           = "contact_update"
+	EventVersionUpdate           = "version_update"
 )
 
 // Message represents a WebSocket message
@@ -209,6 +210,14 @@ func (h *Hub) BroadcastToAccount(accountID uuid.UUID, event string, data interfa
 		Event:     event,
 		AccountID: accountID.String(),
 		Data:      data,
+	}
+}
+
+// BroadcastToAll sends a message to all connected clients across all accounts
+func (h *Hub) BroadcastToAll(event string, data interface{}) {
+	h.broadcast <- &Message{
+		Event: event,
+		Data:  data,
 	}
 }
 

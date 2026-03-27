@@ -20,10 +20,19 @@ type Account struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 
+	// Google Contacts integration
+	GoogleEmail          *string    `json:"google_email,omitempty"`
+	GoogleAccessToken    *string    `json:"-"`
+	GoogleRefreshToken   *string    `json:"-"`
+	GoogleContactGroupID *string    `json:"google_contact_group_id,omitempty"`
+	GoogleConnectedAt    *time.Time `json:"google_connected_at,omitempty"`
+	GoogleSyncLimit      int        `json:"google_sync_limit"`
+
 	// Populated on demand
-	UserCount   int `json:"user_count,omitempty"`
-	DeviceCount int `json:"device_count,omitempty"`
-	ChatCount   int `json:"chat_count,omitempty"`
+	UserCount        int `json:"user_count,omitempty"`
+	DeviceCount      int `json:"device_count,omitempty"`
+	ChatCount        int `json:"chat_count,omitempty"`
+	GoogleSyncCount  int `json:"google_sync_count,omitempty"`
 }
 
 // User represents a user in the system
@@ -38,9 +47,12 @@ type User struct {
 	IsAdmin      bool      `json:"is_admin"`
 	IsSuperAdmin bool      `json:"is_super_admin"`
 	IsActive     bool      `json:"is_active"`
-	GroqAPIKey   string    `json:"-"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	GroqAPIKey       string    `json:"-"`
+	ErosModel        string    `json:"eros_model,omitempty"`
+	ErosRole         string    `json:"eros_role,omitempty"`
+	ErosInstructions string    `json:"eros_instructions,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 
 	// Populated on demand
 	AccountName string `json:"account_name,omitempty"`
@@ -154,10 +166,27 @@ type Contact struct {
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
 	LastActivity *time.Time `json:"last_activity,omitempty"`
+	LeadCount    int        `json:"lead_count"`
+
+	// Google Contacts sync
+	GoogleSync         bool       `json:"google_sync"`
+	GoogleResourceName *string    `json:"google_resource_name,omitempty"`
+	GoogleSyncedAt     *time.Time `json:"google_synced_at,omitempty"`
+	GoogleSyncError    *string    `json:"google_sync_error,omitempty"`
 
 	// Relations (populated on demand)
 	DeviceNames    []ContactDeviceName `json:"device_names,omitempty"`
 	StructuredTags []*Tag              `json:"structured_tags,omitempty"`
+	ExtraPhones    []ContactPhone      `json:"extra_phones,omitempty"`
+}
+
+// ContactPhone represents an additional phone number for a contact
+type ContactPhone struct {
+	ID        uuid.UUID `json:"id"`
+	ContactID uuid.UUID `json:"contact_id"`
+	Phone     string    `json:"phone"`
+	Label     string    `json:"label"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // DisplayName returns the best available name for the contact
@@ -193,14 +222,23 @@ type ContactDeviceName struct {
 
 // ContactFilter defines filter options for listing contacts
 type ContactFilter struct {
-	Search   string
-	DeviceID *uuid.UUID
-	HasPhone bool
-	IsGroup  bool
-	Tags     []string
-	TagIDs   []uuid.UUID
-	Limit    int
-	Offset   int
+	Search             string
+	DeviceID           *uuid.UUID
+	HasPhone           bool
+	IsGroup            bool
+	Tags               []string
+	TagIDs             []uuid.UUID
+	TagNames           []string
+	ExcludeTagNames    []string
+	TagMode            string // OR or AND
+	MatchingContactIDs []uuid.UUID // pre-computed from formula
+	DateField          string
+	DateFrom           string
+	DateTo             string
+	SortBy             string // name, lead_count, created_at
+	SortOrder          string // asc, desc
+	Limit              int
+	Offset             int
 }
 
 // Chat represents a conversation
@@ -373,11 +411,12 @@ type Lead struct {
 	CustomFields map[string]interface{} `json:"custom_fields,omitempty"`
 	AssignedTo   *uuid.UUID             `json:"assigned_to,omitempty"`
 	KommoID      *int64                 `json:"kommo_id,omitempty"`
-	IsArchived   bool                   `json:"is_archived"`
-	ArchivedAt   *time.Time             `json:"archived_at,omitempty"`
-	IsBlocked    bool                   `json:"is_blocked"`
-	BlockedAt    *time.Time             `json:"blocked_at,omitempty"`
-	BlockReason  string                 `json:"block_reason,omitempty"`
+	IsArchived    bool                   `json:"is_archived"`
+	ArchivedAt    *time.Time             `json:"archived_at,omitempty"`
+	ArchiveReason string                 `json:"archive_reason,omitempty"`
+	IsBlocked     bool                   `json:"is_blocked"`
+	BlockedAt     *time.Time             `json:"blocked_at,omitempty"`
+	BlockReason   string                 `json:"block_reason,omitempty"`
 	CreatedAt    time.Time              `json:"created_at"`
 	UpdatedAt    time.Time              `json:"updated_at"`
 
@@ -635,6 +674,11 @@ type EventParticipant struct {
 	LeadStageID    *uuid.UUID `json:"lead_stage_id,omitempty"`
 	LeadStageName  *string    `json:"lead_stage_name,omitempty"`
 	LeadStageColor *string    `json:"lead_stage_color,omitempty"`
+	// Lead archive/block status (populated on demand)
+	IsArchived bool `json:"is_archived,omitempty"`
+	IsBlocked  bool `json:"is_blocked,omitempty"`
+	// Duplicate detection (populated on demand)
+	DuplicateContact bool `json:"duplicate_contact,omitempty"`
 }
 
 // Participant status constants

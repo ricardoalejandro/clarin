@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
-// import ErosAssistant from '@/components/ErosAssistant' // Disabled — Eros AI paused
+import ErosAssistant from '@/components/ErosAssistant'
+import { subscribeWebSocket, onServerVersionChange } from '@/lib/api'
 import {
   MessageSquare,
   Smartphone,
@@ -27,9 +28,10 @@ import {
   BookOpen,
   Zap,
   ClipboardList,
-  Sparkles
+  Sparkles,
+  RefreshCw,
+  FileText
 } from 'lucide-react'
-// import ErosCat from '@/components/ErosCat' // Disabled — Eros AI paused
 
 interface User {
   id: string
@@ -65,6 +67,24 @@ export default function DashboardLayout({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [showAccountSwitcher, setShowAccountSwitcher] = useState(false)
   const accountSwitcherRef = useRef<HTMLDivElement>(null)
+  const [updateAvailable, setUpdateAvailable] = useState(false)
+  const [serverVersion, setServerVersion] = useState<string | null>(null)
+  const [showChangelog, setShowChangelog] = useState(false)
+  const [changelogContent, setChangelogContent] = useState('')
+  const [isErosOpen, setIsErosOpen] = useState(false)
+  const clientVersion = process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev'
+
+  // Ctrl+I to toggle Eros
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
+        e.preventDefault()
+        setIsErosOpen(prev => !prev)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -122,6 +142,76 @@ export default function DashboardLayout({
 
     checkAuth()
   }, [router])
+
+  // Version detection — WebSocket + header interception + polling fallback
+  const checkForUpdate = useCallback((newVersion: string) => {
+    if (clientVersion !== 'dev' && newVersion !== clientVersion) {
+      setServerVersion(newVersion)
+      const dismissed = sessionStorage.getItem('dismissed_version')
+      if (dismissed !== newVersion) {
+        setUpdateAvailable(true)
+      }
+    }
+  }, [clientVersion])
+
+  useEffect(() => {
+    // 1. Listen for version changes from API response headers
+    const unsubHeader = onServerVersionChange(checkForUpdate)
+
+    // 2. Listen for WebSocket version_update events
+    const unsubWS = subscribeWebSocket((data: any) => {
+      if (data?.event === 'version_update' && data?.data?.version) {
+        checkForUpdate(data.data.version)
+      }
+    })
+
+    // 3. Polling fallback — check /api/version every 5 minutes
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/version')
+        if (res.ok) {
+          const json = await res.json()
+          if (json.version) checkForUpdate(json.version)
+        }
+      } catch { /* ignore */ }
+    }, 5 * 60 * 1000)
+
+    return () => {
+      unsubHeader()
+      unsubWS()
+      clearInterval(pollInterval)
+    }
+  }, [checkForUpdate])
+
+  // Close changelog on Escape (capture phase to intercept before page handlers)
+  useEffect(() => {
+    if (!showChangelog) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        e.preventDefault()
+        setShowChangelog(false)
+      }
+    }
+    document.addEventListener('keydown', handler, true)
+    return () => document.removeEventListener('keydown', handler, true)
+  }, [showChangelog])
+
+  const dismissUpdate = () => {
+    setUpdateAvailable(false)
+    if (serverVersion) sessionStorage.setItem('dismissed_version', serverVersion)
+  }
+
+  const openChangelog = async () => {
+    setShowChangelog(true)
+    try {
+      const res = await fetch('/api/version')
+      if (res.ok) {
+        const json = await res.json()
+        if (json.changelog) setChangelogContent(json.changelog)
+      }
+    } catch { /* ignore */ }
+  }
 
   const handleLogout = async () => {
     localStorage.removeItem('token')
@@ -373,10 +463,57 @@ export default function DashboardLayout({
             </div>
           )}
         </div>
+
+        {/* Version */}
+        <div className={`shrink-0 ${isCollapsed ? 'px-2 pb-2' : 'px-3 pb-3'}`}>
+          <button
+            onClick={openChangelog}
+            title="Ver changelog"
+            className={`w-full flex items-center ${isCollapsed ? 'justify-center' : 'gap-1.5 px-2.5'} py-1 rounded-md hover:bg-slate-50 transition-colors group`}
+          >
+            <FileText className="w-3 h-3 text-slate-300 group-hover:text-slate-400 shrink-0" />
+            {!isCollapsed && (
+              <span className="text-[10px] text-slate-300 group-hover:text-slate-400 font-mono truncate">
+                v{clientVersion}
+              </span>
+            )}
+          </button>
+        </div>
       </aside>
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
+        {/* Update available banner */}
+        {updateAvailable && (
+          <div className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white px-4 py-2 flex items-center justify-between shrink-0 shadow-sm">
+            <div className="flex items-center gap-2 text-sm">
+              <RefreshCw className="w-4 h-4" />
+              <span className="font-medium">Nueva versión disponible</span>
+              {serverVersion && <span className="text-emerald-100 text-xs">v{serverVersion}</span>}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={openChangelog}
+                className="text-xs text-emerald-100 hover:text-white underline underline-offset-2 transition-colors"
+              >
+                Ver cambios
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                className="px-3 py-1 bg-white/20 hover:bg-white/30 rounded-md text-xs font-medium transition-colors"
+              >
+                Actualizar
+              </button>
+              <button
+                onClick={dismissUpdate}
+                className="p-0.5 hover:bg-white/20 rounded transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Top bar - mobile only */}
         <header className="h-14 bg-white border-b border-slate-200/80 flex items-center px-4 lg:hidden shrink-0">
           <button
@@ -402,6 +539,98 @@ export default function DashboardLayout({
       </div>
 
     </div>
+
+    {/* Changelog Modal */}
+    {showChangelog && (
+      <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100">
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-bold text-slate-800">Novedades</h2>
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-full">
+                <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                <span className="text-xs font-semibold text-emerald-700 font-mono">v{clientVersion}</span>
+              </span>
+            </div>
+            <button onClick={() => setShowChangelog(false)} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors" title="Cerrar (Esc)">
+              <X className="w-5 h-5 text-slate-400" />
+            </button>
+          </div>
+          {/* Body */}
+          <div className="flex-1 overflow-y-auto px-6 py-5">
+            {changelogContent ? (
+              <div className="space-y-6">
+                {(() => {
+                  const sections: { date: string; builds: { title: string; items: { emoji: string; text: string }[] }[] }[] = []
+                  changelogContent.split('\n').forEach(line => {
+                    if (line.startsWith('## ') && !line.startsWith('## Dev')) {
+                      sections.push({ date: line.replace('## ', '').trim(), builds: [] })
+                    } else if (line.startsWith('### Build ') && sections.length > 0) {
+                      sections[sections.length - 1].builds.push({ title: line.replace('### ', '').trim(), items: [] })
+                    } else if (line.startsWith('- ') && sections.length > 0) {
+                      const current = sections[sections.length - 1]
+                      if (current.builds.length > 0) {
+                        const text = line.replace('- ', '').trim()
+                        const emojis = ['✨', '🐛', '💄', '⚡', '🔧']
+                        const emoji = emojis.find(e => text.startsWith(e))
+                        current.builds[current.builds.length - 1].items.push({
+                          emoji: emoji || '',
+                          text: emoji ? text.slice(emoji.length).trim() : text,
+                        })
+                      }
+                    }
+                  })
+                  const badgeColors: Record<string, string> = {
+                    '✨': 'bg-blue-50 text-blue-600 border-blue-100',
+                    '🐛': 'bg-red-50 text-red-600 border-red-100',
+                    '💄': 'bg-purple-50 text-purple-600 border-purple-100',
+                    '⚡': 'bg-amber-50 text-amber-600 border-amber-100',
+                    '🔧': 'bg-slate-50 text-slate-600 border-slate-200',
+                  }
+                  return sections.map((dateSection, di) => (
+                    <div key={di}>
+                      <div className="flex items-center gap-2 mb-4">
+                        <div className="w-2 h-2 bg-slate-300 rounded-full" />
+                        <h3 className="text-sm font-bold text-slate-700">{dateSection.date}</h3>
+                        <div className="flex-1 border-t border-slate-100" />
+                      </div>
+                      <div className="space-y-4 pl-2">
+                        {dateSection.builds.map((build, bi) => (
+                          <div key={bi} className="bg-slate-50/50 rounded-xl border border-slate-100 overflow-hidden">
+                            <div className="px-4 py-2.5 border-b border-slate-100 bg-white">
+                              <h4 className="text-xs font-semibold text-emerald-600">{build.title}</h4>
+                            </div>
+                            <div className="px-4 py-2.5 space-y-1.5">
+                              {build.items.map((item, ii) => (
+                                <div key={ii} className="flex items-start gap-2.5">
+                                  {item.emoji ? (
+                                    <span className={`text-[10px] px-1.5 py-0.5 rounded-md shrink-0 mt-0.5 border ${badgeColors[item.emoji] || 'bg-slate-50 text-slate-500 border-slate-200'}`}>{item.emoji}</span>
+                                  ) : (
+                                    <span className="w-1.5 h-1.5 bg-slate-300 rounded-full shrink-0 mt-2" />
+                                  )}
+                                  <span className="text-sm text-slate-600 leading-relaxed">{item.text}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))
+                })()}
+              </div>
+            ) : (
+              <div className="flex items-center justify-center py-12">
+                <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )}
+
+    <ErosAssistant isOpenProp={isErosOpen} onClose={() => setIsErosOpen(false)} />
 
     </NotificationProvider>
   )

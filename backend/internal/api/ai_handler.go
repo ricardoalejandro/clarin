@@ -1115,11 +1115,17 @@ return data, nil
 
 // --- System Prompt Builder ---
 
-func buildSystemPrompt(crm *crmContextData, currentPage string) string {
-var sb strings.Builder
+func buildSystemPrompt(crm *crmContextData, currentPage, customRole, customInstructions string) string {
+	var sb strings.Builder
 
-currentDate := time.Now().Format("02/01/2006")
-sb.WriteString(fmt.Sprintf("Eres Eros, gato blanco asistente de Clarin CRM. Fecha: %s. Español peruano, conciso, amigable, con emojis 🎯📊🐱. No inventes datos.\n\n", currentDate))
+	currentDate := time.Now().Format("02/01/2006")
+
+	if customRole != "" {
+		sb.WriteString(fmt.Sprintf("%s\n\n", customRole))
+		sb.WriteString(fmt.Sprintf("También eres Eros, gato blanco asistente de Clarin CRM. Fecha: %s. Español peruano, conciso, amigable, con emojis 🎯📊🐱. No inventes datos.\n\n", currentDate))
+	} else {
+		sb.WriteString(fmt.Sprintf("Eres Eros, gato blanco asistente de Clarin CRM. Fecha: %s. Español peruano, conciso, amigable, con emojis 🎯📊🐱. No inventes datos.\n\n", currentDate))
+	}
 
 sb.WriteString("=== DATOS DEL CRM ===\n")
 sb.WriteString(fmt.Sprintf("• Leads totales: %d | Contactos WhatsApp: %d | Eventos: %d\n", crm.TotalLeads, crm.TotalContacts, crm.TotalEvents))
@@ -1191,6 +1197,10 @@ sb.WriteString("\n")
 
 if currentPage != "" {
 sb.WriteString(fmt.Sprintf("\nEl usuario está en la página: %s\n", currentPage))
+}
+
+if customInstructions != "" {
+sb.WriteString(fmt.Sprintf("\n=== INSTRUCCIONES PERSONALIZADAS DEL USUARIO ===\n%s\n\n", customInstructions))
 }
 
 sb.WriteString(`
@@ -1419,29 +1429,28 @@ WHERE e.account_id = $1 AND lb.date = '2026-03-07' AND le.stage_name = 'Asistier
 return sb.String()
 }
 
-// --- AI Provider Detection ---
+// --- AI Provider ---
 
-// detectAIProvider returns the base URL and model name based on the API key prefix.
-// Keys starting with "AIza" are Google Gemini; everything else is OpenAI.
-func detectAIProvider(apiKey string) (baseURL, model, provider string) {
-	if strings.HasPrefix(apiKey, "AIza") {
-		return "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "gemini-3.1-flash-lite-preview", "gemini"
-	}
-	return "https://api.openai.com/v1/chat/completions", "gpt-4.1-nano", "openai"
-}
+const (
+	openAIBaseURL    = "https://api.openai.com/v1/chat/completions"
+	openAIModelsURL  = "https://api.openai.com/v1/models"
+	defaultAIModel   = "gpt-4.1-nano"
+)
 
 // --- Groq API Call ---
 
-func sendGroqRequest(ctx context.Context, apiKey string, messages []groqMessage, tools []groqTool) (*groqResponse, error) {
+func sendGroqRequest(ctx context.Context, apiKey string, model string, messages []groqMessage, tools []groqTool) (*groqResponse, error) {
 	maxTok := 2048 // follow-up: synthesize response from tool results + charts
 	if tools != nil {
 		maxTok = 1024 // first call with tools: SQL generation + tool selection
 	}
 
-	endpointURL, modelName, _ := detectAIProvider(apiKey)
+	if model == "" {
+		model = defaultAIModel
+	}
 
 	reqBody := groqRequest{
-		Model:       modelName,
+		Model:       model,
 		Messages:    messages,
 		Tools:       tools,
 		Temperature: 0.2,
@@ -1457,7 +1466,7 @@ return nil, fmt.Errorf("marshal groq request: %w", err)
 for attempt := 0; attempt < 2; attempt++ {
 httpCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 
-req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, endpointURL, bytes.NewReader(bodyBytes))
+req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, openAIBaseURL, bytes.NewReader(bodyBytes))
 if err != nil {
 cancel()
 return nil, fmt.Errorf("create groq request: %w", err)
@@ -1520,9 +1529,16 @@ func (s *Server) handleGetAIConfig(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "internal error"})
 	}
+	model, role, instructions, _ := s.repos.User.GetErosConfig(c.Context(), userID)
+	if model == "" {
+		model = defaultAIModel
+	}
 	return c.JSON(fiber.Map{
-		"success": true,
-		"has_key": key != "",
+		"success":      true,
+		"has_key":      key != "",
+		"model":        model,
+		"role":         role,
+		"instructions": instructions,
 	})
 }
 
@@ -1532,13 +1548,21 @@ func (s *Server) handleSetAIConfig(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"success": false, "error": "unauthorized"})
 	}
 	var body struct {
-		GroqAPIKey string `json:"groq_api_key"`
+		GroqAPIKey   string `json:"groq_api_key"`
+		Model        string `json:"model"`
+		Role         string `json:"role"`
+		Instructions string `json:"instructions"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
 	}
+	// Save API key if provided (even empty to disconnect)
 	if err := s.repos.User.SetGroqAPIKey(c.Context(), userID, body.GroqAPIKey); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "could not save key"})
+	}
+	// Save Eros config (model, role, instructions)
+	if err := s.repos.User.SetErosConfig(c.Context(), userID, body.Model, body.Role, body.Instructions); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "could not save config"})
 	}
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -1553,6 +1577,9 @@ func (s *Server) handleValidateAIConfig(c *fiber.Ctx) error {
 	if body.GroqAPIKey == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "API key is required"})
 	}
+	if !strings.HasPrefix(body.GroqAPIKey, "sk-") {
+		return c.JSON(fiber.Map{"success": true, "valid": false, "error": "La API key debe comenzar con sk-"})
+	}
 
 	// Make a minimal test request to validate the key
 	testContent := "Hi"
@@ -1560,10 +1587,8 @@ func (s *Server) handleValidateAIConfig(c *fiber.Ctx) error {
 		{Role: "user", Content: &testContent},
 	}
 
-	endpointURL, modelName, _ := detectAIProvider(body.GroqAPIKey)
-
 	testReq := groqRequest{
-		Model:       modelName,
+		Model:       defaultAIModel,
 		Messages:    testMessages,
 		Temperature: 0.1,
 		MaxTokens:   5,
@@ -1573,7 +1598,7 @@ func (s *Server) handleValidateAIConfig(c *fiber.Ctx) error {
 	httpCtx, cancel := context.WithTimeout(c.Context(), 15*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, endpointURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, openAIBaseURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return c.JSON(fiber.Map{"success": false, "valid": false, "error": "could not create request"})
 	}
@@ -1582,7 +1607,7 @@ func (s *Server) handleValidateAIConfig(c *fiber.Ctx) error {
 
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return c.JSON(fiber.Map{"success": false, "valid": false, "error": "could not reach Groq API"})
+		return c.JSON(fiber.Map{"success": false, "valid": false, "error": "could not reach OpenAI API"})
 	}
 	defer resp.Body.Close()
 
@@ -1598,6 +1623,73 @@ func (s *Server) handleValidateAIConfig(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true, "valid": true})
+}
+
+// --- List OpenAI Models ---
+
+func (s *Server) handleListAIModels(c *fiber.Ctx) error {
+	var body struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
+	}
+	if body.APIKey == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "API key is required"})
+	}
+
+	httpCtx, cancel := context.WithTimeout(c.Context(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(httpCtx, http.MethodGet, openAIModelsURL, nil)
+	if err != nil {
+		return c.JSON(fiber.Map{"success": false, "error": "could not create request"})
+	}
+	req.Header.Set("Authorization", "Bearer "+body.APIKey)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return c.JSON(fiber.Map{"success": false, "error": "could not reach OpenAI API"})
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return c.JSON(fiber.Map{"success": false, "error": fmt.Sprintf("OpenAI returned status %d", resp.StatusCode)})
+	}
+
+	var modelsResp struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
+		return c.JSON(fiber.Map{"success": false, "error": "could not parse models response"})
+	}
+
+	// Filter to GPT/o models only, sort alphabetically
+	var models []string
+	for _, m := range modelsResp.Data {
+		id := m.ID
+		if strings.HasPrefix(id, "gpt-") || strings.HasPrefix(id, "o1") || strings.HasPrefix(id, "o3") || strings.HasPrefix(id, "o4") {
+			// Skip realtime, audio, and search variants
+			if strings.Contains(id, "realtime") || strings.Contains(id, "audio") || strings.Contains(id, "search") || strings.Contains(id, "transcribe") || strings.Contains(id, "tts") {
+				continue
+			}
+			models = append(models, id)
+		}
+	}
+
+	// Sort
+	for i := 0; i < len(models); i++ {
+		for j := i + 1; j < len(models); j++ {
+			if models[i] > models[j] {
+				models[i], models[j] = models[j], models[i]
+			}
+		}
+	}
+
+	return c.JSON(fiber.Map{"success": true, "models": models})
 }
 
 // --- Main AI Chat Handler ---
@@ -1668,8 +1760,6 @@ log.Printf("[AI] buildCRMContext error for account %s: %v", accountIDStr, err)
 crmCtx = &crmContextData{}
 }
 
-systemPrompt := buildSystemPrompt(crmCtx, req.CurrentPage)
-
 apiKey, err := s.repos.User.GetGroqAPIKey(ctx, userID)
 if err != nil || apiKey == "" {
 return c.JSON(fiber.Map{
@@ -1678,7 +1768,13 @@ return c.JSON(fiber.Map{
 })
 }
 
-_, modelName, _ := detectAIProvider(apiKey)
+// Load Eros config (model, role, instructions)
+erosModel, erosRole, erosInstructions, _ := s.repos.User.GetErosConfig(ctx, userID)
+if erosModel == "" {
+erosModel = defaultAIModel
+}
+
+systemPrompt := buildSystemPrompt(crmCtx, req.CurrentPage, erosRole, erosInstructions)
 
 // Build initial messages
 systemContent := systemPrompt
@@ -1697,14 +1793,14 @@ tools := getToolDefinitions()
 log.Printf("[AI] Groq request (account=%s): %q", accountIDStr, req.Message)
 
 // First call — may return tool_calls or direct response
-resp, err := sendGroqRequest(ctx, apiKey, messages, tools)
+resp, err := sendGroqRequest(ctx, apiKey, erosModel, messages, tools)
 
 if resp != nil && resp.Usage != nil {
     var apiKeyPreview string
     if len(apiKey) >= 8 {
         apiKeyPreview = apiKey[:8] + "..."
     }
-    _ = s.repos.AIToken.Save(ctx, accountID, userID, apiKeyPreview, modelName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+    _ = s.repos.AIToken.Save(ctx, accountID, userID, apiKeyPreview, erosModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
 }
 
 if err != nil {
@@ -1772,14 +1868,14 @@ Role: "tool", Content: &resultStr, Name: tc.Function.Name, ToolCallID: tc.ID,
 }
 
 // Call Groq again with tool results (pass tools to allow multi-step queries)
-resp, err = sendGroqRequest(ctx, apiKey, messages, tools)
+resp, err = sendGroqRequest(ctx, apiKey, erosModel, messages, tools)
 
 if resp != nil && resp.Usage != nil {
     var apiKeyPreview string
     if len(apiKey) >= 8 {
         apiKeyPreview = apiKey[:8] + "..."
     }
-    _ = s.repos.AIToken.Save(ctx, accountID, userID, apiKeyPreview, modelName, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+    _ = s.repos.AIToken.Save(ctx, accountID, userID, apiKeyPreview, erosModel, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
 }
 
 if err != nil {
@@ -1891,6 +1987,6 @@ return map[string]interface{}{
 "input_tokens": inTokens,
 "output_tokens": outTokens,
 "total_tokens_used": total,
-"hint": "Comunica al usuario de forma amena cuántos tokens ha consumido. Puedes mencionar la suma total y el modelo usado (OpenAI o Gemini según su configuración).",
+"hint": "Comunica al usuario de forma amena cuántos tokens ha consumido. Puedes mencionar la suma total y el modelo usado.",
 }, nil
 }

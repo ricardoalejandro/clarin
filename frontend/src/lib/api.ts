@@ -2,6 +2,30 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
 
+// ─── Version Detection ────────────────────────────────────────────────────────
+// Tracks server version from X-Clarin-Version header and notifies listeners
+let _latestServerVersion: string | null = null
+const _versionListeners = new Set<(version: string) => void>()
+
+export function getLatestServerVersion(): string | null {
+  return _latestServerVersion
+}
+
+export function onServerVersionChange(cb: (version: string) => void): () => void {
+  _versionListeners.add(cb)
+  return () => _versionListeners.delete(cb)
+}
+
+function checkVersionHeader(res: Response) {
+  const serverVersion = res.headers.get('x-clarin-version')
+  if (serverVersion && serverVersion !== _latestServerVersion) {
+    _latestServerVersion = serverVersion
+    _versionListeners.forEach(cb => {
+      try { cb(serverVersion) } catch (e) { console.error('Version listener error:', e) }
+    })
+  }
+}
+
 interface FetchOptions extends RequestInit {
   skipAuth?: boolean
 }
@@ -30,6 +54,9 @@ export async function api<T>(
       ...fetchOptions,
       headers,
     })
+
+    // Check for server version changes
+    checkVersionHeader(res)
 
     // Handle empty responses (204 No Content, etc.)
     if (res.status === 204 || res.headers.get('content-length') === '0') {

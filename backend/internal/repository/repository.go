@@ -224,6 +224,16 @@ func (r *UserRepository) SetGroqAPIKey(ctx context.Context, userID uuid.UUID, ke
 	return err
 }
 
+func (r *UserRepository) GetErosConfig(ctx context.Context, userID uuid.UUID) (model, role, instructions string, err error) {
+	err = r.db.QueryRow(ctx, `SELECT COALESCE(eros_model, ''), COALESCE(eros_role, ''), COALESCE(eros_instructions, '') FROM users WHERE id = $1`, userID).Scan(&model, &role, &instructions)
+	return
+}
+
+func (r *UserRepository) SetErosConfig(ctx context.Context, userID uuid.UUID, model, role, instructions string) error {
+	_, err := r.db.Exec(ctx, `UPDATE users SET eros_model = $2, eros_role = $3, eros_instructions = $4, updated_at = NOW() WHERE id = $1`, userID, model, role, instructions)
+	return err
+}
+
 // UserAccountRepository handles user-account assignments (many-to-many)
 type UserAccountRepository struct {
 	db *pgxpool.Pool
@@ -380,10 +390,12 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
 			(SELECT COUNT(*) FROM users WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
-			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
+			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count,
+			a.google_email, a.google_contact_group_id, a.google_connected_at, COALESCE(a.google_sync_limit, 20000)
 		FROM accounts a WHERE a.id = $1
 	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.MCPEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
-		&a.UserCount, &a.DeviceCount, &a.ChatCount)
+		&a.UserCount, &a.DeviceCount, &a.ChatCount,
+		&a.GoogleEmail, &a.GoogleContactGroupID, &a.GoogleConnectedAt, &a.GoogleSyncLimit)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -680,19 +692,20 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 
 	// Count total
 	var total int
-	countQuery := "SELECT COUNT(*) " + baseQuery
+	countQuery := "SELECT COUNT(DISTINCT c.id) " + baseQuery
 	if err := r.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	// Get data
+	// Get data — DISTINCT ON prevents duplicate rows when multiple leads share the same JID
 	selectQuery := `
-		SELECT c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
+		SELECT DISTINCT ON (c.is_pinned, c.last_message_at, c.id)
+		       c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
 		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
 		       d.name, d.phone,
 		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name,
 		       COALESCE(l.is_blocked, false)
-	` + baseQuery + " ORDER BY c.is_pinned DESC, c.last_message_at DESC NULLS LAST"
+	` + baseQuery + " ORDER BY c.is_pinned DESC, c.last_message_at DESC NULLS LAST, c.id"
 
 	// Apply pagination
 	if filter.Limit > 0 {
@@ -1049,17 +1062,65 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		argNum++
 	}
 
+	if len(filter.MatchingContactIDs) > 0 {
+		baseQuery += fmt.Sprintf(" AND id = ANY($%d)", argNum)
+		args = append(args, filter.MatchingContactIDs)
+		argNum++
+	}
+
+	if len(filter.TagNames) > 0 {
+		if filter.TagMode == "AND" {
+			baseQuery += fmt.Sprintf(
+				" AND id IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d) GROUP BY ct.contact_id HAVING COUNT(DISTINCT t.name) = $%d)",
+				argNum, argNum+1,
+			)
+			args = append(args, filter.TagNames, len(filter.TagNames))
+			argNum += 2
+		} else {
+			baseQuery += fmt.Sprintf(
+				" AND id IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d))",
+				argNum,
+			)
+			args = append(args, filter.TagNames)
+			argNum++
+		}
+	}
+
+	if len(filter.ExcludeTagNames) > 0 {
+		baseQuery += fmt.Sprintf(
+			" AND id NOT IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d))",
+			argNum,
+		)
+		args = append(args, filter.ExcludeTagNames)
+		argNum++
+	}
+
+	if filter.DateField == "created_at" || filter.DateField == "updated_at" {
+		if filter.DateFrom != "" {
+			baseQuery += fmt.Sprintf(" AND %s >= $%d", filter.DateField, argNum)
+			args = append(args, filter.DateFrom)
+			argNum++
+		}
+		if filter.DateTo != "" {
+			baseQuery += fmt.Sprintf(" AND %s < $%d", filter.DateField, argNum)
+			args = append(args, filter.DateTo)
+			argNum++
+		}
+	}
+
 	// Count
 	var total int
 	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) "+baseQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	// Select with last activity from chats
+	// Select with last activity from chats + lead count
 	selectQuery := `
 		SELECT c.id, c.account_id, c.device_id, c.jid, c.phone, c.name, c.last_name, c.short_name, c.custom_name, c.push_name, c.avatar_url,
 		       c.email, c.company, c.age, c.dni, c.birth_date, c.tags, c.notes, c.source, c.is_group, c.created_at, c.updated_at,
-		       ch_agg.last_activity
+		       c.google_sync, c.google_synced_at, c.google_sync_error,
+		       ch_agg.last_activity,
+		       COALESCE(lc.cnt, 0) AS lead_count
 		FROM contacts c
 		LEFT JOIN (
 			SELECT ch.contact_id, MAX(ch.last_message_at) AS last_activity
@@ -1067,6 +1128,12 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 			WHERE ch.account_id = $1
 			GROUP BY ch.contact_id
 		) ch_agg ON ch_agg.contact_id = c.id
+		LEFT JOIN (
+			SELECT contact_id, COUNT(*) AS cnt
+			FROM leads
+			WHERE account_id = $1 AND contact_id IS NOT NULL AND is_archived = false AND is_blocked = false
+			GROUP BY contact_id
+		) lc ON lc.contact_id = c.id
 		WHERE c.account_id = $1 AND c.is_group = $2
 	`
 
@@ -1100,9 +1167,77 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		selectArgs = append(selectArgs, filter.TagIDs)
 		selectArgNum++
 	}
+
+	if len(filter.MatchingContactIDs) > 0 {
+		selectQuery += fmt.Sprintf(" AND c.id = ANY($%d)", selectArgNum)
+		selectArgs = append(selectArgs, filter.MatchingContactIDs)
+		selectArgNum++
+	}
+
+	if len(filter.TagNames) > 0 {
+		if filter.TagMode == "AND" {
+			selectQuery += fmt.Sprintf(
+				" AND c.id IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d) GROUP BY ct.contact_id HAVING COUNT(DISTINCT t.name) = $%d)",
+				selectArgNum, selectArgNum+1,
+			)
+			selectArgs = append(selectArgs, filter.TagNames, len(filter.TagNames))
+			selectArgNum += 2
+		} else {
+			selectQuery += fmt.Sprintf(
+				" AND c.id IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d))",
+				selectArgNum,
+			)
+			selectArgs = append(selectArgs, filter.TagNames)
+			selectArgNum++
+		}
+	}
+
+	if len(filter.ExcludeTagNames) > 0 {
+		selectQuery += fmt.Sprintf(
+			" AND c.id NOT IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d))",
+			selectArgNum,
+		)
+		selectArgs = append(selectArgs, filter.ExcludeTagNames)
+		selectArgNum++
+	}
+
+	if filter.DateField == "created_at" || filter.DateField == "updated_at" {
+		if filter.DateFrom != "" {
+			selectQuery += fmt.Sprintf(" AND c.%s >= $%d", filter.DateField, selectArgNum)
+			selectArgs = append(selectArgs, filter.DateFrom)
+			selectArgNum++
+		}
+		if filter.DateTo != "" {
+			selectQuery += fmt.Sprintf(" AND c.%s < $%d", filter.DateField, selectArgNum)
+			selectArgs = append(selectArgs, filter.DateTo)
+			selectArgNum++
+		}
+	}
 	_ = selectArgNum
 
-	selectQuery += " ORDER BY ch_agg.last_activity DESC NULLS LAST, c.updated_at DESC"
+	// Dynamic sort
+	switch filter.SortBy {
+	case "name":
+		ord := "ASC"
+		if filter.SortOrder == "desc" {
+			ord = "DESC"
+		}
+		selectQuery += " ORDER BY COALESCE(NULLIF(c.push_name,''), c.jid) " + ord + ", c.updated_at DESC"
+	case "lead_count":
+		ord := "DESC"
+		if filter.SortOrder == "asc" {
+			ord = "ASC"
+		}
+		selectQuery += " ORDER BY lead_count " + ord + " NULLS LAST, c.updated_at DESC"
+	case "created_at":
+		ord := "DESC"
+		if filter.SortOrder == "asc" {
+			ord = "ASC"
+		}
+		selectQuery += " ORDER BY c.created_at " + ord + ", c.updated_at DESC"
+	default:
+		selectQuery += " ORDER BY ch_agg.last_activity DESC NULLS LAST, c.updated_at DESC"
+	}
 
 	if filter.Limit > 0 {
 		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
@@ -1125,7 +1260,9 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
 			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+			&contact.GoogleSync, &contact.GoogleSyncedAt, &contact.GoogleSyncError,
 			&contact.LastActivity,
+			&contact.LeadCount,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -1175,13 +1312,15 @@ func (r *ContactRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, tags, notes, source, is_group, created_at, updated_at,
+		       google_sync, google_resource_name, google_synced_at, google_sync_error
 		FROM contacts WHERE id = $1
 	`, id).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
 		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+		&contact.GoogleSync, &contact.GoogleResourceName, &contact.GoogleSyncedAt, &contact.GoogleSyncError,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1319,6 +1458,21 @@ func (r *ContactRepository) FindDuplicates(ctx context.Context, accountID uuid.U
 		result = append(result, grouped[phone])
 	}
 	return result, nil
+}
+
+// GetContactsWithDuplicateLeads returns the count of contacts that have 2+ active (non-archived, non-blocked) leads.
+func (r *ContactRepository) GetContactsWithDuplicateLeads(ctx context.Context, accountID uuid.UUID) (int, error) {
+	var count int
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM (
+			SELECT contact_id
+			FROM leads
+			WHERE account_id = $1 AND contact_id IS NOT NULL AND is_archived = false AND is_blocked = false
+			GROUP BY contact_id
+			HAVING COUNT(*) > 1
+		) dup
+	`, accountID).Scan(&count)
+	return count, err
 }
 
 func (r *ContactRepository) MergeContacts(ctx context.Context, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
@@ -1555,6 +1709,25 @@ func (r *LeadRepository) UpdateStage(ctx context.Context, id uuid.UUID, stageID 
 
 // SyncToContact is now a no-op — Contact is the source of truth and Lead.Update writes to contacts directly.
 func (r *LeadRepository) SyncToContact(ctx context.Context, lead *domain.Lead) error {
+	if lead.ContactID == nil {
+		return nil
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE contacts SET
+			custom_name = COALESCE($2, custom_name),
+			last_name = COALESCE($3, last_name),
+			short_name = COALESCE($4, short_name),
+			phone = COALESCE($5, phone),
+			email = COALESCE($6, email),
+			age = COALESCE($7, age),
+			dni = COALESCE($8, dni),
+			birth_date = COALESCE($9, birth_date),
+			updated_at = NOW()
+		WHERE id = $1
+	`, *lead.ContactID, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email, lead.Age, lead.DNI, lead.BirthDate)
+	if err != nil {
+		log.Printf("[SYNC] Error syncing lead %s to contact: %v", lead.ID, err)
+	}
 	return nil
 }
 
@@ -1597,28 +1770,38 @@ func (r *LeadRepository) DeleteBatch(ctx context.Context, ids []uuid.UUID) error
 	return err
 }
 
+// GetContactIDForLead returns the contact_id linked to a lead, or nil.
+func (r *LeadRepository) GetContactIDForLead(ctx context.Context, leadID uuid.UUID) (*uuid.UUID, error) {
+	var contactID *uuid.UUID
+	err := r.db.QueryRow(ctx, `SELECT contact_id FROM leads WHERE id = $1`, leadID).Scan(&contactID)
+	if err != nil {
+		return nil, err
+	}
+	return contactID, nil
+}
+
 func (r *LeadRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM leads WHERE account_id = $1`, accountID)
 	return err
 }
 
 // ArchiveLead sets or clears the archived flag on a lead.
-func (r *LeadRepository) ArchiveLead(ctx context.Context, id uuid.UUID, archive bool) error {
+func (r *LeadRepository) ArchiveLead(ctx context.Context, id uuid.UUID, archive bool, reason string) error {
 	if archive {
-		_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = true, archived_at = NOW(), updated_at = NOW() WHERE id = $1`, id)
+		_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = true, archived_at = NOW(), archive_reason = $2, updated_at = NOW() WHERE id = $1`, id, reason)
 		return err
 	}
-	_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = false, archived_at = NULL, updated_at = NOW() WHERE id = $1`, id)
+	_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = false, archived_at = NULL, archive_reason = '', updated_at = NOW() WHERE id = $1`, id)
 	return err
 }
 
 // ArchiveLeadsBatch sets or clears the archived flag on multiple leads.
-func (r *LeadRepository) ArchiveLeadsBatch(ctx context.Context, ids []uuid.UUID, archive bool) error {
+func (r *LeadRepository) ArchiveLeadsBatch(ctx context.Context, ids []uuid.UUID, archive bool, reason string) error {
 	if archive {
-		_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = true, archived_at = NOW(), updated_at = NOW() WHERE id = ANY($1)`, ids)
+		_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = true, archived_at = NOW(), archive_reason = $2, updated_at = NOW() WHERE id = ANY($1)`, ids, reason)
 		return err
 	}
-	_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = false, archived_at = NULL, updated_at = NOW() WHERE id = ANY($1)`, ids)
+	_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = false, archived_at = NULL, archive_reason = '', updated_at = NOW() WHERE id = ANY($1)`, ids)
 	return err
 }
 
@@ -1996,6 +2179,26 @@ func (r *TagRepository) AssignToContact(ctx context.Context, contactID, tagID uu
 
 func (r *TagRepository) RemoveFromContact(ctx context.Context, contactID, tagID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id = $1 AND tag_id = $2`, contactID, tagID)
+	return err
+}
+
+// RecalculateContactTags replaces all contact_tags for a contact with the union of tags
+// from their active (non-archived, non-blocked) leads. If no active leads remain, all tags are removed.
+func (r *TagRepository) RecalculateContactTags(ctx context.Context, contactID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `
+		WITH active_lead_tags AS (
+			SELECT DISTINCT ct.tag_id
+			FROM contact_tags ct
+			JOIN leads l ON l.contact_id = ct.contact_id
+			WHERE ct.contact_id = $1
+			  AND l.contact_id = $1
+			  AND l.is_archived = false
+			  AND l.is_blocked = false
+		)
+		DELETE FROM contact_tags
+		WHERE contact_id = $1
+		  AND tag_id NOT IN (SELECT tag_id FROM active_lead_tags)
+	`, contactID)
 	return err
 }
 
@@ -2962,6 +3165,18 @@ func (r *EventRepository) BulkAddParticipantsFromLeads(ctx context.Context, even
 	return int(tag.RowsAffected()), nil
 }
 
+// RemoveAutoSyncParticipantsByLeadID removes auto_tag_sync participants for a single lead across ALL events.
+func (r *EventRepository) RemoveAutoSyncParticipantsByLeadID(ctx context.Context, leadID uuid.UUID) (int, error) {
+	tag, err := r.db.Exec(ctx, `
+		DELETE FROM event_participants
+		WHERE lead_id = $1 AND auto_tag_sync = TRUE
+	`, leadID)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // RemoveAutoSyncParticipantsByLeadIDs removes auto_tag_sync participants by lead IDs.
 func (r *EventRepository) RemoveAutoSyncParticipantsByLeadIDs(ctx context.Context, eventID uuid.UUID, leadIDs []uuid.UUID) (int, error) {
 	if len(leadIDs) == 0 {
@@ -3374,9 +3589,9 @@ func (r *ParticipantRepository) BulkAdd(ctx context.Context, eventID uuid.UUID, 
 
 func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.UUID, search, statusFilter string, tagIDs []uuid.UUID, hasPhone *bool) ([]*domain.EventParticipant, error) {
 	useDistinct := len(tagIDs) > 0
-	selectClause := `SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color`
+	selectClause := `SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color, COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked`
 	if useDistinct {
-		selectClause = `SELECT DISTINCT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color`
+		selectClause = `SELECT DISTINCT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color, COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked`
 	}
 	query := selectClause + ` FROM event_participants p LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id LEFT JOIN leads l ON l.id = p.lead_id LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id`
 	args := []interface{}{eventID}
@@ -3428,7 +3643,7 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 	var participants []*domain.EventParticipant
 	for rows.Next() {
 		p := &domain.EventParticipant{}
-		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt, &p.StageName, &p.StageColor, &p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor); err != nil {
+		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt, &p.StageName, &p.StageColor, &p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor, &p.IsArchived, &p.IsBlocked); err != nil {
 			return nil, err
 		}
 		participants = append(participants, p)
@@ -3567,7 +3782,7 @@ func (r *ParticipantRepository) SyncToContact(ctx context.Context, p *domain.Eve
 	}
 	_, err := r.db.Exec(ctx, `
 		UPDATE contacts SET
-			name = COALESCE($1, name), last_name = $2, short_name = $3, phone = COALESCE($4, phone), email = $5, age = $6, updated_at = NOW()
+			custom_name = COALESCE($1, custom_name), name = COALESCE($1, name), last_name = $2, short_name = $3, phone = COALESCE($4, phone), email = $5, age = $6, updated_at = NOW()
 		WHERE id = $7
 	`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, *p.ContactID)
 	return err

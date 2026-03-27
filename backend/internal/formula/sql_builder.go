@@ -124,6 +124,165 @@ func BuildCountSQL(node *Node, accountID interface{}) (string, []interface{}, er
 	return sql, args, nil
 }
 
+// ─── All-status variant (includes archived/blocked) ─────────────────────────
+
+// BuildSQLAll is like BuildSQL but does NOT filter by is_archived/is_blocked.
+// Used to count hidden leads that match the formula but are archived/blocked.
+func BuildSQLAll(node *Node, accountID interface{}) (string, []interface{}, error) {
+	if node == nil {
+		return "SELECT id AS lead_id FROM leads WHERE FALSE", nil, nil
+	}
+	args := []interface{}{accountID}
+	argIdx := 2
+	sql, newArgs, _, err := buildNodeAll(node, args, argIdx)
+	if err != nil {
+		return "", nil, err
+	}
+	return sql, newArgs, nil
+}
+
+func buildNodeAll(node *Node, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	switch node.Type {
+	case NodeLiteral:
+		return buildLiteralAll(node, args, argIdx)
+	case NodeNot:
+		return buildNotAll(node, args, argIdx)
+	case NodeAnd:
+		return buildSetOpAll(node, "INTERSECT", args, argIdx)
+	case NodeOr:
+		return buildSetOpAll(node, "UNION", args, argIdx)
+	default:
+		return "", nil, argIdx, fmt.Errorf("unknown node type %d", node.Type)
+	}
+}
+
+func buildLiteralAll(node *Node, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	var cond string
+	if node.IsLike {
+		cond = fmt.Sprintf("LOWER(t.name) LIKE $%d", argIdx)
+	} else {
+		cond = fmt.Sprintf("LOWER(t.name) = $%d", argIdx)
+	}
+	sql := fmt.Sprintf(
+		`SELECT DISTINCT l.id AS lead_id FROM leads l JOIN contact_tags ct ON ct.contact_id = l.contact_id JOIN tags t ON t.id = ct.tag_id WHERE l.account_id = $1 AND %s`,
+		cond,
+	)
+	args = append(args, node.Value)
+	return sql, args, argIdx + 1, nil
+}
+
+func buildNotAll(node *Node, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	childSQL, newArgs, newIdx, err := buildNodeAll(node.Children[0], args, argIdx)
+	if err != nil {
+		return "", nil, newIdx, err
+	}
+	sql := fmt.Sprintf(
+		`(SELECT id AS lead_id FROM leads WHERE account_id = $1 EXCEPT (%s))`,
+		childSQL,
+	)
+	return sql, newArgs, newIdx, nil
+}
+
+func buildSetOpAll(node *Node, op string, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	if len(node.Children) == 0 {
+		return "", args, argIdx, fmt.Errorf("%s node has no children", op)
+	}
+	var parts []string
+	currentArgs := args
+	currentIdx := argIdx
+	for _, child := range node.Children {
+		childSQL, newArgs, newIdx, err := buildNodeAll(child, currentArgs, currentIdx)
+		if err != nil {
+			return "", nil, newIdx, err
+		}
+		parts = append(parts, "("+childSQL+")")
+		currentArgs = newArgs
+		currentIdx = newIdx
+	}
+	sql := strings.Join(parts, " "+op+" ")
+	return sql, currentArgs, currentIdx, nil
+}
+
+// ─── Contact variant ────────────────────────────────────────────────────────
+
+// BuildSQLForContacts converts an AST into a SQL subquery that returns contact IDs
+// matching the formula. Uses contact_tags directly.
+// $1 = accountID in the generated SQL.
+func BuildSQLForContacts(node *Node, accountID interface{}) (string, []interface{}, error) {
+	if node == nil {
+		return "SELECT id AS contact_id FROM contacts WHERE FALSE", nil, nil
+	}
+	args := []interface{}{accountID}
+	argIdx := 2
+	sql, newArgs, _, err := buildContactNode(node, args, argIdx)
+	if err != nil {
+		return "", nil, err
+	}
+	return sql, newArgs, nil
+}
+
+func buildContactNode(node *Node, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	switch node.Type {
+	case NodeLiteral:
+		return buildContactLiteral(node, args, argIdx)
+	case NodeNot:
+		return buildContactNot(node, args, argIdx)
+	case NodeAnd:
+		return buildContactSetOp(node, "INTERSECT", args, argIdx)
+	case NodeOr:
+		return buildContactSetOp(node, "UNION", args, argIdx)
+	default:
+		return "", nil, argIdx, fmt.Errorf("unknown node type %d", node.Type)
+	}
+}
+
+func buildContactLiteral(node *Node, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	var cond string
+	if node.IsLike {
+		cond = fmt.Sprintf("LOWER(t.name) LIKE $%d", argIdx)
+	} else {
+		cond = fmt.Sprintf("LOWER(t.name) = $%d", argIdx)
+	}
+	sql := fmt.Sprintf(
+		`SELECT DISTINCT ct.contact_id AS contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id JOIN contacts c ON c.id = ct.contact_id WHERE c.account_id = $1 AND %s`,
+		cond,
+	)
+	args = append(args, node.Value)
+	return sql, args, argIdx + 1, nil
+}
+
+func buildContactNot(node *Node, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	childSQL, newArgs, newIdx, err := buildContactNode(node.Children[0], args, argIdx)
+	if err != nil {
+		return "", nil, newIdx, err
+	}
+	sql := fmt.Sprintf(
+		`(SELECT id AS contact_id FROM contacts WHERE account_id = $1 AND is_group = false EXCEPT (%s))`,
+		childSQL,
+	)
+	return sql, newArgs, newIdx, nil
+}
+
+func buildContactSetOp(node *Node, op string, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	if len(node.Children) == 0 {
+		return "", args, argIdx, fmt.Errorf("%s node has no children", op)
+	}
+	var parts []string
+	currentArgs := args
+	currentIdx := argIdx
+	for _, child := range node.Children {
+		childSQL, newArgs, newIdx, err := buildContactNode(child, currentArgs, currentIdx)
+		if err != nil {
+			return "", nil, newIdx, err
+		}
+		parts = append(parts, "("+childSQL+")")
+		currentArgs = newArgs
+		currentIdx = newIdx
+	}
+	sql := strings.Join(parts, " "+op+" ")
+	return sql, currentArgs, currentIdx, nil
+}
+
 // ─── Participant variant ────────────────────────────────────────────────────
 
 // BuildSQLForParticipants converts an AST into a SQL subquery that returns participant IDs

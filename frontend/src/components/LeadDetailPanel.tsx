@@ -3,11 +3,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Phone, Mail, User, Calendar, MessageCircle, Trash2, ChevronDown,
-  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone
+  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import TagInput from '@/components/TagInput'
+import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 
 // ─── Props ───────────────────────────────────────────────
@@ -122,15 +123,12 @@ export default function LeadDetailPanel({
   const [observations, setObservations] = useState<Observation[]>([])
   const [loadingObservations, setLoadingObservations] = useState(false)
   const [newObservation, setNewObservation] = useState('')
-  const [newObservationType, setNewObservationType] = useState<'note' | 'call'>('note')
+  const [newObservationType, setNewObservationType] = useState<'note' | 'call'>('call')
   const [savingObservation, setSavingObservation] = useState(false)
   const [obsDisplayCount, setObsDisplayCount] = useState(5)
 
   // History modal
   const [showHistoryModal, setShowHistoryModal] = useState(false)
-  const [historyFilterType, setHistoryFilterType] = useState('')
-  const [historyFilterFrom, setHistoryFilterFrom] = useState('')
-  const [historyFilterTo, setHistoryFilterTo] = useState('')
 
   // Pipeline dropdown
   const [showPipelineDropdown, setShowPipelineDropdown] = useState(false)
@@ -143,10 +141,77 @@ export default function LeadDetailPanel({
   // History sync
   const [syncingHistory, setSyncingHistory] = useState(false)
 
+  // Google sync
+  const [googleSynced, setGoogleSynced] = useState(false)
+  const [googleSyncing, setGoogleSyncing] = useState(false)
+  const [googleConnected, setGoogleConnected] = useState(false)
+
   // Lead stage dropdown (event mode only)
   const [showLeadStageDropdown, setShowLeadStageDropdown] = useState(false)
   const [expandedLeadPipelineId, setExpandedLeadPipelineId] = useState<string | null>(null)
   const leadStageDropdownRef = useRef<HTMLDivElement>(null)
+
+  // ─── Check Google Contacts connection + sync status ───────────────
+  useEffect(() => {
+    const cid = contactMode ? contactId : lead.contact_id
+    if (!cid) return
+    const token = localStorage.getItem('token')
+    fetch('/api/google/status', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => { if (d.success && d.connected) setGoogleConnected(true) })
+      .catch(() => {})
+    // Check contact's google_sync flag via contacts API
+    fetch(`/api/contacts/${cid}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => { if (d.success && d.contact?.google_sync) setGoogleSynced(true); else setGoogleSynced(false) })
+      .catch(() => {})
+  }, [contactMode, contactId, lead.contact_id])
+
+  const handleGoogleSync = async () => {
+    const cid = contactMode ? contactId : lead.contact_id
+    if (!cid) return
+    setGoogleSyncing(true)
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/google/contacts/${cid}/sync`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setGoogleSynced(true)
+      } else {
+        alert(data.error || 'Error al sincronizar con Google')
+      }
+    } catch {
+      alert('Error de conexión')
+    } finally {
+      setGoogleSyncing(false)
+    }
+  }
+
+  const handleGoogleDesync = async () => {
+    const cid = contactMode ? contactId : lead.contact_id
+    if (!cid) return
+    setGoogleSyncing(true)
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/google/contacts/${cid}/sync`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setGoogleSynced(false)
+      } else {
+        alert(data.error || 'Error al desincronizar de Google')
+      }
+    } catch {
+      alert('Error de conexión')
+    } finally {
+      setGoogleSyncing(false)
+    }
+  }
 
   // ─── Fetch pipelines (skip in contact mode) ───────────────
   useEffect(() => {
@@ -173,14 +238,13 @@ export default function LeadDetailPanel({
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (showHistoryModal) { e.stopPropagation(); e.preventDefault(); setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo(''); return }
       if (showLeadStageDropdown) { e.stopPropagation(); setShowLeadStageDropdown(false); return }
       if (showPipelineDropdown) { e.stopPropagation(); setShowPipelineDropdown(false); return }
       // No internal state to close → let event propagate to parent page handler
     }
     document.addEventListener('keydown', h, true)
     return () => document.removeEventListener('keydown', h, true)
-  }, [showHistoryModal, showPipelineDropdown, showLeadStageDropdown])
+  }, [showPipelineDropdown, showLeadStageDropdown])
 
   // ─── Click outside to close dropdown ───────────────────
   useEffect(() => {
@@ -591,7 +655,7 @@ export default function LeadDetailPanel({
           )}
 
           {/* Archive/Block action buttons */}
-          {!eventMode && !contactMode && (
+          {!contactMode && (
             <div className="flex items-center justify-center gap-2 mt-2">
               {lead.is_blocked ? (
                 onUnblock && (
@@ -640,10 +704,10 @@ export default function LeadDetailPanel({
             </div>
           )}
 
-          {/* Kommo sync status */}
-          {!eventMode && !contactMode && (
-          <div className="flex items-center justify-center gap-2 mt-3">
-            {lead.kommo_id ? (
+          {/* Kommo & Google sync status */}
+          <div className="flex items-center justify-center gap-2 mt-3 flex-wrap">
+            {!eventMode && !contactMode && (
+              lead.kommo_id ? (
               <>
                 <span className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 border border-emerald-200 rounded-full text-xs font-medium text-emerald-700">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
@@ -664,9 +728,29 @@ export default function LeadDetailPanel({
                 <span className="w-1.5 h-1.5 rounded-full bg-slate-300 flex-shrink-0" />
                 Sin vínculo Kommo
               </span>
+            ))}
+            {googleConnected && (contactMode ? contactId : lead.contact_id) && (
+              <button
+                onClick={googleSynced ? handleGoogleDesync : handleGoogleSync}
+                disabled={googleSyncing}
+                title={googleSynced ? 'Google Sync activo — click para desincronizar' : 'Sincronizar a Google Contacts'}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors disabled:opacity-50 ${
+                  googleSynced
+                    ? 'bg-sky-50 border border-sky-200 text-sky-700 hover:bg-sky-100'
+                    : 'bg-white border border-slate-200 text-slate-500 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700'
+                }`}
+              >
+                {googleSyncing ? (
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                ) : googleSynced ? (
+                  <Cloud className="w-3 h-3" />
+                ) : (
+                  <CloudOff className="w-3 h-3" />
+                )}
+                {googleSyncing ? 'Sincronizando…' : googleSynced ? 'Google Sync' : 'Google Sync'}
+              </button>
             )}
           </div>
-          )}
         </div>
 
         {/* Inline editable info fields */}
@@ -1127,6 +1211,7 @@ export default function LeadDetailPanel({
           )}
             </>
           )}
+
           {!hideDelete && (
             <button
               onClick={handleDeleteLead}
@@ -1180,7 +1265,13 @@ export default function LeadDetailPanel({
             <textarea
               value={newObservation}
               onChange={(e) => setNewObservation(e.target.value)}
-              placeholder={newObservationType === 'call' ? 'Registrar resultado de llamada...' : 'Escribir una observación...'}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && newObservation.trim() && !savingObservation) {
+                  e.preventDefault()
+                  handleAddObservation()
+                }
+              }}
+              placeholder={newObservationType === 'call' ? 'Registrar resultado de llamada... (Ctrl+Enter para guardar)' : 'Escribir una observación... (Ctrl+Enter para guardar)'}
               rows={2}
               className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
             />
@@ -1240,113 +1331,15 @@ export default function LeadDetailPanel({
       </div>
 
       {/* Full History Modal */}
-      {showHistoryModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4 animate-in fade-in duration-150" onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col border border-slate-200/60 animate-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}>
-            {/* Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-emerald-100 flex items-center justify-center">
-                  <Clock className="w-4.5 h-4.5 text-emerald-600" />
-                </div>
-                <div>
-                  <h2 className="text-base font-semibold text-slate-900">Historial de Observaciones</h2>
-                  <p className="text-xs text-slate-500">{lead.name || 'Sin nombre'} &middot; {observations.length} registro{observations.length !== 1 ? 's' : ''}</p>
-                </div>
-              </div>
-              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="p-2 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-all" title="Cerrar (Esc)">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Filters */}
-            <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/70">
-              <div className="flex items-end gap-4 flex-wrap">
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Tipo</label>
-                  <select value={historyFilterType} onChange={(e) => setHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition">
-                    <option value="">Todos</option>
-                    <option value="note">Nota</option>
-                    <option value="call">Llamada</option>
-                    <option value="whatsapp">WhatsApp</option>
-                    <option value="email">Email</option>
-                    <option value="meeting">Reunión</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Desde</label>
-                  <input type="date" value={historyFilterFrom} onChange={(e) => setHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition" />
-                </div>
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Hasta</label>
-                  <input type="date" value={historyFilterTo} onChange={(e) => setHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition" />
-                </div>
-                {(historyFilterType || historyFilterFrom || historyFilterTo) && (
-                  <button onClick={() => { setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="px-2.5 py-1.5 text-xs text-slate-500 hover:text-red-600 hover:bg-red-50 flex items-center gap-1 transition rounded-lg border border-transparent hover:border-red-200">
-                    <XCircle className="w-3.5 h-3.5" /> Limpiar filtros
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Content */}
-            <div className="flex-1 overflow-y-auto p-6">
-              {(() => {
-                const filtered = observations.filter(obs => {
-                  if (historyFilterType && obs.type !== historyFilterType) return false
-                  if (historyFilterFrom && new Date(obs.created_at) < new Date(historyFilterFrom)) return false
-                  if (historyFilterTo) {
-                    const to = new Date(historyFilterTo)
-                    to.setDate(to.getDate() + 1)
-                    if (new Date(obs.created_at) >= to) return false
-                  }
-                  return true
-                })
-                if (filtered.length === 0) return (
-                  <div className="text-center py-16">
-                    <FileText className="w-10 h-10 text-slate-200 mx-auto mb-3" />
-                    <p className="text-sm text-slate-400">No hay registros con los filtros seleccionados</p>
-                  </div>
-                )
-                return (
-                  <div className="space-y-2.5">
-                    {filtered.map((obs) => (
-                      <div key={obs.id} className="p-4 bg-white rounded-xl group relative border border-slate-100 hover:border-slate-200 hover:shadow-sm transition-all">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1.5">
-                              <span className={`px-2.5 py-0.5 text-[11px] rounded-md font-semibold tracking-wide ${obs.type === 'note' ? 'bg-amber-50 text-amber-700 border border-amber-200/60' : obs.type === 'call' ? 'bg-blue-50 text-blue-700 border border-blue-200/60' : obs.type === 'whatsapp' ? 'bg-green-50 text-green-700 border border-green-200/60' : obs.type === 'email' ? 'bg-purple-50 text-purple-700 border border-purple-200/60' : 'bg-orange-50 text-orange-700 border border-orange-200/60'}`}>
-                                {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
-                              </span>
-                              <span className="text-xs text-slate-400">{format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}</span>
-                            </div>
-                            <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
-                            <div className="flex items-center gap-2 mt-2">
-                              {obs.created_by_name && <span className="text-[11px] text-slate-400">por <span className="font-medium text-slate-500">{obs.created_by_name}</span></span>}
-                              {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium border border-emerald-100">↕ Kommo</span>}
-                            </div>
-                          </div>
-                          <button onClick={() => handleDeleteObservation(obs.id)} className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg sm:opacity-0 sm:group-hover:opacity-100 transition-all shrink-0" title="Eliminar">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )
-              })()}
-            </div>
-
-            {/* Footer */}
-            <div className="px-6 py-3 border-t border-slate-100 bg-slate-50/50 flex items-center justify-between">
-              <span className="text-[11px] text-slate-400">Presiona <kbd className="px-1.5 py-0.5 bg-slate-200/80 text-slate-500 rounded text-[10px] font-mono">Esc</kbd> para cerrar</span>
-              <button onClick={() => { setShowHistoryModal(false); setHistoryFilterType(''); setHistoryFilterFrom(''); setHistoryFilterTo('') }} className="px-4 py-1.5 text-sm text-slate-600 hover:text-slate-800 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-all">
-                Cerrar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ObservationHistoryModal
+        isOpen={showHistoryModal}
+        onClose={() => setShowHistoryModal(false)}
+        leadId={lead.id}
+        contactId={contactMode ? contactId : undefined}
+        name={lead.name || 'Sin nombre'}
+        observations={observations}
+        onObservationChange={() => { fetchObservations(lead.id); onObservationChange?.(lead.id) }}
+      />
     </div>
   )
 }

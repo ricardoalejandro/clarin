@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download, Cloud } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import { es } from 'date-fns/locale'
@@ -14,6 +14,7 @@ import { useRouter } from 'next/navigation'
 import { subscribeWebSocket } from '@/lib/api'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
+import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import { Chat } from '@/types/chat'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 
@@ -426,6 +427,7 @@ export default function LeadsPage() {
   // Status filter: active, archived, blocked
   const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'blocked'>('active')
   const [leadCounts, setLeadCounts] = useState({ active: 0, archived: 0, blocked: 0 })
+  const [hiddenByStatus, setHiddenByStatus] = useState(0)
 
   // List view paginated data
   const [listLeads, setListLeads] = useState<Lead[]>([])
@@ -437,6 +439,12 @@ export default function LeadsPage() {
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
 
+  // Export
+  const [showExportModal, setShowExportModal] = useState(false)
+  const [exportFormat, setExportFormat] = useState<'excel' | 'csv'>('excel')
+  const [exportScope, setExportScope] = useState<'all' | 'filtered'>('filtered')
+  const [exporting, setExporting] = useState(false)
+
   // Create Event from Leads modal
   const [showCreateEventModal, setShowCreateEventModal] = useState(false)
   const [createEventForm, setCreateEventForm] = useState({ name: '', description: '', event_date: '', event_end: '', location: '', color: '#10b981' })
@@ -444,12 +452,14 @@ export default function LeadsPage() {
 
   // List view observations cache
   const [listObservations, setListObservations] = useState<Map<string, Observation[]>>(new Map())
+
+  // Google Contacts sync
+  const [googleConnected, setGoogleConnected] = useState(false)
+  const [googleSyncing, setGoogleSyncing] = useState(false)
+
   const [loadingListObs, setLoadingListObs] = useState<Set<string>>(new Set())
   const [expandedListLeadId, setExpandedListLeadId] = useState<string | null>(null)
   const [listHistoryLead, setListHistoryLead] = useState<Lead | null>(null)
-  const [listHistoryFilterType, setListHistoryFilterType] = useState('')
-  const [listHistoryFilterFrom, setListHistoryFilterFrom] = useState('')
-  const [listHistoryFilterTo, setListHistoryFilterTo] = useState('')
 
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
@@ -557,6 +567,7 @@ export default function LeadsPage() {
         const ua = data.unassigned || { total_count: 0, leads: [], has_more: false }
         setUnassignedData({ ...ua, leads: ua.leads || [] })
         setAllTags(data.all_tags || [])
+        setHiddenByStatus(data.hidden_by_status || 0)
       }
     } catch (err) {
       console.error('Failed to fetch leads:', err)
@@ -733,6 +744,8 @@ export default function LeadsPage() {
   useEffect(() => {
     fetchPipelines()
     fetchDevices()
+    // Check Google Contacts connection status
+    fetch('/api/google/status').then(r => r.json()).then(d => setGoogleConnected(!!d.connected)).catch(() => {})
     // Load hidden stages from localStorage
     try {
       const saved = localStorage.getItem('hiddenStageIds')
@@ -842,8 +855,8 @@ export default function LeadsPage() {
             }
             return prev
           })
-        } else {
-          // Fallback: full re-fetch for unknown actions
+        } else if (msg.action !== 'synced') {
+          // Fallback: full re-fetch for unknown actions (skip background sync noise)
           fetchLeadsPaginated()
         }
       }
@@ -1058,13 +1071,63 @@ export default function LeadsPage() {
     }
   }
 
-  const handleArchiveLead = async (leadId: string, archive: boolean) => {
+  const handleGoogleBatchSyncFromLeads = async () => {
+    if (selectedIds.size === 0 || selectedIds.size > 30) return
+    const token = localStorage.getItem('token')
+    setGoogleSyncing(true)
+    try {
+      const res = await fetch('/api/google/contacts/batch/sync-from-leads', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ lead_ids: Array.from(selectedIds) }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        const synced = (data.results || []).filter((r: any) => r.success).length
+        const errors = (data.results || []).filter((r: any) => !r.success).length
+        alert(`Sincronizados: ${synced} contacto(s)${errors ? `, errores: ${errors}` : ''}`)
+      } else {
+        alert(data.error || 'Error al sincronizar')
+      }
+    } catch {
+      alert('Error de conexión')
+    } finally {
+      setGoogleSyncing(false)
+    }
+  }
+
+  const handleGoogleBatchDesyncFromLeads = async () => {
+    if (selectedIds.size === 0 || selectedIds.size > 30) return
+    if (!confirm(`¿Desincronizar los contactos de ${selectedIds.size} lead(s) de Google?`)) return
+    const token = localStorage.getItem('token')
+    setGoogleSyncing(true)
+    try {
+      const res = await fetch('/api/google/contacts/batch/desync-from-leads', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ lead_ids: Array.from(selectedIds) }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        const desynced = (data.results || []).filter((r: any) => r.success).length
+        alert(`Desincronizados: ${desynced} contacto(s)`)
+      } else {
+        alert(data.error || 'Error al desincronizar')
+      }
+    } catch {
+      alert('Error de conexión')
+    } finally {
+      setGoogleSyncing(false)
+    }
+  }
+
+  const handleArchiveLead = async (leadId: string, archive: boolean, reason: string = '') => {
     const token = localStorage.getItem('token')
     try {
       const res = await fetch(`/api/leads/${leadId}/archive`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ archive }),
+        body: JSON.stringify({ archive, reason }),
       })
       const data = await res.json()
       if (data.success) {
@@ -1097,7 +1160,7 @@ export default function LeadsPage() {
     }
   }
 
-  const handleArchiveSelectedBatch = async (archive: boolean) => {
+  const handleArchiveSelectedBatch = async (archive: boolean, reason: string = '') => {
     if (selectedIds.size === 0) return
     const token = localStorage.getItem('token')
     setDeleting(true)
@@ -1105,7 +1168,7 @@ export default function LeadsPage() {
       const res = await fetch('/api/leads/batch/archive', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ ids: Array.from(selectedIds), archive }),
+        body: JSON.stringify({ ids: Array.from(selectedIds), archive, reason }),
       })
       const data = await res.json()
       if (data.success) {
@@ -1153,11 +1216,36 @@ export default function LeadsPage() {
   const [blockTargetId, setBlockTargetId] = useState<string | null>(null)
   const [blockBatchMode, setBlockBatchMode] = useState(false)
 
+  // Archive reason modal state
+  const [showArchiveModal, setShowArchiveModal] = useState(false)
+  const [archiveReason, setArchiveReason] = useState('')
+  const [archiveTargetId, setArchiveTargetId] = useState<string | null>(null)
+  const [archiveBatchMode, setArchiveBatchMode] = useState(false)
+
   const openBlockModal = (leadId: string | null, batchMode: boolean = false) => {
     setBlockTargetId(leadId)
     setBlockBatchMode(batchMode)
     setBlockReason('')
     setShowBlockModal(true)
+  }
+
+  const openArchiveModal = (leadId: string | null, batchMode: boolean = false) => {
+    setArchiveTargetId(leadId)
+    setArchiveBatchMode(batchMode)
+    setArchiveReason('')
+    setShowArchiveModal(true)
+  }
+
+  const confirmArchive = () => {
+    if (!archiveReason) return
+    if (archiveBatchMode) {
+      handleArchiveSelectedBatch(true, archiveReason)
+    } else if (archiveTargetId) {
+      handleArchiveLead(archiveTargetId, true, archiveReason)
+      setShowDetailPanel(false)
+      setShowInlineChat(false)
+    }
+    setShowArchiveModal(false)
   }
 
   const confirmBlock = () => {
@@ -1836,8 +1924,84 @@ export default function LeadsPage() {
 
   const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0)
 
+  // Export leads
+  const handleExportLeads = async () => {
+    setExporting(true)
+    const token = localStorage.getItem('token')
+    try {
+      const params = new URLSearchParams()
+      if (activePipeline) params.set('pipeline_id', activePipeline.id)
+      if (exportScope === 'filtered') {
+        if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
+        if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
+        if (appliedFormulaType === 'advanced' && appliedFormulaText) {
+          params.set('tag_formula', appliedFormulaText)
+        } else {
+          if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+          if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
+          if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
+        }
+        if (filterDatePreset) {
+          const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+          if (resolved) {
+            params.set('date_field', filterDateField)
+            if (resolved.from) params.set('date_from', resolved.from)
+            if (resolved.to) params.set('date_to', resolved.to)
+          }
+        }
+      }
+      params.set('view', 'list')
+      params.set('limit', '50000')
+      params.set('offset', '0')
 
+      const res = await fetch(`/api/leads?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (!data.success) return
 
+      const allLeads: Lead[] = data.leads || []
+      const { utils, writeFile } = await import('xlsx')
+      const rows = allLeads.map(l => ({
+        'Nombre': l.name || '',
+        'Apellido': l.last_name || '',
+        'Nombre corto': l.short_name || '',
+        'Teléfono': l.phone || '',
+        'Email': l.email || '',
+        'Empresa': l.company || '',
+        'Pipeline': activePipeline?.name || '',
+        'Etapa': l.stage_name || '',
+        'Etiquetas': (l.structured_tags || []).map((t: any) => t.name).join(', ') || (l.tags || []).join(', '),
+        'Archivado': l.is_archived ? 'Sí' : 'No',
+        'Bloqueado': l.is_blocked ? 'Sí' : 'No',
+        'Creado': format(new Date(l.created_at), 'dd/MM/yyyy HH:mm', { locale: es }),
+        'Actualizado': format(new Date(l.updated_at), 'dd/MM/yyyy HH:mm', { locale: es }),
+      }))
+
+      if (exportFormat === 'excel') {
+        const wb = utils.book_new()
+        const ws = utils.json_to_sheet(rows)
+        utils.book_append_sheet(wb, ws, 'Leads')
+        writeFile(wb, `leads_${format(new Date(), 'yyyy-MM-dd')}.xlsx`)
+      } else {
+        const ws = utils.json_to_sheet(rows)
+        const csv = utils.sheet_to_csv(ws)
+        const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `leads_${format(new Date(), 'yyyy-MM-dd')}.csv`
+        a.click()
+        URL.revokeObjectURL(url)
+      }
+      setShowExportModal(false)
+    } catch (err) {
+      console.error('Export failed:', err)
+      alert('Error al exportar leads')
+    } finally {
+      setExporting(false)
+    }
+  }
 
 
   const handleCreateBroadcastFromLeads = async (formResult: CampaignFormResult) => {
@@ -2019,254 +2183,38 @@ export default function LeadsPage() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">Leads</h1>
-          <p className="text-slate-500 text-sm mt-0.5">{viewMode === 'list' ? listTotal : totalLeadCount} leads en total</p>
+      {/* Row 1: Title + View Toggle + Search + Más */}
+      <div className="flex items-center gap-3 py-2 shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <h1 className="text-lg font-bold text-slate-900 whitespace-nowrap">Leads</h1>
+          <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full">{(viewMode === 'list' ? listTotal : totalLeadCount).toLocaleString()}</span>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {selectionMode ? (
-            <>
-              <span className="flex items-center px-3 py-1.5 text-xs text-slate-500 font-medium">
-                {selectedIds.size} seleccionado(s)
-              </span>
-              <button onClick={selectAll} className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600 font-medium">
-                Todos
-              </button>
-              {statusFilter === 'active' && (
-                <button
-                  onClick={() => handleArchiveSelectedBatch(true)}
-                  disabled={selectedIds.size === 0 || deleting}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50 font-medium"
-                >
-                  <Archive className="w-3 h-3" />
-                  Archivar ({selectedIds.size})
-                </button>
-              )}
-              {statusFilter === 'archived' && (
-                <button
-                  onClick={() => handleArchiveSelectedBatch(false)}
-                  disabled={selectedIds.size === 0 || deleting}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 font-medium"
-                >
-                  <ArchiveRestore className="w-3 h-3" />
-                  Restaurar ({selectedIds.size})
-                </button>
-              )}
-              {statusFilter !== 'blocked' && (
-                <button
-                  onClick={() => openBlockModal(null, true)}
-                  disabled={selectedIds.size === 0 || deleting}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 font-medium"
-                >
-                  <ShieldBan className="w-3 h-3" />
-                  Bloquear ({selectedIds.size})
-                </button>
-              )}
-              {statusFilter === 'blocked' && (
-                <button
-                  onClick={() => handleBlockSelectedBatch(false)}
-                  disabled={selectedIds.size === 0 || deleting}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 font-medium"
-                >
-                  <ShieldOff className="w-3 h-3" />
-                  Desbloquear ({selectedIds.size})
-                </button>
-              )}
-              <button
-                onClick={handleDeleteSelected}
-                disabled={selectedIds.size === 0 || deleting}
-                className="px-3 py-1.5 text-xs bg-red-800 text-white rounded-lg hover:bg-red-900 disabled:opacity-50 font-medium"
-              >
-                {deleting ? '...' : `Eliminar (${selectedIds.size})`}
-              </button>
-              <button
-                onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
-                className="p-1.5 border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-400"
-              >
-                <XCircle className="w-4 h-4" />
-              </button>
-            </>
-          ) : (
-            <>
-              {/* View toggle */}
-              <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden">
-                <button
-                  onClick={() => setViewMode('kanban')}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${
-                    viewMode === 'kanban' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'
-                  }`}
-                  title="Vista Kanban"
-                >
-                  <LayoutGrid className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  onClick={() => setViewMode('list')}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${
-                    viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'
-                  }`}
-                  title="Vista Lista"
-                >
-                  <List className="w-3.5 h-3.5" />
-                </button>
-              </div>
 
-              <button
-                onClick={() => { fetchDevices(); setShowBroadcastModal(true) }}
-                disabled={totalLeadCount === 0}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-emerald-200 rounded-lg hover:bg-emerald-50 transition text-emerald-700 text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Radio className="w-3.5 h-3.5" />
-                Masivo
-              </button>
+        {!selectionMode && (
+          <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden">
+            <button
+              onClick={() => setViewMode('kanban')}
+              className={`inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium transition ${
+                viewMode === 'kanban' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'
+              }`}
+              title="Vista Kanban"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setViewMode('list')}
+              className={`inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium transition ${
+                viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'
+              }`}
+              title="Vista Lista"
+            >
+              <List className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
-              {/* ··· More dropdown */}
-              <div ref={moreMenuRef} className="relative">
-                <button
-                  onClick={() => setShowMoreMenu(v => !v)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-xs font-medium transition ${
-                    showMoreMenu ? 'border-slate-400 bg-slate-100 text-slate-700' : 'border-slate-200 hover:bg-slate-50 text-slate-600'
-                  }`}
-                  title="Más acciones"
-                >
-                  <MoreHorizontal className="w-4 h-4" />
-                  <span className="hidden sm:inline">Más</span>
-                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMoreMenu ? 'rotate-180' : ''}`} />
-                </button>
-                {showMoreMenu && (
-                  <div className="absolute right-0 top-full mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
-                    <button
-                      onClick={() => { setSelectionMode(true); setShowMoreMenu(false) }}
-                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
-                    >
-                      <CheckSquare className="w-4 h-4 text-slate-400" />
-                      Seleccionar
-                    </button>
-                    <button
-                      onClick={() => { setShowStageModal(true); setShowMoreMenu(false) }}
-                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
-                    >
-                      <Settings className="w-4 h-4 text-slate-400" />
-                      Etapas
-                    </button>
-                    <button
-                      onClick={() => { setShowImportModal(true); setShowMoreMenu(false) }}
-                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
-                    >
-                      <Upload className="w-4 h-4 text-slate-400" />
-                      Importar CSV
-                    </button>
-                    <button
-                      onClick={() => { setShowCreateEventModal(true); setShowMoreMenu(false) }}
-                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 hover:bg-emerald-50 transition-colors"
-                    >
-                      <Calendar className="w-4 h-4 text-emerald-500" />
-                      Crear Evento desde Leads
-                    </button>
-                    {devices.length > 0 && (
-                      <>
-                        <div className="my-1 border-t border-slate-100" />
-                        <div className="px-4 py-2">
-                          <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Filtrar por dispositivo</p>
-                          {devices.map(d => (
-                            <label key={d.id} className="flex items-center gap-2 py-1 cursor-pointer text-sm">
-                              <input
-                                type="checkbox"
-                                checked={filterDeviceIds.has(d.id)}
-                                onChange={() => {
-                                  setFilterDeviceIds(prev => {
-                                    const next = new Set(prev)
-                                    if (next.has(d.id)) next.delete(d.id)
-                                    else next.add(d.id)
-                                    return next
-                                  })
-                                }}
-                                className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                              />
-                              <span className="text-slate-700 text-xs">{d.name || d.phone || 'Dispositivo'}</span>
-                            </label>
-                          ))}
-                          {filterDeviceIds.size > 0 && (
-                            <button
-                              onClick={() => setFilterDeviceIds(new Set())}
-                              className="w-full mt-1 text-xs text-slate-500 hover:text-slate-700 py-0.5"
-                            >
-                              Limpiar filtro
-                            </button>
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <button
-                onClick={() => setShowAddModal(true)}
-                className="inline-flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-700 transition text-xs font-medium shadow-sm shadow-emerald-600/20"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Nuevo
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Status filter tabs */}
-      <div className="flex items-center gap-1 mb-3">
-        <button
-          onClick={() => setStatusFilter('active')}
-          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-            statusFilter === 'active'
-              ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
-              : 'text-slate-500 hover:bg-slate-50'
-          }`}
-        >
-          Activos
-          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
-            statusFilter === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
-          }`}>{leadCounts.active}</span>
-        </button>
-        <button
-          onClick={() => setStatusFilter('archived')}
-          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-            statusFilter === 'archived'
-              ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
-              : 'text-slate-500 hover:bg-slate-50'
-          }`}
-        >
-          <Archive className="w-3 h-3" />
-          Archivados
-          {leadCounts.archived > 0 && (
-            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
-              statusFilter === 'archived' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'
-            }`}>{leadCounts.archived}</span>
-          )}
-        </button>
-        <button
-          onClick={() => setStatusFilter('blocked')}
-          className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-            statusFilter === 'blocked'
-              ? 'bg-red-50 text-red-700 ring-1 ring-red-200'
-              : 'text-slate-500 hover:bg-slate-50'
-          }`}
-        >
-          <ShieldBan className="w-3 h-3" />
-          Bloqueados
-          {leadCounts.blocked > 0 && (
-            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
-              statusFilter === 'blocked' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'
-            }`}>{leadCounts.blocked}</span>
-          )}
-        </button>
-      </div>
-
-      {/* Pipeline selector + Search */}
-      <div className="flex flex-col sm:flex-row gap-3 mb-3">
-        <div ref={filterDropdownRef} className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+        <div ref={filterDropdownRef} className="flex-1 max-w-sm relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 z-10" />
           <input
             type="text"
             value={searchTerm}
@@ -2274,22 +2222,15 @@ export default function LeadsPage() {
             onFocus={() => setShowFilterDropdown(true)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
             placeholder="Buscar leads..."
-            className="w-full pl-9 pr-10 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 text-sm"
+            className={`w-full pl-8 pr-3 py-1.5 bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 text-sm ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
           />
-          <button
-            onClick={() => setShowFilterDropdown(!showFilterDropdown)}
-            className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md transition ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
-            title="Filtros avanzados"
-          >
-            <Filter className="w-4 h-4" />
-            {activeFilterCount > 0 && (
-              <span className="absolute -top-1 -right-1 w-4 h-4 bg-green-600 text-white text-[10px] rounded-full flex items-center justify-center">{activeFilterCount}</span>
-            )}
-          </button>
+          {activeFilterCount > 0 && !showFilterDropdown && (
+            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 bg-emerald-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center">{activeFilterCount}</span>
+          )}
 
           {/* Filter Dropdown — Two-Column Layout */}
           {showFilterDropdown && (
-            <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200/80 rounded-2xl shadow-2xl shadow-slate-200/50 z-30 flex flex-col max-h-[70vh]">
+            <div className="absolute top-full left-0 mt-1 w-[min(600px,90vw)] bg-white border border-slate-200/80 rounded-2xl shadow-2xl shadow-slate-200/50 z-30 flex flex-col max-h-[70vh]">
               {/* ─── Header ─── */}
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-2.5">
@@ -2314,11 +2255,11 @@ export default function LeadsPage() {
                 </div>
               </div>
 
-              {/* ─── Two-Column Body ─── */}
-              <div className="flex flex-1 min-h-0 overflow-hidden">
+              {/* ─── Responsive Body: 2 cols when space, 1 col when narrow ─── */}
+              <div className="flex flex-col sm:flex-row flex-1 min-h-0 overflow-hidden">
 
                 {/* ══ Left Column — Selections ══ */}
-                <div className="w-[240px] shrink-0 border-r border-slate-100 overflow-y-auto p-3 space-y-4 bg-slate-50/30">
+                <div className="w-full sm:w-[240px] shrink-0 border-b sm:border-b-0 sm:border-r border-slate-100 overflow-y-auto p-3 space-y-4 bg-slate-50/30 max-h-[30vh] sm:max-h-none">
 
                   {/* Stage pills */}
                   {stages.length > 0 && (
@@ -2519,7 +2460,7 @@ export default function LeadsPage() {
                 </div>
 
                 {/* ══ Right Column — Tag Browser ══ */}
-                <div className="flex-1 flex flex-col min-w-0 min-h-0">
+                <div className="flex-1 flex flex-col min-w-0 min-h-0 w-full sm:w-auto">
 
                   {allUniqueTags.length > 0 && (
                     <>
@@ -2705,25 +2646,276 @@ export default function LeadsPage() {
             </div>
           )}
         </div>
+
+        {/* Actions area */}
+        <div className="flex items-center gap-2 shrink-0">
+          {selectionMode ? (
+            <>
+              <span className="flex items-center px-2 py-1.5 text-xs text-slate-500 font-medium whitespace-nowrap">
+                {selectedIds.size} sel.
+              </span>
+              <button onClick={selectAll} className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600 font-medium">
+                Todos
+              </button>
+              {statusFilter === 'active' && (
+                <button
+                  onClick={() => openArchiveModal(null, true)}
+                  disabled={selectedIds.size === 0 || deleting}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50 font-medium"
+                >
+                  <Archive className="w-3 h-3" />
+                  Archivar
+                </button>
+              )}
+              {statusFilter === 'archived' && (
+                <button
+                  onClick={() => handleArchiveSelectedBatch(false)}
+                  disabled={selectedIds.size === 0 || deleting}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 font-medium"
+                >
+                  <ArchiveRestore className="w-3 h-3" />
+                  Restaurar
+                </button>
+              )}
+              {statusFilter !== 'blocked' && (
+                <button
+                  onClick={() => openBlockModal(null, true)}
+                  disabled={selectedIds.size === 0 || deleting}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 font-medium"
+                >
+                  <ShieldBan className="w-3 h-3" />
+                  Bloquear
+                </button>
+              )}
+              {statusFilter === 'blocked' && (
+                <button
+                  onClick={() => handleBlockSelectedBatch(false)}
+                  disabled={selectedIds.size === 0 || deleting}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 font-medium"
+                >
+                  <ShieldOff className="w-3 h-3" />
+                  Desbloquear
+                </button>
+              )}
+              {googleConnected && (
+                <>
+                  <button
+                    onClick={handleGoogleBatchSyncFromLeads}
+                    disabled={selectedIds.size === 0 || selectedIds.size > 30 || googleSyncing}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+                  >
+                    {googleSyncing ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                    Sync
+                  </button>
+                  <button
+                    onClick={handleGoogleBatchDesyncFromLeads}
+                    disabled={selectedIds.size === 0 || selectedIds.size > 30 || googleSyncing}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 disabled:opacity-50 font-medium"
+                  >
+                    <XCircle className="w-3 h-3" />
+                    Desync
+                  </button>
+                </>
+              )}
+              <button
+                onClick={handleDeleteSelected}
+                disabled={selectedIds.size === 0 || deleting}
+                className="px-2.5 py-1.5 text-xs bg-red-800 text-white rounded-lg hover:bg-red-900 disabled:opacity-50 font-medium"
+              >
+                {deleting ? '...' : `Eliminar (${selectedIds.size})`}
+              </button>
+              <button
+                onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
+                className="w-8 h-8 flex items-center justify-center border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-500 hover:text-slate-700 transition-colors"
+                title="Cancelar selección"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </>
+          ) : (
+            <div ref={moreMenuRef} className="relative">
+              <button
+                onClick={() => setShowMoreMenu(v => !v)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm transition-colors ${
+                  showMoreMenu ? 'border-slate-400 bg-slate-100 text-slate-700' : 'border-slate-300 hover:bg-slate-50 text-slate-600'
+                }`}
+                title="Más acciones"
+              >
+                <MoreHorizontal className="w-4 h-4" />
+                <span className="hidden sm:inline">Más</span>
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMoreMenu ? 'rotate-180' : ''}`} />
+              </button>
+              {showMoreMenu && (
+                <div className="absolute right-0 top-full mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+                  <button
+                    onClick={() => { setShowAddModal(true); setShowMoreMenu(false) }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors"
+                  >
+                    <Plus className="w-4 h-4 text-emerald-500" />
+                    Nuevo lead
+                  </button>
+                  <button
+                    onClick={() => { fetchDevices(); setShowBroadcastModal(true); setShowMoreMenu(false) }}
+                    disabled={totalLeadCount === 0}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Radio className="w-4 h-4 text-slate-400" />
+                    Masivo
+                  </button>
+                  <div className="my-1 border-t border-slate-100" />
+                  <button
+                    onClick={() => { setSelectionMode(true); setShowMoreMenu(false) }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                  >
+                    <CheckSquare className="w-4 h-4 text-slate-400" />
+                    Seleccionar
+                  </button>
+                  <button
+                    onClick={() => { setShowStageModal(true); setShowMoreMenu(false) }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                  >
+                    <Settings className="w-4 h-4 text-slate-400" />
+                    Etapas
+                  </button>
+                  <div className="my-1 border-t border-slate-100" />
+                  <button
+                    onClick={() => { setShowImportModal(true); setShowMoreMenu(false) }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                  >
+                    <Upload className="w-4 h-4 text-slate-400" />
+                    Importar CSV
+                  </button>
+                  <button
+                    onClick={() => { setShowExportModal(true); setShowMoreMenu(false) }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                  >
+                    <Download className="w-4 h-4 text-slate-400" />
+                    Exportar leads
+                  </button>
+                  <div className="my-1 border-t border-slate-100" />
+                  <button
+                    onClick={() => { setShowCreateEventModal(true); setShowMoreMenu(false) }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 hover:bg-emerald-50 transition-colors"
+                  >
+                    <Calendar className="w-4 h-4 text-emerald-500" />
+                    Crear Evento desde Leads
+                  </button>
+                  {devices.length > 0 && (
+                    <>
+                      <div className="my-1 border-t border-slate-100" />
+                      <div className="px-4 py-2">
+                        <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Filtrar por dispositivo</p>
+                        {devices.map(d => (
+                          <label key={d.id} className="flex items-center gap-2 py-1 cursor-pointer text-sm">
+                            <input
+                              type="checkbox"
+                              checked={filterDeviceIds.has(d.id)}
+                              onChange={() => {
+                                setFilterDeviceIds(prev => {
+                                  const next = new Set(prev)
+                                  if (next.has(d.id)) next.delete(d.id)
+                                  else next.add(d.id)
+                                  return next
+                                })
+                              }}
+                              className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                            />
+                            <span className="text-slate-700 text-xs">{d.name || d.phone || 'Dispositivo'}</span>
+                          </label>
+                        ))}
+                        {filterDeviceIds.size > 0 && (
+                          <button
+                            onClick={() => setFilterDeviceIds(new Set())}
+                            className="w-full mt-1 text-xs text-slate-500 hover:text-slate-700 py-0.5"
+                          >
+                            Limpiar filtro
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Row 2: Status tabs + Pipeline selector */}
+      <div className="flex items-center gap-1 mb-2 shrink-0">
+        <button
+          onClick={() => setStatusFilter('active')}
+          className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-lg transition ${
+            statusFilter === 'active'
+              ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+              : 'text-slate-500 hover:bg-slate-50'
+          }`}
+        >
+          Activos
+          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
+            statusFilter === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
+          }`}>{leadCounts.active}</span>
+        </button>
+        <button
+          onClick={() => setStatusFilter('archived')}
+          className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-lg transition ${
+            statusFilter === 'archived'
+              ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
+              : 'text-slate-500 hover:bg-slate-50'
+          }`}
+        >
+          <Archive className="w-3 h-3" />
+          Archivados
+          {leadCounts.archived > 0 && (
+            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
+              statusFilter === 'archived' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'
+            }`}>{leadCounts.archived}</span>
+          )}
+        </button>
+        <button
+          onClick={() => setStatusFilter('blocked')}
+          className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-lg transition ${
+            statusFilter === 'blocked'
+              ? 'bg-red-50 text-red-700 ring-1 ring-red-200'
+              : 'text-slate-500 hover:bg-slate-50'
+          }`}
+        >
+          <ShieldBan className="w-3 h-3" />
+          Bloqueados
+          {leadCounts.blocked > 0 && (
+            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
+              statusFilter === 'blocked' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'
+            }`}>{leadCounts.blocked}</span>
+          )}
+        </button>
         {pipelines.length > 1 && (
-          <div className="relative">
-            <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <div className="relative ml-auto">
             <select
               value={activePipeline?.id || ''}
               onChange={(e) => {
                 const p = pipelines.find(p => p.id === e.target.value)
                 if (p) setActivePipeline(p)
               }}
-              className="pl-9 pr-8 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 appearance-none cursor-pointer text-sm text-slate-900"
+              className="pl-2 pr-6 py-1 bg-white border border-slate-200 rounded-lg focus:ring-1 focus:ring-emerald-500 appearance-none cursor-pointer text-xs text-slate-700"
             >
               {pipelines.map(p => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>
-            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+            <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
           </div>
         )}
       </div>
+
+      {/* Hidden leads banner */}
+      {hiddenByStatus > 0 && (
+        <div className="flex items-center gap-2 px-3 py-1.5 mb-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
+          <EyeOff className="w-3.5 h-3.5 shrink-0" />
+          <span>
+            {hiddenByStatus} lead{hiddenByStatus !== 1 ? 's' : ''} {statusFilter === 'active' ? 'archivado' + (hiddenByStatus !== 1 ? 's' : '') + '/bloqueado' + (hiddenByStatus !== 1 ? 's' : '') : statusFilter === 'archived' ? 'activo' + (hiddenByStatus !== 1 ? 's' : '') + '/bloqueado' + (hiddenByStatus !== 1 ? 's' : '') : 'activo' + (hiddenByStatus !== 1 ? 's' : '') + '/archivado' + (hiddenByStatus !== 1 ? 's' : '')} coinciden con este filtro.
+          </span>
+        </div>
+      )}
 
       {/* Pipeline Kanban — Virtualized */}
       {viewMode === 'kanban' && (
@@ -2846,7 +3038,7 @@ export default function LeadsPage() {
                     >
                       <div
                         className={`flex items-start group border-b border-slate-200/80 hover:bg-emerald-50/40 hover:shadow-sm transition-all duration-150 cursor-pointer ${
-                          detailLead?.id === lead.id ? 'bg-emerald-50/60 border-l-2 border-l-emerald-500' : 'border-l-2 border-l-transparent'
+                          detailLead?.id === lead.id ? 'bg-emerald-100 border-l-[3px] border-l-emerald-500 shadow-sm ring-1 ring-emerald-200/60' : 'border-l-[3px] border-l-transparent'
                         }`}
                         onClick={() => openDetailPanel(lead)}
                       >
@@ -2910,9 +3102,6 @@ export default function LeadsPage() {
                             e.stopPropagation()
                             if (obs && obs.length > 0) {
                               setListHistoryLead(lead)
-                              setListHistoryFilterType('')
-                              setListHistoryFilterFrom('')
-                              setListHistoryFilterTo('')
                             }
                           }}
                         >
@@ -2978,91 +3167,20 @@ export default function LeadsPage() {
       )}
 
       {/* List View — Historial Completo Modal */}
-      {listHistoryLead && (() => {
-        const historyObs = listObservations.get(listHistoryLead.id) || []
-        const filtered = historyObs.filter(obs => {
-          if (listHistoryFilterType && obs.type !== listHistoryFilterType) return false
-          if (listHistoryFilterFrom && new Date(obs.created_at) < new Date(listHistoryFilterFrom)) return false
-          if (listHistoryFilterTo) {
-            const to = new Date(listHistoryFilterTo)
-            to.setDate(to.getDate() + 1)
-            if (new Date(obs.created_at) >= to) return false
-          }
-          return true
-        })
-        return (
-          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setListHistoryLead(null)}>
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col border border-slate-100" onClick={(e) => e.stopPropagation()}>
-              <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-                <div>
-                  <h2 className="text-base font-semibold text-slate-900">Historial Completo</h2>
-                  <p className="text-sm text-slate-500">{listHistoryLead.name || 'Sin nombre'} &mdash; {filtered.length} registros</p>
-                </div>
-                <button onClick={() => setListHistoryLead(null)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
-                <div className="flex items-center gap-4 flex-wrap">
-                  <div>
-                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Tipo</label>
-                    <select value={listHistoryFilterType} onChange={(e) => setListHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white">
-                      <option value="">Todos</option>
-                      <option value="note">Nota</option>
-                      <option value="call">Llamada</option>
-                      <option value="whatsapp">WhatsApp</option>
-                      <option value="email">Email</option>
-                      <option value="meeting">Reunión</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Desde</label>
-                    <input type="date" value={listHistoryFilterFrom} onChange={(e) => setListHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Hasta</label>
-                    <input type="date" value={listHistoryFilterTo} onChange={(e) => setListHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
-                  </div>
-                  {(listHistoryFilterType || listHistoryFilterFrom || listHistoryFilterTo) && (
-                    <button onClick={() => { setListHistoryFilterType(''); setListHistoryFilterFrom(''); setListHistoryFilterTo('') }} className="mt-4 text-xs text-slate-500 hover:text-red-600 flex items-center gap-1 transition">
-                      <XCircle className="w-3.5 h-3.5" /> Limpiar
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-6">
-                {filtered.length === 0 ? (
-                  <p className="text-sm text-slate-400 text-center py-10">No hay registros con los filtros seleccionados</p>
-                ) : (
-                  <div className="space-y-3">
-                    {filtered.map((obs) => (
-                      <div key={obs.id} className="p-4 bg-slate-50 rounded-xl border border-slate-100 hover:border-slate-200 transition">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1.5">
-                              <span className={`px-2.5 py-0.5 text-xs rounded-lg font-semibold ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : obs.type === 'email' ? 'bg-purple-100 text-purple-700' : 'bg-orange-100 text-orange-700'}`}>
-                                {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type === 'email' ? 'Email' : obs.type === 'meeting' ? 'Reunión' : obs.type}
-                              </span>
-                              <span className="text-xs text-slate-400">{format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}</span>
-                            </div>
-                            <p className="text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
-                            <div className="flex items-center gap-2 mt-1.5">
-                              {obs.created_by_name && <span className="text-xs text-slate-400">por {obs.created_by_name}</span>}
-                              {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium">↕ Kommo</span>}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )
-      })()}
+      {listHistoryLead && (
+        <ObservationHistoryModal
+          isOpen={true}
+          onClose={() => setListHistoryLead(null)}
+          leadId={listHistoryLead.id}
+          name={listHistoryLead.name || 'Sin nombre'}
+          observations={listObservations.get(listHistoryLead.id) || []}
+          onObservationChange={() => {
+            // Invalidate cache so it refetches
+            setListObservations(prev => { const next = new Map(prev); next.delete(listHistoryLead.id); return next })
+            fetchBatchObservations([listHistoryLead.id])
+          }}
+        />
+      )}
 
       {/* Add Lead Modal */}
       {showAddModal && (
@@ -3341,9 +3459,13 @@ export default function LeadsPage() {
                 }}
                 hideWhatsApp={showInlineChat}
                 onArchive={(leadId: string, archive: boolean) => {
-                  handleArchiveLead(leadId, archive)
-                  setShowDetailPanel(false)
-                  setShowInlineChat(false)
+                  if (archive) {
+                    openArchiveModal(leadId, false)
+                  } else {
+                    handleArchiveLead(leadId, false)
+                    setShowDetailPanel(false)
+                    setShowInlineChat(false)
+                  }
                 }}
                 onBlock={(leadId: string) => {
                   openBlockModal(leadId, false)
@@ -3626,6 +3748,129 @@ export default function LeadsPage() {
                 className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition"
               >
                 Bloquear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Archive Reason Modal */}
+      {showArchiveModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
+            <div className="px-6 py-4 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <Archive className="w-5 h-5 text-amber-500" />
+                Archivar {archiveBatchMode ? `${selectedIds.size} lead(s)` : 'lead'}
+              </h3>
+              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del archivado. Los leads archivados no aparecerán en la vista principal ni participarán en eventos.</p>
+            </div>
+            <div className="px-6 py-4 space-y-2">
+              {[
+                'Ya no aplica al programa',
+                'Proceso finalizado',
+                'Lead duplicado',
+                'Datos incorrectos',
+                'No responde',
+              ].map(reason => (
+                <button
+                  key={reason}
+                  onClick={() => setArchiveReason(reason)}
+                  className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${
+                    archiveReason === reason
+                      ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200 font-medium'
+                      : 'text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  {reason}
+                </button>
+              ))}
+              <div className="pt-2">
+                <input
+                  type="text"
+                  placeholder="Otro motivo..."
+                  value={!['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].includes(archiveReason) ? archiveReason : ''}
+                  onChange={(e) => setArchiveReason(e.target.value)}
+                  onFocus={() => { if (['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].includes(archiveReason)) setArchiveReason('') }}
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                onClick={() => setShowArchiveModal(false)}
+                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmArchive}
+                disabled={!archiveReason}
+                className="px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700 disabled:opacity-50 transition"
+              >
+                Archivar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export Modal */}
+      {showExportModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-sm">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">
+                <Download className="w-5 h-5 text-emerald-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Exportar Leads</h3>
+                <p className="text-sm text-slate-500">{activePipeline?.name || 'Todos'}</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Formato</label>
+                <div className="flex rounded-lg border border-slate-200 overflow-hidden">
+                  <button onClick={() => setExportFormat('excel')}
+                    className={`flex-1 px-3 py-2 text-sm font-medium transition ${exportFormat === 'excel' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                    Excel (.xlsx)
+                  </button>
+                  <button onClick={() => setExportFormat('csv')}
+                    className={`flex-1 px-3 py-2 text-sm font-medium transition ${exportFormat === 'csv' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>
+                    CSV
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Alcance</label>
+                <div className="space-y-2">
+                  <label className="flex items-center gap-3 p-3 border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-50">
+                    <input type="radio" checked={exportScope === 'all'} onChange={() => setExportScope('all')} className="text-emerald-600 focus:ring-emerald-500" />
+                    <div>
+                      <p className="text-sm font-medium text-slate-700">Todos los leads del pipeline</p>
+                    </div>
+                  </label>
+                  <label className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer hover:bg-slate-50 ${activeFilterCount > 0 ? 'border-emerald-300 bg-emerald-50/50' : 'border-slate-200'}`}>
+                    <input type="radio" checked={exportScope === 'filtered'} onChange={() => setExportScope('filtered')} className="text-emerald-600 focus:ring-emerald-500" />
+                    <div>
+                      <p className="text-sm font-medium text-slate-700">Solo filtrados</p>
+                      {activeFilterCount > 0 && <p className="text-xs text-emerald-600">{activeFilterCount} filtro{activeFilterCount > 1 ? 's' : ''} activo{activeFilterCount > 1 ? 's' : ''}</p>}
+                    </div>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button onClick={() => setShowExportModal(false)} className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 text-sm">
+                Cancelar
+              </button>
+              <button onClick={handleExportLeads} disabled={exporting}
+                className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm disabled:opacity-50 flex items-center justify-center gap-2">
+                {exporting ? <><div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" /> Exportando...</> : <><Download className="w-4 h-4" /> Exportar</>}
               </button>
             </div>
           </div>

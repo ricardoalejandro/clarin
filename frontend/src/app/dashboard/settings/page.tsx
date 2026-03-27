@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { useSearchParams, useRouter } from 'next/navigation'
 import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings } from 'lucide-react'
 import { subscribeWebSocket } from '@/lib/api'
 import {
@@ -327,8 +327,16 @@ export default function SettingsPage() {
   const [devEditName, setDevEditName] = useState('')
   const [devSaving, setDevSaving] = useState(false)
 
+  // Google Contacts state
+  const [googleStatus, setGoogleStatus] = useState<{
+    connected: boolean; email: string | null; sync_limit: number; sync_count: number; configured: boolean
+  } | null>(null)
+  const [googleLoading, setGoogleLoading] = useState(false)
+  const [googleDisconnecting, setGoogleDisconnecting] = useState(false)
+
   // URL tab param
   const searchParams = useSearchParams()
+  const router = useRouter()
 
   // Pipeline management state
   interface ManagedPipeline {
@@ -653,6 +661,72 @@ export default function SettingsPage() {
   useEffect(() => {
     fetchKommoStatus()
   }, [fetchKommoStatus])
+
+  // --- Google Contacts ---
+  const fetchGoogleStatus = useCallback(async () => {
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/google/status', { headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      if (data.success) setGoogleStatus(data)
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    if (activeTab === 'integrations') fetchGoogleStatus()
+  }, [activeTab, fetchGoogleStatus])
+
+  // Handle Google redirect callback
+  useEffect(() => {
+    const googleParam = searchParams.get('google')
+    if (googleParam === 'connected') {
+      fetchGoogleStatus()
+      showMessage('success', 'Google Contacts conectado exitosamente')
+      router.replace('/dashboard/settings?tab=integrations')
+    } else if (googleParam === 'error') {
+      const msg = searchParams.get('msg') || 'Error al conectar Google Contacts'
+      showMessage('error', msg)
+      router.replace('/dashboard/settings?tab=integrations')
+    }
+  }, [searchParams, fetchGoogleStatus, router])
+
+  const handleGoogleConnect = async () => {
+    setGoogleLoading(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/google/auth-url', { headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      if (data.success && data.url) {
+        window.location.href = data.url
+      } else {
+        showMessage('error', data.error || 'Error al obtener URL de autorización')
+        setGoogleLoading(false)
+      }
+    } catch {
+      showMessage('error', 'Error de conexión')
+      setGoogleLoading(false)
+    }
+  }
+
+  const handleGoogleDisconnect = async () => {
+    if (!confirm('¿Desconectar Google Contacts? Se dejará de sincronizar todos los contactos.')) return
+    setGoogleDisconnecting(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/google/disconnect', { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      if (data.success) {
+        showMessage('success', 'Google Contacts desconectado')
+        fetchGoogleStatus()
+      } else {
+        showMessage('error', data.error || 'Error al desconectar')
+      }
+    } catch {
+      showMessage('error', 'Error de conexión')
+    } finally {
+      setGoogleDisconnecting(false)
+    }
+  }
 
   // Fetch pipelines and worker status when integrations tab is active
   useEffect(() => {
@@ -1918,6 +1992,95 @@ export default function SettingsPage() {
                   </div>
                 </div>
               )}
+
+              {/* Divider */}
+              <div className="border-t border-slate-200 pt-6">
+                <h3 className="text-sm font-medium text-slate-900">Google Contacts</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Sincroniza contactos de Clarin a Google Contacts para que WhatsApp muestre los nombres en tu teléfono Android.
+                </p>
+              </div>
+
+              {/* Google Connection Status */}
+              <div className="bg-slate-50 rounded-xl p-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    {googleStatus?.connected ? (
+                      <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                    ) : googleStatus?.configured ? (
+                      <Link2 className="w-5 h-5 text-slate-400" />
+                    ) : (
+                      <XCircle className="w-5 h-5 text-red-400" />
+                    )}
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">
+                        {googleStatus?.connected
+                          ? 'Conectado'
+                          : googleStatus?.configured
+                          ? 'No conectado'
+                          : 'No configurado (faltan credenciales)'}
+                      </p>
+                      {googleStatus?.email && (
+                        <p className="text-xs text-slate-500">{googleStatus.email}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={fetchGoogleStatus}
+                      className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-white rounded-lg transition"
+                      title="Verificar conexión"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                    {googleStatus?.connected ? (
+                      <button
+                        onClick={handleGoogleDisconnect}
+                        disabled={googleDisconnecting}
+                        className="inline-flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded-lg transition text-xs font-medium"
+                      >
+                        {googleDisconnecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
+                        Desconectar
+                      </button>
+                    ) : googleStatus?.configured ? (
+                      <button
+                        onClick={handleGoogleConnect}
+                        disabled={googleLoading}
+                        className="inline-flex items-center gap-1.5 bg-emerald-600 text-white hover:bg-emerald-700 px-3 py-1.5 rounded-lg transition text-xs font-medium shadow-sm"
+                      >
+                        {googleLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+                        Conectar Google
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                {/* Sync Quota */}
+                {googleStatus?.connected && (
+                  <div className="mt-3 pt-3 border-t border-slate-200">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs text-slate-500">Contactos sincronizados</span>
+                      <span className="text-xs font-medium text-slate-700">
+                        {googleStatus.sync_count.toLocaleString()} / {googleStatus.sync_limit.toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="w-full bg-slate-200 rounded-full h-2">
+                      <div
+                        className="bg-emerald-500 h-2 rounded-full transition-all"
+                        style={{ width: `${Math.min(100, (googleStatus.sync_count / googleStatus.sync_limit) * 100)}%` }}
+                      />
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      Sincroniza contactos individuales desde la página de Contactos o Leads.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Google info */}
+              <div className="text-xs text-slate-500 bg-blue-50 border border-blue-100 rounded-xl p-3">
+                <strong>¿Cómo funciona?</strong> Al sincronizar un contacto, se crea en Google Contacts con nombre, teléfono, email y empresa. En un teléfono Android con esa cuenta Google, WhatsApp mostrará los nombres actualizados.
+              </div>
             </div>
           )}
 

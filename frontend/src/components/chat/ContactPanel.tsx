@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { X, User, Smartphone, Tag, Pencil, Check } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { X, User, Smartphone, Tag, Pencil, Check, Archive, ArchiveRestore, ShieldBan, ShieldOff } from 'lucide-react'
 import ImageViewer from '@/components/chat/ImageViewer'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import TagInput from '@/components/TagInput'
@@ -42,6 +43,76 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   const [editNameValue, setEditNameValue] = useState('')
   const [savingName, setSavingName] = useState(false)
   const nameInputRef = useRef<HTMLInputElement>(null)
+
+  // ─── Archive / Block ───────────────────────────────────────────────────────
+  const [showArchiveModal, setShowArchiveModal] = useState(false)
+  const [archiveReason, setArchiveReason] = useState('')
+  const [archiveTargetId, setArchiveTargetId] = useState<string | null>(null)
+  const [showBlockModal, setShowBlockModal] = useState(false)
+  const [blockReason, setBlockReason] = useState('')
+  const [blockTargetId, setBlockTargetId] = useState<string | null>(null)
+
+  const getToken = () => localStorage.getItem('token') || ''
+
+  const openArchiveModal = (leadId: string) => {
+    setArchiveTargetId(leadId)
+    setArchiveReason('')
+    setShowArchiveModal(true)
+  }
+
+  const confirmArchive = async () => {
+    if (!archiveReason || !archiveTargetId) return
+    try {
+      await fetch(`/api/leads/${archiveTargetId}/archive`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ archive: true, reason: archiveReason }),
+      })
+      setShowArchiveModal(false)
+      fetchDetails()
+    } catch (err) { console.error('Failed to archive:', err) }
+  }
+
+  const handleRestoreLead = async (leadId: string) => {
+    try {
+      await fetch(`/api/leads/${leadId}/archive`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ archive: false }),
+      })
+      fetchDetails()
+    } catch (err) { console.error('Failed to restore:', err) }
+  }
+
+  const openBlockModal = (leadId: string) => {
+    setBlockTargetId(leadId)
+    setBlockReason('')
+    setShowBlockModal(true)
+  }
+
+  const confirmBlock = async () => {
+    if (!blockReason || !blockTargetId) return
+    try {
+      await fetch(`/api/leads/${blockTargetId}/block`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ block: true, reason: blockReason }),
+      })
+      setShowBlockModal(false)
+      fetchDetails()
+    } catch (err) { console.error('Failed to block:', err) }
+  }
+
+  const handleUnblock = async (leadId: string) => {
+    try {
+      await fetch(`/api/leads/${leadId}/block`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ block: false }),
+      })
+      fetchDetails()
+    } catch (err) { console.error('Failed to unblock:', err) }
+  }
 
   // Close on Escape
   useEffect(() => {
@@ -194,6 +265,12 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
               setLead(null)
               fetchDetails()
             }}
+            onArchive={(leadId: string, archive: boolean) => {
+              if (archive) openArchiveModal(leadId)
+              else handleRestoreLead(leadId)
+            }}
+            onBlock={(leadId: string) => openBlockModal(leadId)}
+            onUnblock={(leadId: string) => handleUnblock(leadId)}
             className="flex-1 min-h-0"
           />
         </div>
@@ -309,6 +386,66 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
           isOpen={showAvatarViewer}
           onClose={() => setShowAvatarViewer(false)}
         />
+      )}
+
+      {/* ═══ Archive Reason Modal ═══ */}
+      {showArchiveModal && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
+            <div className="px-6 py-4 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <Archive className="w-5 h-5 text-amber-500" />
+                Archivar lead
+              </h3>
+              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del archivado.</p>
+            </div>
+            <div className="px-6 py-4 space-y-2">
+              {['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].map(reason => (
+                <button key={reason} onClick={() => setArchiveReason(reason)} className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${archiveReason === reason ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200 font-medium' : 'text-slate-700 hover:bg-slate-50'}`}>
+                  {reason}
+                </button>
+              ))}
+              <div className="pt-2">
+                <input type="text" placeholder="Otro motivo..." value={!['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].includes(archiveReason) ? archiveReason : ''} onChange={(e) => setArchiveReason(e.target.value)} onFocus={() => { if (['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].includes(archiveReason)) setArchiveReason('') }} className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500" />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
+              <button onClick={() => setShowArchiveModal(false)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">Cancelar</button>
+              <button onClick={confirmArchive} disabled={!archiveReason} className="px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700 disabled:opacity-50 transition">Archivar</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* ═══ Block Reason Modal ═══ */}
+      {showBlockModal && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
+            <div className="px-6 py-4 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <ShieldBan className="w-5 h-5 text-red-500" />
+                Bloquear lead
+              </h3>
+              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del bloqueo. Los leads bloqueados no serán contactados.</p>
+            </div>
+            <div className="px-6 py-4 space-y-2">
+              {['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].map(reason => (
+                <button key={reason} onClick={() => setBlockReason(reason)} className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${blockReason === reason ? 'bg-red-50 text-red-700 ring-1 ring-red-200 font-medium' : 'text-slate-700 hover:bg-slate-50'}`}>
+                  {reason}
+                </button>
+              ))}
+              <div className="pt-2">
+                <input type="text" placeholder="Otro motivo..." value={!['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''} onChange={(e) => setBlockReason(e.target.value)} onFocus={() => { if (['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }} className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500" />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
+              <button onClick={() => setShowBlockModal(false)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">Cancelar</button>
+              <button onClick={confirmBlock} disabled={!blockReason} className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition">Bloquear</button>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   )

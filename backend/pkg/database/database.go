@@ -884,6 +884,7 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ`,
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS block_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS archive_reason TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_leads_archived ON leads(account_id) WHERE is_archived = true`,
 		`CREATE INDEX IF NOT EXISTS idx_leads_blocked ON leads(account_id) WHERE is_blocked = true`,
 
@@ -1125,6 +1126,29 @@ func Migrate(db *pgxpool.Pool) error {
 		 WHERE i.lead_id = l.id
 		   AND i.contact_id IS NULL
 		   AND l.contact_id IS NOT NULL`,
+
+		// ─── Google Contacts integration ──
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS google_email TEXT`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS google_access_token TEXT`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS google_refresh_token TEXT`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS google_contact_group_id TEXT`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS google_connected_at TIMESTAMPTZ`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS google_sync_limit INT DEFAULT 20000`,
+
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS google_sync BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS google_resource_name TEXT`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS google_synced_at TIMESTAMPTZ`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS google_sync_error TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_contacts_google_sync ON contacts(account_id) WHERE google_sync = TRUE`,
+
+		`CREATE TABLE IF NOT EXISTS contact_phones (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+			phone TEXT NOT NULL,
+			label TEXT DEFAULT 'mobile',
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_phones_contact_id ON contact_phones(contact_id)`,
 	}
 
 	for _, migration := range migrations {
@@ -1415,6 +1439,11 @@ func MigrateEventPipelines(db *pgxpool.Pool) error {
 
 	// Per-user Groq API key for Eros AI assistant
 	_, _ = db.Exec(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS groq_api_key TEXT DEFAULT ''`)
+
+	// Eros AI customization per user
+	_, _ = db.Exec(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS eros_model TEXT DEFAULT ''`)
+	_, _ = db.Exec(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS eros_role TEXT DEFAULT ''`)
+	_, _ = db.Exec(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS eros_instructions TEXT DEFAULT ''`)
 
 	// Saved filter for pending logbooks (bitácoras)
 	_, _ = db.Exec(ctx, `ALTER TABLE event_logbooks ADD COLUMN IF NOT EXISTS saved_filter JSONB DEFAULT NULL`)

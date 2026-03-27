@@ -31,6 +31,10 @@ type Config struct {
 	// AI Assistant
 	GeminiAPIKey string
 	GroqAPIKey   string
+	// Google Contacts OAuth
+	GoogleClientID     string
+	GoogleClientSecret string
+	GoogleRedirectURI  string
 }
 
 func Load() *Config {
@@ -63,6 +67,9 @@ func Load() *Config {
 		KommoRedirectURI:  getEnv("KOMMO_REDIRECT_URI", ""),
 		GeminiAPIKey:      getEnv("GEMINI_API_KEY", ""),
 		GroqAPIKey:        getEnv("GROQ_API_KEY", ""),
+		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
+		GoogleRedirectURI:  getEnv("GOOGLE_REDIRECT_URI", ""),
 	}
 }
 

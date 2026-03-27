@@ -122,7 +122,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 <button
                   type="button"
                   onClick={() => {
-                    const csv = 'telefono,nombre,apellido,email,empresa,notas,tags\n987654321,Juan,Pérez,juan@ejemplo.com,Empresa SA,Nota de ejemplo,"cliente, vip"'
+                    const csv = 'telefono,nombre,apellido,email,empresa,notas,dni,fecha_nacimiento,tags\n987654321,Juan,Pérez,juan@ejemplo.com,Empresa SA,Nota de ejemplo,12345678,1990-05-15,"cliente, vip"'
                     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
                     const url = URL.createObjectURL(blob)
                     const a = document.createElement('a')
@@ -138,7 +138,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 </button>
               </div>
               <p><span className="text-green-600 font-medium">Requerida:</span> phone / telefono / celular</p>
-              <p><span className="text-gray-500 font-medium">Opcionales:</span> name, email, apellido, empresa, notas, tags</p>
+              <p><span className="text-gray-500 font-medium">Opcionales:</span> name, email, apellido, empresa, notas, dni, fecha_nacimiento, tags</p>
             </div>
 
             <div className="flex gap-3 mt-5">

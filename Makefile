@@ -1,4 +1,4 @@
-.PHONY: build up down logs restart migrate seed test clean install
+.PHONY: build up down logs restart migrate seed test clean install deploy
 
 # ===================
 # Docker Compose (single file: docker-compose.yml)
@@ -58,7 +58,16 @@ test-coverage:
 clean:
 	docker compose down -v
 	rm -rf backend/sessions/*
-	rm -rf frontend/.next frontend/node_modules
+
+# Deploy with version injection
+deploy:
+	@cp CHANGELOG.md backend/CHANGELOG.md
+	@BUILD_VERSION=$$(./version.sh) && \
+	echo "🚀 Deploying Clarin CRM v$$BUILD_VERSION" && \
+	docker compose build --build-arg BUILD_VERSION=$$BUILD_VERSION backend && \
+	docker compose build --build-arg BUILD_VERSION=$$BUILD_VERSION frontend && \
+	docker compose up -d backend frontend && \
+	echo "✅ Deployed v$$BUILD_VERSION"
 
 # Install dependencies
 install:

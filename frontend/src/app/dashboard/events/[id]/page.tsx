@@ -5,10 +5,11 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import {
   ArrowLeft, Users, UserPlus, Search, Phone, MessageSquare, Mail,
   CheckCircle2, Clock, GripVertical, List, LayoutGrid, X, Plus, Trash2,
-  Filter, Send, Maximize2, MapPin, CalendarDays, Download,
+  Filter, Send, Maximize2, CalendarDays, Download,
   FileSpreadsheet, FileText, FileDown, Loader2, StickyNote,
-  Tag, CheckSquare, XCircle, Code, AlertCircle, BookOpen, Camera, Edit3,
-  ChevronRight, PenLine, Settings, Lock
+  Tag, CheckSquare, XCircle, Code, AlertCircle, AlertTriangle, BookOpen, Camera, Edit3,
+  ChevronRight, PenLine, Settings, Lock, Archive, ArchiveRestore, ShieldBan, ShieldOff,
+  MoreHorizontal, ChevronDown, RefreshCw
 } from 'lucide-react'
 import { format, formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -17,10 +18,13 @@ import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCamp
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
+import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import FormulaEditor from '@/components/FormulaEditor'
+import TagInput, { TagItem as TagInputItem } from '@/components/TagInput'
 import { Chat } from '@/types/chat'
 import { exportToExcel, exportToCSV } from '@/utils/eventExport'
 import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/eventWordReport'
+import { parseFormula, evaluateFormula } from '@/utils/formulaEvaluator'
 import { subscribeWebSocket } from '@/lib/api'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 
@@ -68,6 +72,7 @@ interface Event {
   location?: string; status: string; color: string; total_participants: number
   participant_counts?: Record<string, number>
   pipeline_id?: string; pipeline_name?: string
+  tag_formula?: string; tag_formula_type?: string; tag_formula_mode?: string
 }
 
 interface TagItem {
@@ -83,6 +88,9 @@ interface Participant {
   next_action?: string; next_action_date?: string; invited_at?: string
   confirmed_at?: string; attended_at?: string; last_interaction?: string
   tags?: TagItem[]
+  duplicate_contact?: boolean
+  is_archived?: boolean
+  is_blocked?: boolean
 }
 
 interface PipelineStage {
@@ -145,6 +153,8 @@ function participantToLead(p: Participant): any {
     assigned_to: '',
     created_at: '',
     updated_at: '',
+    is_archived: p.is_archived || false,
+    is_blocked: p.is_blocked || false,
   }
 }
 
@@ -192,6 +202,11 @@ const ParticipantCard = memo(function ParticipantCard({
           <p className="text-[13px] font-medium text-slate-900 truncate max-w-[150px]">
             {p.name || 'Sin nombre'} {p.last_name || ''}
           </p>
+          {p.duplicate_contact && (
+            <span title="Este contacto tiene otro lead en el evento" className="ml-1 text-amber-500">
+              <AlertTriangle className="w-3.5 h-3.5" />
+            </span>
+          )}
         </div>
         {!selectionMode && (
           <button
@@ -417,12 +432,19 @@ export default function EventDetailPage() {
   const [addTab, setAddTab] = useState<'search' | 'manual'>('search')
   const [manualForm, setManualForm] = useState({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
   const [leadForm, setLeadForm] = useState({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
+  const [manualFormTags, setManualFormTags] = useState<TagInputItem[]>([])
   const [leadPipelines, setLeadPipelines] = useState<{ id: string; name: string; stages: { id: string; name: string }[] }[]>([])
   const [creatingLead, setCreatingLead] = useState(false)
+
+  // Quick confirmation (contact → lead)
+  const [pendingContact, setPendingContact] = useState<SelectedPerson | null>(null)
+  const [pendingTags, setPendingTags] = useState<TagInputItem[]>([])
+  const [creatingFromConfirm, setCreatingFromConfirm] = useState(false)
 
   // Export
   const [showExportModal, setShowExportModal] = useState(false)
   const [exportFormat, setExportFormat] = useState<'excel' | 'csv' | 'word'>('excel')
+  const [exportScope, setExportScope] = useState<'all' | 'filtered'>('all')
   const [exportStyle, setExportStyle] = useState<ReportStyle>('gerencia')
   const [exportDetail, setExportDetail] = useState<DetailLevel>('detallado')
   const [exporting, setExporting] = useState(false)
@@ -431,6 +453,17 @@ export default function EventDetailPage() {
   const [showCampaignModal, setShowCampaignModal] = useState(false)
   const [creatingCampaign, setCreatingCampaign] = useState(false)
   const [campaignInitialName, setCampaignInitialName] = useState('')
+
+  // More menu
+  const [showMoreMenu, setShowMoreMenu] = useState(false)
+  const moreMenuRef = useRef<HTMLDivElement>(null)
+
+  // Google Sync
+  const [showGoogleSyncModal, setShowGoogleSyncModal] = useState(false)
+  const [googleSyncStatus, setGoogleSyncStatus] = useState<{ total: number; synced: number; pending: number; no_contact: number } | null>(null)
+  const [googleSyncLoading, setGoogleSyncLoading] = useState(false)
+  const [googleSyncing, setGoogleSyncing] = useState(false)
+  const [googleConnected, setGoogleConnected] = useState(false)
 
   // List view
   const [listParticipants, setListParticipants] = useState<Participant[]>([])
@@ -442,9 +475,6 @@ export default function EventDetailPage() {
   const [listObservations, setListObservations] = useState<Map<string, Observation[]>>(new Map())
   const [loadingListObs, setLoadingListObs] = useState<Set<string>>(new Set())
   const [listHistoryParticipant, setListHistoryParticipant] = useState<Participant | null>(null)
-  const [listHistoryFilterType, setListHistoryFilterType] = useState('')
-  const [listHistoryFilterFrom, setListHistoryFilterFrom] = useState('')
-  const [listHistoryFilterTo, setListHistoryFilterTo] = useState('')
 
   // ── Logbook (Bitácora) state ──
   interface Logbook {
@@ -906,8 +936,19 @@ export default function EventDetailPage() {
 
   const handleAddFromSelector = async (selected: SelectedPerson[]) => {
     if (selected.length === 0) return
+    // Single contact (not lead) → show quick confirmation to create lead
+    const contacts = selected.filter(p => p.source_type === 'contact')
+    const leads = selected.filter(p => p.source_type === 'lead')
+    if (contacts.length === 1 && leads.length === 0) {
+      setPendingContact(contacts[0])
+      setPendingTags([])
+      setShowAddModal(false)
+      fetchLeadPipelines()
+      return
+    }
     const parts = selected.map(p => ({
       contact_id: p.source_type === 'contact' ? p.id : undefined,
+      lead_id: p.source_type === 'lead' ? p.id : undefined,
       name: p.name, phone: p.phone || '', email: p.email || '',
     }))
     const res = await fetch(`/api/events/${eventId}/participants/bulk`, {
@@ -968,7 +1009,7 @@ export default function EventDetailPage() {
           notes: leadForm.notes || undefined,
           dni: leadForm.dni || undefined,
           birth_date: leadForm.birth_date || undefined,
-          tags: leadForm.tags.split(',').map(t => t.trim()).filter(Boolean),
+          tags: manualFormTags.map(t => t.name),
           stage_id: stageId || undefined,
         }),
       })
@@ -992,10 +1033,77 @@ export default function EventDetailPage() {
       if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingLead(false); return }
       setShowAddModal(false)
       setLeadForm({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
+      setManualFormTags([])
       fetchParticipantsPaginated()
       fetchEvent()
     } catch (e) { console.error(e); alert('Error de conexión') }
     setCreatingLead(false)
+  }
+
+  // ─── Formula validation for tag assignment ────────────────────────────────
+  const eventFormulaNode = useMemo(() => {
+    if (!event?.tag_formula || event.tag_formula_type !== 'advanced') return null
+    try { return parseFormula(event.tag_formula) } catch { return null }
+  }, [event?.tag_formula, event?.tag_formula_type])
+
+  const hasEventFormula = !!eventFormulaNode
+
+  const pendingFormulaMatch = useMemo(() => {
+    if (!eventFormulaNode) return true // no formula = always matches
+    return evaluateFormula(eventFormulaNode, pendingTags.map(t => t.name))
+  }, [eventFormulaNode, pendingTags])
+
+  const leadFormTagNames = useMemo(() => {
+    return manualFormTags.map(t => t.name)
+  }, [manualFormTags])
+
+  const leadFormFormulaMatch = useMemo(() => {
+    if (!eventFormulaNode) return true
+    return evaluateFormula(eventFormulaNode, leadFormTagNames)
+  }, [eventFormulaNode, leadFormTagNames])
+
+  // ─── Confirm: create lead from pending contact ────────────────────────────
+  const handleConfirmCreateLead = async () => {
+    if (!pendingContact) return
+    if (hasEventFormula && !pendingFormulaMatch) return
+    setCreatingFromConfirm(true)
+    try {
+      const activePipeline = leadPipelines[0]
+      const stageId = activePipeline?.stages?.[0]?.id || undefined
+      const leadRes = await fetch('/api/leads', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: pendingContact.name,
+          phone: pendingContact.phone || undefined,
+          email: pendingContact.email || undefined,
+          tags: pendingTags.map(t => t.name),
+          stage_id: stageId || undefined,
+        }),
+      })
+      const leadData = await leadRes.json()
+      if (!leadData.success) { alert(leadData.error || 'Error al crear lead'); setCreatingFromConfirm(false); return }
+      const lead = leadData.lead
+      const partRes = await fetch(`/api/events/${eventId}/participants`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lead_id: lead.id,
+          contact_id: lead.contact_id || undefined,
+          name: lead.name,
+          last_name: lead.last_name || undefined,
+          phone: lead.phone || undefined,
+          email: lead.email || undefined,
+        }),
+      })
+      const partData = await partRes.json()
+      if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingFromConfirm(false); return }
+      setPendingContact(null)
+      setPendingTags([])
+      fetchParticipantsPaginated()
+      fetchEvent()
+    } catch (e) { console.error(e); alert('Error de conexión') }
+    setCreatingFromConfirm(false)
   }
 
   // ─── Delete ─────────────────────────────────────────────────────────────────
@@ -1060,6 +1168,82 @@ export default function EventDetailPage() {
     } catch { alert('Error de conexión') }
   }
 
+  // ─── Archive / Block ───────────────────────────────────────────────────────
+  const [showArchiveModal, setShowArchiveModal] = useState(false)
+  const [archiveReason, setArchiveReason] = useState('')
+  const [archiveTargetId, setArchiveTargetId] = useState<string | null>(null)
+  const [showBlockModal, setShowBlockModal] = useState(false)
+  const [blockReason, setBlockReason] = useState('')
+  const [blockTargetId, setBlockTargetId] = useState<string | null>(null)
+
+  const openArchiveModal = (leadId: string) => {
+    setArchiveTargetId(leadId)
+    setArchiveReason('')
+    setShowArchiveModal(true)
+  }
+
+  const confirmArchive = async () => {
+    if (!archiveReason || !archiveTargetId) return
+    try {
+      await fetch(`/api/leads/${archiveTargetId}/archive`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ archive: true, reason: archiveReason }),
+      })
+      setShowArchiveModal(false)
+      setShowDetailPanel(false)
+      setShowInlineChat(false)
+      fetchEvent()
+    } catch (err) { console.error('Failed to archive:', err) }
+  }
+
+  const openBlockModal = (leadId: string) => {
+    setBlockTargetId(leadId)
+    setBlockReason('')
+    setShowBlockModal(true)
+  }
+
+  const confirmBlock = async () => {
+    if (!blockReason || !blockTargetId) return
+    try {
+      await fetch(`/api/leads/${blockTargetId}/block`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ block: true, reason: blockReason }),
+      })
+      setShowBlockModal(false)
+      setShowDetailPanel(false)
+      setShowInlineChat(false)
+      fetchEvent()
+    } catch (err) { console.error('Failed to block:', err) }
+  }
+
+  const handleUnblock = async (leadId: string) => {
+    try {
+      await fetch(`/api/leads/${leadId}/block`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ block: false }),
+      })
+      setShowDetailPanel(false)
+      setShowInlineChat(false)
+      fetchEvent()
+    } catch (err) { console.error('Failed to unblock:', err) }
+  }
+
+  const handleRestoreLead = async (leadId: string) => {
+    try {
+      await fetch(`/api/leads/${leadId}/archive`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ archive: false }),
+      })
+      setShowDetailPanel(false)
+      setShowInlineChat(false)
+      fetchEvent()
+    } catch (err) { console.error('Failed to restore:', err) }
+  }
+
   // ─── Campaign ──────────────────────────────────────────────────────────────
   const handleCreateCampaign = async (formResult: CampaignFormResult) => {
     setCreatingCampaign(true)
@@ -1111,12 +1295,37 @@ export default function EventDetailPage() {
   }
 
   // ─── Export ────────────────────────────────────────────────────────────────
+  const buildFilterParams = useCallback(() => {
+    const params = new URLSearchParams()
+    if (debouncedSearch) params.set('search', debouncedSearch)
+    if (appliedFormulaType === 'advanced' && appliedFormulaText) {
+      params.set('tag_formula', appliedFormulaText)
+    } else {
+      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+      if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
+      if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
+    }
+    if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
+    if (filterHasPhone) params.set('has_phone', 'true')
+    const dateRange = resolveParticipantDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+    if (dateRange) {
+      params.set('date_field', filterDateField)
+      if (dateRange.from) params.set('date_from', dateRange.from)
+      if (dateRange.to) params.set('date_to', dateRange.to)
+    }
+    return params
+  }, [debouncedSearch, appliedFormulaType, appliedFormulaText, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterHasPhone, filterDatePreset, filterDateFrom, filterDateTo, filterDateField])
+
   const handleExport = async () => {
     if (!event) return
     setExporting(true)
     try {
-      // Fetch ALL participants for export
-      const res = await fetch(`/api/events/${eventId}/participants`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      // Build URL with or without filters
+      const useFilters = exportFormat === 'excel' && exportScope === 'filtered' && activeFilterCount > 0
+      const params = useFilters ? buildFilterParams() : new URLSearchParams()
+      const qs = params.toString()
+      const url = `/api/events/${eventId}/participants${qs ? '?' + qs : ''}`
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } })
       const data = await res.json()
       const allP = data.success ? (data.participants || []) : []
       if (exportFormat === 'excel') { exportToExcel(event, allP) }
@@ -1397,13 +1606,26 @@ export default function EventDetailPage() {
     return () => clearTimeout(t)
   }, [searchQuery])
 
-  // WebSocket
+  // WebSocket — debounce reconciliation events to avoid refresh storms from background sync
+  const participantDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string; action?: string; event_id?: string; lead_id?: string }
       if (msg.event === 'event_participant_update' && msg.event_id === eventId) {
         // Skip refetch if we just changed a stage ourselves (prevents reverting optimistic update)
         if (msg.action === 'stage_changed' && ownStageChangeRef.current) return
+        if (msg.action === 'tag_sync_reconcile') {
+          // Background sync reconciliation — debounce to avoid refresh storms
+          if (participantDebounceRef.current) clearTimeout(participantDebounceRef.current)
+          participantDebounceRef.current = setTimeout(() => {
+            fetchParticipantsPaginated()
+            fetchEvent()
+            if (viewMode === 'list') fetchListParticipants(true)
+            participantDebounceRef.current = null
+          }, 3000)
+          return
+        }
+        // Direct user actions — refetch immediately
         fetchParticipantsPaginated()
         fetchEvent()
         if (viewMode === 'list') fetchListParticipants(true)
@@ -1421,19 +1643,24 @@ export default function EventDetailPage() {
           fetchBatchObservations(visibleIds)
         }
       }
-      // Handle lead updates — refetch participants to sync lead_stage fields from DB
-      if (msg.event === 'lead_update') {
+      // Handle lead updates — only react to actual user-initiated changes, not background sync
+      if (msg.event === 'lead_update' && msg.action !== 'synced') {
         fetchParticipantsPaginated()
         if (viewMode === 'list') fetchListParticipants(true)
       }
     })
-    return () => unsubscribe()
+    return () => {
+      unsubscribe()
+      if (participantDebounceRef.current) clearTimeout(participantDebounceRef.current)
+    }
   }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants, fetchLogbooks, listObservations, fetchBatchObservations])
 
   // Escape key
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (showGoogleSyncModal) { setShowGoogleSyncModal(false); return }
+      if (pendingContact) { setPendingContact(null); setPendingTags([]); return }
       if (showExportModal) { setShowExportModal(false); return }
       if (showDeviceSelector) { setShowDeviceSelector(false); return }
       if (showInlineChat) { setShowInlineChat(false); return }
@@ -1447,7 +1674,54 @@ export default function EventDetailPage() {
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showDetailPanel, viewMode, router, folderParam])
+  }, [showGoogleSyncModal, pendingContact, showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showDetailPanel, viewMode, router, folderParam])
+
+  // Close more menu on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setShowMoreMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  // Check if Google is connected
+  useEffect(() => {
+    fetch('/api/google/status', { headers: { Authorization: `Bearer ${getToken()}` } })
+      .then(r => r.json())
+      .then(d => { if (d.connected) setGoogleConnected(true) })
+      .catch(() => {})
+  }, [])
+
+  const fetchGoogleSyncStatus = useCallback(async () => {
+    setGoogleSyncLoading(true)
+    try {
+      const res = await fetch(`/api/events/${eventId}/google-sync-status`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      const data = await res.json()
+      if (data.success) setGoogleSyncStatus(data)
+    } catch { /* ignore */ }
+    finally { setGoogleSyncLoading(false) }
+  }, [eventId])
+
+  const handleGoogleSync = async () => {
+    setGoogleSyncing(true)
+    try {
+      const res = await fetch(`/api/events/${eventId}/google-sync`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowGoogleSyncModal(false)
+        setGoogleSyncStatus(null)
+      } else {
+        alert(data.error || 'Error al sincronizar')
+      }
+    } catch { alert('Error de conexión') }
+    finally { setGoogleSyncing(false) }
+  }
 
   // Scroll sync for kanban
   const handleTopScroll = () => {
@@ -1534,144 +1808,106 @@ export default function EventDetailPage() {
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Event Header — compact in logbook mode */}
-      <div className={`flex-shrink-0 transition-all duration-300 ease-in-out ${viewMode === 'logbook' ? 'pb-0' : 'pb-3'}`}>
-        <div className={`flex items-center gap-3 transition-all duration-300 ${viewMode === 'logbook' ? 'mb-1' : 'mb-2'}`}>
-          <button onClick={() => {
-            if (viewMode === 'logbook') { setViewMode('kanban'); setSelectedLogbook(null) }
-            else router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : ''))
-          }} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 group/name">
-              <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: event.color }} />
-              {editingEventName ? (
-                <input
-                  ref={editNameRef}
-                  value={editNameValue}
-                  onChange={e => setEditNameValue(e.target.value)}
-                  onBlur={async () => {
-                    const v = editNameValue.trim()
-                    if (v && v !== event.name) {
-                      try {
-                        await fetch(`/api/events/${eventId}`, {
-                          method: 'PUT',
-                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-                          body: JSON.stringify({ name: v }),
-                        })
-                        setEvent(prev => prev ? { ...prev, name: v } : prev)
-                      } catch (e) { console.error('[Event] rename error:', e) }
-                    }
-                    setEditingEventName(false)
-                  }}
-                  onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') { setEditingEventName(false) } }}
-                  className={`font-bold text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0 py-0 transition-all duration-300 ${viewMode === 'logbook' ? 'text-base' : 'text-xl'}`}
-                  autoFocus
-                />
-              ) : (
-                <h1
-                  className={`font-bold text-slate-900 truncate transition-all duration-300 cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded ${viewMode === 'logbook' ? 'text-base' : 'text-xl'}`}
-                  onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
-                  title="Click para editar"
-                >{event.name}</h1>
-              )}
-              {!editingEventName && (
-                <button
-                  onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
-                  className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition"
-                  title="Editar nombre"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                </button>
-              )}
-              {viewMode === 'logbook' && (
-                <span className="text-xs text-slate-400 flex-shrink-0 ml-1">· {totalParticipantCount} participantes</span>
-              )}
-            </div>
-            {viewMode !== 'logbook' && (
-              <div className="flex items-center gap-4 text-sm text-slate-500 mt-0.5 ml-5">
-                {event.event_date && (
-                  <span className="flex items-center gap-1"><CalendarDays className="w-3.5 h-3.5" />{format(new Date(event.event_date), "d MMM yyyy, HH:mm", { locale: es })}</span>
-                )}
-                {event.location && (
-                  <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" />{event.location}</span>
-                )}
-                <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" />{totalParticipantCount} participantes</span>
-              </div>
-            )}
-          </div>
-          {/* View toggle — inline right side in logbook mode */}
-          {viewMode === 'logbook' && (
-            <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden flex-shrink-0">
-              <button onClick={() => setViewMode('kanban')} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition text-slate-500 hover:bg-slate-50">
-                <LayoutGrid className="w-3.5 h-3.5" />
-              </button>
-              <button onClick={() => setViewMode('list')} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition text-slate-500 hover:bg-slate-50">
-                <List className="w-3.5 h-3.5" />
-              </button>
-            </div>
+      {/* Event Header — single compact row */}
+      <div className="flex items-center gap-3 py-2 shrink-0">
+        <button onClick={() => {
+          if (viewMode === 'logbook') { setViewMode('kanban'); setSelectedLogbook(null) }
+          else router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : ''))
+        }} className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
+          <ArrowLeft className="w-5 h-5" />
+        </button>
+        <div className="flex items-center gap-2 min-w-0 group/name">
+          <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: event.color }} />
+          {editingEventName ? (
+            <input
+              ref={editNameRef}
+              value={editNameValue}
+              onChange={e => setEditNameValue(e.target.value)}
+              onBlur={async () => {
+                const v = editNameValue.trim()
+                if (v && v !== event.name) {
+                  try {
+                    await fetch(`/api/events/${eventId}`, {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+                      body: JSON.stringify({ name: v }),
+                    })
+                    setEvent(prev => prev ? { ...prev, name: v } : prev)
+                  } catch (e) { console.error('[Event] rename error:', e) }
+                }
+                setEditingEventName(false)
+              }}
+              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') { setEditingEventName(false) } }}
+              className="font-bold text-lg text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0 py-0 min-w-[120px] max-w-[500px] w-auto"
+              size={Math.max(10, editNameValue.length)}
+              autoFocus
+            />
+          ) : (
+            <h1
+              className="font-bold text-lg text-slate-900 truncate cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded max-w-[280px]"
+              onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
+              title={event.name}
+            >{event.name}</h1>
           )}
+          {!editingEventName && (
+            <button
+              onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
+              className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition flex-shrink-0"
+              title="Editar nombre"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+            </button>
+          )}
+          <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full flex-shrink-0">{totalParticipantCount}</span>
         </div>
 
-        {/* Stage badges + Toolbar — animated collapse in logbook mode */}
-        <div className={`transition-all duration-300 ease-in-out ${viewMode === 'logbook' ? 'max-h-0 opacity-0 pointer-events-none overflow-hidden' : 'max-h-[250px] opacity-100'}`}>
-          <div className="flex items-center gap-2 flex-wrap ml-8 mb-3">
-            {stageData.map(s => (
-              <span key={s.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium" style={{ backgroundColor: hexBgLight(s.color), color: s.color }}>
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: s.color }} />
-                {s.total_count} {s.name.toLowerCase()}
-              </span>
-            ))}
-          </div>
-
-          {/* Toolbar */}
-          <div className="flex items-center gap-3 ml-8 flex-wrap">
+        {viewMode !== 'logbook' && (
+          <>
             {/* Search + Filter dropdown container */}
-            <div className="relative flex-1 max-w-xs">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Buscar participante..."
-              className="w-full pl-10 pr-10 py-2 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900 placeholder:text-slate-400"
-            />
-            <button
-              onClick={() => setShowFilterDropdown(!showFilterDropdown)}
-              className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md transition ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
-            >
-              <Filter className="w-4 h-4" />
-              {activeFilterCount > 0 && (
-                <span className="absolute -top-1 -right-1 w-4 h-4 bg-green-600 text-white text-[10px] rounded-full flex items-center justify-center">{activeFilterCount}</span>
-              )}
-            </button>
+            <div className="relative flex-1 max-w-sm">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 z-10" />
+              <input
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Buscar participante..."
+                className={`w-full pl-8 pr-3 py-1.5 bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 text-sm ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
+              />
+              <button
+                onClick={() => setShowFilterDropdown(!showFilterDropdown)}
+                className={`absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md transition ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'}`}
+              >
+                <Filter className="w-3.5 h-3.5" />
+                {activeFilterCount > 0 && (
+                  <span className="absolute -top-1 -right-1 w-4 h-4 bg-emerald-600 text-white text-[10px] rounded-full flex items-center justify-center">{activeFilterCount}</span>
+                )}
+              </button>
 
-            {/* ─── Two-Column Filter Dropdown ─── */}
-            {showFilterDropdown && (
-              <div className="absolute left-0 top-full mt-2 z-50 bg-white border border-slate-200 rounded-2xl shadow-2xl flex flex-col" style={{ width: 620, maxHeight: '70vh' }} onClick={e => e.stopPropagation()}>
-                {/* Header */}
-                <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
-                    <span className="text-sm font-semibold text-slate-800">Filtros</span>
-                    {activeFilterCount > 0 && (
-                      <span className="text-[10px] font-medium bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full">{activeFilterCount} activo{activeFilterCount > 1 ? 's' : ''}</span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {activeFilterCount > 0 && (
-                      <button
-                        onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setFilterHasPhone(false); setPFormulaType('simple'); setPFormulaText(''); setPFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setTagSearchQuery('') }}
-                        className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
-                      >
-                        Limpiar todo
+              {/* ─── Two-Column Filter Dropdown ─── */}
+              {showFilterDropdown && (
+                <div className="absolute left-0 top-full mt-1 w-[min(620px,90vw)] bg-white border border-slate-200/80 rounded-2xl shadow-2xl shadow-slate-200/50 z-50 flex flex-col max-h-[70vh]" onClick={e => e.stopPropagation()}>
+                  {/* Header */}
+                  <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
+                      <span className="text-sm font-semibold text-slate-800">Filtros</span>
+                      {activeFilterCount > 0 && (
+                        <span className="text-[10px] font-medium bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full">{activeFilterCount} activo{activeFilterCount > 1 ? 's' : ''}</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {activeFilterCount > 0 && (
+                        <button
+                          onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setFilterHasPhone(false); setPFormulaType('simple'); setPFormulaText(''); setPFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setTagSearchQuery('') }}
+                          className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
+                        >
+                          Limpiar todo
+                        </button>
+                      )}
+                      <button onClick={() => setShowFilterDropdown(false)} className="p-1 hover:bg-slate-100 rounded-lg transition-colors">
+                        <X className="w-4 h-4 text-slate-400" />
                       </button>
-                    )}
-                    <button onClick={() => setShowFilterDropdown(false)} className="p-1 hover:bg-slate-100 rounded-lg transition-colors">
-                      <X className="w-4 h-4 text-slate-400" />
-                    </button>
+                    </div>
                   </div>
-                </div>
 
                 {/* Two-Column Body */}
                 <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -1979,28 +2215,49 @@ export default function EventDetailPage() {
               </div>
             )}
           </div>
+          </>
+        )}
 
-          <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden">
-            <button onClick={() => setViewMode('kanban')} className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${viewMode === 'kanban' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
-              <LayoutGrid className="w-3.5 h-3.5" />
-            </button>
-            <button onClick={() => setViewMode('list')} className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition ${viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
-              <List className="w-3.5 h-3.5" />
-            </button>
-          </div>
+        {/* View toggle */}
+        <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden flex-shrink-0">
+          <button onClick={() => setViewMode('kanban')} className={`inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium transition ${viewMode === 'kanban' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
+            <LayoutGrid className="w-3.5 h-3.5" />
+          </button>
+          <button onClick={() => setViewMode('list')} className={`inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium transition ${viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
+            <List className="w-3.5 h-3.5" />
+          </button>
+        </div>
 
-          <button onClick={() => setViewMode(viewMode === 'logbook' ? 'kanban' : 'logbook')} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium shadow-sm transition ${viewMode === 'logbook' ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
-            <BookOpen className="w-3.5 h-3.5" />Bitácora
+        {/* ─── "Más" dropdown menu ─── */}
+        <div ref={moreMenuRef} className="relative flex-shrink-0">
+          <button
+            onClick={() => setShowMoreMenu(v => !v)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm transition-colors ${
+              showMoreMenu ? 'border-slate-400 bg-slate-100 text-slate-700'
+                : 'border-slate-300 hover:bg-slate-50 text-slate-600'
+            }`}
+            title="Más acciones"
+          >
+            <MoreHorizontal className="w-4 h-4" />
+            <span className="hidden sm:inline">Más</span>
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMoreMenu ? 'rotate-180' : ''}`} />
           </button>
 
-          {viewMode !== 'logbook' && (
-            <>
-              <button onClick={() => setShowExportModal(true)} className="flex items-center gap-2 px-3 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 text-xs font-medium shadow-sm">
-                <Download className="w-3.5 h-3.5" />Exportar
+          {showMoreMenu && (
+            <div className="absolute right-0 top-full mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+              {/* 1. Agregar contacto */}
+              <button
+                onClick={() => { setAddTab('search'); setShowAddModal(true); setShowMoreMenu(false) }}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors"
+              >
+                <UserPlus className="w-4 h-4 text-emerald-500" />
+                Agregar contacto
               </button>
 
+              {/* 2. Envío masivo */}
               <button
                 onClick={async () => {
+                  setShowMoreMenu(false)
                   fetchDevices()
                   try {
                     const res = await fetch('/api/campaigns', { headers: { Authorization: `Bearer ${getToken()}` } })
@@ -2011,21 +2268,53 @@ export default function EventDetailPage() {
                   } catch { setCampaignInitialName(`Envío - ${event?.name || ''}`) }
                   setShowCampaignModal(true)
                 }}
-                className="flex items-center gap-2 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-xs font-medium shadow-sm"
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
               >
-                <Send className="w-3.5 h-3.5" />Envío Masivo
+                <Send className="w-4 h-4 text-slate-400" />
+                Envío masivo
               </button>
 
-              <button onClick={() => { setAddTab('search'); setShowAddModal(true) }} className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-medium shadow-sm">
-                <UserPlus className="w-3.5 h-3.5" />Agregar
+              {/* 3. Sincronizar Google */}
+              {googleConnected && (
+                <button
+                  onClick={() => { setShowGoogleSyncModal(true); fetchGoogleSyncStatus(); setShowMoreMenu(false) }}
+                  className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                >
+                  <RefreshCw className="w-4 h-4 text-slate-400" />
+                  Sincronizar Google
+                </button>
+              )}
+
+              {/* 4. Crear lead */}
+              <button
+                onClick={() => { setAddTab('manual'); fetchLeadPipelines(); setShowAddModal(true); setShowMoreMenu(false) }}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+              >
+                <Plus className="w-4 h-4 text-slate-400" />
+                Crear lead
               </button>
-              <button onClick={() => { setAddTab('manual'); fetchLeadPipelines(); setShowAddModal(true) }} className="p-2 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Crear nuevo lead">
-                <Plus className="w-4 h-4" />
+
+              <div className="my-1 border-t border-slate-100" />
+
+              {/* 5. Exportar */}
+              <button
+                onClick={() => { setExportScope(activeFilterCount > 0 ? 'filtered' : 'all'); setShowExportModal(true); setShowMoreMenu(false) }}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+              >
+                <Download className="w-4 h-4 text-slate-400" />
+                Exportar
               </button>
-            </>
+
+              {/* 6. Bitácora */}
+              <button
+                onClick={() => { setViewMode(viewMode === 'logbook' ? 'kanban' : 'logbook'); setShowMoreMenu(false) }}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+              >
+                <BookOpen className="w-4 h-4 text-slate-400" />
+                Bitácora
+              </button>
+            </div>
           )}
-        </div>
-        {/* End of animated collapse wrapper */}
         </div>
       </div>
 
@@ -2113,7 +2402,7 @@ export default function EventDetailPage() {
                     >
                       <div
                         className={`flex items-start group border-b border-slate-200/80 hover:bg-emerald-50/40 hover:shadow-sm transition-all duration-150 cursor-pointer ${
-                          detailParticipant?.id === p.id ? 'bg-emerald-50/60 border-l-2 border-l-emerald-500' : 'border-l-2 border-l-transparent'
+                          detailParticipant?.id === p.id ? 'bg-emerald-100 border-l-[3px] border-l-emerald-500 shadow-sm ring-1 ring-emerald-200/60' : 'border-l-[3px] border-l-transparent'
                         }`}
                         onClick={() => openDetailPanel(p)}
                       >
@@ -2146,7 +2435,7 @@ export default function EventDetailPage() {
                           ) : <span className="text-[10px] text-slate-300">—</span>}
                         </div>
                         <div className="px-3 py-2.5 flex-1 cursor-pointer hover:bg-slate-50 rounded-lg transition-colors"
-                          onClick={(e) => { e.stopPropagation(); if (obs && obs.length > 0) { setListHistoryParticipant(p); setListHistoryFilterType(''); setListHistoryFilterFrom(''); setListHistoryFilterTo('') } }}
+                          onClick={(e) => { e.stopPropagation(); if (obs && obs.length > 0) { setListHistoryParticipant(p) } }}
                         >
                           {loadingListObs.has(p.id) ? (
                             <div className="flex items-center gap-2">
@@ -2886,66 +3175,18 @@ export default function EventDetailPage() {
       )}
 
       {/* ═══ List History Modal ═══ */}
-      {listHistoryParticipant && (() => {
-        const historyObs = listObservations.get(listHistoryParticipant.id) || []
-        const filtered = historyObs.filter(obs => {
-          if (listHistoryFilterType && obs.type !== listHistoryFilterType) return false
-          if (listHistoryFilterFrom && new Date(obs.created_at) < new Date(listHistoryFilterFrom)) return false
-          if (listHistoryFilterTo) { const to = new Date(listHistoryFilterTo); to.setDate(to.getDate() + 1); if (new Date(obs.created_at) >= to) return false }
-          return true
-        })
-        return (
-          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setListHistoryParticipant(null)}>
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col border border-slate-100" onClick={(e) => e.stopPropagation()}>
-              <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-                <div>
-                  <h2 className="text-base font-semibold text-slate-900">Historial Completo</h2>
-                  <p className="text-sm text-slate-500">{listHistoryParticipant.name || 'Sin nombre'} — {filtered.length} registros</p>
-                </div>
-                <button onClick={() => setListHistoryParticipant(null)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition"><X className="w-5 h-5" /></button>
-              </div>
-              <div className="px-6 py-3 border-b border-slate-100 bg-slate-50">
-                <div className="flex items-center gap-4 flex-wrap">
-                  <div>
-                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Tipo</label>
-                    <select value={listHistoryFilterType} onChange={(e) => setListHistoryFilterType(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white">
-                      <option value="">Todos</option><option value="note">Nota</option><option value="call">Llamada</option><option value="whatsapp">WhatsApp</option><option value="email">Email</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Desde</label>
-                    <input type="date" value={listHistoryFilterFrom} onChange={(e) => setListHistoryFilterFrom(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 block font-semibold">Hasta</label>
-                    <input type="date" value={listHistoryFilterTo} onChange={(e) => setListHistoryFilterTo(e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-xl text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500 bg-white" />
-                  </div>
-                </div>
-              </div>
-              <div className="flex-1 overflow-y-auto p-6">
-                {filtered.length === 0 ? (
-                  <p className="text-sm text-slate-400 text-center py-10">No hay registros</p>
-                ) : (
-                  <div className="space-y-3">
-                    {filtered.map(obs => (
-                      <div key={obs.id} className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                        <div className="flex items-center gap-2 mb-1.5">
-                          <span className={`px-2.5 py-0.5 text-xs rounded-lg font-semibold ${obs.type === 'note' ? 'bg-yellow-100 text-yellow-700' : obs.type === 'call' ? 'bg-blue-100 text-blue-700' : obs.type === 'whatsapp' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-700'}`}>
-                            {obs.type === 'note' ? 'Nota' : obs.type === 'call' ? 'Llamada' : obs.type === 'whatsapp' ? 'WhatsApp' : obs.type}
-                          </span>
-                          <span className="text-xs text-slate-400">{format(new Date(obs.created_at), "d MMM yyyy, HH:mm", { locale: es })}</span>
-                        </div>
-                        <p className="text-sm text-slate-800 whitespace-pre-wrap">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
-                        {obs.created_by_name && <span className="text-xs text-slate-400 mt-1.5 block">por {obs.created_by_name}</span>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )
-      })()}
+      {listHistoryParticipant && (
+        <ObservationHistoryModal
+          isOpen={true}
+          onClose={() => setListHistoryParticipant(null)}
+          leadId={listHistoryParticipant.lead_id || listHistoryParticipant.id}
+          name={listHistoryParticipant.name || 'Sin nombre'}
+          observations={listObservations.get(listHistoryParticipant.id) || []}
+          onObservationChange={() => {
+            fetchBatchObservations([listHistoryParticipant.id])
+          }}
+        />
+      )}
 
       {/* ═══ Detail Panel (Slide-over) with Inline Chat ═══ */}
       {(showDetailPanel || showInlineChat) && detailParticipant && (
@@ -3088,6 +3329,12 @@ export default function EventDetailPage() {
                 }}
                 onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
                 onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                onArchive={(leadId: string, archive: boolean) => {
+                  if (archive) openArchiveModal(leadId)
+                  else handleRestoreLead(leadId)
+                }}
+                onBlock={(leadId: string) => openBlockModal(leadId)}
+                onUnblock={(leadId: string) => handleUnblock(leadId)}
                 onObservationChange={() => {
                   if (viewMode === 'list') {
                     setListObservations(new Map())
@@ -3102,6 +3349,64 @@ export default function EventDetailPage() {
                 }}
                 hideWhatsApp={showInlineChat}
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Archive Reason Modal ═══ */}
+      {showArchiveModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
+            <div className="px-6 py-4 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <Archive className="w-5 h-5 text-amber-500" />
+                Archivar lead
+              </h3>
+              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del archivado.</p>
+            </div>
+            <div className="px-6 py-4 space-y-2">
+              {['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].map(reason => (
+                <button key={reason} onClick={() => setArchiveReason(reason)} className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${archiveReason === reason ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200 font-medium' : 'text-slate-700 hover:bg-slate-50'}`}>
+                  {reason}
+                </button>
+              ))}
+              <div className="pt-2">
+                <input type="text" placeholder="Otro motivo..." value={!['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].includes(archiveReason) ? archiveReason : ''} onChange={(e) => setArchiveReason(e.target.value)} onFocus={() => { if (['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].includes(archiveReason)) setArchiveReason('') }} className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500" />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
+              <button onClick={() => setShowArchiveModal(false)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">Cancelar</button>
+              <button onClick={confirmArchive} disabled={!archiveReason} className="px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700 disabled:opacity-50 transition">Archivar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Block Reason Modal ═══ */}
+      {showBlockModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
+            <div className="px-6 py-4 border-b border-slate-200">
+              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                <ShieldBan className="w-5 h-5 text-red-500" />
+                Bloquear lead
+              </h3>
+              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del bloqueo. Los leads bloqueados no serán contactados.</p>
+            </div>
+            <div className="px-6 py-4 space-y-2">
+              {['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].map(reason => (
+                <button key={reason} onClick={() => setBlockReason(reason)} className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${blockReason === reason ? 'bg-red-50 text-red-700 ring-1 ring-red-200 font-medium' : 'text-slate-700 hover:bg-slate-50'}`}>
+                  {reason}
+                </button>
+              ))}
+              <div className="pt-2">
+                <input type="text" placeholder="Otro motivo..." value={!['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''} onChange={(e) => setBlockReason(e.target.value)} onFocus={() => { if (['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }} className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500" />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
+              <button onClick={() => setShowBlockModal(false)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">Cancelar</button>
+              <button onClick={confirmBlock} disabled={!blockReason} className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition">Bloquear</button>
             </div>
           </div>
         </div>
@@ -3174,8 +3479,27 @@ export default function EventDetailPage() {
                   </div>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Etiquetas</label>
-                  <input value={leadForm.tags} onChange={e => setLeadForm(f => ({ ...f, tags: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="ventas, premium (separadas por coma)" />
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Etiquetas {hasEventFormula && <span className="text-slate-400 font-normal">— requeridas por la fórmula</span>}
+                  </label>
+                  <div className={`rounded-xl transition-all ${hasEventFormula ? (leadFormFormulaMatch && manualFormTags.length > 0 ? 'ring-2 ring-emerald-400' : 'ring-2 ring-red-400') : ''}`}>
+                    <TagInput
+                      entityType="lead"
+                      entityId=""
+                      assignedTags={manualFormTags}
+                      onTagsChange={setManualFormTags}
+                      localMode
+                    />
+                  </div>
+                  {hasEventFormula && !leadFormFormulaMatch && manualFormTags.length > 0 && (
+                    <p className="text-xs text-red-500 mt-1">Las etiquetas no coinciden con la fórmula del evento</p>
+                  )}
+                  {hasEventFormula && leadFormFormulaMatch && manualFormTags.length > 0 && (
+                    <p className="text-xs text-emerald-600 mt-1">✓ Coincide con la fórmula del evento</p>
+                  )}
+                  {hasEventFormula && manualFormTags.length === 0 && (
+                    <p className="text-xs text-amber-500 mt-1">Agrega etiquetas que coincidan con la fórmula del evento</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Notas</label>
@@ -3187,11 +3511,96 @@ export default function EventDetailPage() {
               </button>
             </div>
             <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
-              <button onClick={() => { setShowAddModal(false); setLeadForm({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' }) }} className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
+              <button onClick={() => { setShowAddModal(false); setLeadForm({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' }); setManualFormTags([]) }} className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
                 Cancelar
               </button>
-              <button onClick={handleCreateLeadAndAdd} disabled={!leadForm.name || creatingLead} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">
+              <button onClick={handleCreateLeadAndAdd} disabled={!leadForm.name || creatingLead || (hasEventFormula && !leadFormFormulaMatch)} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">
                 {creatingLead ? 'Creando...' : 'Crear Lead'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Quick Confirmation — Create Lead from Contact ═══ */}
+      {pendingContact && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setPendingContact(null); setPendingTags([]) }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-100" onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-slate-100">
+              <h2 className="text-lg font-semibold text-slate-900">Crear Lead y Agregar</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Se creará un lead para este contacto y se agregará al evento</p>
+            </div>
+            <div className="p-6 space-y-4">
+              {/* Contact info */}
+              <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
+                <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-sm">
+                  {(pendingContact.name || '?')[0]?.toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-slate-900 truncate">{pendingContact.name || 'Sin nombre'}</p>
+                  {pendingContact.phone && <p className="text-xs text-slate-500">{pendingContact.phone}</p>}
+                </div>
+              </div>
+
+              {/* Pipeline & Stage */}
+              {leadPipelines.length > 0 && leadPipelines[0].stages?.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Pipeline / Etapa</label>
+                  <div className="flex gap-2">
+                    <div className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 truncate">
+                      {leadPipelines[0].name}
+                    </div>
+                    <select
+                      value={leadForm.stage_id || leadPipelines[0].stages[0]?.id || ''}
+                      onChange={(e) => setLeadForm(f => ({ ...f, stage_id: e.target.value }))}
+                      className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
+                    >
+                      {leadPipelines[0].stages.map((st: { id: string; name: string }) => (
+                        <option key={st.id} value={st.id}>{st.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {/* Tags with formula validation */}
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Etiquetas {hasEventFormula && <span className="text-slate-400 font-normal">— requeridas por la fórmula</span>}
+                </label>
+                <div className={`rounded-xl transition-all ${hasEventFormula ? (pendingFormulaMatch ? 'ring-2 ring-emerald-400' : 'ring-2 ring-red-400') : ''}`}>
+                  <TagInput
+                    entityType="lead"
+                    entityId=""
+                    assignedTags={pendingTags}
+                    onTagsChange={setPendingTags}
+                    localMode
+                  />
+                </div>
+                {hasEventFormula && !pendingFormulaMatch && pendingTags.length > 0 && (
+                  <p className="text-xs text-red-500 mt-1">Las etiquetas no coinciden con la fórmula del evento</p>
+                )}
+                {hasEventFormula && pendingFormulaMatch && pendingTags.length > 0 && (
+                  <p className="text-xs text-emerald-600 mt-1">✓ Coincide con la fórmula del evento</p>
+                )}
+                {hasEventFormula && pendingTags.length === 0 && (
+                  <p className="text-xs text-amber-500 mt-1">Agrega etiquetas que coincidan con la fórmula del evento</p>
+                )}
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
+              <button
+                onClick={() => { setPendingContact(null); setPendingTags([]) }}
+                className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleConfirmCreateLead}
+                disabled={creatingFromConfirm || (hasEventFormula && !pendingFormulaMatch)}
+                className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm"
+              >
+                {creatingFromConfirm ? 'Creando...' : 'Crear Lead y Agregar'}
               </button>
             </div>
           </div>
@@ -3293,6 +3702,35 @@ export default function EventDetailPage() {
                   ))}
                 </div>
               </div>
+              {exportFormat === 'excel' && activeFilterCount > 0 && (
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 block">Alcance</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button onClick={() => setExportScope('all')}
+                      className={`flex items-center gap-3 p-3.5 rounded-xl border-2 text-left transition-all ${
+                        exportScope === 'all' ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      <Users className={`w-5 h-5 flex-shrink-0 ${exportScope === 'all' ? 'text-emerald-600' : 'text-slate-400'}`} />
+                      <div>
+                        <span className={`text-sm font-semibold ${exportScope === 'all' ? 'text-slate-900' : 'text-slate-600'}`}>Todos</span>
+                        <p className="text-[11px] text-slate-400">Todos los participantes</p>
+                      </div>
+                    </button>
+                    <button onClick={() => setExportScope('filtered')}
+                      className={`flex items-center gap-3 p-3.5 rounded-xl border-2 text-left transition-all ${
+                        exportScope === 'filtered' ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      <Filter className={`w-5 h-5 flex-shrink-0 ${exportScope === 'filtered' ? 'text-emerald-600' : 'text-slate-400'}`} />
+                      <div>
+                        <span className={`text-sm font-semibold ${exportScope === 'filtered' ? 'text-slate-900' : 'text-slate-600'}`}>Filtrados</span>
+                        <p className="text-[11px] text-slate-400">{totalParticipantCount} participantes</p>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+              )}
               {exportFormat === 'word' && (
                 <div className="space-y-5">
                   <div>
@@ -3343,6 +3781,101 @@ export default function EventDetailPage() {
                 } disabled:opacity-50`}
               >
                 {exporting ? <><Loader2 className="w-4 h-4 animate-spin" />Generando...</> : <><Download className="w-4 h-4" />{exportFormat === 'excel' ? 'Descargar Excel' : exportFormat === 'csv' ? 'Descargar CSV' : 'Generar Informe'}</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Google Sync Modal ═══ */}
+      {showGoogleSyncModal && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4"
+          onClick={() => !googleSyncing && setShowGoogleSyncModal(false)}
+          onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); if (!googleSyncing) setShowGoogleSyncModal(false) } }}
+        >
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="px-6 py-5 border-b border-slate-100 bg-gradient-to-r from-blue-50 to-indigo-50/50">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                    <RefreshCw className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-900">Sincronizar con Google</h2>
+                    <p className="text-xs text-slate-500 mt-0.5">Contactos de Google del evento</p>
+                  </div>
+                </div>
+                <button onClick={() => !googleSyncing && setShowGoogleSyncModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="p-6">
+              {googleSyncLoading ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="w-6 h-6 animate-spin text-blue-500" />
+                </div>
+              ) : googleSyncStatus ? (
+                <div className="space-y-4">
+                  {/* Stats grid */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-slate-50 rounded-xl p-4 text-center">
+                      <p className="text-2xl font-bold text-slate-900 tabular-nums">{googleSyncStatus.total}</p>
+                      <p className="text-xs text-slate-500 mt-1">Total participantes</p>
+                    </div>
+                    <div className="bg-emerald-50 rounded-xl p-4 text-center">
+                      <p className="text-2xl font-bold text-emerald-600 tabular-nums">{googleSyncStatus.synced}</p>
+                      <p className="text-xs text-emerald-600/70 mt-1">Ya sincronizados</p>
+                    </div>
+                    <div className="bg-amber-50 rounded-xl p-4 text-center">
+                      <p className="text-2xl font-bold text-amber-600 tabular-nums">{googleSyncStatus.pending}</p>
+                      <p className="text-xs text-amber-600/70 mt-1">Pendientes</p>
+                    </div>
+                    <div className="bg-slate-50 rounded-xl p-4 text-center">
+                      <p className="text-2xl font-bold text-slate-400 tabular-nums">{googleSyncStatus.no_contact}</p>
+                      <p className="text-xs text-slate-400 mt-1">Sin contacto</p>
+                    </div>
+                  </div>
+
+                  {googleSyncStatus.pending > 0 && (
+                    <p className="text-xs text-slate-500 text-center">
+                      Se sincronizarán {googleSyncStatus.pending} contacto{googleSyncStatus.pending !== 1 ? 's' : ''} en segundo plano.
+                    </p>
+                  )}
+                  {googleSyncStatus.pending === 0 && (
+                    <p className="text-xs text-emerald-600 text-center font-medium">
+                      Todos los contactos ya están sincronizados con Google.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500 text-center py-8">No se pudo obtener el estado de sincronización.</p>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
+              <button
+                onClick={() => !googleSyncing && setShowGoogleSyncModal(false)}
+                disabled={googleSyncing}
+                className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100 disabled:opacity-50 transition-colors"
+              >
+                Cerrar
+              </button>
+              <button
+                onClick={handleGoogleSync}
+                disabled={googleSyncing || !googleSyncStatus || googleSyncStatus.pending === 0}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                {googleSyncing ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" />Sincronizando...</>
+                ) : (
+                  <><RefreshCw className="w-4 h-4" />Sincronizar todos</>
+                )}
               </button>
             </div>
           </div>

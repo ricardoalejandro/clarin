@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/formula"
+	googleclient "github.com/naperu/clarin/internal/google"
 	"golang.org/x/crypto/bcrypt"
 	"github.com/naperu/clarin/internal/kommo"
 	"github.com/naperu/clarin/internal/repository"
@@ -51,9 +53,12 @@ type Server struct {
 	storage  *storage.Storage
 	kommoSync *kommo.SyncService
 	cache    *cache.Cache
+	googleClient *googleclient.Client
+	version   string
+	changelog string
 }
 
-func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, c *cache.Cache) *Server {
+func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, c *cache.Cache, gc *googleclient.Client, version string) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:               "Clarin CRM",
 		BodyLimit:             32 * 1024 * 1024, // 32MB max upload
@@ -126,19 +131,49 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		AllowCredentials: true,
 	}))
 
-	server := &Server{
-		app:      app,
-		cfg:      cfg,
-		services: services,
-		repos:    repos,
-		hub:      hub,
-		pool:     pool,
-		storage:  store,
-		kommoSync: kommoSyncSvc,
-		cache:    c,
+	// Load changelog content from file (copied during deploy)
+	changelogContent := ""
+	for _, path := range []string{"CHANGELOG.md", "/app/CHANGELOG.md"} {
+		if data, err := os.ReadFile(path); err == nil {
+			changelogContent = string(data)
+			break
+		}
 	}
 
+	server := &Server{
+		app:          app,
+		cfg:          cfg,
+		services:     services,
+		repos:        repos,
+		hub:          hub,
+		pool:         pool,
+		storage:      store,
+		kommoSync:    kommoSyncSvc,
+		cache:        c,
+		googleClient: gc,
+		version:      version,
+		changelog:    changelogContent,
+	}
+
+	// Version header middleware — adds X-Clarin-Version to all API responses
+	app.Use(func(c *fiber.Ctx) error {
+		c.Set("X-Clarin-Version", server.version)
+		return c.Next()
+	})
+
 	server.setupRoutes()
+
+	// Broadcast version update to all connected clients after a short delay
+	// This covers the case where users are connected when a new version is deployed
+	if hub != nil {
+		go func() {
+			time.Sleep(15 * time.Second)
+			hub.BroadcastToAll(ws.EventVersionUpdate, map[string]interface{}{
+				"version": version,
+			})
+		}()
+	}
+
 	return server
 }
 
@@ -148,6 +183,9 @@ func (s *Server) setupRoutes() {
 
 	// API routes
 	api := s.app.Group("/api")
+
+	// Version endpoint — public, returns version info and changelog
+	api.Get("/version", s.handleGetVersion)
 
 	// Device health endpoint (protected) — detailed per-device metrics
 	// Registered after auth middleware setup below
@@ -250,10 +288,13 @@ func (s *Server) setupRoutes() {
 	leads.Get("/", s.handleGetLeads)
 	leads.Get("/paginated", s.handleGetLeadsPaginated)
 	leads.Get("/list-paginated", s.handleGetLeadsListPaginated)
+	leads.Get("/counts", s.handleGetLeadCounts)
 	leads.Get("/by-stage/:stageId", s.handleGetLeadsByStage)
 	leads.Post("/", s.handleCreateLead)
 	leads.Delete("/batch", s.handleDeleteLeadsBatch)
 	leads.Post("/observations/batch", s.handleBatchLeadObservations)
+	leads.Patch("/batch/archive", s.handleArchiveLeadsBatch)
+	leads.Patch("/batch/block", s.handleBlockLeadsBatch)
 	leads.Get("/:id", s.handleGetLead)
 	leads.Put("/:id", s.handleUpdateLead)
 	leads.Delete("/:id", s.handleDeleteLead)
@@ -261,9 +302,6 @@ func (s *Server) setupRoutes() {
 	leads.Patch("/:id/stage", s.handleUpdateLeadStage)
 	leads.Get("/:id/interactions", s.handleGetLeadInteractions)
 	leads.Post("/:id/sync-kommo", s.handleSyncLeadFromKommo)
-	leads.Get("/counts", s.handleGetLeadCounts)
-	leads.Patch("/batch/archive", s.handleArchiveLeadsBatch)
-	leads.Patch("/batch/block", s.handleBlockLeadsBatch)
 	leads.Patch("/:id/archive", s.handleArchiveLead)
 	leads.Patch("/:id/block", s.handleBlockLead)
 
@@ -349,9 +387,11 @@ func (s *Server) setupRoutes() {
 	contacts.Post("/", s.handleCreateContact)
 	contacts.Post("/bulk", s.handleCreateContactsBulk)
 	contacts.Get("/duplicates", s.handleGetContactDuplicates)
+	contacts.Get("/lead-duplicates", s.handleGetContactLeadDuplicates)
 	contacts.Post("/merge", s.handleMergeContacts)
 	contacts.Delete("/batch", s.handleDeleteContactsBatch)
 	contacts.Get("/:id", s.handleGetContact)
+	contacts.Get("/:id/leads", s.handleGetContactLeads)
 	contacts.Put("/:id", s.handleUpdateContact)
 	contacts.Post("/:id/reset", s.handleResetContactFromDevice)
 	contacts.Post("/:id/sync-kommo", s.handleSyncContactFromKommo)
@@ -404,6 +444,10 @@ func (s *Server) setupRoutes() {
 	events.Post("/:id/participants/:pid/check-tag-impact", s.handleCheckTagImpact)
 	events.Post("/:id/campaign", s.handleCreateCampaignFromEvent)
 
+	// Event Google Contacts sync
+	events.Get("/:id/google-sync-status", s.handleEventGoogleSyncStatus)
+	events.Post("/:id/google-sync", s.handleEventGoogleSync)
+
 	// Event Logbook (Bitácora) routes
 	events.Get("/:id/logbooks", s.handleGetEventLogbooks)
 	events.Post("/:id/logbooks", s.handleCreateEventLogbook)
@@ -442,6 +486,22 @@ func (s *Server) setupRoutes() {
 	kommoGroup.Delete("/pipelines/:kommoId/connect", s.handleKommoDisconnectPipeline)
 	kommoGroup.Get("/sync/status", s.handleKommoSyncStatus)
 	kommoGroup.Get("/sync/full-status", s.handleKommoFullSyncStatus)
+
+	// Google Contacts integration routes
+	googleGroup := protected.Group("/google", s.requirePermission(domain.PermIntegrations))
+	googleGroup.Get("/auth-url", s.handleGoogleAuthURL)
+	googleGroup.Delete("/disconnect", s.handleGoogleDisconnect)
+	googleGroup.Get("/status", s.handleGoogleStatus)
+	// Google callback (public — called by Google redirect, state carries accountID)
+	api.Get("/google/callback", s.handleGoogleCallback)
+	// Google Contacts sync routes (requires contacts permission)
+	googleContacts := protected.Group("/google/contacts", s.requirePermission(domain.PermContacts))
+	googleContacts.Post("/:id/sync", s.handleGoogleSyncContact)
+	googleContacts.Delete("/:id/sync", s.handleGoogleDesyncContact)
+	googleContacts.Post("/batch/sync", s.handleGoogleBatchSync)
+	googleContacts.Post("/batch/desync", s.handleGoogleBatchDesync)
+	googleContacts.Post("/batch/sync-from-leads", s.handleGoogleBatchSyncFromLeads)
+	googleContacts.Post("/batch/desync-from-leads", s.handleGoogleBatchDesyncFromLeads)
 
 	// Automation routes
 	automations := protected.Group("/automations", s.requirePermission(domain.PermLeads))
@@ -520,6 +580,7 @@ func (s *Server) setupRoutes() {
 	protected.Get("/ai/config", s.handleGetAIConfig)
 	protected.Put("/ai/config", s.handleSetAIConfig)
 	protected.Post("/ai/config/validate", s.handleValidateAIConfig)
+	protected.Post("/ai/models", s.handleListAIModels)
 	protected.Post("/ai/chat", s.handleAIChat)
 	protected.Get("/ai/conversations", s.handleListErosConversations)
 	protected.Get("/ai/conversations/:id", s.handleGetErosConversation)
@@ -2152,6 +2213,32 @@ func buildAdvancedFormulaSQL(formulaText string, accountID uuid.UUID, args []int
 	return clause, args, argIdx, nil
 }
 
+// buildAdvancedFormulaSQLAll is like buildAdvancedFormulaSQL but uses BuildSQLAll
+// which does NOT filter by is_archived/is_blocked.
+func buildAdvancedFormulaSQLAll(formulaText string, accountID uuid.UUID, args []interface{}, argIdx int) (string, []interface{}, int, error) {
+	ast, err := formula.Parse(formulaText)
+	if err != nil {
+		return "", args, argIdx, err
+	}
+	if ast == nil {
+		return "", args, argIdx, nil
+	}
+	innerSQL, innerArgs, err := formula.BuildSQLAll(ast, accountID)
+	if err != nil {
+		return "", args, argIdx, err
+	}
+	remappedSQL := innerSQL
+	for i := len(innerArgs); i >= 1; i-- {
+		old := fmt.Sprintf("$%d", i)
+		new := fmt.Sprintf("$%d", argIdx+i-1)
+		remappedSQL = strings.ReplaceAll(remappedSQL, old, new)
+	}
+	clause := fmt.Sprintf("l.id IN (%s)", remappedSQL)
+	args = append(args, innerArgs...)
+	argIdx += len(innerArgs)
+	return clause, args, argIdx, nil
+}
+
 // handleGetLeadsPaginated returns leads grouped by stage with server-side filtering, first N per stage + total counts.
 // This enables instant load for any number of leads (100K+) — only the first page per column is returned.
 func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
@@ -2463,6 +2550,82 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		log.Printf("[LEADS] Unassigned error: %v", unassignedErr)
 	}
 
+	// Hidden by status: count leads matching filters (ignoring status) to show how many are hidden
+	hiddenByStatus := 0
+	hasFormulaOrTagFilter := tagFormulaRaw != "" || len(tagNames) > 0 || len(excludeTagNames) > 0
+	if statusFilter != "all" && hasFormulaOrTagFilter {
+		hArgs := []interface{}{accountID}
+		hIdx := 2
+		hClauses := []string{"l.account_id = $1"}
+		// NO status filter — count ALL statuses
+		if pipelineID != "" {
+			if pid, err := uuid.Parse(pipelineID); err == nil {
+				hClauses = append(hClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", hIdx))
+				hArgs = append(hArgs, pid)
+				hIdx++
+			}
+		}
+		if search != "" {
+			searchPattern := "%" + strings.ToLower(search) + "%"
+			hClauses = append(hClauses, fmt.Sprintf(
+				"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
+				hIdx, hIdx, hIdx, hIdx, hIdx,
+			))
+			hArgs = append(hArgs, searchPattern)
+			hIdx++
+		}
+		if len(deviceUUIDs) > 0 {
+			hClauses = append(hClauses, fmt.Sprintf("l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($%d))", hIdx))
+			hArgs = append(hArgs, deviceUUIDs)
+			hIdx++
+		}
+		if tagFormulaRaw != "" {
+			fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQLAll(tagFormulaRaw, accountID, hArgs, hIdx)
+			if fErr == nil && fSQL != "" {
+				hClauses = append(hClauses, fSQL)
+				hArgs = newArgs
+				hIdx = newIdx
+			}
+		} else if len(tagNames) > 0 || len(excludeTagNames) > 0 {
+			tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, hArgs, hIdx)
+			if tagSQL != "" {
+				hClauses = append(hClauses, tagSQL)
+				hArgs = newArgs
+				hIdx = newIdx
+			}
+		}
+		if len(stageIDs) > 0 {
+			var validStageUUIDs []uuid.UUID
+			for _, sid := range stageIDs {
+				if id, err := uuid.Parse(strings.TrimSpace(sid)); err == nil {
+					validStageUUIDs = append(validStageUUIDs, id)
+				}
+			}
+			if len(validStageUUIDs) > 0 {
+				hClauses = append(hClauses, fmt.Sprintf("l.stage_id = ANY($%d)", hIdx))
+				hArgs = append(hArgs, validStageUUIDs)
+				hIdx++
+			}
+		}
+		addDateFilter(c, "l", leadDateFields, &hClauses, &hArgs, &hIdx)
+		hWhereSQL := strings.Join(hClauses, " AND ")
+		var totalAll int
+		err := s.repos.DB().QueryRow(c.Context(),
+			fmt.Sprintf("SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id WHERE %s", hWhereSQL),
+			hArgs...,
+		).Scan(&totalAll)
+		if err == nil {
+			visibleTotal := unassignedCount
+			for _, sc := range counts {
+				visibleTotal += sc.Count
+			}
+			hiddenByStatus = totalAll - visibleTotal
+			if hiddenByStatus < 0 {
+				hiddenByStatus = 0
+			}
+		}
+	}
+
 	// Assign tags to leads
 	for _, lead := range paginatedLeads {
 		lead.StructuredTags = tagMap[lead.ID]
@@ -2578,7 +2741,8 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			"leads":       unassignedLeads,
 			"has_more":    unassignedCount > len(unassignedLeads),
 		},
-		"all_tags": tagsList,
+		"all_tags":         tagsList,
+		"hidden_by_status": hiddenByStatus,
 	})
 }
 
@@ -3007,6 +3171,7 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		DNI       string     `json:"dni"`
 		BirthDate *string    `json:"birth_date"`
 		StageID   *uuid.UUID `json:"stage_id"`
+		Tags      []string   `json:"tags"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -3154,6 +3319,13 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 
 	if err := s.services.Lead.Create(c.Context(), lead); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	// Assign tags if provided
+	if len(req.Tags) > 0 {
+		if err := s.repos.Tag.SyncLeadTagsByNames(c.Context(), accountID, lead.ID, req.Tags); err != nil {
+			log.Printf("[API] Failed to sync tags for new lead %s: %v", lead.ID, err)
+		}
 	}
 
 	// Push new lead to Kommo (async, only if pipeline is Kommo-connected)
@@ -3387,6 +3559,23 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 		}
 	}
 
+	// Auto-sync to Google Contacts if linked contact is synced
+	if s.googleClient != nil && lead.ContactID != nil {
+		go func() {
+			contact, err := s.repos.Contact.GetByID(context.Background(), *lead.ContactID)
+			if err == nil && contact != nil && contact.GoogleSync {
+				log.Printf("[GOOGLE] Auto-sync triggered from handleUpdateLead for lead %s → contact %s (google_sync=%v)", lead.ID, contact.ID, contact.GoogleSync)
+				if _, err := s.syncContactToGoogle(context.Background(), lead.AccountID, contact.ID); err != nil {
+					log.Printf("[GOOGLE] Auto-sync from lead %s failed: %v", lead.ID, err)
+				}
+			} else if err != nil {
+				log.Printf("[GOOGLE] Auto-sync skipped: contact load error: %v", err)
+			} else if contact != nil && !contact.GoogleSync {
+				log.Printf("[GOOGLE] Auto-sync skipped for lead %s → contact %s: google_sync=false", lead.ID, contact.ID)
+			}
+		}()
+	}
+
 	// Populate structured_tags before responding
 	tags, err := s.repos.Tag.GetByLead(c.Context(), lead.ID)
 	if err == nil {
@@ -3513,6 +3702,84 @@ func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 
 // --- Archive & Block Handlers ---
 
+// desyncGoogleForLeadIDs resolves lead IDs → contacts with google_sync=true, deletes from Google API, and clears local sync flags.
+// Designed to be called from a goroutine (synchronous internally).
+func (s *Server) desyncGoogleForLeadIDs(accountID uuid.UUID, leadIDs []uuid.UUID) {
+	if s.googleClient == nil || len(leadIDs) == 0 {
+		return
+	}
+	ctx := context.Background()
+
+	contactIDs, err := s.repos.Contact.GetContactIDsFromLeadIDs(ctx, accountID, leadIDs)
+	if err != nil || len(contactIDs) == 0 {
+		return
+	}
+
+	contacts, err := s.repos.Contact.GetContactsByIDs(ctx, accountID, contactIDs)
+	if err != nil || len(contacts) == 0 {
+		return
+	}
+
+	// Fetch Google tokens once for the account
+	_, accessToken, refreshToken, _, tokErr := s.repos.Account.GetGoogleTokens(ctx, accountID)
+	var validToken string
+	if tokErr == nil && accessToken != "" {
+		validToken, _ = s.ensureValidToken(ctx, accountID, accessToken, refreshToken)
+	}
+
+	for _, c := range contacts {
+		if !c.GoogleSync {
+			continue
+		}
+		// Delete from Google if resource name exists
+		if validToken != "" && c.GoogleResourceName != nil && *c.GoogleResourceName != "" {
+			if err := s.googleClient.DeleteContact(ctx, validToken, *c.GoogleResourceName); err != nil {
+				log.Printf("[GOOGLE] Error deleting contact %s from Google on archive/block: %v", c.ID, err)
+			}
+		}
+		if err := s.repos.Contact.ClearGoogleSync(ctx, c.ID); err != nil {
+			log.Printf("[GOOGLE] Error clearing sync for contact %s on archive/block: %v", c.ID, err)
+		} else {
+			log.Printf("[GOOGLE] Auto-desynced contact %s due to lead archive/block", c.ID)
+		}
+	}
+}
+
+// logArchiveBlockObservation creates an auto-observation when a lead is archived or blocked.
+// Designed to be called from a goroutine.
+func (s *Server) logArchiveBlockObservation(accountID, userID, leadID uuid.UUID, actionLabel, reason string) {
+	ctx := context.Background()
+	userName := ""
+	if u, err := s.repos.User.GetByID(ctx, userID); err == nil && u != nil {
+		userName = u.DisplayName
+		if userName == "" {
+			userName = u.Email
+		}
+	}
+	notes := fmt.Sprintf("%s por %s. Motivo: %s", actionLabel, userName, reason)
+	interaction := &domain.Interaction{
+		AccountID: accountID,
+		LeadID:    &leadID,
+		Type:      "note",
+		Notes:     &notes,
+		CreatedBy: &userID,
+	}
+	// Auto-link contact_id
+	var contactID *uuid.UUID
+	_ = s.repos.DB().QueryRow(ctx, `SELECT contact_id FROM leads WHERE id = $1`, leadID).Scan(&contactID)
+	if contactID != nil {
+		interaction.ContactID = contactID
+	}
+	if err := s.services.Interaction.LogInteraction(ctx, interaction); err != nil {
+		log.Printf("[ARCHIVE/BLOCK] Error creating observation: %v", err)
+	}
+	// Broadcast so the detail panel refreshes observations
+	s.hub.BroadcastToAccount(accountID, ws.EventInteractionUpdate, map[string]interface{}{
+		"action":  "created",
+		"lead_id": leadID.String(),
+	})
+}
+
 func (s *Server) handleArchiveLead(c *fiber.Ctx) error {
 	leadID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -3520,17 +3787,19 @@ func (s *Server) handleArchiveLead(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		Archive bool `json:"archive"`
+		Archive bool   `json:"archive"`
+		Reason  string `json:"reason"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
-	if err := s.services.Lead.ArchiveLead(c.Context(), leadID, req.Archive); err != nil {
+	if err := s.services.Lead.ArchiveLead(c.Context(), leadID, req.Archive, req.Reason); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	s.invalidateLeadsCache(accountID)
 	s.invalidateLeadDetailCache(leadID)
 	action := "archived"
@@ -3541,6 +3810,18 @@ func (s *Server) handleArchiveLead(c *fiber.Ctx) error {
 		"action":  action,
 		"lead_id": leadID.String(),
 	})
+	// Broadcast event participant update so event pages refresh
+	if req.Archive {
+		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{
+			"action":  "lead_archived",
+			"lead_id": leadID.String(),
+		})
+		go s.desyncGoogleForLeadIDs(accountID, []uuid.UUID{leadID})
+		// Auto-create observation note
+		if req.Reason != "" {
+			go s.logArchiveBlockObservation(accountID, userID, leadID, "📦 Archivado", req.Reason)
+		}
+	}
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -3567,6 +3848,7 @@ func (s *Server) handleBlockLead(c *fiber.Ctx) error {
 	}
 
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	s.invalidateLeadsCache(accountID)
 	s.invalidateLeadDetailCache(leadID)
 	action := "blocked"
@@ -3577,15 +3859,24 @@ func (s *Server) handleBlockLead(c *fiber.Ctx) error {
 		"action":  action,
 		"lead_id": leadID.String(),
 	})
+	if req.Block {
+		go s.desyncGoogleForLeadIDs(accountID, []uuid.UUID{leadID})
+		// Auto-create observation note
+		if req.Reason != "" {
+			go s.logArchiveBlockObservation(accountID, userID, leadID, "🚫 Bloqueado", req.Reason)
+		}
+	}
 	return c.JSON(fiber.Map{"success": true})
 }
 
 func (s *Server) handleArchiveLeadsBatch(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 
 	var req struct {
 		IDs     []string `json:"ids"`
 		Archive bool     `json:"archive"`
+		Reason  string   `json:"reason"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -3604,7 +3895,7 @@ func (s *Server) handleArchiveLeadsBatch(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No valid IDs provided"})
 	}
 
-	if err := s.services.Lead.ArchiveLeadsBatch(c.Context(), uuids, req.Archive); err != nil {
+	if err := s.services.Lead.ArchiveLeadsBatch(c.Context(), uuids, req.Archive, req.Reason); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -3617,6 +3908,16 @@ func (s *Server) handleArchiveLeadsBatch(c *fiber.Ctx) error {
 		"action": action + "_batch",
 		"count":  len(uuids),
 	})
+	if req.Archive {
+		go s.desyncGoogleForLeadIDs(accountID, uuids)
+		if req.Reason != "" {
+			go func() {
+				for _, uid := range uuids {
+					s.logArchiveBlockObservation(accountID, userID, uid, "📦 Archivado", req.Reason)
+				}
+			}()
+		}
+	}
 	return c.JSON(fiber.Map{"success": true, "count": len(uuids)})
 }
 
@@ -3661,6 +3962,9 @@ func (s *Server) handleBlockLeadsBatch(c *fiber.Ctx) error {
 		"action": action + "_batch",
 		"count":  len(uuids),
 	})
+	if req.Block {
+		go s.desyncGoogleForLeadIDs(accountID, uuids)
+	}
 	return c.JSON(fiber.Map{"success": true, "count": len(uuids)})
 }
 
@@ -4058,6 +4362,8 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	tagsCol := findCol(colMap, "tags", "etiquetas")
 	companyCol := findCol(colMap, "company", "empresa")
 	lastNameCol := findCol(colMap, "last_name", "apellido", "apellidos")
+	dniCol := findCol(colMap, "dni", "documento", "doc_identidad")
+	birthDateCol := findCol(colMap, "fecha_nacimiento", "birth_date", "nacimiento", "cumpleanos", "cumpleaños")
 	stageCol := findCol(colMap, "estatus del lead", "stage", "etapa", "estado lead", "status")
 	_ = findCol(colMap, "embudo de ventas", "pipeline", "embudo") // reserved for future multi-pipeline import
 	_ = findCol(colMap, "edad", "age") // age managed via contacts
@@ -4113,6 +4419,8 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 		company := safeCol(row, companyCol)
 		lastName := safeCol(row, lastNameCol)
 		stageName := safeCol(row, stageCol)
+		dni := safeCol(row, dniCol)
+		birthDateStr := safeCol(row, birthDateCol)
 
 		if importType == "contacts" || importType == "both" {
 			contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, name, "", false)
@@ -4135,6 +4443,16 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 				if notes != "" && (contact.Notes == nil || *contact.Notes == "") {
 					contact.Notes = &notes
 					needUpdate = true
+				}
+				if dni != "" && (contact.DNI == nil || *contact.DNI == "") {
+					contact.DNI = &dni
+					needUpdate = true
+				}
+				if birthDateStr != "" && contact.BirthDate == nil {
+					if bd, err := time.Parse("2006-01-02", birthDateStr); err == nil {
+						contact.BirthDate = &bd
+						needUpdate = true
+					}
 				}
 				if needUpdate {
 					s.services.Contact.Update(c.Context(), contact)
@@ -4161,6 +4479,16 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 				if notes != "" && (csvContact.Notes == nil || *csvContact.Notes == "") {
 					csvContact.Notes = &notes
 					needUpdate = true
+				}
+				if dni != "" && (csvContact.DNI == nil || *csvContact.DNI == "") {
+					csvContact.DNI = &dni
+					needUpdate = true
+				}
+				if birthDateStr != "" && csvContact.BirthDate == nil {
+					if bd, err := time.Parse("2006-01-02", birthDateStr); err == nil {
+						csvContact.BirthDate = &bd
+						needUpdate = true
+					}
 				}
 				if needUpdate {
 					s.services.Contact.Update(c.Context(), csvContact)
@@ -4324,6 +4652,58 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 		}
 	}
 
+	// Advanced tag filtering: formula or tag_names
+	tagFormulaRaw := c.Query("tag_formula")
+	if tagFormulaRaw != "" {
+		ast, err := formula.Parse(tagFormulaRaw)
+		if err == nil && ast != nil {
+			innerSQL, innerArgs, err := formula.BuildSQLForContacts(ast, accountID)
+			if err == nil {
+				rows, err := s.repos.DB().Query(c.Context(), innerSQL, innerArgs...)
+				if err == nil {
+					defer rows.Close()
+					for rows.Next() {
+						var cid uuid.UUID
+						if rows.Scan(&cid) == nil {
+							filter.MatchingContactIDs = append(filter.MatchingContactIDs, cid)
+						}
+					}
+				}
+				if len(filter.MatchingContactIDs) == 0 {
+					// Formula matched nothing — force empty result
+					return c.JSON(fiber.Map{
+						"success": true, "contacts": []interface{}{},
+						"total": 0, "limit": filter.Limit, "offset": filter.Offset,
+					})
+				}
+			}
+		}
+	} else {
+		if tagNamesRaw := c.Query("tag_names"); tagNamesRaw != "" {
+			filter.TagNames = strings.Split(tagNamesRaw, ",")
+		}
+		if excludeRaw := c.Query("exclude_tag_names"); excludeRaw != "" {
+			filter.ExcludeTagNames = strings.Split(excludeRaw, ",")
+		}
+		filter.TagMode = strings.ToUpper(c.Query("tag_mode", "OR"))
+	}
+
+	// Date filters
+	filter.DateField = c.Query("date_field")
+	filter.DateFrom = c.Query("date_from")
+	filter.DateTo = c.Query("date_to")
+
+	// Sort
+	if sortBy := c.Query("sort_by"); sortBy != "" {
+		switch sortBy {
+		case "name", "lead_count", "created_at":
+			filter.SortBy = sortBy
+		}
+	}
+	if sortOrder := strings.ToLower(c.Query("sort_order")); sortOrder == "asc" || sortOrder == "desc" {
+		filter.SortOrder = sortOrder
+	}
+
 	contacts, total, err := s.services.Contact.GetByAccountIDWithFilters(c.Context(), accountID, filter)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -4475,6 +4855,18 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		"jid":        contact.JID,
 	})
 
+	// Auto-sync to Google Contacts if synced
+	if s.googleClient != nil && contact.GoogleSync {
+		log.Printf("[GOOGLE] Auto-sync triggered from handleUpdateContact for contact %s (google_sync=%v)", contact.ID, contact.GoogleSync)
+		go func() {
+			if _, err := s.syncContactToGoogle(context.Background(), contact.AccountID, contact.ID); err != nil {
+				log.Printf("[GOOGLE] Auto-sync contact %s failed: %v", contact.ID, err)
+			}
+		}()
+	} else if s.googleClient != nil && !contact.GoogleSync {
+		log.Printf("[GOOGLE] Auto-sync skipped for contact %s: google_sync=false", contact.ID)
+	}
+
 	return c.JSON(fiber.Map{"success": true, "contact": contact})
 }
 
@@ -4503,6 +4895,75 @@ func (s *Server) handleDeleteContact(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleGetContactLeads(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	contactID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid id"})
+	}
+
+	rows, err := s.repos.DB().Query(c.Context(), `
+		SELECT l.id, l.account_id, l.contact_id, l.jid,
+		       COALESCE(c.custom_name, c.name, l.name) AS name,
+		       COALESCE(c.last_name, l.last_name) AS last_name,
+		       COALESCE(c.phone, l.phone) AS phone,
+		       COALESCE(c.email, l.email) AS email,
+		       l.pipeline_id, l.stage_id,
+		       ps.name AS stage_name, ps.color AS stage_color,
+		       pp.name AS pipeline_name,
+		       l.is_archived, l.is_blocked, l.created_at
+		FROM leads l
+		LEFT JOIN contacts c ON c.id = l.contact_id
+		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+		LEFT JOIN pipelines pp ON pp.id = l.pipeline_id
+		WHERE l.account_id = $1 AND l.contact_id = $2
+		ORDER BY l.created_at DESC
+	`, accountID, contactID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	defer rows.Close()
+
+	type contactLead struct {
+		ID           uuid.UUID  `json:"id"`
+		AccountID    uuid.UUID  `json:"account_id"`
+		ContactID    *uuid.UUID `json:"contact_id"`
+		JID          *string    `json:"jid"`
+		Name         *string    `json:"name"`
+		LastName     *string    `json:"last_name"`
+		Phone        *string    `json:"phone"`
+		Email        *string    `json:"email"`
+		PipelineID   *uuid.UUID `json:"pipeline_id"`
+		StageID      *uuid.UUID `json:"stage_id"`
+		StageName    *string    `json:"stage_name"`
+		StageColor   *string    `json:"stage_color"`
+		PipelineName *string    `json:"pipeline_name"`
+		IsArchived   bool       `json:"is_archived"`
+		IsBlocked    bool       `json:"is_blocked"`
+		CreatedAt    time.Time  `json:"created_at"`
+		Tags         []*domain.Tag `json:"tags"`
+	}
+
+	var leads []contactLead
+	for rows.Next() {
+		var cl contactLead
+		if err := rows.Scan(
+			&cl.ID, &cl.AccountID, &cl.ContactID, &cl.JID,
+			&cl.Name, &cl.LastName, &cl.Phone, &cl.Email,
+			&cl.PipelineID, &cl.StageID, &cl.StageName, &cl.StageColor, &cl.PipelineName,
+			&cl.IsArchived, &cl.IsBlocked, &cl.CreatedAt,
+		); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		// Load tags for this lead's contact
+		tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", contactID)
+		cl.Tags = tags
+		leads = append(leads, cl)
+	}
+
+	return c.JSON(fiber.Map{"success": true, "leads": leads})
 }
 
 func (s *Server) handleDeleteContactsBatch(c *fiber.Ctx) error {
@@ -4540,6 +5001,15 @@ func (s *Server) handleGetContactDuplicates(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "duplicates": groups})
+}
+
+func (s *Server) handleGetContactLeadDuplicates(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	count, err := s.services.Contact.GetDuplicateLeadsCount(c.Context(), accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "count": count})
 }
 
 func (s *Server) handleMergeContacts(c *fiber.Ctx) error {
@@ -4591,11 +5061,16 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 	}
 
 	normalizedPhone := kommo.NormalizePhone(body.Phone)
-	if normalizedPhone == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "phone is required"})
+	jid := ""
+	if normalizedPhone != "" {
+		jid = normalizedPhone + "@s.whatsapp.net"
+	} else {
+		// Contacts without phone — require at least a name
+		if strings.TrimSpace(body.Name) == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Se requiere teléfono o nombre"})
+		}
+		jid = fmt.Sprintf("manual_%s@clarin.contact", uuid.New().String()[:8])
 	}
-
-	jid := normalizedPhone + "@s.whatsapp.net"
 
 	contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, normalizedPhone, body.Name, "", false)
 	if err != nil {
@@ -4603,6 +5078,10 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 	}
 
 	updated := false
+	// Set source to manual for manually created contacts
+	src := "manual"
+	contact.Source = &src
+	updated = true
 	// When manually creating, set custom_name from the provided name
 	if body.Name != "" {
 		contact.CustomName = &body.Name
@@ -6298,7 +6777,8 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.created_at, p.updated_at,
 		       eps.name AS stage_name, eps.color AS stage_color,
-		       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color
+		       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
+		       COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked
 		FROM event_participants p
 		LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id
 		LEFT JOIN leads l ON l.id = p.lead_id
@@ -6325,6 +6805,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 			&p.CreatedAt, &p.UpdatedAt,
 			&p.StageName, &p.StageColor,
 			&p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor,
+			&p.IsArchived, &p.IsBlocked,
 		); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
@@ -6360,6 +6841,20 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 	if participants == nil {
 		participants = make([]*domain.EventParticipant, 0)
 	}
+
+	// Mark participants that share a contact_id with another participant in this event
+	contactCount := make(map[uuid.UUID]int)
+	for _, p := range participants {
+		if p.ContactID != nil {
+			contactCount[*p.ContactID]++
+		}
+	}
+	for _, p := range participants {
+		if p.ContactID != nil && contactCount[*p.ContactID] > 1 {
+			p.DuplicateContact = true
+		}
+	}
+
 	return c.JSON(fiber.Map{"success": true, "participants": participants, "total": total})
 }
 
@@ -6558,6 +7053,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 				       p.created_at, p.updated_at,
 				       s.name AS stage_name, s.color AS stage_color, s.position AS stage_position,
 				       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
+				       COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked,
 				       ROW_NUMBER() OVER (PARTITION BY p.stage_id ORDER BY p.created_at DESC) AS rn
 				FROM event_participants p
 				LEFT JOIN event_pipeline_stages s ON s.id = p.stage_id
@@ -6571,7 +7067,8 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 			       invited_at, confirmed_at, attended_at,
 			       created_at, updated_at,
 			       stage_name, stage_color, stage_position,
-			       lead_pipeline_id, lead_stage_id, lead_stage_name, lead_stage_color
+			       lead_pipeline_id, lead_stage_id, lead_stage_name, lead_stage_color,
+			       is_archived, is_blocked
 			FROM ranked WHERE rn <= %d
 			ORDER BY stage_position NULLS LAST, created_at DESC
 		`, whereSQL, perStage)
@@ -6592,6 +7089,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 				&p.CreatedAt, &p.UpdatedAt,
 				&p.StageName, &p.StageColor, &stagePosition,
 				&p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor,
+				&p.IsArchived, &p.IsBlocked,
 			); err != nil {
 				partsErr = err
 				return
@@ -6659,6 +7157,19 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	// Assign tags to participants
 	for _, p := range paginatedParts {
 		p.Tags = tagMap[p.ID]
+	}
+
+	// Mark participants that share a contact_id (duplicate leads for same contact)
+	contactCountPag := make(map[uuid.UUID]int)
+	for _, p := range paginatedParts {
+		if p.ContactID != nil {
+			contactCountPag[*p.ContactID]++
+		}
+	}
+	for _, p := range paginatedParts {
+		if p.ContactID != nil && contactCountPag[*p.ContactID] > 1 {
+			p.DuplicateContact = true
+		}
 	}
 
 	// Build count map
@@ -6745,6 +7256,12 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	}
 	if unassignedParts == nil {
 		unassignedParts = make([]*domain.EventParticipant, 0)
+	}
+	// Mark duplicate contacts in unassigned parts too
+	for _, p := range unassignedParts {
+		if p.ContactID != nil && contactCountPag[*p.ContactID] > 1 {
+			p.DuplicateContact = true
+		}
 	}
 
 	// All account tags for filter sidebar (via contact_tags, with lead fallback)
@@ -6906,7 +7423,8 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.created_at, p.updated_at,
 		       COALESCE(s.name, '') AS stage_name, COALESCE(s.color, '') AS stage_color,
-		       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color
+		       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
+		       COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked
 		FROM event_participants p
 		LEFT JOIN event_pipeline_stages s ON s.id = p.stage_id
 		LEFT JOIN leads l ON l.id = p.lead_id
@@ -6933,6 +7451,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 			&p.CreatedAt, &p.UpdatedAt,
 			&p.StageName, &p.StageColor,
 			&p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor,
+			&p.IsArchived, &p.IsBlocked,
 		); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
@@ -7323,6 +7842,19 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 	// Sync shared fields back to the linked contact
 	if p.ContactID != nil {
 		_ = s.services.Event.SyncParticipantToContact(c.Context(), p)
+
+		// Auto-sync to Google Contacts if linked contact has google_sync enabled
+		if s.googleClient != nil {
+			go func() {
+				contact, err := s.repos.Contact.GetByID(context.Background(), *p.ContactID)
+				if err == nil && contact != nil && contact.GoogleSync {
+					log.Printf("[GOOGLE] Auto-sync triggered from handleUpdateEventParticipant for participant %s → contact %s (google_sync=%v)", p.ID, contact.ID, contact.GoogleSync)
+					if _, err := s.syncContactToGoogle(context.Background(), contact.AccountID, contact.ID); err != nil {
+						log.Printf("[GOOGLE] Auto-sync from participant %s failed: %v", p.ID, err)
+					}
+				}
+			}()
+		}
 	}
 
 	return c.JSON(fiber.Map{"success": true, "participant": p})
@@ -8326,11 +8858,6 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 		s.invalidateLeadDetailCache(*interaction.LeadID)
 	}
 
-	// Push call observations to Kommo if this is a call type with a lead
-	if s.kommoSync != nil && interaction.Type == "call" && interaction.LeadID != nil {
-		go s.kommoSync.PushLeadObservations(accountID, *interaction.LeadID)
-	}
-
 	// Broadcast interaction update via WebSocket
 	if s.hub != nil {
 		leadIDStr := ""
@@ -8420,11 +8947,6 @@ func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 	// Invalidate lead detail + interactions cache
 	if interactionLeadID != nil {
 		s.invalidateLeadDetailCache(*interactionLeadID)
-	}
-
-	// Re-push all call observations to Kommo after deletion
-	if s.kommoSync != nil && interactionType == "call" && interactionLeadID != nil {
-		go s.kommoSync.PushLeadObservations(accountID, *interactionLeadID)
 	}
 
 	// Broadcast interaction update via WebSocket
@@ -9608,6 +10130,13 @@ func (s *Server) handleAdminDeleteRole(c *fiber.Ctx) error {
 // handleHealthCheck is a deep health probe that checks all dependencies.
 // Returns 200 with "healthy" if all systems are operational,
 // 503 with "degraded" if some dependencies are down.
+func (s *Server) handleGetVersion(c *fiber.Ctx) error {
+	return c.JSON(fiber.Map{
+		"version":   s.version,
+		"changelog": s.changelog,
+	})
+}
+
 func (s *Server) handleHealthCheck(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
 	defer cancel()
