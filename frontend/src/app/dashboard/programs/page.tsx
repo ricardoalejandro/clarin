@@ -71,7 +71,8 @@ export default function ProgramsPage() {
   // Close menus on outside click
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
-      if (menuID && !(e.target as HTMLElement).closest('[data-menu-toggle]')) {
+      const target = e.target as HTMLElement;
+      if (menuID && !target.closest('[data-menu-toggle]') && !target.closest('[data-menu-dropdown]')) {
         setMenuID(null);
       }
     };
@@ -323,7 +324,7 @@ export default function ProgramsPage() {
                 <MoreHorizontal className="w-3.5 h-3.5" />
               </button>
               {menuID === program.id && (
-                <div className="absolute top-full right-0 mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+                <div data-menu-dropdown className="absolute top-full right-0 mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
                   <button onClick={(e) => openEditProgram(program, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                     <Edit2 className="w-3.5 h-3.5" /> Editar
                   </button>
@@ -658,7 +659,7 @@ export default function ProgramsPage() {
                     <p className="mt-2 text-sm font-semibold text-slate-800 truncate">{folder.name}</p>
                     <p className="text-xs text-slate-400 mt-0.5">{folder.program_count} programa{folder.program_count !== 1 ? 's' : ''}</p>
                     {menuID === `f-${folder.id}` && (
-                      <div className="absolute top-8 right-2 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[120px]" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+                      <div data-menu-dropdown className="absolute top-8 right-2 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[120px]" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
                         <button onClick={e => openEditFolder(folder, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                           <Edit2 className="w-3.5 h-3.5" /> Editar
                         </button>
