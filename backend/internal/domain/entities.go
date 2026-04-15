@@ -16,6 +16,7 @@ type Account struct {
 	MaxDevices int        `json:"max_devices"`
 	IsActive   bool       `json:"is_active"`
 	MCPEnabled bool       `json:"mcp_enabled"`
+	KommoEnabled bool     `json:"kommo_enabled"`
 	DefaultIncomingStageID *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
@@ -79,13 +80,15 @@ const (
 	PermIntegrations = "integrations"
 	PermSurveys      = "surveys"
 	PermDynamics     = "dynamics"
+	PermTasks        = "tasks"
+	PermDocuments    = "documents"
 	PermAll          = "*"
 )
 
 // AllPermissions contains all available permission modules in display order
 var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
-	PermDevices, PermEvents, PermBroadcasts, PermTags, PermSettings, PermIntegrations, PermSurveys, PermDynamics,
+	PermDevices, PermEvents, PermBroadcasts, PermTags, PermSettings, PermIntegrations, PermSurveys, PermDynamics, PermTasks, PermDocuments,
 }
 
 // Role represents a named set of module permissions
@@ -158,6 +161,9 @@ type Contact struct {
 	Age        *int       `json:"age,omitempty"`
 	DNI        *string    `json:"dni,omitempty"`
 	BirthDate  *time.Time `json:"birth_date,omitempty"`
+	Address    *string    `json:"address,omitempty"`
+	Distrito   *string    `json:"distrito,omitempty"`
+	Ocupacion  *string    `json:"ocupacion,omitempty"`
 	Tags       []string   `json:"tags,omitempty"`
 	Notes      *string    `json:"notes,omitempty"`
 	Source     *string    `json:"source,omitempty"`
@@ -402,6 +408,9 @@ type Lead struct {
 	Age          *int                   `json:"age,omitempty"`
 	DNI          *string                `json:"dni,omitempty"`
 	BirthDate    *time.Time             `json:"birth_date,omitempty"`
+	Address      *string                `json:"address,omitempty"`
+	Distrito     *string                `json:"distrito,omitempty"`
+	Ocupacion    *string                `json:"ocupacion,omitempty"`
 	Status       *string                `json:"status,omitempty"` // legacy, kept for backward compat
 	PipelineID   *uuid.UUID             `json:"pipeline_id,omitempty"`
 	StageID      *uuid.UUID             `json:"stage_id,omitempty"`
@@ -415,8 +424,9 @@ type Lead struct {
 	ArchivedAt    *time.Time             `json:"archived_at,omitempty"`
 	ArchiveReason string                 `json:"archive_reason,omitempty"`
 	IsBlocked     bool                   `json:"is_blocked"`
-	BlockedAt     *time.Time             `json:"blocked_at,omitempty"`
-	BlockReason   string                 `json:"block_reason,omitempty"`
+	BlockedAt      *time.Time             `json:"blocked_at,omitempty"`
+	BlockReason    string                 `json:"block_reason,omitempty"`
+	KommoDeletedAt *time.Time             `json:"kommo_deleted_at,omitempty"`
 	CreatedAt    time.Time              `json:"created_at"`
 	UpdatedAt    time.Time              `json:"updated_at"`
 
@@ -653,6 +663,12 @@ type EventParticipant struct {
 	Phone          *string    `json:"phone,omitempty"`
 	Email          *string    `json:"email,omitempty"`
 	Age            *int       `json:"age,omitempty"`
+	Company        *string    `json:"company,omitempty"`
+	DNI            *string    `json:"dni,omitempty"`
+	BirthDate      *time.Time `json:"birth_date,omitempty"`
+	Address        *string    `json:"address,omitempty"`
+	Distrito       *string    `json:"distrito,omitempty"`
+	Ocupacion      *string    `json:"ocupacion,omitempty"`
 	Status         string     `json:"status"` // invited, contacted, confirmed, declined, attended, no_show
 	Notes          *string    `json:"notes,omitempty"`
 	NextAction     *string    `json:"next_action,omitempty"`
@@ -733,6 +749,110 @@ const (
 	InteractionOutcomeDeclined    = "declined"
 	InteractionOutcomeRescheduled = "rescheduled"
 	InteractionOutcomeCallback    = "callback"
+)
+
+// TaskList represents a named grouping for tasks
+type TaskList struct {
+	ID        uuid.UUID `json:"id"`
+	AccountID uuid.UUID `json:"account_id"`
+	Name      string    `json:"name"`
+	Color     string    `json:"color,omitempty"`
+	SortOrder int       `json:"sort_order"`
+	CreatedBy uuid.UUID `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	TaskCount int       `json:"task_count"`
+}
+
+// Task represents a scheduled action (call, follow-up, meeting, reminder)
+type Task struct {
+	ID                uuid.UUID  `json:"id"`
+	AccountID         uuid.UUID  `json:"account_id"`
+	CreatedBy         uuid.UUID  `json:"created_by"`
+	AssignedTo        uuid.UUID  `json:"assigned_to"`
+	Title             string     `json:"title"`
+	Description       string     `json:"description,omitempty"`
+	Type              string     `json:"type"`     // call, whatsapp, meeting, reminder
+	DueAt             *time.Time `json:"due_at,omitempty"`
+	DueEndAt          *time.Time `json:"due_end_at,omitempty"`
+	Priority          string     `json:"priority"` // low, medium, high, urgent
+	Status            string     `json:"status"`   // pending, completed, overdue, cancelled
+	CompletedAt       *time.Time `json:"completed_at,omitempty"`
+	CompletedBy       *uuid.UUID `json:"completed_by,omitempty"`
+	LeadID            *uuid.UUID `json:"lead_id,omitempty"`
+	EventID           *uuid.UUID `json:"event_id,omitempty"`
+	ProgramID         *uuid.UUID `json:"program_id,omitempty"`
+	ContactID         *uuid.UUID `json:"contact_id,omitempty"`
+	ListID            *uuid.UUID `json:"list_id,omitempty"`
+	Starred           bool       `json:"starred"`
+	SortOrder         int        `json:"sort_order"`
+	RecurrenceRule    string     `json:"recurrence_rule,omitempty"`
+	RecurrenceParentID *uuid.UUID `json:"recurrence_parent_id,omitempty"`
+	ReminderMinutes   *int       `json:"reminder_minutes,omitempty"`
+	Notes             string     `json:"notes,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+
+	// Populated on demand (JOINs)
+	AssignedToName string `json:"assigned_to_name,omitempty"`
+	CreatedByName  string `json:"created_by_name,omitempty"`
+	LeadName       string `json:"lead_name,omitempty"`
+	EventName      string `json:"event_name,omitempty"`
+	ProgramName    string `json:"program_name,omitempty"`
+	ContactName    string `json:"contact_name,omitempty"`
+	ListName       string `json:"list_name,omitempty"`
+
+	// Subtask counts (populated via subqueries)
+	SubtaskCount int `json:"subtask_count"`
+	SubtaskDone  int `json:"subtask_done"`
+}
+
+// TaskReminder represents a scheduled reminder for a task
+type TaskReminder struct {
+	ID          uuid.UUID  `json:"id"`
+	TaskID      uuid.UUID  `json:"task_id"`
+	AccountID   uuid.UUID  `json:"account_id"`
+	AssignedTo  uuid.UUID  `json:"assigned_to"`
+	ReminderAt  time.Time  `json:"reminder_at"`
+	Delivered   bool       `json:"delivered"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+}
+
+// Subtask represents a sub-item within a task
+type Subtask struct {
+	ID          uuid.UUID  `json:"id"`
+	TaskID      uuid.UUID  `json:"task_id"`
+	AccountID   uuid.UUID  `json:"account_id"`
+	Title       string     `json:"title"`
+	Completed   bool       `json:"completed"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	SortOrder   int        `json:"sort_order"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// Task type constants
+const (
+	TaskTypeCall     = "call"
+	TaskTypeWhatsApp = "whatsapp"
+	TaskTypeMeeting  = "meeting"
+	TaskTypeReminder = "reminder"
+)
+
+// Task priority constants
+const (
+	TaskPriorityLow    = "low"
+	TaskPriorityMedium = "medium"
+	TaskPriorityHigh   = "high"
+	TaskPriorityUrgent = "urgent"
+)
+
+// Task status constants
+const (
+	TaskStatusPending   = "pending"
+	TaskStatusCompleted = "completed"
+	TaskStatusOverdue   = "overdue"
+	TaskStatusCancelled = "cancelled"
 )
 
 // EventFilter defines filter options for listing events
@@ -1323,5 +1443,22 @@ type DynamicWhatsAppQueue struct {
 	ErrorMsg       string     `json:"error_msg"`
 	CreatedAt      time.Time  `json:"created_at"`
 	SentAt         *time.Time `json:"sent_at"`
+}
+
+// DocumentTemplate represents a reusable document design template
+type DocumentTemplate struct {
+	ID              uuid.UUID       `json:"id"`
+	AccountID       uuid.UUID       `json:"account_id"`
+	Name            string          `json:"name"`
+	Description     string          `json:"description"`
+	CanvasJSON      json.RawMessage `json:"canvas_json"`
+	ThumbnailURL    string          `json:"thumbnail_url"`
+	PageWidth       float64         `json:"page_width"`
+	PageHeight      float64         `json:"page_height"`
+	PageOrientation string          `json:"page_orientation"`
+	FieldsUsed      []string        `json:"fields_used"`
+	CreatedBy       *uuid.UUID      `json:"created_by,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
 }
 

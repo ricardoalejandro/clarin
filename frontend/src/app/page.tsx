@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { MessageSquare, Lock, User, ArrowRight } from 'lucide-react'
+import { tryRefreshToken } from '@/lib/api'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -10,6 +11,33 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [checking, setChecking] = useState(true)
+
+  // Auto-redirect if user has a valid session (refresh token cookie)
+  useEffect(() => {
+    const check = async () => {
+      const token = localStorage.getItem('token')
+      if (token) {
+        try {
+          const res = await fetch('/api/me', {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+          if (res.ok) {
+            router.push('/dashboard')
+            return
+          }
+        } catch { /* ignore */ }
+        // Token existed but /api/me failed — try refreshing the session
+        const refreshed = await tryRefreshToken()
+        if (refreshed) {
+          router.push('/dashboard')
+          return
+        }
+      }
+      setChecking(false)
+    }
+    check()
+  }, [router])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -39,6 +67,14 @@ export default function LoginPage() {
     } finally {
       setLoading(false)
     }
+  }
+
+  if (checking) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-slate-50">
+        <div className="animate-spin rounded-full h-8 w-8 border-2 border-emerald-200 border-t-emerald-600" />
+      </div>
+    )
   }
 
   return (

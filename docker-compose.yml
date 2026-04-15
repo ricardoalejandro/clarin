@@ -93,6 +93,9 @@ services:
       KOMMO_CLIENT_SECRET: ${KOMMO_CLIENT_SECRET}
       KOMMO_ACCESS_TOKEN: ${KOMMO_ACCESS_TOKEN}
       KOMMO_REDIRECT_URI: ${KOMMO_REDIRECT_URI}
+      # Kommo Webhooks
+      KOMMO_WEBHOOK_SECRET: ${KOMMO_WEBHOOK_SECRET}
+      PUBLIC_URL: "https://clarin.naperu.cloud"
       # AI Assistant (Eros)
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}

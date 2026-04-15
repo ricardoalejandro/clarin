@@ -83,6 +83,7 @@ interface Participant {
   id: string; event_id: string; contact_id?: string; lead_id?: string; name: string
   last_name?: string; short_name?: string; phone?: string; email?: string
   age?: number; status: string; notes?: string; dni?: string; birth_date?: string
+  company?: string; address?: string; distrito?: string; ocupacion?: string
   stage_id?: string; stage_name?: string; stage_color?: string
   lead_pipeline_id?: string; lead_stage_id?: string; lead_stage_name?: string; lead_stage_color?: string
   next_action?: string; next_action_date?: string; invited_at?: string
@@ -131,10 +132,13 @@ function participantToLead(p: Participant): any {
     short_name: p.short_name || null,
     phone: p.phone || '',
     email: p.email || '',
-    company: null,
+    company: p.company || null,
     age: p.age || null,
     dni: p.dni || null,
     birth_date: p.birth_date || null,
+    address: p.address || null,
+    distrito: p.distrito || null,
+    ocupacion: p.ocupacion || null,
     status: p.status,
     pipeline_id: null,
     stage_id: p.stage_id || null,
@@ -440,6 +444,21 @@ export default function EventDetailPage() {
   const [pendingContact, setPendingContact] = useState<SelectedPerson | null>(null)
   const [pendingTags, setPendingTags] = useState<TagInputItem[]>([])
   const [creatingFromConfirm, setCreatingFromConfirm] = useState(false)
+
+  // Lead picker (contact with existing leads)
+  const [contactLeads, setContactLeads] = useState<{
+    id: string; name: string | null; phone: string | null; email: string | null;
+    pipeline_name: string | null; stage_name: string | null; stage_color: string | null;
+    is_archived: boolean; is_blocked: boolean; created_at: string;
+    tags: { id: string; name: string; color: string }[];
+  }[]>([])
+  const [showLeadPicker, setShowLeadPicker] = useState(false)
+  const [selectedExistingLead, setSelectedExistingLead] = useState<{
+    id: string; name: string | null; phone: string | null; email: string | null;
+    contact_id?: string;
+    tags: { id: string; name: string; color: string }[];
+  } | null>(null)
+  const [loadingContactLeads, setLoadingContactLeads] = useState(false)
 
   // Export
   const [showExportModal, setShowExportModal] = useState(false)
@@ -936,14 +955,40 @@ export default function EventDetailPage() {
 
   const handleAddFromSelector = async (selected: SelectedPerson[]) => {
     if (selected.length === 0) return
-    // Single contact (not lead) → show quick confirmation to create lead
+    // Single contact (not lead) → check for existing leads first
     const contacts = selected.filter(p => p.source_type === 'contact')
     const leads = selected.filter(p => p.source_type === 'lead')
     if (contacts.length === 1 && leads.length === 0) {
-      setPendingContact(contacts[0])
-      setPendingTags([])
+      const contact = contacts[0]
       setShowAddModal(false)
       fetchLeadPipelines()
+
+      // Fetch contact's active leads
+      setLoadingContactLeads(true)
+      try {
+        const res = await fetch(`/api/contacts/${contact.id}/leads`, {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        })
+        const data = await res.json()
+        const activeLeads = (data.leads || []).filter((l: { is_archived: boolean; is_blocked: boolean }) => !l.is_archived && !l.is_blocked)
+
+        if (activeLeads.length > 0) {
+          // Has active leads → show lead picker
+          setPendingContact(contact)
+          setContactLeads(activeLeads)
+          setShowLeadPicker(true)
+          setPendingTags(contact.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
+        } else {
+          // No active leads → go straight to create lead confirmation with inherited tags
+          setPendingContact(contact)
+          setPendingTags(contact.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
+        }
+      } catch {
+        // On error, fall back to direct creation flow
+        setPendingContact(contact)
+        setPendingTags(contact.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
+      }
+      setLoadingContactLeads(false)
       return
     }
     const parts = selected.map(p => ({
@@ -1062,44 +1107,112 @@ export default function EventDetailPage() {
     return evaluateFormula(eventFormulaNode, leadFormTagNames)
   }, [eventFormulaNode, leadFormTagNames])
 
-  // ─── Confirm: create lead from pending contact ────────────────────────────
+  // ─── Select existing lead from lead picker ─────────────────────────────────
+  const handleSelectExistingLead = (lead: typeof contactLeads[0]) => {
+    setSelectedExistingLead({
+      id: lead.id,
+      name: lead.name,
+      phone: lead.phone,
+      email: lead.email,
+      tags: lead.tags || [],
+    })
+    // Pre-populate tags from the lead's tags
+    setPendingTags(lead.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
+    setShowLeadPicker(false)
+  }
+
+  const handleLeadPickerCreateNew = () => {
+    // User wants to create a new lead — tags already pre-populated from contact
+    setSelectedExistingLead(null)
+    setPendingTags(pendingContact?.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
+    setShowLeadPicker(false)
+  }
+
+  // ─── Confirm: create lead or add existing lead ────────────────────────────
   const handleConfirmCreateLead = async () => {
     if (!pendingContact) return
     if (hasEventFormula && !pendingFormulaMatch) return
     setCreatingFromConfirm(true)
     try {
-      const activePipeline = leadPipelines[0]
-      const stageId = activePipeline?.stages?.[0]?.id || undefined
-      const leadRes = await fetch('/api/leads', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: pendingContact.name,
-          phone: pendingContact.phone || undefined,
-          email: pendingContact.email || undefined,
-          tags: pendingTags.map(t => t.name),
-          stage_id: stageId || undefined,
-        }),
-      })
-      const leadData = await leadRes.json()
-      if (!leadData.success) { alert(leadData.error || 'Error al crear lead'); setCreatingFromConfirm(false); return }
-      const lead = leadData.lead
-      const partRes = await fetch(`/api/events/${eventId}/participants`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          lead_id: lead.id,
-          contact_id: lead.contact_id || undefined,
-          name: lead.name,
-          last_name: lead.last_name || undefined,
-          phone: lead.phone || undefined,
-          email: lead.email || undefined,
-        }),
-      })
-      const partData = await partRes.json()
-      if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingFromConfirm(false); return }
+      if (selectedExistingLead) {
+        // ── Add existing lead as participant ──
+        // Sync tags to the contact: remove old, add new
+        const currentTagIds = new Set((pendingContact.tags || []).map(t => t.id))
+        const newTagIds = new Set(pendingTags.map(t => t.id))
+
+        // Remove tags no longer present
+        for (const tag of (pendingContact.tags || [])) {
+          if (!newTagIds.has(tag.id)) {
+            await fetch('/api/tags/remove', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ entity_type: 'contact', entity_id: pendingContact.id, tag_id: tag.id }),
+            })
+          }
+        }
+        // Add new tags
+        for (const tag of pendingTags) {
+          if (!currentTagIds.has(tag.id)) {
+            await fetch('/api/tags/assign', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ entity_type: 'contact', entity_id: pendingContact.id, tag_id: tag.id }),
+            })
+          }
+        }
+
+        // Then add participant
+        const partRes = await fetch(`/api/events/${eventId}/participants`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lead_id: selectedExistingLead.id,
+            contact_id: pendingContact.id,
+            name: selectedExistingLead.name || pendingContact.name,
+            phone: selectedExistingLead.phone || pendingContact.phone || undefined,
+            email: selectedExistingLead.email || pendingContact.email || undefined,
+          }),
+        })
+        const partData = await partRes.json()
+        if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingFromConfirm(false); return }
+      } else {
+        // ── Create new lead and add as participant ──
+        const activePipeline = leadPipelines[0]
+        const stageId = leadForm.stage_id || activePipeline?.stages?.[0]?.id || undefined
+        const leadRes = await fetch('/api/leads', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: pendingContact.name,
+            phone: pendingContact.phone || undefined,
+            email: pendingContact.email || undefined,
+            tags: pendingTags.map(t => t.name),
+            stage_id: stageId || undefined,
+          }),
+        })
+        const leadData = await leadRes.json()
+        if (!leadData.success) { alert(leadData.error || 'Error al crear lead'); setCreatingFromConfirm(false); return }
+        const lead = leadData.lead
+        const partRes = await fetch(`/api/events/${eventId}/participants`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lead_id: lead.id,
+            contact_id: lead.contact_id || undefined,
+            name: lead.name,
+            last_name: lead.last_name || undefined,
+            phone: lead.phone || undefined,
+            email: lead.email || undefined,
+          }),
+        })
+        const partData = await partRes.json()
+        if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingFromConfirm(false); return }
+      }
       setPendingContact(null)
       setPendingTags([])
+      setSelectedExistingLead(null)
+      setContactLeads([])
+      setLeadForm(f => ({ ...f, stage_id: '' }))
       fetchParticipantsPaginated()
       fetchEvent()
     } catch (e) { console.error(e); alert('Error de conexión') }
@@ -3256,6 +3369,10 @@ export default function EventDetailPage() {
                     age: updatedLead.age ?? p.age,
                     dni: updatedLead.dni ?? p.dni,
                     birth_date: updatedLead.birth_date ?? p.birth_date,
+                    company: updatedLead.company ?? p.company,
+                    address: updatedLead.address ?? p.address,
+                    distrito: updatedLead.distrito ?? p.distrito,
+                    ocupacion: updatedLead.ocupacion ?? p.ocupacion,
                     notes: updatedLead.notes ?? p.notes,
                     stage_id: updatedLead.stage_id || p.stage_id,
                     stage_name: updatedLead.stage_name || p.stage_name,
@@ -3277,6 +3394,10 @@ export default function EventDetailPage() {
                     age: updatedLead.age ?? prev.age,
                     dni: updatedLead.dni ?? prev.dni,
                     birth_date: updatedLead.birth_date ?? prev.birth_date,
+                    company: updatedLead.company ?? prev.company,
+                    address: updatedLead.address ?? prev.address,
+                    distrito: updatedLead.distrito ?? prev.distrito,
+                    ocupacion: updatedLead.ocupacion ?? prev.ocupacion,
                     notes: updatedLead.notes ?? prev.notes,
                     stage_id: updatedLead.stage_id || prev.stage_id,
                     stage_name: updatedLead.stage_name || prev.stage_name,
@@ -3522,15 +3643,15 @@ export default function EventDetailPage() {
         </div>
       )}
 
-      {/* ═══ Quick Confirmation — Create Lead from Contact ═══ */}
-      {pendingContact && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setPendingContact(null); setPendingTags([]) }}>
+      {/* ═══ Lead Picker — Select Existing Lead or Create New ═══ */}
+      {showLeadPicker && pendingContact && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setShowLeadPicker(false); setPendingContact(null); setPendingTags([]); setContactLeads([]) }}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-100" onClick={e => e.stopPropagation()}>
             <div className="px-6 py-4 border-b border-slate-100">
-              <h2 className="text-lg font-semibold text-slate-900">Crear Lead y Agregar</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Se creará un lead para este contacto y se agregará al evento</p>
+              <h2 className="text-lg font-semibold text-slate-900">Seleccionar Lead</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Este contacto ya tiene leads activos. Selecciona uno o crea uno nuevo.</p>
             </div>
-            <div className="p-6 space-y-4">
+            <div className="p-6 space-y-3">
               {/* Contact info */}
               <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
                 <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-sm">
@@ -3542,8 +3663,109 @@ export default function EventDetailPage() {
                 </div>
               </div>
 
-              {/* Pipeline & Stage */}
-              {leadPipelines.length > 0 && leadPipelines[0].stages?.length > 0 && (
+              {/* List of leads */}
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {contactLeads.map(lead => (
+                  <button
+                    key={lead.id}
+                    onClick={() => handleSelectExistingLead(lead)}
+                    className="w-full flex items-center gap-3 p-3 border border-slate-200 rounded-xl hover:bg-emerald-50 hover:border-emerald-300 transition text-left group"
+                  >
+                    <div className="w-9 h-9 rounded-full bg-slate-100 group-hover:bg-emerald-100 flex items-center justify-center text-slate-600 group-hover:text-emerald-700 font-bold text-xs transition">
+                      <Users className="w-4 h-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        {lead.pipeline_name && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded-md truncate max-w-[120px]">
+                            {lead.pipeline_name}
+                          </span>
+                        )}
+                        {lead.stage_name && (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded-md truncate max-w-[100px]"
+                            style={{ backgroundColor: (lead.stage_color || '#e2e8f0') + '20', color: lead.stage_color || '#64748b' }}
+                          >
+                            {lead.stage_name}
+                          </span>
+                        )}
+                      </div>
+                      {lead.tags && lead.tags.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {lead.tags.slice(0, 4).map(tag => (
+                            <span key={tag.id} className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ backgroundColor: (tag.color || '#e2e8f0') + '20', color: tag.color || '#64748b' }}>
+                              {tag.name}
+                            </span>
+                          ))}
+                          {lead.tags.length > 4 && (
+                            <span className="text-[10px] text-slate-400">+{lead.tags.length - 4}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-500 transition" />
+                  </button>
+                ))}
+              </div>
+
+              {/* Create new lead option */}
+              <button
+                onClick={handleLeadPickerCreateNew}
+                className="w-full flex items-center gap-3 p-3 border-2 border-dashed border-slate-200 rounded-xl hover:border-emerald-300 hover:bg-emerald-50/50 transition text-left group"
+              >
+                <div className="w-9 h-9 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-600">
+                  <Plus className="w-4 h-4" />
+                </div>
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-emerald-700">Crear nuevo lead</p>
+                  <p className="text-[10px] text-slate-400">Se creará un nuevo lead para este contacto</p>
+                </div>
+              </button>
+            </div>
+            <div className="px-6 py-3 border-t border-slate-100">
+              <button
+                onClick={() => { setShowLeadPicker(false); setPendingContact(null); setPendingTags([]); setContactLeads([]) }}
+                className="w-full px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Quick Confirmation — Create Lead from Contact ═══ */}
+      {pendingContact && !showLeadPicker && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setPendingContact(null); setPendingTags([]); setSelectedExistingLead(null); setContactLeads([]) }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-100" onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-slate-100">
+              <h2 className="text-lg font-semibold text-slate-900">
+                {selectedExistingLead ? 'Agregar Lead al Evento' : 'Crear Lead y Agregar'}
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {selectedExistingLead
+                  ? 'Se agregará el lead seleccionado al evento'
+                  : 'Se creará un lead para este contacto y se agregará al evento'}
+              </p>
+            </div>
+            <div className="p-6 space-y-4">
+              {/* Contact/Lead info */}
+              <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
+                <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-sm">
+                  {((selectedExistingLead?.name || pendingContact.name) || '?')[0]?.toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-slate-900 truncate">{(selectedExistingLead?.name || pendingContact.name) || 'Sin nombre'}</p>
+                  {(selectedExistingLead?.phone || pendingContact.phone) && <p className="text-xs text-slate-500">{selectedExistingLead?.phone || pendingContact.phone}</p>}
+                  {selectedExistingLead && (
+                    <span className="text-[10px] px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded-md mt-0.5 inline-block">Lead existente</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Pipeline & Stage — only for new leads */}
+              {!selectedExistingLead && leadPipelines.length > 0 && leadPipelines[0].stages?.length > 0 && (
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Pipeline / Etapa</label>
                   <div className="flex gap-2">
@@ -3590,7 +3812,7 @@ export default function EventDetailPage() {
             </div>
             <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
               <button
-                onClick={() => { setPendingContact(null); setPendingTags([]) }}
+                onClick={() => { setPendingContact(null); setPendingTags([]); setSelectedExistingLead(null); setContactLeads([]) }}
                 className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
               >
                 Cancelar
@@ -3600,7 +3822,9 @@ export default function EventDetailPage() {
                 disabled={creatingFromConfirm || (hasEventFormula && !pendingFormulaMatch)}
                 className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm"
               >
-                {creatingFromConfirm ? 'Creando...' : 'Crear Lead y Agregar'}
+                {creatingFromConfirm
+                  ? (selectedExistingLead ? 'Agregando...' : 'Creando...')
+                  : (selectedExistingLead ? 'Agregar al Evento' : 'Crear Lead y Agregar')}
               </button>
             </div>
           </div>

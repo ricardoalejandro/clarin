@@ -140,6 +140,12 @@ export default function EventsPage() {
   const [events, setEvents] = useState<Event[]>([])
   const [folders, setFolders] = useState<EventFolder[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(true)
+  const [total, setTotal] = useState(0)
+  const offsetRef = useRef(0)
+  const eventsScrollRef = useRef<HTMLDivElement>(null)
+  const EVENTS_PAGE_SIZE = 50
 
   // Navigation state
   const [currentFolderID, setCurrentFolderID] = useState<string | null>(null)
@@ -214,23 +220,43 @@ export default function EventsPage() {
     }
   }, [token])
 
-  const fetchEvents = useCallback(async () => {
+  const fetchEvents = useCallback(async (reset: boolean = true) => {
+    if (!reset && !hasMore) return
+    if (!reset) setLoadingMore(true)
     try {
+      if (reset) offsetRef.current = 0
       const params = new URLSearchParams()
       if (search) params.set('search', search)
       if (statusFilter) params.set('status', statusFilter)
       params.set('folder', currentFolderID ?? 'root')
+      params.set('limit', String(EVENTS_PAGE_SIZE))
+      params.set('offset', String(offsetRef.current))
       const res = await fetch(`/api/events?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) setEvents(data.events || [])
+      if (data.success) {
+        const newEvents: Event[] = data.events || []
+        if (reset) {
+          setEvents(newEvents)
+        } else {
+          setEvents(prev => {
+            const ids = new Set(prev.map(e => e.id))
+            return [...prev, ...newEvents.filter(e => !ids.has(e.id))]
+          })
+        }
+        const serverTotal = data.total ?? newEvents.length
+        setTotal(serverTotal)
+        offsetRef.current += newEvents.length
+        setHasMore(offsetRef.current < serverTotal)
+      }
     } catch (e) {
       console.error(e)
     } finally {
       setLoading(false)
+      setLoadingMore(false)
     }
-  }, [token, search, statusFilter, currentFolderID])
+  }, [token, search, statusFilter, currentFolderID, hasMore])
 
   // Restore folder from URL on mount
   useEffect(() => {
@@ -262,6 +288,21 @@ export default function EventsPage() {
     fetchEvents()
     fetchTags()
   }, [fetchFolders, fetchEvents, fetchTags])
+
+  // Infinite scroll for events
+  useEffect(() => {
+    if (!hasMore || loadingMore || loading) return
+    const el = eventsScrollRef.current
+    if (!el) return
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = el
+      if (scrollHeight - scrollTop - clientHeight < 300) {
+        fetchEvents(false)
+      }
+    }
+    el.addEventListener('scroll', handleScroll, { passive: true })
+    return () => el.removeEventListener('scroll', handleScroll)
+  }, [hasMore, loadingMore, loading, fetchEvents])
 
   // Close modals on Escape
   useEffect(() => {
@@ -1039,7 +1080,7 @@ export default function EventsPage() {
   // ─── JSX ─────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="space-y-5 overflow-y-auto flex-1 min-h-0 pb-6">
+    <div ref={eventsScrollRef} className="space-y-5 overflow-y-auto flex-1 min-h-0 pb-6">
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -1458,6 +1499,17 @@ export default function EventsPage() {
             )
           })}
         </div>
+      )}
+
+      {/* Loading more indicator */}
+      {loadingMore && (
+        <div className="flex items-center justify-center py-4">
+          <div className="w-5 h-5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+          <span className="ml-2 text-sm text-slate-500">Cargando más eventos...</span>
+        </div>
+      )}
+      {!hasMore && events.length > 0 && total > EVENTS_PAGE_SIZE && (
+        <p className="text-center text-xs text-slate-400 py-2">{total} eventos cargados</p>
       )}
 
       {/* Drop zone to move events back to parent when inside a folder */}

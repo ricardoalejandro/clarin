@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -20,6 +21,17 @@ import (
 
 func (s *Server) handleListDynamics(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// Redis cache — 30s TTL
+	dynamicsCacheKey := ""
+	if s.cache != nil {
+		dynamicsCacheKey = fmt.Sprintf("dynamics:%s:all", accountID.String())
+		if cached, err := s.cache.Get(c.Context(), dynamicsCacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
+	}
+
 	dynamics, err := s.repos.Dynamic.List(c.Context(), accountID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
@@ -27,6 +39,13 @@ func (s *Server) handleListDynamics(c *fiber.Ctx) error {
 	if dynamics == nil {
 		dynamics = []*domain.Dynamic{}
 	}
+
+	if dynamicsCacheKey != "" && s.cache != nil {
+		if data, err := json.Marshal(dynamics); err == nil {
+			_ = s.cache.Set(c.Context(), dynamicsCacheKey, data, 30*time.Second)
+		}
+	}
+
 	return c.JSON(dynamics)
 }
 
@@ -63,6 +82,7 @@ func (s *Server) handleCreateDynamic(c *fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	s.invalidateDynamicsCache(accountID)
 	return c.Status(fiber.StatusCreated).JSON(d)
 }
 
@@ -114,6 +134,7 @@ func (s *Server) handleUpdateDynamic(c *fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	s.invalidateDynamicsCache(accountID)
 	return c.JSON(d)
 }
 
@@ -127,6 +148,7 @@ func (s *Server) handleDeleteDynamic(c *fiber.Ctx) error {
 	if err := s.repos.Dynamic.Delete(c.Context(), id, accountID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	s.invalidateDynamicsCache(accountID)
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
@@ -147,6 +169,7 @@ func (s *Server) handleSetDynamicActive(c *fiber.Ctx) error {
 	if err := s.repos.Dynamic.SetActive(c.Context(), id, accountID, req.IsActive); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	s.invalidateDynamicsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -169,9 +192,13 @@ func (s *Server) handleCheckDynamicSlug(c *fiber.Ctx) error {
 // ─── Dynamic Items ───────────────────────────────────────────────────────────
 
 func (s *Server) handleListDynamicItems(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	dynamicID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid dynamic ID"})
+	}
+	if _, err := s.repos.Dynamic.GetByID(c.Context(), dynamicID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Dynamic not found"})
 	}
 
 	items, err := s.repos.Dynamic.ListItems(c.Context(), dynamicID)
@@ -488,9 +515,13 @@ func (s *Server) handleGetPublicDynamic(c *fiber.Ctx) error {
 // ─── Dynamic Options Handlers ────────────────────────────────────────────────
 
 func (s *Server) handleListDynamicOptions(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	dynamicID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid dynamic ID"})
+	}
+	if _, err := s.repos.Dynamic.GetByID(c.Context(), dynamicID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Dynamic not found"})
 	}
 
 	options, err := s.repos.Dynamic.ListOptions(c.Context(), dynamicID)
@@ -611,9 +642,13 @@ func (s *Server) handleReorderDynamicOptions(c *fiber.Ctx) error {
 // ─── Dynamic Links Handlers ──────────────────────────────────────────────────
 
 func (s *Server) handleListDynamicLinks(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	dynamicID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid dynamic ID"})
+	}
+	if _, err := s.repos.Dynamic.GetByID(c.Context(), dynamicID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Dynamic not found"})
 	}
 	links, err := s.repos.Dynamic.ListLinks(c.Context(), dynamicID)
 	if err != nil {

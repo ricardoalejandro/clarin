@@ -2,8 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
-import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings } from 'lucide-react'
-import { subscribeWebSocket } from '@/lib/api'
+import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe } from 'lucide-react'
+import { api, subscribeWebSocket } from '@/lib/api'
 import {
   getNotificationSettings,
   saveNotificationSettings,
@@ -265,6 +265,7 @@ function APIKeysPanel() {
 }
 
 export default function SettingsPage() {
+  const [kommoEnabled, setKommoEnabled] = useState(() => typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true')
   const [account, setAccount] = useState<Account | null>(null)
   const [user, setUser] = useState<UserProfile | null>(null)
   const [loading, setLoading] = useState(true)
@@ -309,6 +310,19 @@ export default function SettingsPage() {
   const [kommoWorkerStatus, setKommoWorkerStatus] = useState<{
     running: boolean; active_accounts: number; last_check: string | null; connected_count: number
   } | null>(null)
+  const [syncMonitor, setSyncMonitor] = useState<{
+    entries: { id: number; time: string; source: string; message: string; level: string }[]
+    stats: {
+      webhook: { count: number; last_at: string | null; last_msg: string }
+      events_poller: { count: number; last_at: string | null; last_msg: string }
+      push: { count: number; last_at: string | null; last_msg: string }
+      reconcile: { count: number; last_at: string | null; last_msg: string }
+    }
+  } | null>(null)
+  const [forcingPoll, setForcingPoll] = useState(false)
+  const [integrationView, setIntegrationView] = useState<'list' | 'kommo' | 'google'>('list')
+  const [togglingAllPipelines, setTogglingAllPipelines] = useState(false)
+  const [togglingKommo, setTogglingKommo] = useState(false)
   const [incomingStageId, setIncomingStageId] = useState<string>('')
   const [pipelineStages, setPipelineStages] = useState<{ id: string; name: string; color: string; pipeline_name: string }[]>([])
   const [savingStage, setSavingStage] = useState(false)
@@ -329,7 +343,7 @@ export default function SettingsPage() {
 
   // Google Contacts state
   const [googleStatus, setGoogleStatus] = useState<{
-    connected: boolean; email: string | null; sync_limit: number; sync_count: number; configured: boolean
+    connected: boolean; email: string | null; sync_limit: number; sync_count: number; configured: boolean; token_valid?: boolean
   } | null>(null)
   const [googleLoading, setGoogleLoading] = useState(false)
   const [googleDisconnecting, setGoogleDisconnecting] = useState(false)
@@ -650,12 +664,13 @@ export default function SettingsPage() {
   }, [])
 
   const fetchKommoWorkerStatus = useCallback(async () => {
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch('/api/kommo/sync/status', { headers: { Authorization: `Bearer ${token}` } })
-      const data = await res.json()
-      if (data.success) setKommoWorkerStatus(data.status)
-    } catch {}
+    const result = await api<{ status?: any }>('/api/kommo/sync/status')
+    if (result.success && result.data) setKommoWorkerStatus(result.data.status)
+  }, [])
+
+  const fetchSyncMonitor = useCallback(async () => {
+    const result = await api<{ monitor?: any }>('/api/kommo/sync/monitor')
+    if (result.success && result.data?.monitor) setSyncMonitor(result.data.monitor)
   }, [])
 
   useEffect(() => {
@@ -734,10 +749,11 @@ export default function SettingsPage() {
       fetchKommoPipelines()
       fetchKommoConnected()
       fetchKommoWorkerStatus()
-      const interval = setInterval(fetchKommoWorkerStatus, 10000)
+      fetchSyncMonitor()
+      const interval = setInterval(() => { fetchKommoWorkerStatus(); fetchSyncMonitor() }, 10000)
       return () => clearInterval(interval)
     }
-  }, [activeTab, kommoStatus?.connected, fetchKommoPipelines, fetchKommoConnected, fetchKommoWorkerStatus])
+  }, [activeTab, kommoStatus?.connected, fetchKommoPipelines, fetchKommoConnected, fetchKommoWorkerStatus, fetchSyncMonitor])
 
   const handleKommoConnectPipeline = async (kommoId: number) => {
     setKommoConnecting(kommoId)
@@ -783,35 +799,66 @@ export default function SettingsPage() {
   }
 
   const pollFullSyncStatus = useCallback(async () => {
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch('/api/kommo/sync/full-status', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success && data.status) {
-        const st = data.status
-        if (st.running) {
-          setKommoSyncProgress(st.progress || 'Sincronizando...')
-          return true // still running
-        } else {
-          // Done
-          if (st.result) {
-            setKommoSyncResult(st.result)
-            showMessage('success', `Sincronización completada en ${st.result.duration}`)
-          } else if (st.error) {
-            showMessage('error', st.error)
-          }
-          setKommoSyncing(false)
-          setKommoSyncProgress('')
-          return false // done
+    const result = await api<{ status?: any }>('/api/kommo/sync/full-status')
+    if (result.success && result.data?.status) {
+      const st = result.data.status
+      if (st.running) {
+        setKommoSyncProgress(st.progress || 'Sincronizando...')
+        return true // still running
+      } else {
+        // Done
+        if (st.result) {
+          setKommoSyncResult(st.result)
+          showMessage('success', `Sincronización completada en ${st.result.duration}`)
+        } else if (st.error) {
+          showMessage('error', st.error)
         }
+        setKommoSyncing(false)
+        setKommoSyncProgress('')
+        return false // done
       }
-    } catch {
-      // ignore polling errors
     }
     return false
   }, [])
+
+  const handleToggleAllPipelines = async (enabled: boolean) => {
+    setTogglingAllPipelines(true)
+    try {
+      const res = await api<{ count: number; enabled: boolean }>('/api/kommo/pipelines/toggle-all', {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      })
+      if (res.success) {
+        showMessage('success', enabled ? 'Sincronización activada para todos los embudos' : 'Sincronización desactivada')
+        fetchKommoConnected()
+      } else {
+        showMessage('error', res.error || 'Error al cambiar estado')
+      }
+    } catch {
+      showMessage('error', 'Error de conexión')
+    } finally {
+      setTogglingAllPipelines(false)
+    }
+  }
+
+  const handleToggleKommoEnabled = async (enabled: boolean) => {
+    setTogglingKommo(true)
+    try {
+      const res = await api<{ kommo_enabled: boolean }>('/api/kommo/toggle', {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      })
+      if (res) {
+        localStorage.setItem('kommo_enabled', String(enabled))
+        setKommoEnabled(enabled)
+        showMessage('success', enabled ? 'Kommo habilitado para esta cuenta' : 'Kommo deshabilitado para esta cuenta')
+      }
+    } catch {
+      showMessage('error', 'Error al cambiar estado de Kommo')
+    } finally {
+      setTogglingKommo(false)
+    }
+  }
 
   const handleKommoSync = async () => {
     setKommoSyncing(true)
@@ -849,21 +896,15 @@ export default function SettingsPage() {
   useEffect(() => {
     if (activeTab === 'integrations' && kommoStatus?.connected) {
       const checkRunningSync = async () => {
-        const token = localStorage.getItem('token')
-        try {
-          const res = await fetch('/api/kommo/sync/full-status', {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-          const data = await res.json()
-          if (data.success && data.status?.running) {
+        const result = await api<{ status?: any }>('/api/kommo/sync/full-status')
+        if (result.success && result.data?.status?.running) {
             setKommoSyncing(true)
-            setKommoSyncProgress(data.status.progress || 'Sincronizando...')
+            setKommoSyncProgress(result.data.status.progress || 'Sincronizando...')
             const interval = setInterval(async () => {
               const stillRunning = await pollFullSyncStatus()
               if (!stillRunning) clearInterval(interval)
             }, 2000)
-          }
-        } catch {}
+        }
       }
       checkRunningSync()
     }
@@ -1749,338 +1790,507 @@ export default function SettingsPage() {
           {/* Integrations Tab */}
           {activeTab === 'integrations' && (
             <div className="space-y-6">
-              <div>
-                <h3 className="text-sm font-medium text-slate-900">Kommo CRM</h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  Sincronización bidireccional con Kommo: etapas, etiquetas y nuevos leads se sincronizan automáticamente.
-                </p>
-              </div>
 
-              {/* Connection Status */}
-              <div className="bg-slate-50 rounded-xl p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    {kommoStatus?.connected ? (
-                      <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                    ) : kommoStatus?.configured ? (
-                      <XCircle className="w-5 h-5 text-red-500" />
-                    ) : (
-                      <Link2 className="w-5 h-5 text-slate-400" />
-                    )}
-                    <div>
-                      <p className="text-sm font-medium text-slate-900">
-                        {kommoStatus?.connected
-                          ? 'Conectado'
-                          : kommoStatus?.configured
-                          ? 'Error de conexión'
-                          : 'No configurado'}
-                      </p>
-                      {kommoStatus?.subdomain && (
-                        <p className="text-xs text-slate-500">{kommoStatus.subdomain}.kommo.com</p>
-                      )}
-                      {kommoStatus?.error && (
-                        <p className="text-xs text-red-500 mt-1">{kommoStatus.error}</p>
-                      )}
-                    </div>
+              {/* === INTEGRATION LIST VIEW === */}
+              {integrationView === 'list' && (
+                <>
+                  <div>
+                    <h3 className="text-sm font-medium text-slate-900">Integraciones</h3>
+                    <p className="text-xs text-slate-500 mt-1">Conecta servicios externos para sincronizar datos automáticamente.</p>
                   </div>
-                  <button
-                    onClick={fetchKommoStatus}
-                    className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-white rounded-lg transition"
-                    title="Verificar conexión"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                  </button>
-                </div>
 
-                {kommoStatus?.account && (
-                  <div className="mt-3 pt-3 border-t border-slate-200 grid grid-cols-2 gap-3 text-xs">
-                    <div>
-                      <span className="text-slate-500">Cuenta:</span>{' '}
-                      <span className="font-medium text-slate-900">{kommoStatus.account.name}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-500">ID:</span>{' '}
-                      <span className="font-medium text-slate-900">{kommoStatus.account.id}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-500">País:</span>{' '}
-                      <span className="font-medium text-slate-900">{kommoStatus.account.country}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-500">Moneda:</span>{' '}
-                      <span className="font-medium text-slate-900">{kommoStatus.account.currency}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Pipeline Selector */}
-              {kommoStatus?.connected && (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-sm font-medium text-slate-900 flex items-center gap-2">
-                        <Power className="w-4 h-4" /> Embudos (Pipelines)
-                      </h4>
-                      <p className="text-xs text-slate-500">
-                        Selecciona los embudos que deseas sincronizar en tiempo real. Puedes conectar varios simultáneamente.
-                      </p>
-                    </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {/* Kommo Card */}
                     <button
-                      onClick={() => { fetchKommoPipelines(); fetchKommoConnected() }}
-                      disabled={kommoLoadingPipelines}
-                      className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition"
-                      title="Refrescar pipelines"
+                      onClick={() => setIntegrationView('kommo')}
+                      className="text-left border border-slate-200 rounded-xl p-5 hover:border-emerald-300 hover:shadow-md transition-all group bg-white"
                     >
-                      <RefreshCw className={`w-4 h-4 ${kommoLoadingPipelines ? 'animate-spin' : ''}`} />
-                    </button>
-                  </div>
-
-                  {kommoLoadingPipelines && kommoPipelines.length === 0 ? (
-                    <div className="flex items-center justify-center py-8 text-slate-400 text-sm">
-                      <Loader2 className="w-5 h-5 animate-spin mr-2" /> Cargando embudos...
-                    </div>
-                  ) : (
-                    <div className="grid gap-3">
-                      {kommoPipelines.map((pipeline) => {
-                        const connected = kommoConnected.find(c => c.kommo_pipeline_id === pipeline.id && c.enabled)
-                        const isConnecting = kommoConnecting === pipeline.id
-                        return (
-                          <div
-                            key={pipeline.id}
-                            className={`border rounded-xl p-4 transition ${
-                              connected
-                                ? 'border-emerald-200 bg-emerald-50/50'
-                                : 'border-slate-200 bg-white hover:border-slate-300'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-3">
-                                <div className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
-                                <div>
-                                  <p className="text-sm font-medium text-slate-900">
-                                    {pipeline.name}
-                                    {pipeline.is_main && (
-                                      <span className="ml-2 text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded-full">Principal</span>
-                                    )}
-                                  </p>
-                                  <p className="text-[10px] text-slate-500">
-                                    {pipeline.stages} etapas · ID: {pipeline.id}
-                                    {connected?.last_synced_at && (
-                                      <> · Último sync: {new Date(connected.last_synced_at).toLocaleString('es-PE')}</>
-                                    )}
-                                  </p>
-                                </div>
-                              </div>
-                              <button
-                                onClick={() => connected
-                                  ? handleKommoDisconnectPipeline(pipeline.id)
-                                  : handleKommoConnectPipeline(pipeline.id)
-                                }
-                                disabled={isConnecting}
-                                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition ${
-                                  connected
-                                    ? 'bg-red-50 text-red-700 hover:bg-red-100'
-                                    : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm'
-                                } disabled:opacity-50`}
-                              >
-                                {isConnecting ? (
-                                  <Loader2 className="w-4 h-4 animate-spin" />
-                                ) : connected ? (
-                                  <XCircle className="w-4 h-4" />
-                                ) : (
-                                  <Power className="w-4 h-4" />
-                                )}
-                                {isConnecting ? 'Conectando...' : connected ? 'Desconectar' : 'Conectar'}
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-
-                  {/* Worker Status */}
-                  {kommoWorkerStatus && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm">
-                      <div className="flex items-center gap-2 mb-1">
-                        <Activity className={`w-4 h-4 ${kommoWorkerStatus.running ? 'text-emerald-600' : 'text-slate-400'}`} />
-                        <span className="text-xs font-medium text-slate-900">Worker de Sincronización</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${kommoWorkerStatus.running ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
-                          {kommoWorkerStatus.running ? 'Activo' : 'Inactivo'}
-                        </span>
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${kommoStatus?.connected ? 'bg-emerald-100' : 'bg-slate-100'}`}>
+                          <Link2 className={`w-5 h-5 ${kommoStatus?.connected ? 'text-emerald-600' : 'text-slate-400'}`} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-slate-900 group-hover:text-emerald-700 transition">Kommo CRM</p>
+                          <p className="text-[10px] text-slate-500 truncate">Leads, etiquetas, embudos</p>
+                        </div>
+                        <div className={`w-2.5 h-2.5 rounded-full ${kommoStatus?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
                       </div>
-                      <div className="text-[10px] text-slate-500 space-y-0.5">
-                        <p>{kommoWorkerStatus.connected_count} pipeline(s) conectado(s) · {kommoWorkerStatus.active_accounts} cuenta(s) sincronizando en paralelo</p>
-                        {kommoWorkerStatus.last_check && (
-                          <p>Última verificación: {new Date(kommoWorkerStatus.last_check).toLocaleString('es-PE')}</p>
+                      <div className="flex items-center gap-2 text-[10px]">
+                        <span className={`px-2 py-0.5 rounded-full ${kommoEnabled ? (kommoStatus?.connected ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500') : 'bg-amber-50 text-amber-700'}`}>
+                          {kommoEnabled ? (kommoStatus?.connected ? 'Conectado' : 'No conectado') : 'Deshabilitado'}
+                        </span>
+                        {kommoEnabled && kommoConnected.filter(c => c.enabled).length > 0 && (
+                          <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">
+                            {kommoConnected.filter(c => c.enabled).length} embudo{kommoConnected.filter(c => c.enabled).length !== 1 ? 's' : ''} activo{kommoConnected.filter(c => c.enabled).length !== 1 ? 's' : ''}
+                          </span>
                         )}
                       </div>
-                    </div>
-                  )}
+                    </button>
 
-                  <hr className="border-slate-200" />
-
-                  {/* Full Sync (all pipelines) */}
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="text-sm font-medium text-slate-900">Sincronización Completa</h4>
-                      <p className="text-xs text-slate-500">
-                        Importa los pipelines conectados, etapas, etiquetas, contactos y leads en segundo plano.
-                      </p>
-                      {kommoSyncing && kommoSyncProgress && (
-                        <p className="text-xs text-emerald-600 mt-1 flex items-center gap-2">
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          {kommoSyncProgress}
-                        </p>
-                      )}
-                    </div>
+                    {/* Google Contacts Card */}
                     <button
-                      onClick={handleKommoSync}
-                      disabled={kommoSyncing}
-                      className="inline-flex items-center gap-2 bg-emerald-600 text-white px-4 py-2 rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition text-sm font-medium shadow-sm"
+                      onClick={() => setIntegrationView('google')}
+                      className="text-left border border-slate-200 rounded-xl p-5 hover:border-blue-300 hover:shadow-md transition-all group bg-white"
                     >
-                      {kommoSyncing ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-4 h-4" />
-                      )}
-                      {kommoSyncing ? 'Sincronizando...' : 'Sincronizar Todo'}
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${googleStatus?.connected ? 'bg-blue-100' : 'bg-slate-100'}`}>
+                          <Users className={`w-5 h-5 ${googleStatus?.connected ? 'text-blue-600' : 'text-slate-400'}`} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-slate-900 group-hover:text-blue-700 transition">Google Contacts</p>
+                          <p className="text-[10px] text-slate-500 truncate">Sincroniza contactos a Android</p>
+                        </div>
+                        <div className={`w-2.5 h-2.5 rounded-full ${googleStatus?.connected ? 'bg-blue-500 animate-pulse' : 'bg-slate-300'}`} />
+                      </div>
+                      <div className="flex items-center gap-2 text-[10px]">
+                        <span className={`px-2 py-0.5 rounded-full ${googleStatus?.connected ? 'bg-blue-50 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
+                          {googleStatus?.connected ? 'Conectado' : googleStatus?.configured ? 'No conectado' : 'No configurado'}
+                        </span>
+                        {googleStatus?.connected && (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">
+                            {googleStatus.sync_count} contacto{googleStatus.sync_count !== 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </div>
                     </button>
                   </div>
-
-                  {/* Sync Result */}
-                  {kommoSyncResult && (
-                    <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4">
-                      <h4 className="text-sm font-medium text-emerald-800 mb-2">Sincronización completada</h4>
-                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
-                        <div className="bg-white rounded-xl p-3 text-center">
-                          <p className="text-xl font-bold text-slate-900">{kommoSyncResult.pipelines}</p>
-                          <p className="text-slate-500 text-[10px]">Pipelines</p>
-                        </div>
-                        <div className="bg-white rounded-xl p-3 text-center">
-                          <p className="text-xl font-bold text-slate-900">{kommoSyncResult.stages}</p>
-                          <p className="text-slate-500 text-[10px]">Etapas</p>
-                        </div>
-                        <div className="bg-white rounded-xl p-3 text-center">
-                          <p className="text-xl font-bold text-slate-900">{kommoSyncResult.tags}</p>
-                          <p className="text-slate-500 text-[10px]">Etiquetas</p>
-                        </div>
-                        <div className="bg-white rounded-xl p-3 text-center">
-                          <p className="text-xl font-bold text-slate-900">{kommoSyncResult.contacts}</p>
-                          <p className="text-slate-500 text-[10px]">Contactos</p>
-                        </div>
-                        <div className="bg-white rounded-xl p-3 text-center">
-                          <p className="text-xl font-bold text-slate-900">{kommoSyncResult.leads}</p>
-                          <p className="text-slate-500 text-[10px]">Leads</p>
-                        </div>
-                      </div>
-                      <p className="text-[10px] text-emerald-700 mt-2">Duración: {kommoSyncResult.duration}</p>
-                      {kommoSyncResult.errors && kommoSyncResult.errors.length > 0 && (
-                        <div className="mt-2 text-xs text-red-600">
-                          {kommoSyncResult.errors.map((e, i) => (
-                            <p key={i}>{e}</p>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Read-only notice */}
-                  <div className="text-xs text-slate-500 bg-emerald-50 border border-emerald-100 rounded-xl p-3">
-                    <strong>Sincronización bidireccional:</strong> Cambios de etapa, etiquetas y nuevos leads en Clarin se reflejan automáticamente en Kommo. Puedes tener varios embudos activos.
-                  </div>
-                </div>
+                </>
               )}
 
-              {/* Divider */}
-              <div className="border-t border-slate-200 pt-6">
-                <h3 className="text-sm font-medium text-slate-900">Google Contacts</h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  Sincroniza contactos de Clarin a Google Contacts para que WhatsApp muestre los nombres en tu teléfono Android.
-                </p>
-              </div>
+              {/* === KOMMO DETAIL VIEW === */}
+              {integrationView === 'kommo' && (
+                <>
+                  <button
+                    onClick={() => setIntegrationView('list')}
+                    className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 transition -mb-2"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" /> Integraciones
+                  </button>
 
-              {/* Google Connection Status */}
-              <div className="bg-slate-50 rounded-xl p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    {googleStatus?.connected ? (
-                      <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                    ) : googleStatus?.configured ? (
-                      <Link2 className="w-5 h-5 text-slate-400" />
-                    ) : (
-                      <XCircle className="w-5 h-5 text-red-400" />
-                    )}
-                    <div>
-                      <p className="text-sm font-medium text-slate-900">
-                        {googleStatus?.connected
-                          ? 'Conectado'
-                          : googleStatus?.configured
-                          ? 'No conectado'
-                          : 'No configurado (faltan credenciales)'}
-                      </p>
-                      {googleStatus?.email && (
-                        <p className="text-xs text-slate-500">{googleStatus.email}</p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={fetchGoogleStatus}
-                      className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-white rounded-lg transition"
-                      title="Verificar conexión"
-                    >
-                      <RefreshCw className="w-4 h-4" />
-                    </button>
-                    {googleStatus?.connected ? (
-                      <button
-                        onClick={handleGoogleDisconnect}
-                        disabled={googleDisconnecting}
-                        className="inline-flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded-lg transition text-xs font-medium"
-                      >
-                        {googleDisconnecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
-                        Desconectar
-                      </button>
-                    ) : googleStatus?.configured ? (
-                      <button
-                        onClick={handleGoogleConnect}
-                        disabled={googleLoading}
-                        className="inline-flex items-center gap-1.5 bg-emerald-600 text-white hover:bg-emerald-700 px-3 py-1.5 rounded-lg transition text-xs font-medium shadow-sm"
-                      >
-                        {googleLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
-                        Conectar Google
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-
-                {/* Sync Quota */}
-                {googleStatus?.connected && (
-                  <div className="mt-3 pt-3 border-t border-slate-200">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs text-slate-500">Contactos sincronizados</span>
-                      <span className="text-xs font-medium text-slate-700">
-                        {googleStatus.sync_count.toLocaleString()} / {googleStatus.sync_limit.toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="w-full bg-slate-200 rounded-full h-2">
-                      <div
-                        className="bg-emerald-500 h-2 rounded-full transition-all"
-                        style={{ width: `${Math.min(100, (googleStatus.sync_count / googleStatus.sync_limit) * 100)}%` }}
-                      />
-                    </div>
-                    <p className="text-[10px] text-slate-400 mt-1">
-                      Sincroniza contactos individuales desde la página de Contactos o Leads.
+                  <div>
+                    <h3 className="text-sm font-medium text-slate-900">Kommo CRM</h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Sincronización bidireccional con Kommo: etapas, etiquetas y nuevos leads se sincronizan automáticamente.
                     </p>
                   </div>
-                )}
-              </div>
 
-              {/* Google info */}
-              <div className="text-xs text-slate-500 bg-blue-50 border border-blue-100 rounded-xl p-3">
-                <strong>¿Cómo funciona?</strong> Al sincronizar un contacto, se crea en Google Contacts con nombre, teléfono, email y empresa. En un teléfono Android con esa cuenta Google, WhatsApp mostrará los nombres actualizados.
-              </div>
+                  {/* Enable/Disable Kommo for this account */}
+                  <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Power className={`w-5 h-5 ${kommoEnabled ? 'text-emerald-600' : 'text-slate-400'}`} />
+                        <div>
+                          <p className="text-sm font-medium text-slate-900">Integración Kommo</p>
+                          <p className="text-xs text-slate-500">
+                            {kommoEnabled
+                              ? 'Kommo está habilitado — los badges, filtros y sincronización están activos en toda la app'
+                              : 'Kommo está deshabilitado — los elementos de Kommo están ocultos en la interfaz'}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleToggleKommoEnabled(!kommoEnabled)}
+                        disabled={togglingKommo}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ${
+                          kommoEnabled ? 'bg-emerald-500' : 'bg-slate-300'
+                        } ${togglingKommo ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                      >
+                        <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ${
+                          kommoEnabled ? 'translate-x-6' : 'translate-x-1'
+                        }`} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Connection Status */}
+                  <div className="bg-slate-50 rounded-xl p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        {kommoStatus?.connected ? (
+                          <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                        ) : kommoStatus?.configured ? (
+                          <XCircle className="w-5 h-5 text-red-500" />
+                        ) : (
+                          <Link2 className="w-5 h-5 text-slate-400" />
+                        )}
+                        <div>
+                          <p className="text-sm font-medium text-slate-900">
+                            {kommoStatus?.connected
+                              ? 'Conectado'
+                              : kommoStatus?.configured
+                              ? 'Error de conexión'
+                              : 'No configurado'}
+                          </p>
+                          {kommoStatus?.subdomain && (
+                            <p className="text-xs text-slate-500">{kommoStatus.subdomain}.kommo.com</p>
+                          )}
+                          {kommoStatus?.error && (
+                            <p className="text-xs text-red-500 mt-1">{kommoStatus.error}</p>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        onClick={fetchKommoStatus}
+                        className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-white rounded-lg transition"
+                        title="Verificar conexión"
+                      >
+                        <RefreshCw className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {kommoStatus?.account && (
+                      <div className="mt-3 pt-3 border-t border-slate-200 grid grid-cols-2 gap-3 text-xs">
+                        <div>
+                          <span className="text-slate-500">Cuenta:</span>{' '}
+                          <span className="font-medium text-slate-900">{kommoStatus.account.name}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">ID:</span>{' '}
+                          <span className="font-medium text-slate-900">{kommoStatus.account.id}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">País:</span>{' '}
+                          <span className="font-medium text-slate-900">{kommoStatus.account.country}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Moneda:</span>{' '}
+                          <span className="font-medium text-slate-900">{kommoStatus.account.currency}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Sync Toggle */}
+                  {kommoStatus?.connected && (
+                    <div className="space-y-4">
+                      <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <Power className={`w-5 h-5 ${kommoConnected.some(c => c.enabled) ? 'text-emerald-600' : 'text-slate-400'}`} />
+                            <div>
+                              <p className="text-sm font-medium text-slate-900">Sincronización de Embudos</p>
+                              <p className="text-xs text-slate-500">
+                                {kommoConnected.some(c => c.enabled)
+                                  ? `${kommoConnected.filter(c => c.enabled).length} embudo${kommoConnected.filter(c => c.enabled).length !== 1 ? 's' : ''} sincronizando`
+                                  : 'Sincronización desactivada'}
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleToggleAllPipelines(!kommoConnected.some(c => c.enabled))}
+                            disabled={togglingAllPipelines}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 ${
+                              kommoConnected.some(c => c.enabled) ? 'bg-emerald-500' : 'bg-slate-300'
+                            } ${togglingAllPipelines ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                          >
+                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ${
+                              kommoConnected.some(c => c.enabled) ? 'translate-x-6' : 'translate-x-1'
+                            }`} />
+                          </button>
+                        </div>
+                        {kommoConnected.some(c => c.enabled) && (
+                          <div className="mt-3 pt-3 border-t border-slate-100">
+                            <div className="flex flex-wrap gap-1.5">
+                              {kommoConnected.filter(c => c.enabled).map(cp => (
+                                <span key={cp.id} className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100">
+                                  {cp.pipeline_name || `Pipeline ${cp.kommo_pipeline_id}`}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Worker Status */}
+                      {kommoWorkerStatus && (
+                        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm">
+                          <div className="flex items-center gap-2 mb-1">
+                            <Activity className={`w-4 h-4 ${kommoWorkerStatus.running ? 'text-emerald-600' : 'text-slate-400'}`} />
+                            <span className="text-xs font-medium text-slate-900">Worker de Sincronización</span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${kommoWorkerStatus.running ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                              {kommoWorkerStatus.running ? 'Activo' : 'Inactivo'}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-500 space-y-0.5">
+                            <p>{kommoWorkerStatus.connected_count} pipeline(s) conectado(s) · {kommoWorkerStatus.active_accounts} cuenta(s) sincronizando en paralelo</p>
+                            {kommoWorkerStatus.last_check && (
+                              <p>Última verificación: {new Date(kommoWorkerStatus.last_check).toLocaleString('es-PE')}</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Sync Monitor Panel */}
+                      {syncMonitor && (
+                        <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Signal className="w-4 h-4 text-emerald-600" />
+                              <span className="text-sm font-medium text-slate-900">Monitor de Sincronización</span>
+                            </div>
+                            <button
+                              onClick={async () => {
+                                setForcingPoll(true)
+                                try {
+                                  await api('/api/kommo/sync/events-poller/force', { method: 'POST' })
+                                  await fetchSyncMonitor()
+                                } finally {
+                                  setForcingPoll(false)
+                                }
+                              }}
+                              disabled={forcingPoll}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition disabled:opacity-50"
+                            >
+                              {forcingPoll ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                              {forcingPoll ? 'Consultando...' : 'Forzar Poll'}
+                            </button>
+                          </div>
+
+                          {/* 4 Stat Cards */}
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                            {([
+                              { key: 'webhook' as const, label: 'Webhooks', color: 'blue' },
+                              { key: 'events_poller' as const, label: 'Events Poller', color: 'emerald' },
+                              { key: 'push' as const, label: 'Push', color: 'amber' },
+                              { key: 'reconcile' as const, label: 'Reconciliación', color: 'purple' },
+                            ] as const).map(({ key, label, color }) => {
+                              const stat = syncMonitor.stats[key]
+                              const colorMap: Record<string, { bg: string; text: string; dot: string }> = {
+                                blue: { bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500' },
+                                emerald: { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
+                                amber: { bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-500' },
+                                purple: { bg: 'bg-purple-50', text: 'text-purple-700', dot: 'bg-purple-500' },
+                              }
+                              const c = colorMap[color]
+                              return (
+                                <div key={key} className={`${c.bg} rounded-xl p-3`}>
+                                  <div className="flex items-center gap-1.5 mb-1">
+                                    <div className={`w-1.5 h-1.5 rounded-full ${stat.last_at ? c.dot : 'bg-slate-300'}`} />
+                                    <span className={`text-[10px] font-medium ${c.text}`}>{label}</span>
+                                  </div>
+                                  <p className="text-lg font-bold text-slate-900">{stat.count}</p>
+                                  <p className="text-[9px] text-slate-500 truncate">
+                                    {stat.last_at ? new Date(stat.last_at).toLocaleTimeString('es-PE') : 'Sin actividad'}
+                                  </p>
+                                </div>
+                              )
+                            })}
+                          </div>
+
+                          {/* Activity Log */}
+                          {syncMonitor.entries.length > 0 && (
+                            <div>
+                              <p className="text-[10px] font-medium text-slate-500 mb-1.5">Actividad reciente (últimas 24h)</p>
+                              <div className="max-h-64 overflow-y-auto space-y-1 scrollbar-thin">
+                                {syncMonitor.entries.map((entry, i) => {
+                                  const sourceColors: Record<string, string> = {
+                                    webhook: 'bg-blue-100 text-blue-700',
+                                    events_poller: 'bg-emerald-100 text-emerald-700',
+                                    push: 'bg-amber-100 text-amber-700',
+                                    reconcile: 'bg-purple-100 text-purple-700',
+                                  }
+                                  return (
+                                    <div key={i} className="flex items-start gap-2 py-1 px-2 rounded-lg hover:bg-slate-50 transition">
+                                      <span className="text-[9px] text-slate-400 whitespace-nowrap mt-0.5">
+                                        {new Date(entry.time).toLocaleTimeString('es-PE')}
+                                      </span>
+                                      <span className={`text-[9px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${sourceColors[entry.source] || 'bg-slate-100 text-slate-600'}`}>
+                                        {entry.source === 'events_poller' ? 'poller' : entry.source}
+                                      </span>
+                                      <span className={`text-[10px] ${entry.level === 'error' ? 'text-red-600' : 'text-slate-700'}`}>
+                                        {entry.message}
+                                      </span>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <hr className="border-slate-200" />
+
+                      {/* Full Sync */}
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h4 className="text-sm font-medium text-slate-900">Sincronización Completa</h4>
+                          <p className="text-xs text-slate-500">
+                            Importa leads, etiquetas, contactos y ejecuta reconciliación completa (sin límite).
+                          </p>
+                          {kommoSyncing && kommoSyncProgress && (
+                            <p className="text-xs text-emerald-600 mt-1 flex items-center gap-2">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              {kommoSyncProgress}
+                            </p>
+                          )}
+                        </div>
+                        <button
+                          onClick={handleKommoSync}
+                          disabled={kommoSyncing}
+                          className="inline-flex items-center gap-2 bg-emerald-600 text-white px-4 py-2 rounded-xl hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition text-sm font-medium shadow-sm"
+                        >
+                          {kommoSyncing ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-4 h-4" />
+                          )}
+                          {kommoSyncing ? 'Sincronizando...' : 'Sincronizar Todo'}
+                        </button>
+                      </div>
+
+                      {/* Sync Result */}
+                      {kommoSyncResult && (
+                        <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4">
+                          <h4 className="text-sm font-medium text-emerald-800 mb-2">Sincronización completada</h4>
+                          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+                            <div className="bg-white rounded-xl p-3 text-center">
+                              <p className="text-xl font-bold text-slate-900">{kommoSyncResult.pipelines}</p>
+                              <p className="text-slate-500 text-[10px]">Pipelines</p>
+                            </div>
+                            <div className="bg-white rounded-xl p-3 text-center">
+                              <p className="text-xl font-bold text-slate-900">{kommoSyncResult.stages}</p>
+                              <p className="text-slate-500 text-[10px]">Etapas</p>
+                            </div>
+                            <div className="bg-white rounded-xl p-3 text-center">
+                              <p className="text-xl font-bold text-slate-900">{kommoSyncResult.tags}</p>
+                              <p className="text-slate-500 text-[10px]">Etiquetas</p>
+                            </div>
+                            <div className="bg-white rounded-xl p-3 text-center">
+                              <p className="text-xl font-bold text-slate-900">{kommoSyncResult.contacts}</p>
+                              <p className="text-slate-500 text-[10px]">Contactos</p>
+                            </div>
+                            <div className="bg-white rounded-xl p-3 text-center">
+                              <p className="text-xl font-bold text-slate-900">{kommoSyncResult.leads}</p>
+                              <p className="text-slate-500 text-[10px]">Leads</p>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-emerald-700 mt-2">Duración: {kommoSyncResult.duration}</p>
+                          {kommoSyncResult.errors && kommoSyncResult.errors.length > 0 && (
+                            <div className="mt-2 text-xs text-red-600">
+                              {kommoSyncResult.errors.map((e: string, i: number) => (
+                                <p key={i}>{e}</p>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Info */}
+                      <div className="text-xs text-slate-500 bg-emerald-50 border border-emerald-100 rounded-xl p-3">
+                        <strong>Sincronización bidireccional:</strong> Cambios de etapa, etiquetas y nuevos leads en Clarin se reflejan automáticamente en Kommo. La reconciliación detecta leads faltantes en ambas direcciones.
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* === GOOGLE CONTACTS DETAIL VIEW === */}
+              {integrationView === 'google' && (
+                <>
+                  <button
+                    onClick={() => setIntegrationView('list')}
+                    className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 transition -mb-2"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" /> Integraciones
+                  </button>
+
+                  <div>
+                    <h3 className="text-sm font-medium text-slate-900">Google Contacts</h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Sincroniza contactos de Clarin a Google Contacts para que WhatsApp muestre los nombres en tu teléfono Android.
+                    </p>
+                  </div>
+
+                  {/* Google Connection Status */}
+                  <div className="bg-slate-50 rounded-xl p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        {googleStatus?.connected ? (
+                          <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                        ) : googleStatus?.configured ? (
+                          <Link2 className="w-5 h-5 text-slate-400" />
+                        ) : (
+                          <XCircle className="w-5 h-5 text-red-400" />
+                        )}
+                        <div>
+                          <p className="text-sm font-medium text-slate-900">
+                            {googleStatus?.connected
+                              ? 'Conectado'
+                              : googleStatus?.configured
+                              ? 'No conectado'
+                              : 'No configurado (faltan credenciales)'}
+                          </p>
+                          {googleStatus?.email && (
+                            <p className="text-xs text-slate-500">{googleStatus.email}</p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={fetchGoogleStatus}
+                          className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-white rounded-lg transition"
+                          title="Verificar conexión"
+                        >
+                          <RefreshCw className="w-4 h-4" />
+                        </button>
+                        {googleStatus?.connected ? (
+                          <button
+                            onClick={handleGoogleDisconnect}
+                            disabled={googleDisconnecting}
+                            className="inline-flex items-center gap-1.5 bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded-lg transition text-xs font-medium"
+                          >
+                            {googleDisconnecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
+                            Desconectar
+                          </button>
+                        ) : googleStatus?.configured ? (
+                          <button
+                            onClick={handleGoogleConnect}
+                            disabled={googleLoading}
+                            className="inline-flex items-center gap-1.5 bg-emerald-600 text-white hover:bg-emerald-700 px-3 py-1.5 rounded-lg transition text-xs font-medium shadow-sm"
+                          >
+                            {googleLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+                            Conectar Google
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {/* Sync Quota */}
+                    {googleStatus?.connected && (
+                      <div className="mt-3 pt-3 border-t border-slate-200">
+                        {googleStatus.token_valid === false && (
+                          <div className="mb-3 p-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                            <p className="text-xs text-amber-800 font-medium">⚠️ El token de Google ha expirado</p>
+                            <p className="text-[10px] text-amber-600 mt-0.5">Desconecta y vuelve a conectar Google para renovar la autenticación.</p>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs text-slate-500">Contactos sincronizados</span>
+                          <span className="text-xs font-medium text-slate-700">
+                            {googleStatus.sync_count.toLocaleString()} / {googleStatus.sync_limit.toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="w-full bg-slate-200 rounded-full h-2">
+                          <div
+                            className="bg-emerald-500 h-2 rounded-full transition-all"
+                            style={{ width: `${Math.min(100, (googleStatus.sync_count / googleStatus.sync_limit) * 100)}%` }}
+                          />
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          Sincroniza contactos individuales desde la página de Contactos o Leads.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Google info */}
+                  <div className="text-xs text-slate-500 bg-blue-50 border border-blue-100 rounded-xl p-3">
+                    <strong>¿Cómo funciona?</strong> Al sincronizar un contacto, se crea en Google Contacts con nombre, teléfono, email y empresa. En un teléfono Android con esa cuenta Google, WhatsApp mostrará los nombres actualizados.
+                  </div>
+                </>
+              )}
+
             </div>
           )}
 

@@ -3,12 +3,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Phone, Mail, User, Calendar, MessageCircle, Trash2, ChevronDown,
-  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff
+  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff, MapPin, Briefcase, Map
 } from 'lucide-react'
-import { formatDistanceToNow, format } from 'date-fns'
+import { formatDistanceToNow, format, parseISO } from 'date-fns'
 import { es } from 'date-fns/locale'
 import TagInput from '@/components/TagInput'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
+import TaskList from '@/components/TaskList'
+import TaskFormModal from '@/components/TaskFormModal'
+import GenerateDocumentModal from '@/components/GenerateDocumentModal'
+import ConfirmDeleteKommoModal from '@/components/ConfirmDeleteKommoModal'
+import type { Task, TaskList as TaskListType } from '@/types/task'
+import { TASK_TYPE_CONFIG } from '@/types/task'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 
 // ─── Props ───────────────────────────────────────────────
@@ -61,14 +67,15 @@ interface LeadDetailPanelProps {
   pushName?: string | null
   /** Avatar URL in contact mode */
   avatarUrl?: string | null
-  /** Called when "Reset from Device" is clicked in contact mode */
-  onResetFromDevice?: () => void
+
   /** Called when "Send Message" is clicked in contact mode */
   onSendMessage?: () => void
   /** Called after any field save in contact mode (to refresh parent's list) */
   onContactUpdate?: (contact: any) => void
   /** Called when an observation is created or deleted (to refresh parent's list view) */
   onObservationChange?: (leadId: string) => void
+  /** Auto-scroll to tasks section after panel opens */
+  scrollToTasks?: boolean
 }
 
 // ─── Component ───────────────────────────────────────────
@@ -97,11 +104,12 @@ export default function LeadDetailPanel({
   deviceNames,
   pushName,
   avatarUrl,
-  onResetFromDevice,
   onSendMessage,
   onContactUpdate,
   onObservationChange,
+  scrollToTasks = false,
 }: LeadDetailPanelProps) {
+  const kommoEnabled = typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true'
   // Internal lead state — updates immediately on save, syncs with prop
   const [lead, setLead] = useState(leadProp)
   useEffect(() => { setLead(leadProp) }, [leadProp])
@@ -113,6 +121,7 @@ export default function LeadDetailPanel({
   const [editingField, setEditingField] = useState<string | null>(null)
   const [editValues, setEditValues] = useState<Record<string, string>>({})
   const [savingField, setSavingField] = useState(false)
+  const savingFieldRef = useRef<string | null>(null)
 
   // Notes
   const [editingNotes, setEditingNotes] = useState(false)
@@ -130,6 +139,16 @@ export default function LeadDetailPanel({
   // History modal
   const [showHistoryModal, setShowHistoryModal] = useState(false)
 
+  // Destructive Kommo delete modal
+  const [showKommoDeleteModal, setShowKommoDeleteModal] = useState(false)
+  const [kommoDeleting, setKommoDeleting] = useState(false)
+
+  // Tasks
+  const [leadTasks, setLeadTasks] = useState<Task[]>([])
+  const [showTaskModal, setShowTaskModal] = useState(false)
+  const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [taskLists, setTaskLists] = useState<TaskListType[]>([])
+
   // Pipeline dropdown
   const [showPipelineDropdown, setShowPipelineDropdown] = useState(false)
   const [expandedPipelineId, setExpandedPipelineId] = useState<string | null>(null)
@@ -140,6 +159,9 @@ export default function LeadDetailPanel({
 
   // History sync
   const [syncingHistory, setSyncingHistory] = useState(false)
+
+  // Document generation
+  const [showDocumentModal, setShowDocumentModal] = useState(false)
 
   // Google sync
   const [googleSynced, setGoogleSynced] = useState(false)
@@ -232,7 +254,24 @@ export default function LeadDetailPanel({
     setEditingNotes(false)
     setObsDisplayCount(5)
     fetchObservations(lead.id)
+    fetchTaskLists()
+    if (!contactMode) {
+      fetchLeadTasks(lead.id)
+    } else if (contactId) {
+      fetchContactTasks(contactId)
+    }
   }, [leadProp.id])
+
+  // Auto-scroll to tasks section when scrollToTasks prop is set
+  useEffect(() => {
+    if (!scrollToTasks) return
+    // Wait for tasks to load and DOM to render
+    const timer = setTimeout(() => {
+      const el = document.getElementById('tasks-section')
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [scrollToTasks, leadProp.id])
 
   // ─── Close on Escape ───────────────────────────────────
   useEffect(() => {
@@ -280,8 +319,43 @@ export default function LeadDetailPanel({
     }
   }
 
+  const fetchTaskLists = async () => {
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch('/api/tasks/lists', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) setTaskLists(data.lists || [])
+    } catch { /* ignore */ }
+  }
+
+  const fetchLeadTasks = async (leadId: string) => {
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/tasks?lead_id=${leadId}&limit=20`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) setLeadTasks(data.tasks || [])
+    } catch { /* ignore */ }
+  }
+
+  const fetchContactTasks = async (cId: string) => {
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/tasks?contact_id=${cId}&limit=20`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) setLeadTasks(data.tasks || [])
+    } catch { /* ignore */ }
+  }
+
   const saveLeadField = async (field: string) => {
     if (!lead?.id) return
+    if (savingFieldRef.current) return
+    savingFieldRef.current = field
     setSavingField(true)
     const token = localStorage.getItem('token')
     try {
@@ -314,9 +388,11 @@ export default function LeadDetailPanel({
           onContactUpdate?.(data.contact)
         }
       } else if (eventMode) {
-        const updated = { ...lead, ...payload } as Lead
-        setLead(updated)
-        onLeadChange(updated)
+        if (data.success) {
+          const updated = { ...lead, ...payload } as Lead
+          setLead(updated)
+          onLeadChange(updated)
+        }
       } else {
         if (data.success && data.lead) {
           const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
@@ -329,6 +405,7 @@ export default function LeadDetailPanel({
     } finally {
       setSavingField(false)
       setEditingField(null)
+      setTimeout(() => { savingFieldRef.current = null }, 50)
     }
   }
 
@@ -371,6 +448,7 @@ export default function LeadDetailPanel({
 
   const handleUpdateLeadStage = async (leadId: string, stageId: string) => {
     const token = localStorage.getItem('token')
+    const prevLead = lead
     try {
       if (eventMode && eventId && participantId) {
         const res = await fetch(`/api/events/${eventId}/participants/${participantId}/stage`, {
@@ -393,31 +471,37 @@ export default function LeadDetailPanel({
           onStageChange?.(stageId, stage?.name || '', stage?.color || '')
         }
       } else {
+        // Optimistic update BEFORE API call
+        let stage: PipelineStage | undefined
+        for (const p of pipelines) {
+          const found = p.stages?.find(s => s.id === stageId)
+          if (found) { stage = found; break }
+        }
+        const updated = {
+          ...lead,
+          stage_id: stageId,
+          stage_name: stage?.name || null,
+          stage_color: stage?.color || null,
+          stage_position: stage?.position ?? null,
+        }
+        setLead(updated)
+        onLeadChange(updated)
+
         const res = await fetch(`/api/leads/${leadId}/stage`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ stage_id: stageId }),
         })
         const data = await res.json()
-        if (data.success) {
-          let stage: PipelineStage | undefined
-          for (const p of pipelines) {
-            const found = p.stages?.find(s => s.id === stageId)
-            if (found) { stage = found; break }
-          }
-          const updated = {
-            ...lead,
-            stage_id: stageId,
-            stage_name: stage?.name || null,
-            stage_color: stage?.color || null,
-            stage_position: stage?.position ?? null,
-          }
-          setLead(updated)
-          onLeadChange(updated)
+        if (!data.success) {
+          setLead(prevLead)
+          onLeadChange(prevLead)
         }
       }
     } catch (err) {
       console.error('Failed to update stage:', err)
+      setLead(prevLead)
+      onLeadChange(prevLead)
     }
   }
 
@@ -539,6 +623,11 @@ export default function LeadDetailPanel({
   }
 
   const handleDeleteLead = async () => {
+    // Blocked lead with Kommo sync → show special destructive modal
+    if (kommoEnabled && !contactMode && !eventMode && lead.is_blocked && lead.kommo_id && !lead.kommo_deleted_at) {
+      setShowKommoDeleteModal(true)
+      return
+    }
     const confirmMsg = contactMode ? '¿Estás seguro de eliminar este contacto?' : eventMode ? '¿Estás seguro de eliminar este participante?' : '¿Estás seguro de eliminar este lead?'
     if (!confirm(confirmMsg)) return
     const token = localStorage.getItem('token')
@@ -562,13 +651,41 @@ export default function LeadDetailPanel({
     }
   }
 
+  const handleDeleteFromKommo = async () => {
+    setKommoDeleting(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${lead.id}?delete_from_kommo=true`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowKommoDeleteModal(false)
+        onDelete?.(lead.id)
+        onClose()
+      } else {
+        alert(data.error || 'Error al eliminar lead de Kommo')
+      }
+    } catch (err) {
+      console.error('Failed to delete lead from Kommo:', err)
+      alert('Error de conexión al eliminar lead')
+    } finally {
+      setKommoDeleting(false)
+    }
+  }
+
   // ─── Helpers ───────────────────────────────────────────
   const startEditing = (field: string, currentValue: string) => {
     setEditingField(field)
     setEditValues({ ...editValues, [field]: currentValue })
   }
 
-  const cancelEditing = () => setEditingField(null)
+  const cancelEditing = () => {
+    savingFieldRef.current = '_cancel'
+    setEditingField(null)
+    setTimeout(() => { savingFieldRef.current = null }, 50)
+  }
 
   const handleFieldKeyDown = (e: React.KeyboardEvent, field: string) => {
     if (e.key === 'Enter') { e.preventDefault(); saveLeadField(field) }
@@ -706,12 +823,12 @@ export default function LeadDetailPanel({
 
           {/* Kommo & Google sync status */}
           <div className="flex items-center justify-center gap-2 mt-3 flex-wrap">
-            {!eventMode && !contactMode && (
+            {kommoEnabled && !eventMode && !contactMode && (
               lead.kommo_id ? (
               <>
-                <span className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 border border-emerald-200 rounded-full text-xs font-medium text-emerald-700">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
-                  Kommo #{lead.kommo_id}
+                <span className={`flex items-center gap-1.5 px-2.5 py-1 border rounded-full text-xs font-medium ${lead.kommo_deleted_at ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${lead.kommo_deleted_at ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                  {lead.kommo_deleted_at ? `Eliminado de Kommo #${lead.kommo_id}` : `Kommo #${lead.kommo_id}`}
                 </span>
                 <button
                   onClick={handleSyncKommo}
@@ -848,7 +965,43 @@ export default function LeadDetailPanel({
               <input autoFocus type="date" value={editValues.birth_date ?? ''} onChange={(e) => setEditValues({ ...editValues, birth_date: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'birth_date')} onBlur={() => saveLeadField('birth_date')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" />
             ) : (
               <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${lead.birth_date ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('birth_date', lead.birth_date ? lead.birth_date.split('T')[0] : '')} title="Clic para editar">
-                {lead.birth_date ? format(new Date(lead.birth_date), 'dd/MM/yyyy') : 'Agregar fecha de nacimiento'}
+                {lead.birth_date ? format(parseISO(lead.birth_date.split('T')[0]), 'dd/MM/yyyy') : 'Agregar fecha de nacimiento'}
+              </span>
+            )}
+          </div>
+
+          {/* Address */}
+          <div className="flex items-center gap-3 group">
+            <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
+            {editingField === 'address' ? (
+              <input autoFocus type="text" value={editValues.address ?? ''} onChange={(e) => setEditValues({ ...editValues, address: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'address')} onBlur={() => saveLeadField('address')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Dirección" />
+            ) : (
+              <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${lead.address ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('address', lead.address || '')} title="Clic para editar">
+                {lead.address || 'Agregar dirección'}
+              </span>
+            )}
+          </div>
+
+          {/* Distrito */}
+          <div className="flex items-center gap-3 group">
+            <Map className="w-4 h-4 text-emerald-600 shrink-0" />
+            {editingField === 'distrito' ? (
+              <input autoFocus type="text" value={editValues.distrito ?? ''} onChange={(e) => setEditValues({ ...editValues, distrito: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'distrito')} onBlur={() => saveLeadField('distrito')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Distrito" />
+            ) : (
+              <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${lead.distrito ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('distrito', lead.distrito || '')} title="Clic para editar">
+                {lead.distrito || 'Agregar distrito'}
+              </span>
+            )}
+          </div>
+
+          {/* Ocupación */}
+          <div className="flex items-center gap-3 group">
+            <Briefcase className="w-4 h-4 text-emerald-600 shrink-0" />
+            {editingField === 'ocupacion' ? (
+              <input autoFocus type="text" value={editValues.ocupacion ?? ''} onChange={(e) => setEditValues({ ...editValues, ocupacion: e.target.value })} onKeyDown={(e) => handleFieldKeyDown(e, 'ocupacion')} onBlur={() => saveLeadField('ocupacion')} className="flex-1 text-sm text-slate-800 bg-transparent border-b-2 border-emerald-500 outline-none" placeholder="Ocupación" />
+            ) : (
+              <span className={`text-sm flex-1 cursor-pointer hover:text-emerald-700 ${lead.ocupacion ? 'text-slate-800' : 'text-slate-400 italic'}`} onClick={() => startEditing('ocupacion', lead.ocupacion || '')} title="Clic para editar">
+                {lead.ocupacion || 'Agregar ocupación'}
               </span>
             )}
           </div>
@@ -881,7 +1034,13 @@ export default function LeadDetailPanel({
           <div className="relative">
             {/* Main Button */}
             <button
-              onClick={() => setShowPipelineDropdown(!showPipelineDropdown)}
+              onClick={() => {
+                const willOpen = !showPipelineDropdown
+                setShowPipelineDropdown(willOpen)
+                if (willOpen && lead.pipeline_id) {
+                  setExpandedPipelineId(lead.pipeline_id)
+                }
+              }}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border transition-all ${
                 lead.stage_id
                   ? 'bg-white border-slate-200 text-slate-700 hover:border-emerald-300 hover:shadow-sm'
@@ -1169,7 +1328,16 @@ export default function LeadDetailPanel({
         <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
           {contactMode ? (
             <>
-              {onSendMessage && (
+              {!hideWhatsApp && onSendWhatsApp && lead.phone && (
+                <button
+                  onClick={() => onSendWhatsApp(lead.phone)}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition text-sm font-medium shadow-sm"
+                >
+                  <MessageCircle className="w-4 h-4" />
+                  Enviar Mensaje
+                </button>
+              )}
+              {!hideWhatsApp && onSendMessage && !onSendWhatsApp && (
                 <button
                   onClick={onSendMessage}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition text-sm font-medium shadow-sm"
@@ -1178,15 +1346,7 @@ export default function LeadDetailPanel({
                   Enviar Mensaje
                 </button>
               )}
-              {onResetFromDevice && (
-                <button
-                  onClick={onResetFromDevice}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  Restaurar del Dispositivo
-                </button>
-              )}
+
             </>
           ) : (
             <>
@@ -1212,6 +1372,14 @@ export default function LeadDetailPanel({
             </>
           )}
 
+          <button
+            onClick={() => setShowDocumentModal(true)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition text-sm"
+          >
+            <FileText className="w-4 h-4" />
+            Generar Documento
+          </button>
+
           {!hideDelete && (
             <button
               onClick={handleDeleteLead}
@@ -1222,6 +1390,63 @@ export default function LeadDetailPanel({
             </button>
           )}
         </div>
+
+        {/* ─── Tasks Section ─── */}
+        {(!contactMode || (contactMode && contactId)) && (
+          <div id="tasks-section">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-xs font-semibold text-slate-500 flex items-center gap-2">
+                <Calendar className="w-3.5 h-3.5" />
+                Tareas ({leadTasks.filter(t => t.status === 'pending' || t.status === 'overdue').length})
+              </h4>
+              <button
+                onClick={() => { setEditingTask(null); setShowTaskModal(true) }}
+                className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition"
+                title="Nueva tarea"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {leadTasks.filter(t => t.status === 'pending' || t.status === 'overdue').length > 0 ? (
+              <TaskList
+                tasks={leadTasks.filter(t => t.status === 'pending' || t.status === 'overdue')}
+                maxItems={5}
+                compact
+                onComplete={async (taskId) => {
+                  try {
+                    const token = localStorage.getItem('token')
+                    await fetch(`/api/tasks/${taskId}/complete`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+                    if (contactMode && contactId) fetchContactTasks(contactId)
+                    else fetchLeadTasks(lead.id)
+                  } catch { /* ignore */ }
+                }}
+                onUpdate={async (taskId, fields) => {
+                  try {
+                    const token = localStorage.getItem('token')
+                    await fetch(`/api/tasks/${taskId}`, {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      body: JSON.stringify(fields),
+                    })
+                    if (contactMode && contactId) fetchContactTasks(contactId)
+                    else fetchLeadTasks(lead.id)
+                  } catch { /* ignore */ }
+                }}
+                onDelete={async (taskId) => {
+                  try {
+                    const token = localStorage.getItem('token')
+                    await fetch(`/api/tasks/${taskId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
+                    if (contactMode && contactId) fetchContactTasks(contactId)
+                    else fetchLeadTasks(lead.id)
+                  } catch { /* ignore */ }
+                }}
+                onOpenFullEdit={(t) => { setEditingTask(t); setShowTaskModal(true) }}
+              />
+            ) : (
+              <p className="text-xs text-slate-400 text-center py-2">Sin tareas</p>
+            )}
+          </div>
+        )}
 
         {/* Observations / History */}
         <div>
@@ -1340,6 +1565,45 @@ export default function LeadDetailPanel({
         observations={observations}
         onObservationChange={() => { fetchObservations(lead.id); onObservationChange?.(lead.id) }}
       />
+
+      {/* Task Form Modal (lead/contact-linked) */}
+      {(!contactMode || (contactMode && contactId)) && (
+        <TaskFormModal
+          isOpen={showTaskModal}
+          onClose={() => { setShowTaskModal(false); setEditingTask(null) }}
+          onSave={() => {
+            setShowTaskModal(false); setEditingTask(null)
+            if (contactMode && contactId) { fetchContactTasks(contactId); fetchObservations(lead.id) }
+            else { fetchLeadTasks(lead.id); fetchObservations(lead.id) }
+          }}
+          task={editingTask}
+          leadId={contactMode ? undefined : lead.id}
+          leadName={contactMode ? undefined : lead.name}
+          contactId={contactMode ? contactId : undefined}
+          contactName={contactMode ? lead.name : undefined}
+          taskLists={taskLists}
+        />
+      )}
+
+      {/* Generate Document Modal */}
+      {showDocumentModal && (
+        <GenerateDocumentModal
+          lead={lead}
+          onClose={() => setShowDocumentModal(false)}
+        />
+      )}
+
+      {/* Destructive Kommo Delete Modal */}
+      {kommoEnabled && (
+      <ConfirmDeleteKommoModal
+        isOpen={showKommoDeleteModal}
+        onConfirm={handleDeleteFromKommo}
+        onCancel={() => { setShowKommoDeleteModal(false); setKommoDeleting(false) }}
+        leadName={lead.name || 'Sin nombre'}
+        kommoId={lead.kommo_id || 0}
+        loading={kommoDeleting}
+      />
+      )}
     </div>
   )
 }

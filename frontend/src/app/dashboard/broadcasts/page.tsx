@@ -19,6 +19,7 @@ import LeadDetailPanel from '@/components/LeadDetailPanel'
 import type { Lead, Contact as FullContact } from '@/types/contact'
 import { renderFormattedText } from '@/lib/whatsappFormat'
 import * as XLSX from 'xlsx'
+import { api } from '@/lib/api'
 
 interface Device {
   id: string
@@ -202,58 +203,29 @@ export default function BroadcastsPage() {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
   const fetchCampaigns = useCallback(async () => {
-    try {
-      const res = await fetch('/api/campaigns', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) setCampaigns(data.campaigns || [])
-    } catch (err) {
-      console.error('Failed to fetch campaigns:', err)
-    } finally {
-      setLoading(false)
-    }
-  }, [token])
+    const result = await api<{ campaigns?: any[] }>('/api/campaigns')
+    if (result.success && result.data) setCampaigns(result.data.campaigns || [])
+    setLoading(false)
+  }, [])
 
   const fetchDevices = useCallback(async () => {
-    try {
-      const res = await fetch('/api/devices', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) setDevices(data.devices || [])
-    } catch (err) {
-      console.error('Failed to fetch devices:', err)
-    }
-  }, [token])
+    const result = await api<{ devices?: any[] }>('/api/devices')
+    if (result.success && result.data) setDevices(result.data.devices || [])
+  }, [])
 
   const fetchContacts = useCallback(async (tagIds?: Set<string>) => {
-    try {
-      let url = '/api/contacts?limit=1000&has_phone=true'
-      if (tagIds && tagIds.size > 0) {
-        url += `&tag_ids=${Array.from(tagIds).join(',')}`
-      }
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) setContacts(data.contacts || [])
-    } catch (err) {
-      console.error('Failed to fetch contacts:', err)
+    let url = '/api/contacts?limit=1000&has_phone=true'
+    if (tagIds && tagIds.size > 0) {
+      url += `&tag_ids=${Array.from(tagIds).join(',')}`
     }
-  }, [token])
+    const result = await api<{ contacts?: any[] }>(url)
+    if (result.success && result.data) setContacts(result.data.contacts || [])
+  }, [])
 
   const fetchTags = useCallback(async () => {
-    try {
-      const res = await fetch('/api/tags', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) setAllTags(data.tags || [])
-    } catch (err) {
-      console.error('Failed to fetch tags:', err)
-    }
-  }, [token])
+    const result = await api<{ tags?: any[] }>('/api/tags')
+    if (result.success && result.data) setAllTags(result.data.tags || [])
+  }, [])
 
   useEffect(() => {
     fetchCampaigns()

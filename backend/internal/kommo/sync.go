@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +75,140 @@ type SyncTask struct {
 }
 
 // WorkerStatus reports the real-time status of the background sync worker.
+// SyncMonitorEntry represents a single log entry in the sync monitor.
+type SyncMonitorEntry struct {
+	ID        int64     `json:"id"`
+	Time      time.Time `json:"time"`
+	Source    string    `json:"source"`  // "webhook", "events_poller", "push", "reconcile"
+	Message   string    `json:"message"`
+	Level     string    `json:"level"` // "info", "error"
+}
+
+// SyncMonitor tracks real-time sync activity persisted in PostgreSQL (24h retention).
+type SyncMonitor struct {
+	db     *pgxpool.Pool
+	stopCh chan struct{}
+}
+
+func NewSyncMonitor(db *pgxpool.Pool) *SyncMonitor {
+	m := &SyncMonitor{db: db, stopCh: make(chan struct{})}
+	go m.cleanupLoop()
+	return m
+}
+
+// Stop signals the cleanup goroutine to exit.
+func (m *SyncMonitor) Stop() {
+	close(m.stopCh)
+}
+
+// Log inserts a sync monitor entry into the database.
+func (m *SyncMonitor) Log(source, message, level string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := m.db.Exec(ctx,
+		`INSERT INTO sync_monitor_entries (source, message, level) VALUES ($1, $2, $3)`,
+		source, message, level,
+	)
+	if err != nil {
+		log.Printf("[SyncMonitor] Failed to insert entry: %v", err)
+	}
+}
+
+// cleanupLoop deletes entries older than 24 hours every hour.
+func (m *SyncMonitor) cleanupLoop() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			result, err := m.db.Exec(ctx, `DELETE FROM sync_monitor_entries WHERE created_at < NOW() - INTERVAL '24 hours'`)
+			if err != nil {
+				log.Printf("[SyncMonitor] Cleanup error: %v", err)
+			} else if result.RowsAffected() > 0 {
+				log.Printf("[SyncMonitor] Cleaned up %d old entries", result.RowsAffected())
+			}
+			cancel()
+		}
+	}
+}
+
+// GetData returns the monitor data for the API (last 24h entries + per-subsystem stats).
+func (m *SyncMonitor) GetData() map[string]interface{} {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Fetch last 200 entries (newest first)
+	rows, err := m.db.Query(ctx,
+		`SELECT id, source, message, level, created_at FROM sync_monitor_entries
+		 WHERE created_at > NOW() - INTERVAL '24 hours'
+		 ORDER BY created_at DESC LIMIT 200`)
+	if err != nil {
+		log.Printf("[SyncMonitor] GetData query error: %v", err)
+		return map[string]interface{}{"entries": []SyncMonitorEntry{}, "stats": map[string]interface{}{}}
+	}
+	defer rows.Close()
+
+	var entries []SyncMonitorEntry
+	for rows.Next() {
+		var e SyncMonitorEntry
+		if err := rows.Scan(&e.ID, &e.Source, &e.Message, &e.Level, &e.Time); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	if entries == nil {
+		entries = []SyncMonitorEntry{}
+	}
+
+	// Per-subsystem aggregate stats from the last 24h
+	type subsystemStat struct {
+		Count   int64   `json:"count"`
+		LastAt  *string `json:"last_at"`
+		LastMsg string  `json:"last_msg"`
+	}
+	stats := map[string]*subsystemStat{
+		"webhook":       {}, "events_poller": {},
+		"push":          {}, "reconcile":     {},
+	}
+
+	statRows, err := m.db.Query(ctx, `
+		SELECT source, COUNT(*),
+		       MAX(created_at),
+		       (SELECT message FROM sync_monitor_entries e2 WHERE e2.source = e1.source AND e2.created_at > NOW() - INTERVAL '24 hours' ORDER BY e2.created_at DESC LIMIT 1)
+		FROM sync_monitor_entries e1
+		WHERE created_at > NOW() - INTERVAL '24 hours'
+		GROUP BY source
+	`)
+	if err == nil {
+		defer statRows.Close()
+		for statRows.Next() {
+			var source string
+			var count int64
+			var lastAt time.Time
+			var lastMsg *string
+			if err := statRows.Scan(&source, &count, &lastAt, &lastMsg); err != nil {
+				continue
+			}
+			if s, ok := stats[source]; ok {
+				s.Count = count
+				t := lastAt.Format(time.RFC3339)
+				s.LastAt = &t
+				if lastMsg != nil {
+					s.LastMsg = *lastMsg
+				}
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"entries": entries,
+		"stats":   stats,
+	}
+}
+
 type WorkerStatus struct {
 	Running            bool       `json:"running"`
 	ActiveAccounts     int        `json:"active_accounts"` // accounts being synced right now
@@ -114,6 +249,20 @@ type SyncService struct {
 	// OnLeadTagsChanged is called after lead tags are synced for an account.
 	// Used to trigger event participant reconciliation without tight coupling.
 	OnLeadTagsChanged func(ctx context.Context, accountID uuid.UUID)
+	// WebhookSecret is the secret used to validate incoming webhook requests.
+	// Set from KOMMO_WEBHOOK_SECRET env var. If empty, webhooks are disabled.
+	WebhookSecret string
+	// PublicURL is the public base URL of the Clarin backend (e.g., https://clarin.naperu.cloud).
+	// Used for webhook auto-registration with Kommo.
+	PublicURL string
+	// Events poller state: tracks the last poll timestamp and stats for the Events API poller.
+	eventsPollerMu      sync.Mutex
+	lastEventPoll       int64     // Unix timestamp of the last successful events poll cursor
+	lastEventPollAt     time.Time // Wall clock time of the last poll completion
+	lastEventPollEvents int       // Number of events found in the last poll
+	lastEventPollLeads  int       // Number of leads synced in the last poll
+	// Sync monitor: ring buffer + stats for the monitor panel.
+	Monitor *SyncMonitor
 }
 
 // NewSyncService creates a new sync service with per-account parallel workers.
@@ -126,7 +275,14 @@ func NewSyncService(client *Client, db *pgxpool.Pool, hub *ws.Hub) *SyncService 
 		fullSync:          make(map[uuid.UUID]*FullSyncStatus),
 		unsortedSkipCache: make(map[int]int64),
 		busyAccounts:      make(map[uuid.UUID]bool),
+		lastEventPoll:     time.Now().Unix() - 60, // Start looking 60s back
+		Monitor:           NewSyncMonitor(db),
 	}
+}
+
+// GetClient returns the Kommo API client for direct operations.
+func (s *SyncService) GetClient() *Client {
+	return s.client
 }
 
 // StartFullSyncAsync starts a full sync in the background for the given account.
@@ -159,25 +315,34 @@ func (s *SyncService) StartFullSyncAsync(accountID uuid.UUID) bool {
 		setProgress("Sincronizando pipelines y etapas...")
 		result, err := s.SyncAll(ctx, accountID)
 
+		if err != nil {
+			now := time.Now()
+			s.fullSyncMu.Lock()
+			if st, ok := s.fullSync[accountID]; ok {
+				st.Running = false
+				st.DoneAt = &now
+				st.Error = err.Error()
+			}
+			s.fullSyncMu.Unlock()
+			log.Printf("[Kommo Sync] Background full sync failed for %s: %v", accountID, err)
+			return
+		}
+
+		// Run full reconciliation (stale + reverse) without batch limits
+		setProgress("Reconciliando leads (stale + faltantes)...")
+		log.Printf("[Kommo Sync] Running full reconciliation (unlimited) for %s", accountID)
+		s.reconcileAccount(ctx, accountID, true)
+
 		now := time.Now()
 		s.fullSyncMu.Lock()
 		if st, ok := s.fullSync[accountID]; ok {
 			st.Running = false
 			st.DoneAt = &now
-			if err != nil {
-				st.Error = err.Error()
-			} else {
-				st.Result = result
-				st.Progress = "Completado"
-			}
+			st.Result = result
+			st.Progress = "Completado"
 		}
 		s.fullSyncMu.Unlock()
-
-		if err != nil {
-			log.Printf("[Kommo Sync] Background full sync failed for %s: %v", accountID, err)
-		} else {
-			log.Printf("[Kommo Sync] Background full sync completed for %s in %s", accountID, result.Duration)
-		}
+		log.Printf("[Kommo Sync] Background full sync completed for %s in %s", accountID, result.Duration)
 	}()
 	return true
 }
@@ -193,7 +358,9 @@ func (s *SyncService) GetFullSyncStatus(accountID uuid.UUID) *FullSyncStatus {
 	return nil
 }
 
-// Start begins the background sync worker and poller.
+// Start begins the background sync worker.
+// If a webhook secret is configured, it registers the webhook with Kommo on startup.
+// Polling is replaced by webhooks — only reconciliation runs periodically.
 func (s *SyncService) Start() {
 	s.mu.Lock()
 	if s.running {
@@ -204,10 +371,26 @@ func (s *SyncService) Start() {
 	s.status.Running = true
 	s.mu.Unlock()
 
-	// Poller: each tick spawns per-account goroutines (parallel, skip-if-busy)
-	go s.poller()
+	// Espejo total: auto-connect ALL Kommo pipelines to ALL accounts on startup
+	go func() {
+		time.Sleep(3 * time.Second) // Let DB connections settle
+		s.syncAllKommoPipelines()
 
-	log.Println("[Kommo Sync] Background poller started (5s interval, parallel per-account)")
+		// After pipelines are synced, register webhook
+		if s.WebhookSecret != "" {
+			s.autoRegisterWebhook()
+		} else {
+			log.Println("[Kommo Sync] KOMMO_WEBHOOK_SECRET not set — webhook auto-registration disabled")
+		}
+
+		// Events API poller: catches ALL changes including UI tag edits that webhooks miss
+		go s.eventsPoller()
+	}()
+
+	// Reconciliation: periodic full check of all synced pipelines against Kommo
+	go s.reconcileLoop()
+
+	log.Println("[Kommo Sync] Background reconciliation started (1h interval)")
 }
 
 // Stop gracefully shuts down the sync worker.
@@ -221,7 +404,250 @@ func (s *SyncService) Stop() {
 	s.mu.Unlock()
 	close(s.stopCh)
 	s.wg.Wait() // wait for all per-account sync goroutines to finish
+	s.Monitor.Stop()
 	log.Println("[Kommo Sync] Background worker stopped")
+}
+
+// isKommoEnabled checks if an account has Kommo integration enabled.
+func (s *SyncService) isKommoEnabled(ctx context.Context, accountID uuid.UUID) bool {
+	var enabled bool
+	err := s.db.QueryRow(ctx, `SELECT COALESCE(kommo_enabled, false) FROM accounts WHERE id = $1`, accountID).Scan(&enabled)
+	return err == nil && enabled
+}
+
+// ProcessWebhookLead fetches a lead from Kommo and syncs it to ALL accounts
+// that have Kommo integration enabled (espejo model: all accounts see all Kommo data).
+func (s *SyncService) ProcessWebhookLead(ctx context.Context, kommoLeadID int) {
+	// Fetch the full lead from Kommo API
+	kl, err := s.client.GetLeadByID(kommoLeadID)
+	if err != nil {
+		log.Printf("[WEBHOOK] Failed to fetch lead %d from Kommo: %v", kommoLeadID, err)
+		s.Monitor.Log("webhook", fmt.Sprintf("Error fetching lead %d: %v", kommoLeadID, err), "error")
+		return
+	}
+
+	// Espejo total: get ALL accounts with Kommo enabled
+	rows, err := s.db.Query(ctx, `SELECT id FROM accounts WHERE kommo_enabled = TRUE`)
+	if err != nil {
+		log.Printf("[WEBHOOK] Failed to query accounts: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var accountIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if rows.Scan(&id) == nil {
+			accountIDs = append(accountIDs, id)
+		}
+	}
+	rows.Close()
+
+	if len(accountIDs) == 0 {
+		return
+	}
+
+	// Ensure the lead's pipeline exists for each account (auto-create if Kommo added a new pipeline)
+	pipelineKommoID := int64(kl.PipelineID)
+	for _, accountID := range accountIDs {
+		var exists bool
+		_ = s.db.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM kommo_connected_pipelines WHERE account_id = $1 AND kommo_pipeline_id = $2 AND enabled = TRUE)
+		`, accountID, pipelineKommoID).Scan(&exists)
+		if !exists {
+			// Pipeline not connected yet for this account — auto-create it
+			kp := KommoPipeline{ID: kl.PipelineID, Name: fmt.Sprintf("Pipeline_%d", kl.PipelineID)}
+			// Try to get full pipeline info (name + stages) from Kommo
+			if pipelines, err := s.client.GetPipelines(); err == nil {
+				for _, p := range pipelines {
+					if p.ID == kl.PipelineID {
+						kp = p
+						break
+					}
+				}
+			}
+			pid, _ := s.ensurePipelineForAccount(ctx, accountID, kp)
+			if pid != nil {
+				_, _ = s.db.Exec(ctx, `
+					INSERT INTO kommo_connected_pipelines (id, account_id, kommo_pipeline_id, pipeline_id, enabled)
+					VALUES ($1, $2, $3, $4, TRUE)
+					ON CONFLICT (account_id, kommo_pipeline_id) DO UPDATE SET pipeline_id = $4, enabled = TRUE
+				`, uuid.New(), accountID, pipelineKommoID, *pid)
+				log.Printf("[WEBHOOK] Auto-connected pipeline %d for account %s", kl.PipelineID, accountID)
+			}
+		}
+	}
+
+	// Sync to each account
+	changedAccounts := 0
+	for _, accountID := range accountIDs {
+		changed, err := s.upsertLead(ctx, accountID, *kl, nil)
+		if err != nil {
+			log.Printf("[WEBHOOK] Lead %d → account %s error: %v", kommoLeadID, accountID, err)
+			continue
+		}
+		if changed {
+			changedAccounts++
+			if s.hub != nil {
+				s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{"action": "updated"})
+			}
+		}
+	}
+
+	// Trigger event reconciliation for accounts that had changes
+	if s.OnLeadTagsChanged != nil && changedAccounts > 0 {
+		for _, accountID := range accountIDs {
+			s.OnLeadTagsChanged(ctx, accountID)
+		}
+	}
+
+	if changedAccounts > 0 {
+		log.Printf("[WEBHOOK] Lead %d synced to %d/%d accounts", kommoLeadID, changedAccounts, len(accountIDs))
+		s.Monitor.Log("webhook", fmt.Sprintf("Lead %d sincronizado a %d/%d cuentas", kommoLeadID, changedAccounts, len(accountIDs)), "info")
+	}
+}
+
+// autoRegisterWebhook checks if a webhook is already registered with Kommo,
+// and registers one if needed. Runs once on startup.
+func (s *SyncService) autoRegisterWebhook() {
+	if s.WebhookSecret == "" || s.PublicURL == "" {
+		log.Println("[WEBHOOK] Cannot auto-register: KOMMO_WEBHOOK_SECRET or PUBLIC_URL not set")
+		return
+	}
+
+	// Wait a few seconds for the HTTP server to start
+	time.Sleep(5 * time.Second)
+
+	webhookURL := fmt.Sprintf("%s/api/kommo/webhook/%s", strings.TrimRight(s.PublicURL, "/"), s.WebhookSecret)
+
+	// Check existing webhooks
+	existing, err := s.client.ListWebhooks()
+	if err != nil {
+		log.Printf("[WEBHOOK] Failed to list existing webhooks: %v", err)
+		log.Println("[WEBHOOK] Will retry auto-registration on next restart")
+		return
+	}
+
+	// Check if our webhook is already registered
+	for _, wh := range existing {
+		if wh.Destination == webhookURL {
+			log.Printf("[WEBHOOK] Already registered (ID %d) → %s", wh.ID, webhookURL)
+			return
+		}
+	}
+
+	// Register new webhook
+	events := []string{"update_lead", "add_lead", "status_lead", "delete_lead"}
+	if err := s.client.RegisterWebhook(webhookURL, events); err != nil {
+		log.Printf("[WEBHOOK] Failed to register webhook: %v", err)
+		return
+	}
+
+	log.Printf("[WEBHOOK] Successfully registered webhook → %s", webhookURL)
+}
+
+// syncAllKommoPipelines implements the "espejo total" model:
+// fetches ALL pipelines from Kommo and ensures every account has
+// a local copy with stages and a kommo_connected_pipelines record (enabled).
+func (s *SyncService) syncAllKommoPipelines() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// 1. Fetch all pipelines from Kommo (single API call)
+	kommoPipelines, err := s.client.GetPipelines()
+	if err != nil {
+		log.Printf("[ESPEJO] Failed to fetch Kommo pipelines: %v", err)
+		return
+	}
+
+	// 2. Get all accounts with Kommo enabled
+	rows, err := s.db.Query(ctx, `SELECT id, name FROM accounts WHERE kommo_enabled = TRUE`)
+	if err != nil {
+		log.Printf("[ESPEJO] Failed to query accounts: %v", err)
+		return
+	}
+	type acct struct {
+		ID   uuid.UUID
+		Name string
+	}
+	var accounts []acct
+	for rows.Next() {
+		var a acct
+		if rows.Scan(&a.ID, &a.Name) == nil {
+			accounts = append(accounts, a)
+		}
+	}
+	rows.Close()
+
+	// 3. For each account × each pipeline: ensure pipeline + stages + connection exist
+	created := 0
+	for _, account := range accounts {
+		for _, kp := range kommoPipelines {
+			pipelineID, isNew := s.ensurePipelineForAccount(ctx, account.ID, kp)
+			if pipelineID == nil {
+				continue
+			}
+			// Ensure kommo_connected_pipelines record
+			_, _ = s.db.Exec(ctx, `
+				INSERT INTO kommo_connected_pipelines (id, account_id, kommo_pipeline_id, pipeline_id, enabled)
+				VALUES ($1, $2, $3, $4, TRUE)
+				ON CONFLICT (account_id, kommo_pipeline_id) DO UPDATE SET pipeline_id = $4, enabled = TRUE
+			`, uuid.New(), account.ID, int64(kp.ID), *pipelineID)
+			if isNew {
+				created++
+			}
+		}
+	}
+
+	log.Printf("[ESPEJO] Pipeline sync complete: %d accounts × %d Kommo pipelines, %d new pipelines created",
+		len(accounts), len(kommoPipelines), created)
+}
+
+// ensurePipelineForAccount creates or updates a local pipeline + stages for the given
+// Kommo pipeline data, without making additional API calls. Returns the pipeline UUID
+// and whether it was newly created.
+func (s *SyncService) ensurePipelineForAccount(ctx context.Context, accountID uuid.UUID, kp KommoPipeline) (*uuid.UUID, bool) {
+	kommoID := int64(kp.ID)
+	var pipelineID uuid.UUID
+	isNew := false
+
+	err := s.db.QueryRow(ctx, `SELECT id FROM pipelines WHERE account_id = $1 AND kommo_id = $2`, accountID, kommoID).Scan(&pipelineID)
+	if err != nil {
+		// Create new pipeline
+		pipelineID = uuid.New()
+		isNew = true
+		_, err = s.db.Exec(ctx, `
+			INSERT INTO pipelines (id, account_id, name, is_default, kommo_id, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		`, pipelineID, accountID, kp.Name, kp.IsMain, kommoID)
+		if err != nil {
+			log.Printf("[ESPEJO] Failed to create pipeline %q for account %s: %v", kp.Name, accountID, err)
+			return nil, false
+		}
+	} else {
+		// Update name if changed
+		_, _ = s.db.Exec(ctx, `UPDATE pipelines SET name = $1, is_default = $2, updated_at = NOW() WHERE id = $3`,
+			kp.Name, kp.IsMain, pipelineID)
+	}
+
+	// Sync stages
+	for i, ks := range kp.Statuses {
+		stageKommoID := int64(ks.ID)
+		color := kommoColorToHex(ks.Color)
+		var existingStageID uuid.UUID
+		err := s.db.QueryRow(ctx, `SELECT id FROM pipeline_stages WHERE pipeline_id = $1 AND kommo_id = $2`, pipelineID, stageKommoID).Scan(&existingStageID)
+		if err != nil {
+			_, _ = s.db.Exec(ctx, `
+				INSERT INTO pipeline_stages (id, pipeline_id, name, color, position, kommo_id, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6, NOW())
+			`, uuid.New(), pipelineID, ks.Name, color, i, stageKommoID)
+		} else {
+			_, _ = s.db.Exec(ctx, `UPDATE pipeline_stages SET name = $1, color = $2, position = $3 WHERE id = $4`,
+				ks.Name, color, i, existingStageID)
+		}
+	}
+
+	return &pipelineID, isNew
 }
 
 // GetStatus returns the current worker status.
@@ -483,22 +909,29 @@ func (s *SyncService) SyncAll(ctx context.Context, accountID uuid.UUID) (*SyncRe
 		}
 	}
 
-	// Sync only connected pipelines (metadata + stages)
+	// Sync pipeline metadata + stages with a SINGLE API call to Kommo
 	setProgress(fmt.Sprintf("Sincronizando %d pipeline(s)...", len(activePipelines)))
-	pCount := 0
-	for _, cp := range activePipelines {
-		_, err := s.syncSinglePipeline(ctx, accountID, int(cp.KommoPipelineID))
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("pipeline %d: %v", cp.KommoPipelineID, err))
-			continue
+	log.Printf("[SYNC] Account %s: syncing %d pipeline metadata...", accountID, len(activePipelines))
+	kommoPipelines, err := s.client.GetPipelines()
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("fetch pipelines: %v", err))
+	} else {
+		// Build lookup by Kommo ID
+		kpMap := make(map[int]KommoPipeline)
+		for _, kp := range kommoPipelines {
+			kpMap[kp.ID] = kp
 		}
-		pCount++
+		pCount := 0
+		for _, cp := range activePipelines {
+			if kp, ok := kpMap[int(cp.KommoPipelineID)]; ok {
+				_, _ = s.ensurePipelineForAccount(ctx, accountID, kp)
+				pCount++
+			}
+		}
+		result.Pipelines = pCount
 	}
-	result.Pipelines = pCount
 
 	// Only sync tags if the account has at least one active pipeline.
-	// Tags come from the shared Kommo API, so syncing without a pipeline
-	// would incorrectly assign another account's tags to this account.
 	if len(activePipelines) > 0 {
 		setProgress("Sincronizando etiquetas...")
 		tCount, err := s.syncTags(ctx, accountID)
@@ -520,20 +953,29 @@ func (s *SyncService) SyncAll(ctx context.Context, accountID uuid.UUID) (*SyncRe
 		log.Printf("[SYNC] Skipping tag sync for account %s — no active pipelines", accountID)
 	}
 
-	// Contacts are synced automatically when leads are synced (via upsertLead → upsertContact),
-	// so we only sync contacts that are linked to leads in connected pipelines.
-	// No separate syncContacts call to avoid importing 50K+ contacts from all pipelines.
-
-	// Sync leads only from connected pipelines (contacts are synced within each lead)
-	setProgress(fmt.Sprintf("Sincronizando leads de %d pipeline(s)...", len(activePipelines)))
+	// Sync leads from connected pipelines with detailed progress logging
 	lCount := 0
-	for _, cp := range activePipelines {
+	for i, cp := range activePipelines {
+		pName := fmt.Sprintf("pipeline %d", cp.KommoPipelineID)
+		// Try to get pipeline name for better logging
+		var pn string
+		if s.db.QueryRow(ctx, `SELECT name FROM pipelines WHERE id = $1`, cp.PipelineID).Scan(&pn) == nil && pn != "" {
+			pName = pn
+		}
+		progress := fmt.Sprintf("Sincronizando leads: %s (%d/%d)...", pName, i+1, len(activePipelines))
+		setProgress(progress)
+		log.Printf("[SYNC] Account %s: %s", accountID, progress)
+
 		count, err := s.syncPipelineLeads(ctx, accountID, int(cp.KommoPipelineID), 0)
 		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("leads pipeline %d: %v", cp.KommoPipelineID, err))
+			log.Printf("[SYNC] Account %s: pipeline %s error: %v", accountID, pName, err)
+			result.Errors = append(result.Errors, fmt.Sprintf("leads %s: %v", pName, err))
 			continue
 		}
 		lCount += count
+		if count > 0 {
+			log.Printf("[SYNC] Account %s: pipeline %s → %d leads synced", accountID, pName, count)
+		}
 	}
 	result.Leads = lCount
 
@@ -587,9 +1029,6 @@ func (s *SyncService) syncSinglePipeline(ctx context.Context, accountID uuid.UUI
 		}
 
 		for i, ks := range kp.Statuses {
-			if ks.ID == 142 || ks.ID == 143 {
-				continue
-			}
 			stageKommoID := int64(ks.ID)
 			color := kommoColorToHex(ks.Color)
 			var existingStageID uuid.UUID
@@ -624,8 +1063,17 @@ func (s *SyncService) syncGlobalLeads(ctx context.Context, accountID uuid.UUID, 
 			return count, err
 		}
 
+		// Batch-fetch contacts for this page of leads
+		contactMap := s.batchFetchContacts(leads)
+
 		for _, kl := range leads {
-			changed, err := s.upsertLead(ctx, accountID, kl)
+			var prefetched *KommoContact
+			if kl.Embedded != nil && len(kl.Embedded.Contacts) > 0 {
+				if c, ok := contactMap[kl.Embedded.Contacts[0].ID]; ok {
+					prefetched = &c
+				}
+			}
+			changed, err := s.upsertLead(ctx, accountID, kl, prefetched)
 			if err != nil {
 				log.Printf("[Kommo Sync] lead %d error: %v", kl.ID, err)
 				continue
@@ -727,7 +1175,7 @@ func (s *SyncService) syncUnsortedLeads(ctx context.Context, accountID uuid.UUID
 			continue
 		}
 
-		if _, err := s.upsertLead(ctx, accountID, *kl); err != nil {
+		if _, err := s.upsertLead(ctx, accountID, *kl, nil); err != nil {
 			log.Printf("[Kommo Sync] unsorted lead %d upsert error: %v", leadID, err)
 			continue
 		}
@@ -772,8 +1220,17 @@ func (s *SyncService) syncPipelineLeads(ctx context.Context, accountID uuid.UUID
 			return count, err
 		}
 
+		// Batch-fetch contacts for this page of leads
+		contactMap := s.batchFetchContacts(leads)
+
 		for _, kl := range leads {
-			if _, err := s.upsertLead(ctx, accountID, kl); err != nil {
+			var prefetched *KommoContact
+			if kl.Embedded != nil && len(kl.Embedded.Contacts) > 0 {
+				if c, ok := contactMap[kl.Embedded.Contacts[0].ID]; ok {
+					prefetched = &c
+				}
+			}
+			if _, err := s.upsertLead(ctx, accountID, kl, prefetched); err != nil {
 				log.Printf("[Kommo Sync] lead %d error: %v", kl.ID, err)
 				continue
 			}
@@ -786,12 +1243,43 @@ func (s *SyncService) syncPipelineLeads(ctx context.Context, accountID uuid.UUID
 		page++
 	}
 
+	// Won/lost leads (status 142/143) are intentionally NOT synced.
+	// They are handled by upsertLead() when detected via reconciliation:
+	// existing active leads that transition to won/lost are auto-blocked.
+
 	return count, nil
+}
+
+// batchFetchContacts collects all unique contact IDs from a page of leads and
+// fetches them in a single batch API call. Returns a map of contactID → KommoContact.
+func (s *SyncService) batchFetchContacts(leads []KommoLead) map[int]KommoContact {
+	idSet := make(map[int]struct{})
+	for _, kl := range leads {
+		if kl.Embedded != nil {
+			for _, c := range kl.Embedded.Contacts {
+				idSet[c.ID] = struct{}{}
+			}
+		}
+	}
+	if len(idSet) == 0 {
+		return nil
+	}
+	ids := make([]int, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	contactMap, err := s.client.GetContactsByIDs(ids)
+	if err != nil {
+		log.Printf("[Kommo Sync] batch contact fetch error (%d contacts): %v", len(ids), err)
+		return nil // upsertLead will fall back to individual fetches
+	}
+	return contactMap
 }
 
 // upsertLead inserts or updates a single lead and its associated contact.
 // upsertLead syncs a Kommo lead into the local DB. Returns true if data was actually changed.
-func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl KommoLead) (bool, error) {
+// If prefetchedContact is non-nil, it is used directly instead of calling the API individually.
+func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl KommoLead, prefetchedContact *KommoContact) (bool, error) {
 	kommoID := int64(kl.ID)
 	pipelineKommoID := int64(kl.PipelineID)
 	statusKommoID := int64(kl.StatusID)
@@ -824,6 +1312,55 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		stageID = nil
 	}
 
+	// ─── Won/Lost Detection (status 142=Won, 143=Lost) ───
+	// Won/lost leads are NOT imported into Clarin. If an existing active lead
+	// transitions to won/lost in Kommo, it's auto-blocked and desynced.
+	if statusKommoID == 142 || statusKommoID == 143 {
+		var existingLeadID uuid.UUID
+		var alreadyDesynced bool
+		err := s.db.QueryRow(ctx,
+			`SELECT id, (kommo_deleted_at IS NOT NULL) FROM leads WHERE account_id = $1 AND kommo_id = $2`,
+			accountID, kommoID).Scan(&existingLeadID, &alreadyDesynced)
+		if err != nil {
+			// Lead doesn't exist in Clarin → skip, don't import won/lost
+			return false, nil
+		}
+		if alreadyDesynced {
+			// Already desynced from Kommo → nothing to do
+			return false, nil
+		}
+		// Lead transitioning to won/lost → block (if not already) + desync + add observation
+		statusLabel := "GANADO"
+		emoji := "🏆"
+		blockReason := "Ganado en Kommo"
+		if statusKommoID == 143 {
+			statusLabel = "PERDIDO"
+			emoji = "❌"
+			blockReason = "Perdido en Kommo"
+		}
+		_, _ = s.db.Exec(ctx, `
+			UPDATE leads SET is_blocked = true, blocked_at = COALESCE(blocked_at, NOW()), block_reason = $2,
+				kommo_deleted_at = NOW(), updated_at = NOW()
+			WHERE id = $1
+		`, existingLeadID, blockReason)
+		// Create observation explaining what happened
+		obsNotes := fmt.Sprintf("%s Lead marcado como %s en Kommo. Bloqueado automáticamente y desvinculado de la sincronización. Si deseas eliminarlo, puedes hacerlo sin afectar Kommo.", emoji, statusLabel)
+		_, _ = s.db.Exec(ctx, `
+			INSERT INTO interactions (id, account_id, lead_id, contact_id, type, notes, created_at)
+			VALUES (gen_random_uuid(), $1, $2, (SELECT contact_id FROM leads WHERE id = $2), 'note', $3, NOW())
+		`, accountID, existingLeadID, obsNotes)
+		log.Printf("[Kommo Sync] Lead %s (Kommo %d) transitioned to %s → auto-blocked and desynced", existingLeadID, kommoID, statusLabel)
+		// Broadcast updates
+		if s.hub != nil {
+			s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{"action": "updated"})
+			s.hub.BroadcastToAccount(accountID, ws.EventInteractionUpdate, map[string]interface{}{
+				"action":  "created",
+				"lead_id": existingLeadID.String(),
+			})
+		}
+		return true, nil
+	}
+
 	// Early check: if the pipeline is NOT synced and the lead doesn't already exist
 	// in this account, skip entirely to avoid creating orphan contacts.
 	if !pipelineSynced {
@@ -838,9 +1375,18 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	var contactID *uuid.UUID
 	var phone, email string
 	if kl.Embedded != nil && len(kl.Embedded.Contacts) > 0 {
-		// Always fetch and upsert contact to keep names/phones in sync
-		contact, fetchErr := s.client.GetContactByID(kl.Embedded.Contacts[0].ID)
-		if fetchErr == nil {
+		// Use pre-fetched contact if available (batch mode), otherwise fetch individually
+		var contact *KommoContact
+		if prefetchedContact != nil {
+			contact = prefetchedContact
+		} else {
+			fetched, fetchErr := s.client.GetContactByID(kl.Embedded.Contacts[0].ID)
+			if fetchErr == nil {
+				contact = fetched
+			}
+		}
+
+		if contact != nil {
 			syncedID := s.upsertContact(ctx, accountID, *contact)
 			if syncedID != nil {
 				contactID = syncedID
@@ -892,17 +1438,19 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		// NEW lead — only import if it belongs to a synced pipeline.
 		// Leads from non-synced pipelines are completely ignored.
 		if pipelineID == nil {
-			return false, nil // Pipeline not synced in Clarin → skip
+			log.Printf("[Kommo Sync] lead %d SKIPPED: pipeline %d not synced in Clarin", kl.ID, pipelineKommoID)
+			return false, nil
 		}
-		if jid == "" || strings.HasPrefix(jid, "kommo_") {
-			return false, nil // No valid WhatsApp phone → skip
+		if jid == "" {
+			log.Printf("[Kommo Sync] lead %d SKIPPED: no JID could be resolved", kl.ID)
+			return false, nil
 		}
 
 		leadID = uuid.New()
 		_, err = s.db.Exec(ctx, `
 			INSERT INTO leads (id, account_id, contact_id, jid, status, source,
-				pipeline_id, stage_id, tags, kommo_id, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'new', 'kommo', $5, $6, $7, $8, NOW(), NOW())
+				pipeline_id, stage_id, tags, kommo_synced_tags, kommo_id, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'new', 'kommo', $5, $6, $7, $7, $8, NOW(), NOW())
 		`, leadID, accountID, contactID, jid,
 			pipelineID, stageID, tagNames, kommoID)
 		if err != nil {
@@ -917,6 +1465,8 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	}
 
 	// Anti-loop: skip update if this is an echo of our own push
+	// (The three-way merge makes the old 2-min cooldown unnecessary — this cheap
+	// timestamp check still avoids wasted DB writes for our own push echoes.)
 	var lastPushedAt int64
 	_ = s.db.QueryRow(ctx, `SELECT COALESCE(kommo_last_pushed_at, 0) FROM leads WHERE id = $1`, leadID).Scan(&lastPushedAt)
 	if lastPushedAt > 0 && lastPushedAt == kl.UpdatedAt {
@@ -925,9 +1475,19 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		return false, nil
 	}
 
-	// Only update if the lead is in a synced pipeline.
-	// If moved to a non-synced pipeline in Kommo, don't touch the local lead.
+	// Lead moved to a non-synced pipeline in Kommo.
+	// Remove it from its current pipeline in Clarin (move to "Leads Entrantes").
 	if pipelineID == nil {
+		var curPipelineID *uuid.UUID
+		_ = s.db.QueryRow(ctx, `SELECT pipeline_id FROM leads WHERE id = $1`, leadID).Scan(&curPipelineID)
+		if curPipelineID != nil {
+			_, _ = s.db.Exec(ctx, `UPDATE leads SET pipeline_id = NULL, stage_id = NULL, updated_at = NOW() WHERE id = $1`, leadID)
+			log.Printf("[Kommo Sync] Lead %s (Kommo %d) moved to non-synced pipeline %d in Kommo → removed from Clarin pipeline", leadID, kommoID, pipelineKommoID)
+			if s.hub != nil {
+				s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{"action": "updated"})
+			}
+			return true, nil
+		}
 		return false, nil
 	}
 
@@ -951,8 +1511,14 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	pipelineSame := (curPipelineID != nil && pipelineID != nil && *curPipelineID == *pipelineID) || (curPipelineID == nil && pipelineID == nil)
 	stageSame := (curStageID != nil && stageID != nil && *curStageID == *stageID) || (curStageID == nil && stageID == nil)
 
+	// Ensure tagNames is never nil (nil would be stored as SQL NULL)
+	if tagNames == nil {
+		tagNames = []string{}
+	}
+
 	if foundByKommoID && pipelineSame && stageSame && tagsSame {
-		// No actual changes — skip update entirely
+		// Lead fields unchanged — still reconcile contact_tags junction (may be out of sync)
+		s.syncLeadTags(ctx, accountID, leadID, tagNames)
 		return false, nil
 	}
 
@@ -963,7 +1529,8 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 				contact_id = COALESCE($1, contact_id),
 				pipeline_id = $2,
 				stage_id = $3,
-				tags = COALESCE($4, tags),
+				tags = $4,
+				kommo_deleted_at = NULL,
 				updated_at = NOW()
 			WHERE id = $5
 		`, contactID, pipelineID, stageID, tagNames, leadID)
@@ -976,7 +1543,8 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 				contact_id = COALESCE($2, contact_id),
 				pipeline_id = $3,
 				stage_id = $4,
-				tags = COALESCE($5, tags),
+				tags = $5,
+				kommo_deleted_at = NULL,
 				updated_at = NOW()
 			WHERE id = $6
 		`, kommoID, contactID, pipelineID, stageID, tagNames, leadID)
@@ -986,10 +1554,8 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		return false, err
 	}
 
-	// Sync contact_tags junction table
-	if len(tagNames) > 0 {
-		s.syncLeadTags(ctx, accountID, leadID, tagNames)
-	}
+	// Sync contact_tags junction table (always call — even with empty tagNames to clean up removed tags)
+	s.syncLeadTags(ctx, accountID, leadID, tagNames)
 
 	// Sync call observations from Kommo custom fields → Clarin interactions
 	s.syncCallsFromKommo(ctx, accountID, leadID, contactID, kl.CustomFields)
@@ -1184,9 +1750,6 @@ func (s *SyncService) syncPipelines(ctx context.Context, accountID uuid.UUID) (i
 		pCount++
 
 		for i, ks := range kp.Statuses {
-			if ks.ID == 142 || ks.ID == 143 {
-				continue
-			}
 			stageKommoID := int64(ks.ID)
 			color := kommoColorToHex(ks.Color)
 			var existingStageID uuid.UUID
@@ -1317,8 +1880,17 @@ func (s *SyncService) syncLeads(ctx context.Context, accountID uuid.UUID) (int, 
 			return count, err
 		}
 
+		// Batch-fetch contacts for reconcile page
+		contactMap := s.batchFetchContacts(leads)
+
 		for _, kl := range leads {
-			if _, err := s.upsertLead(ctx, accountID, kl); err != nil {
+			var prefetched *KommoContact
+			if kl.Embedded != nil && len(kl.Embedded.Contacts) > 0 {
+				if c, ok := contactMap[kl.Embedded.Contacts[0].ID]; ok {
+					prefetched = &c
+				}
+			}
+			if _, err := s.upsertLead(ctx, accountID, kl, prefetched); err != nil {
 				log.Printf("[Kommo Sync] lead %d error: %v", kl.ID, err)
 				continue
 			}
@@ -1334,23 +1906,23 @@ func (s *SyncService) syncLeads(ctx context.Context, accountID uuid.UUID) (int, 
 	return count, nil
 }
 
-// syncLeadTags populates the contact_tags junction table for a lead's contact.
-func (s *SyncService) syncLeadTags(ctx context.Context, accountID, leadID uuid.UUID, tagNames []string) {
-	// Resolve contact_id for this lead
+// syncLeadTags uses three-way merge to reconcile tags between Kommo and Clarin.
+// baseline (kommo_synced_tags) tracks the last agreed state. Changes from both sides
+// are computed as diffs against the baseline and merged without data loss.
+func (s *SyncService) syncLeadTags(ctx context.Context, accountID, leadID uuid.UUID, kommoTagNames []string) {
 	var contactID *uuid.UUID
-	_ = s.db.QueryRow(ctx, `SELECT contact_id FROM leads WHERE id = $1`, leadID).Scan(&contactID)
+	var baseline []string
+	_ = s.db.QueryRow(ctx, `SELECT contact_id, COALESCE(kommo_synced_tags, '{}') FROM leads WHERE id = $1`, leadID).Scan(&contactID, &baseline)
 	if contactID == nil {
 		return
 	}
 
-	// Clear existing contact_tags for this contact
-	_, _ = s.db.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id = $1`, *contactID)
-
-	for _, name := range tagNames {
+	// Resolve all Kommo tag names → local tag IDs (create if needed)
+	kommoTagIDs := make(map[string]uuid.UUID, len(kommoTagNames))
+	for _, name := range kommoTagNames {
 		var tagID uuid.UUID
 		err := s.db.QueryRow(ctx, `SELECT id FROM tags WHERE account_id = $1 AND name = $2`, accountID, name).Scan(&tagID)
 		if err != nil {
-			// Tag doesn't exist yet — create it
 			tagID = uuid.New()
 			_, err = s.db.Exec(ctx, `
 				INSERT INTO tags (id, account_id, name, color, created_at, updated_at)
@@ -1358,24 +1930,82 @@ func (s *SyncService) syncLeadTags(ctx context.Context, accountID, leadID uuid.U
 				ON CONFLICT (account_id, name) DO NOTHING
 			`, tagID, accountID, name)
 			if err != nil {
-				// If insert failed due to race, re-fetch
 				_ = s.db.QueryRow(ctx, `SELECT id FROM tags WHERE account_id = $1 AND name = $2`, accountID, name).Scan(&tagID)
 			}
 		}
-		_, _ = s.db.Exec(ctx, `
-			INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
-		`, *contactID, tagID)
+		kommoTagIDs[name] = tagID
 	}
+
+	// Get current Clarin tags for this contact (name → tagID)
+	clarinTagIDs := make(map[string]uuid.UUID)
+	rows, err := s.db.Query(ctx, `
+		SELECT t.name, ct.tag_id
+		FROM contact_tags ct
+		JOIN tags t ON ct.tag_id = t.id
+		WHERE ct.contact_id = $1 AND t.account_id = $2
+	`, *contactID, accountID)
+	if err == nil {
+		for rows.Next() {
+			var name string
+			var tid uuid.UUID
+			if rows.Scan(&name, &tid) == nil {
+				clarinTagIDs[name] = tid
+			}
+		}
+		rows.Close()
+	}
+
+	// Three-way merge
+	baselineSet := toStringSet(baseline)
+	kommoSet := toStringSet(kommoTagNames)
+	clarinSet := make(map[string]bool, len(clarinTagIDs))
+	for name := range clarinTagIDs {
+		clarinSet[name] = true
+	}
+
+	kommoAdded := diffSet(kommoSet, baselineSet)   // tags Kommo added since baseline
+	kommoRemoved := diffSet(baselineSet, kommoSet)  // tags Kommo removed since baseline
+
+	// merged = (clarin_current ∪ kommo_added) - kommo_removed
+	merged := copySet(clarinSet)
+	for tag := range kommoAdded {
+		merged[tag] = true
+	}
+	for tag := range kommoRemoved {
+		delete(merged, tag)
+	}
+
+	// Apply merged state to contact_tags
+	// ADD: tags in merged but not in clarinSet
+	for name := range merged {
+		if _, exists := clarinTagIDs[name]; !exists {
+			// Need to resolve tag ID
+			if tid, ok := kommoTagIDs[name]; ok {
+				_, _ = s.db.Exec(ctx, `INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, *contactID, tid)
+			}
+		}
+	}
+	// REMOVE: tags in clarinSet but not in merged
+	for name, tid := range clarinTagIDs {
+		if !merged[name] {
+			_, _ = s.db.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id = $1 AND tag_id = $2`, *contactID, tid)
+		}
+	}
+
+	// Update baseline
+	mergedSlice := setToSlice(merged)
+	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_synced_tags = $1 WHERE id = $2`, mergedSlice, leadID)
 }
 
-// syncContactTags populates the contact_tags junction table for a contact.
+// syncContactTags merges the contact_tags junction table for a contact.
+// Uses MERGE logic: adds new Kommo tags, removes only Kommo-sourced tags no longer present.
 func (s *SyncService) syncContactTags(ctx context.Context, accountID, contactID uuid.UUID, tags []KommoTag) {
 	if len(tags) == 0 {
 		return
 	}
-	// Clear existing contact_tags for this contact
-	_, _ = s.db.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id = $1`, contactID)
 
+	// Resolve all Kommo tags → local tag IDs (create if needed)
+	newTagIDs := make(map[uuid.UUID]bool, len(tags))
 	for _, kt := range tags {
 		var tagID uuid.UUID
 		err := s.db.QueryRow(ctx, `SELECT id FROM tags WHERE account_id = $1 AND name = $2`, accountID, kt.Name).Scan(&tagID)
@@ -1390,9 +2020,48 @@ func (s *SyncService) syncContactTags(ctx context.Context, accountID, contactID 
 				_ = s.db.QueryRow(ctx, `SELECT id FROM tags WHERE account_id = $1 AND name = $2`, accountID, kt.Name).Scan(&tagID)
 			}
 		}
-		_, _ = s.db.Exec(ctx, `
-			INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
-		`, contactID, tagID)
+		newTagIDs[tagID] = true
+	}
+
+	// Get existing tags with origin info
+	type existingTag struct {
+		tagID      uuid.UUID
+		hasKommoID bool
+	}
+	var existingTags []existingTag
+	rows, err := s.db.Query(ctx, `
+		SELECT ct.tag_id, (t.kommo_id IS NOT NULL) as has_kommo_id
+		FROM contact_tags ct
+		JOIN tags t ON ct.tag_id = t.id
+		WHERE ct.contact_id = $1
+	`, contactID)
+	if err == nil {
+		for rows.Next() {
+			var et existingTag
+			if rows.Scan(&et.tagID, &et.hasKommoID) == nil {
+				existingTags = append(existingTags, et)
+			}
+		}
+		rows.Close()
+	}
+
+	existingSet := make(map[uuid.UUID]bool, len(existingTags))
+	for _, et := range existingTags {
+		existingSet[et.tagID] = true
+	}
+
+	// ADD: tags in Kommo but not locally
+	for tid := range newTagIDs {
+		if !existingSet[tid] {
+			_, _ = s.db.Exec(ctx, `INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, contactID, tid)
+		}
+	}
+
+	// REMOVE: any tag no longer in Kommo's authoritative list
+	for _, et := range existingTags {
+		if !newTagIDs[et.tagID] {
+			_, _ = s.db.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id = $1 AND tag_id = $2`, contactID, et.tagID)
+		}
 	}
 }
 
@@ -1405,6 +2074,10 @@ func (s *SyncService) syncContactTags(ctx context.Context, accountID, contactID 
 func (s *SyncService) PushLeadStageChange(accountID, leadID, stageID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
 
 	var kommoLeadID *int64
 	var kommoStageID *int64
@@ -1434,6 +2107,7 @@ func (s *SyncService) PushLeadStageChange(accountID, leadID, stageID uuid.UUID) 
 	// Store the pushed timestamp for anti-loop
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
 	log.Printf("[PUSH] Lead %s stage → Kommo lead %d, stage %d (updated_at=%d)", leadID, *kommoLeadID, *kommoStageID, updatedAt)
+	s.Monitor.Log("push", fmt.Sprintf("Lead etapa → Kommo lead %d, etapa %d", *kommoLeadID, *kommoStageID), "info")
 }
 
 // PushLeadTagsChange pushes all current tags of a lead to Kommo.
@@ -1441,15 +2115,20 @@ func (s *SyncService) PushLeadTagsChange(accountID, leadID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
+
 	var kommoLeadID *int64
-	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoLeadID)
+	var baseline []string
+	err := s.db.QueryRow(ctx, `SELECT kommo_id, COALESCE(kommo_synced_tags, '{}') FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoLeadID, &baseline)
 	if err != nil || kommoLeadID == nil {
 		return
 	}
 
-	// Get all current tags for this lead with their kommo_id (via contact_tags)
+	// Get all current Clarin tags for this lead (via contact_tags)
 	rows, err := s.db.Query(ctx, `
-		SELECT t.id, t.name, t.kommo_id FROM contact_tags ct
+		SELECT t.name FROM contact_tags ct
 		JOIN tags t ON ct.tag_id = t.id
 		JOIN leads l ON l.contact_id = ct.contact_id
 		WHERE l.id = $1
@@ -1459,32 +2138,51 @@ func (s *SyncService) PushLeadTagsChange(accountID, leadID uuid.UUID) {
 		return
 	}
 	defer rows.Close()
-
-	var tags []KommoTag
+	var clarinCurrent []string
 	for rows.Next() {
-		var tagLocalID uuid.UUID
 		var name string
-		var kommoTagID *int64
-		if err := rows.Scan(&tagLocalID, &name, &kommoTagID); err != nil {
-			continue
+		if rows.Scan(&name) == nil {
+			clarinCurrent = append(clarinCurrent, name)
 		}
-		if kommoTagID != nil {
-			tags = append(tags, KommoTag{ID: int(*kommoTagID), Name: name})
-		} else {
-			// Tag doesn't exist in Kommo — create it one by one
-			newKommoID, createErr := s.client.CreateLeadTag(name)
-			if createErr != nil {
-				log.Printf("[PUSH] Lead %s: failed to create tag %q in Kommo: %v", leadID, name, createErr)
-				// Still include by name so Kommo can try auto-create
-				tags = append(tags, KommoTag{Name: name})
-				continue
-			}
-			// Save the new kommo_id back to our database
-			kommoID64 := int64(newKommoID)
-			_, _ = s.db.Exec(ctx, `UPDATE tags SET kommo_id = $1, updated_at = NOW() WHERE id = $2`, kommoID64, tagLocalID)
-			tags = append(tags, KommoTag{ID: newKommoID, Name: name})
-			log.Printf("[PUSH] Lead %s: created tag %q in Kommo (kommo_id=%d)", leadID, name, newKommoID)
+	}
+	rows.Close()
+
+	// Read-before-write: fetch current Kommo tags
+	kl, err := s.client.GetLeadByID(int(*kommoLeadID))
+	if err != nil {
+		log.Printf("[PUSH] Lead %s: failed to fetch Kommo lead %d: %v", leadID, *kommoLeadID, err)
+		return
+	}
+	var kommoCurrent []string
+	if kl.Embedded != nil {
+		for _, t := range kl.Embedded.Tags {
+			kommoCurrent = append(kommoCurrent, t.Name)
 		}
+	}
+
+	// Three-way merge: compute diffs against baseline
+	baselineSet := toStringSet(baseline)
+	clarinSet := toStringSet(clarinCurrent)
+	kommoSet := toStringSet(kommoCurrent)
+
+	clarinAdded := diffSet(clarinSet, baselineSet)   // tags Clarin added since baseline
+	clarinRemoved := diffSet(baselineSet, clarinSet)  // tags Clarin removed since baseline
+
+	// merged = (kommo_current ∪ clarin_added) - clarin_removed
+	merged := copySet(kommoSet)
+	for tag := range clarinAdded {
+		merged[tag] = true
+	}
+	for tag := range clarinRemoved {
+		delete(merged, tag)
+	}
+
+	mergedSlice := setToSlice(merged)
+
+	// Build KommoTag list for API
+	var tags []KommoTag
+	for _, name := range mergedSlice {
+		tags = append(tags, KommoTag{Name: name})
 	}
 
 	updatedAt, err := s.client.UpdateLeadTags(int(*kommoLeadID), tags)
@@ -1493,14 +2191,44 @@ func (s *SyncService) PushLeadTagsChange(accountID, leadID uuid.UUID) {
 		return
 	}
 
-	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
-	log.Printf("[PUSH] Lead %s tags → Kommo lead %d (%d tags, updated_at=%d)", leadID, *kommoLeadID, len(tags), updatedAt)
+	// Sync-back: add Kommo-only tags to Clarin (tags in merged but not in clarinSet)
+	kommoOnlyTags := diffSet(merged, clarinSet)
+	if len(kommoOnlyTags) > 0 {
+		var contactID *uuid.UUID
+		_ = s.db.QueryRow(ctx, `SELECT contact_id FROM leads WHERE id = $1`, leadID).Scan(&contactID)
+		if contactID != nil {
+			for tagName := range kommoOnlyTags {
+				var tagID uuid.UUID
+				err := s.db.QueryRow(ctx, `SELECT id FROM tags WHERE account_id = $1 AND name = $2`, accountID, tagName).Scan(&tagID)
+				if err != nil {
+					tagID = uuid.New()
+					_, _ = s.db.Exec(ctx, `
+						INSERT INTO tags (id, account_id, name, color, created_at, updated_at)
+						VALUES ($1, $2, $3, '#6366f1', NOW(), NOW())
+						ON CONFLICT (account_id, name) DO NOTHING
+					`, tagID, accountID, tagName)
+					_ = s.db.QueryRow(ctx, `SELECT id FROM tags WHERE account_id = $1 AND name = $2`, accountID, tagName).Scan(&tagID)
+				}
+				_, _ = s.db.Exec(ctx, `INSERT INTO contact_tags (contact_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, *contactID, tagID)
+			}
+		}
+	}
+
+	// Update baseline + anti-echo timestamp
+	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_synced_tags = $1, kommo_last_pushed_at = $2, tags = $1 WHERE id = $3`, mergedSlice, updatedAt, leadID)
+
+	log.Printf("[PUSH] Lead %s tags → Kommo lead %d (3-way merge: %d baseline, %d clarin, %d kommo → %d merged)", leadID, *kommoLeadID, len(baseline), len(clarinCurrent), len(kommoCurrent), len(mergedSlice))
+	s.Monitor.Log("push", fmt.Sprintf("Lead tags → Kommo lead %d (%d tags, 3-way merge)", *kommoLeadID, len(mergedSlice)), "info")
 }
 
 // PushContactTagsChange pushes all current tags of a contact to Kommo.
 func (s *SyncService) PushContactTagsChange(accountID, contactID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
 
 	var kommoContactID *int64
 	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM contacts WHERE id = $1 AND account_id = $2`, contactID, accountID).Scan(&kommoContactID)
@@ -1519,6 +2247,7 @@ func (s *SyncService) PushContactTagsChange(accountID, contactID uuid.UUID) {
 	}
 	defer rows.Close()
 
+	// Send tags by NAME only — Kommo resolves by name natively.
 	var tags []KommoTag
 	for rows.Next() {
 		var tagLocalID uuid.UUID
@@ -1527,21 +2256,7 @@ func (s *SyncService) PushContactTagsChange(accountID, contactID uuid.UUID) {
 		if err := rows.Scan(&tagLocalID, &name, &kommoTagID); err != nil {
 			continue
 		}
-		if kommoTagID != nil {
-			tags = append(tags, KommoTag{ID: int(*kommoTagID), Name: name})
-		} else {
-			// Tag doesn't exist in Kommo — create it one by one
-			newKommoID, createErr := s.client.CreateContactTag(name)
-			if createErr != nil {
-				log.Printf("[PUSH] Contact %s: failed to create tag %q in Kommo: %v", contactID, name, createErr)
-				tags = append(tags, KommoTag{Name: name})
-				continue
-			}
-			kommoID64 := int64(newKommoID)
-			_, _ = s.db.Exec(ctx, `UPDATE tags SET kommo_id = $1, updated_at = NOW() WHERE id = $2`, kommoID64, tagLocalID)
-			tags = append(tags, KommoTag{ID: newKommoID, Name: name})
-			log.Printf("[PUSH] Contact %s: created tag %q in Kommo (kommo_id=%d)", contactID, name, newKommoID)
-		}
+		tags = append(tags, KommoTag{Name: name})
 	}
 
 	updatedAt, err := s.client.UpdateContactTags(int(*kommoContactID), tags)
@@ -1552,6 +2267,7 @@ func (s *SyncService) PushContactTagsChange(accountID, contactID uuid.UUID) {
 
 	_, _ = s.db.Exec(ctx, `UPDATE contacts SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, contactID)
 	log.Printf("[PUSH] Contact %s tags → Kommo contact %d (%d tags, updated_at=%d)", contactID, *kommoContactID, len(tags), updatedAt)
+	s.Monitor.Log("push", fmt.Sprintf("Contact tags → Kommo contact %d (%d tags)", *kommoContactID, len(tags)), "info")
 }
 
 // PushNewLead creates a new lead (and optionally contact) in Kommo.
@@ -1559,6 +2275,10 @@ func (s *SyncService) PushContactTagsChange(accountID, contactID uuid.UUID) {
 func (s *SyncService) PushNewLead(accountID, leadID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
 
 	// Fetch lead details (personal data from linked contact via COALESCE)
 	var leadName, phone, email *string
@@ -1608,6 +2328,7 @@ func (s *SyncService) PushNewLead(accountID, leadID uuid.UUID) {
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_id = $1, kommo_last_pushed_at = $2 WHERE id = $3`,
 		kommoIDVal, leadUpdatedAt, leadID)
 	log.Printf("[PUSH] Created lead %s → Kommo lead %d", leadID, kommoLeadID)
+	s.Monitor.Log("push", fmt.Sprintf("Nuevo lead creado → Kommo lead %d", kommoLeadID), "info")
 
 	// Create contact in Kommo if exists and doesn't have kommo_id
 	if contactID != nil {
@@ -1669,6 +2390,10 @@ func (s *SyncService) PushNewLead(accountID, leadID uuid.UUID) {
 func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
 
 	var kommoLeadID *int64
 	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM leads WHERE id = $1 AND account_id = $2`, leadID, accountID).Scan(&kommoLeadID)
@@ -1796,12 +2521,17 @@ func (s *SyncService) PushLeadObservations(accountID, leadID uuid.UUID) {
 
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
 	log.Printf("[PUSH] Lead %s observations → Kommo lead %d (%d calls, updated_at=%d)", leadID, *kommoLeadID, len(calls), updatedAt)
+	s.Monitor.Log("push", fmt.Sprintf("Lead observaciones → Kommo lead %d (%d llamadas)", *kommoLeadID, len(calls)), "info")
 }
 
 // PushLeadName pushes a lead's name change to Kommo (both lead and linked contact).
 func (s *SyncService) PushLeadName(accountID, leadID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
 
 	var kommoLeadID *int64
 	var leadName *string
@@ -1826,6 +2556,7 @@ func (s *SyncService) PushLeadName(accountID, leadID uuid.UUID) {
 
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
 	log.Printf("[PUSH] Lead %s name '%s' → Kommo lead %d (updated_at=%d)", leadID, name, *kommoLeadID, updatedAt)
+	s.Monitor.Log("push", fmt.Sprintf("Lead nombre '%s' → Kommo lead %d", name, *kommoLeadID), "info")
 
 	// Also update the linked contact name in Kommo
 	var kommoContactID *int64
@@ -1848,6 +2579,10 @@ func (s *SyncService) PushLeadName(accountID, leadID uuid.UUID) {
 func (s *SyncService) PushPipelineStageChange(accountID, leadID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
 
 	var kommoID *int64
 	var pipelineKommoID *int64
@@ -1883,6 +2618,7 @@ func (s *SyncService) PushPipelineStageChange(accountID, leadID uuid.UUID) {
 	// Record echo prevention
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = $1 WHERE id = $2`, updatedAt, leadID)
 	log.Printf("[PUSH] Lead %s pipeline/stage updated in Kommo (ts=%d)", leadID, updatedAt)
+	s.Monitor.Log("push", fmt.Sprintf("Lead pipeline/etapa → Kommo lead %d", *kommoID), "info")
 }
 
 // --- Helpers ---
@@ -1968,10 +2704,503 @@ func (s *SyncService) SyncSingleLead(ctx context.Context, accountID, leadID uuid
 	// Clear anti-loop flag so the upsert performs a full update
 	_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_last_pushed_at = 0 WHERE id = $1`, leadID)
 
-	if _, err := s.upsertLead(ctx, accountID, *kl); err != nil {
+	if _, err := s.upsertLead(ctx, accountID, *kl, nil); err != nil {
 		return fmt.Errorf("failed to update from Kommo: %w", err)
 	}
 
 	log.Printf("[Kommo Sync] Manual lead sync: %s (Kommo ID %d)", leadID, *kommoID)
 	return nil
+}
+
+// eventsPoller uses the Kommo Events API to detect ALL changes (including UI tag edits
+// that webhooks miss). Runs with an adaptive interval: 15s target, minimum 2s pause.
+func (s *SyncService) eventsPoller() {
+	// Initial delay: let startup (pipelines, webhook registration) finish
+	select {
+	case <-time.After(30 * time.Second):
+	case <-s.stopCh:
+		return
+	}
+
+	log.Println("[EventsPoller] Started (15s adaptive interval, Events API)")
+
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		default:
+		}
+
+		start := time.Now()
+		s.pollEvents()
+		elapsed := time.Since(start)
+
+		// Adaptive wait: target 15s between poll starts, minimum 2s pause
+		wait := 15*time.Second - elapsed
+		if wait < 2*time.Second {
+			wait = 2 * time.Second
+		}
+
+		select {
+		case <-time.After(wait):
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+// eventTypesFilter is the comma-separated list of Kommo event types to monitor.
+const eventTypesFilter = "entity_tag_added,entity_tag_deleted,lead_status_changed,custom_field_value_changed,entity_responsible_changed,name_field_changed,sale_field_changed"
+
+// pollEvents fetches recent events from the Kommo Events API and syncs affected leads.
+func (s *SyncService) pollEvents() {
+	s.eventsPollerMu.Lock()
+	since := s.lastEventPoll - 5 // 5s overlap to avoid gaps
+	s.eventsPollerMu.Unlock()
+
+	// Skip if a full sync is running
+	s.fullSyncMu.RLock()
+	for _, st := range s.fullSync {
+		if st.Running {
+			s.fullSyncMu.RUnlock()
+			return
+		}
+	}
+	s.fullSyncMu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Fetch events from Kommo
+	seenEventIDs := make(map[string]bool)
+	leadIDSet := make(map[int]bool)
+
+	for page := 1; page <= 5; page++ { // Max 500 events per cycle
+		events, hasMore, err := s.client.GetEvents(since, eventTypesFilter, "lead", page)
+		if err != nil {
+			log.Printf("[EventsPoller] Error fetching events page %d: %v", page, err)
+			break
+		}
+
+		for _, ev := range events {
+			if seenEventIDs[ev.ID] {
+				continue
+			}
+			seenEventIDs[ev.ID] = true
+
+			if ev.EntityType == "lead" && ev.EntityID > 0 {
+				leadIDSet[ev.EntityID] = true
+			}
+		}
+
+		if !hasMore {
+			break
+		}
+	}
+
+	totalEvents := len(seenEventIDs)
+
+	// Update cursor to now
+	now := time.Now().Unix()
+	s.eventsPollerMu.Lock()
+	s.lastEventPoll = now
+	s.lastEventPollAt = time.Now()
+	s.lastEventPollEvents = totalEvents
+	s.eventsPollerMu.Unlock()
+
+	if len(leadIDSet) == 0 {
+		s.Monitor.Log("events_poller", fmt.Sprintf("Poll completado: %d eventos, sin cambios de leads", totalEvents), "info")
+		return
+	}
+
+	// Collect all affected lead IDs (no cooldown filtering — three-way merge handles echoes)
+	var leadIDs []int
+	for id := range leadIDSet {
+		leadIDs = append(leadIDs, id)
+	}
+
+	// Batch fetch leads from Kommo
+	leadsMap, err := s.client.GetLeadsByIDs(leadIDs)
+	if err != nil {
+		log.Printf("[EventsPoller] Error batch fetching %d leads: %v", len(leadIDs), err)
+		s.Monitor.Log("events_poller", fmt.Sprintf("Error fetching %d leads: %v", len(leadIDs), err), "error")
+		return
+	}
+
+	if len(leadsMap) == 0 {
+		return
+	}
+
+	// Convert to slice for batchFetchContacts
+	var leadSlice []KommoLead
+	for _, kl := range leadsMap {
+		leadSlice = append(leadSlice, kl)
+	}
+
+	// Batch fetch contacts for these leads
+	contacts := s.batchFetchContacts(leadSlice)
+
+	// Get all accounts with Kommo enabled
+	rows, err := s.db.Query(ctx, `SELECT id FROM accounts WHERE kommo_enabled = TRUE`)
+	if err != nil {
+		log.Printf("[EventsPoller] Error fetching accounts: %v", err)
+		return
+	}
+	var accountIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if rows.Scan(&id) == nil {
+			accountIDs = append(accountIDs, id)
+		}
+	}
+	rows.Close()
+
+	if len(accountIDs) == 0 {
+		return
+	}
+
+	// Sync each lead to all accounts (espejo total)
+	synced := 0
+	for _, kl := range leadSlice {
+		var prefetched *KommoContact
+		if kl.Embedded != nil && len(kl.Embedded.Contacts) > 0 {
+			if c, ok := contacts[kl.Embedded.Contacts[0].ID]; ok {
+				prefetched = &c
+			}
+		}
+
+		for _, accountID := range accountIDs {
+			changed, err := s.upsertLead(ctx, accountID, kl, prefetched)
+			if err != nil {
+				continue
+			}
+			if changed {
+				synced++
+				if s.hub != nil {
+					s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{"action": "updated"})
+				}
+			}
+		}
+	}
+
+	// Update stats
+	s.eventsPollerMu.Lock()
+	s.lastEventPollLeads = synced
+	s.eventsPollerMu.Unlock()
+
+	s.Monitor.Log("events_poller", fmt.Sprintf("Poll completado: %d eventos, %d leads obtenidos, %d sincronizados", totalEvents, len(leadSlice), synced), "info")
+
+	if synced > 0 {
+		log.Printf("[EventsPoller] Synced %d lead changes across %d accounts (%d events, %d leads fetched)", synced, len(accountIDs), totalEvents, len(leadSlice))
+		// Trigger event reconciliation for tag changes
+		if s.OnLeadTagsChanged != nil {
+			for _, accountID := range accountIDs {
+				s.OnLeadTagsChanged(ctx, accountID)
+			}
+		}
+	}
+}
+
+// ForceEventsPoll triggers an immediate events poll cycle.
+// Returns the number of events found and leads synced.
+func (s *SyncService) ForceEventsPoll() (int, int) {
+	s.eventsPollerMu.Lock()
+	// Check if already running
+	s.eventsPollerMu.Unlock()
+
+	log.Println("[EventsPoller] Manual poll triggered")
+	s.Monitor.Log("events_poller", "Poll manual forzado", "info")
+	s.pollEvents()
+
+	s.eventsPollerMu.Lock()
+	defer s.eventsPollerMu.Unlock()
+	return s.lastEventPollEvents, s.lastEventPollLeads
+}
+
+// GetEventsPollerStatus returns the current status of the events poller.
+func (s *SyncService) GetEventsPollerStatus() map[string]interface{} {
+	s.eventsPollerMu.Lock()
+	defer s.eventsPollerMu.Unlock()
+
+	result := map[string]interface{}{
+		"interval_seconds":        15,
+		"last_poll_events_found":  s.lastEventPollEvents,
+		"last_poll_leads_synced":  s.lastEventPollLeads,
+	}
+
+	if !s.lastEventPollAt.IsZero() {
+		result["last_poll_at"] = s.lastEventPollAt.Format(time.RFC3339)
+		result["seconds_since_last_poll"] = int(time.Since(s.lastEventPollAt).Seconds())
+	}
+
+	return result
+}
+
+// reconcileLoop runs a periodic full reconciliation of all synced pipelines.
+// It detects leads that exist in Clarin but are no longer in their Kommo pipeline
+// (moved, deleted, or archived) and fixes them via SyncSingleLead.
+func (s *SyncService) reconcileLoop() {
+	// Initial delay: wait 2 minutes after startup to let the poller warm up
+	select {
+	case <-time.After(2 * time.Minute):
+	case <-s.stopCh:
+		return
+	}
+
+	log.Println("[Reconcile] Running initial reconciliation cycle")
+	s.Monitor.Log("reconcile", "Iniciando ciclo de reconciliación", "info")
+	s.runReconciliation()
+
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.runReconciliation()
+		}
+	}
+}
+
+// runReconciliation reconciles all accounts with enabled pipelines.
+func (s *SyncService) runReconciliation() {
+	// Re-sync all Kommo pipelines to all accounts (espejo total)
+	s.syncAllKommoPipelines()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	rows, err := s.db.Query(ctx, `SELECT DISTINCT kcp.account_id FROM kommo_connected_pipelines kcp JOIN accounts a ON a.id = kcp.account_id WHERE kcp.enabled = TRUE AND a.kommo_enabled = TRUE`)
+	if err != nil {
+		log.Printf("[Reconcile] Error querying accounts: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var accountIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err == nil {
+			accountIDs = append(accountIDs, id)
+		}
+	}
+	rows.Close()
+
+	for _, accountID := range accountIDs {
+		// Skip if a full sync is already running for this account
+		s.fullSyncMu.RLock()
+		if st, ok := s.fullSync[accountID]; ok && st.Running {
+			s.fullSyncMu.RUnlock()
+			continue
+		}
+		s.fullSyncMu.RUnlock()
+
+		s.reconcileAccount(ctx, accountID, false)
+	}
+}
+
+// reconcileAccount checks all leads in synced pipelines for a single account.
+// For each synced pipeline, it compares Clarin's leads vs Kommo's leads and
+// re-syncs any that are in Clarin but no longer in that Kommo pipeline.
+func (s *SyncService) reconcileAccount(ctx context.Context, accountID uuid.UUID, unlimited bool) {
+	pipelines, err := s.GetConnectedPipelines(ctx, accountID)
+	if err != nil {
+		log.Printf("[Reconcile] Account %s: error getting pipelines: %v", accountID, err)
+		return
+	}
+
+	totalFixed := 0
+	for _, cp := range pipelines {
+		if !cp.Enabled || cp.PipelineID == nil {
+			continue
+		}
+
+		fixed, err := s.reconcilePipeline(ctx, accountID, *cp.PipelineID, int(cp.KommoPipelineID), unlimited)
+		if err != nil {
+			log.Printf("[Reconcile] Account %s pipeline %d: error: %v", accountID, cp.KommoPipelineID, err)
+			continue
+		}
+		totalFixed += fixed
+	}
+
+	if totalFixed > 0 {
+		log.Printf("[Reconcile] Account %s: fixed %d desynchronized leads", accountID, totalFixed)
+		s.Monitor.Log("reconcile", fmt.Sprintf("Cuenta %s: corregidos %d leads desincronizados", accountID, totalFixed), "info")
+		if s.hub != nil {
+			s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{"action": "reconciled"})
+		}
+		if s.OnLeadTagsChanged != nil {
+			s.OnLeadTagsChanged(ctx, accountID)
+		}
+	}
+}
+
+// reconcilePipeline compares leads in a single Clarin pipeline against Kommo.
+// Returns the number of leads that were fixed (stale re-synced + missing imported).
+func (s *SyncService) reconcilePipeline(ctx context.Context, accountID uuid.UUID, pipelineID uuid.UUID, kommoPipelineID int, unlimited bool) (int, error) {
+	// 1. Fetch ALL leads from Kommo for this pipeline (no date filter)
+	kommoIDs := make(map[int64]bool)
+	kommoLeads := make(map[int64]KommoLead)
+	page := 1
+	for {
+		leads, hasMore, err := s.client.GetLeadsForPipeline(kommoPipelineID, 0, page)
+		if err != nil {
+			if strings.Contains(err.Error(), "204") || strings.Contains(err.Error(), "No content") {
+				break
+			}
+			return 0, fmt.Errorf("fetch Kommo leads page %d: %w", page, err)
+		}
+		for _, kl := range leads {
+			kid := int64(kl.ID)
+			kommoIDs[kid] = true
+			kommoLeads[kid] = kl
+		}
+		if !hasMore || len(leads) == 0 {
+			break
+		}
+		page++
+	}
+
+	// 2. Get all kommo_ids from Clarin that claim to be in this pipeline
+	rows, err := s.db.Query(ctx, `
+		SELECT id, kommo_id FROM leads
+		WHERE account_id = $1 AND pipeline_id = $2 AND kommo_id IS NOT NULL AND kommo_deleted_at IS NULL
+	`, accountID, pipelineID)
+	if err != nil {
+		return 0, fmt.Errorf("query Clarin leads: %w", err)
+	}
+	defer rows.Close()
+
+	type staleEntry struct {
+		leadID  uuid.UUID
+		kommoID int64
+	}
+	var stale []staleEntry
+	clarinKommoIDs := make(map[int64]bool)
+	for rows.Next() {
+		var leadID uuid.UUID
+		var kid int64
+		if err := rows.Scan(&leadID, &kid); err != nil {
+			continue
+		}
+		clarinKommoIDs[kid] = true
+		if !kommoIDs[kid] {
+			stale = append(stale, staleEntry{leadID, kid})
+		}
+	}
+	rows.Close()
+
+	fixed := 0
+
+	// 3. Re-sync each stale lead individually (in Clarin but not in Kommo pipeline)
+	if len(stale) > 0 {
+		log.Printf("[Reconcile] Pipeline %d: found %d leads in Clarin but not in Kommo pipeline (out of %d Kommo / %d Clarin checked)",
+			kommoPipelineID, len(stale), len(kommoIDs), len(clarinKommoIDs))
+
+		maxPerCycle := 200
+		for i, entry := range stale {
+			if !unlimited && i >= maxPerCycle {
+				log.Printf("[Reconcile] Pipeline %d: stale batch limit (%d), remaining %d will be processed next cycle",
+					kommoPipelineID, maxPerCycle, len(stale)-maxPerCycle)
+				break
+			}
+			if err := s.SyncSingleLead(ctx, accountID, entry.leadID); err != nil {
+				if strings.Contains(err.Error(), "eliminado") || strings.Contains(err.Error(), "archivado") {
+					_, _ = s.db.Exec(ctx, `UPDATE leads SET kommo_deleted_at = NOW(), updated_at = NOW() WHERE id = $1`, entry.leadID)
+					log.Printf("[Reconcile] Lead %s (Kommo %d): deleted/archived in Kommo → marked as kommo_deleted (kept in pipeline)", entry.leadID, entry.kommoID)
+					fixed++
+				} else {
+					log.Printf("[Reconcile] Lead %s (Kommo %d): sync error: %v", entry.leadID, entry.kommoID, err)
+				}
+				continue
+			}
+			fixed++
+		}
+	}
+
+	// 4. Import missing leads (in Kommo but not in Clarin) — reverse reconciliation
+	var missing []KommoLead
+	for kid, kl := range kommoLeads {
+		if !clarinKommoIDs[kid] {
+			missing = append(missing, kl)
+		}
+	}
+
+	if len(missing) > 0 {
+		log.Printf("[Reconcile] Pipeline %d: found %d leads in Kommo but not in Clarin → importing",
+			kommoPipelineID, len(missing))
+
+		// Batch-fetch contacts to avoid N+1 API calls
+		maxImportPerCycle := 200
+		toImport := missing
+		if !unlimited && len(toImport) > maxImportPerCycle {
+			log.Printf("[Reconcile] Pipeline %d: import batch limit (%d), remaining %d will be processed next cycle",
+				kommoPipelineID, maxImportPerCycle, len(missing)-maxImportPerCycle)
+			toImport = toImport[:maxImportPerCycle]
+		}
+
+		contactMap := s.batchFetchContacts(toImport)
+		imported := 0
+		for _, kl := range toImport {
+			var prefetched *KommoContact
+			if contactMap != nil && kl.Embedded != nil && len(kl.Embedded.Contacts) > 0 {
+				if c, ok := contactMap[kl.Embedded.Contacts[0].ID]; ok {
+					prefetched = &c
+				}
+			}
+			_, err := s.upsertLead(ctx, accountID, kl, prefetched)
+			if err != nil {
+				log.Printf("[Reconcile] Pipeline %d: import Kommo %d error: %v", kommoPipelineID, kl.ID, err)
+				continue
+			}
+			imported++
+		}
+		fixed += imported
+		log.Printf("[Reconcile] Pipeline %d: imported %d/%d missing leads from Kommo", kommoPipelineID, imported, len(missing))
+		s.Monitor.Log("reconcile", fmt.Sprintf("Pipeline %d: importados %d leads faltantes desde Kommo", kommoPipelineID, imported), "info")
+	}
+
+	return fixed, nil
+}
+
+// --- Three-way merge helpers for tag sets ---
+
+// toStringSet converts a string slice to a set (map[string]bool).
+func toStringSet(s []string) map[string]bool {
+	m := make(map[string]bool, len(s))
+	for _, v := range s {
+		m[v] = true
+	}
+	return m
+}
+
+// diffSet returns elements in a but not in b (a - b).
+func diffSet(a, b map[string]bool) map[string]bool {
+	d := make(map[string]bool)
+	for k := range a {
+		if !b[k] {
+			d[k] = true
+		}
+	}
+	return d
+}
+
+// copySet returns a shallow copy of a set.
+func copySet(s map[string]bool) map[string]bool {
+	c := make(map[string]bool, len(s))
+	for k := range s {
+		c[k] = true
+	}
+	return c
+}
+
+// setToSlice converts a set back to a sorted string slice.
+func setToSlice(s map[string]bool) []string {
+	result := make([]string, 0, len(s))
+	for k := range s {
+		result = append(result, k)
+	}
+	sort.Strings(result)
+	return result
 }

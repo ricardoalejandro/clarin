@@ -51,6 +51,9 @@ export interface Lead {
   age: number | null
   dni: string | null
   birth_date: string | null
+  address: string | null
+  distrito: string | null
+  ocupacion: string | null
   status: string
   pipeline_id: string | null
   stage_id: string | null
@@ -70,6 +73,7 @@ export interface Lead {
   is_blocked: boolean
   blocked_at: string | null
   block_reason: string
+  kommo_deleted_at: string | null
   assigned_to: string
   created_at: string
   updated_at: string
@@ -93,6 +97,9 @@ export interface Contact {
   age?: number | null
   dni?: string | null
   birth_date?: string | null
+  address?: string | null
+  distrito?: string | null
+  ocupacion?: string | null
   tags?: string[]
   structured_tags?: StructuredTag[] | null
   notes?: string | null

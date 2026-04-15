@@ -173,6 +173,24 @@ textarea::placeholder {
   opacity: 1;
 }
 
+/* Dark editor: light text on dark inputs */
+.dark-editor input,
+.dark-editor textarea,
+.dark-editor select {
+  color: #f1f5f9 !important;
+}
+
+.dark-editor select option {
+  background: #2a2a3d;
+  color: #f1f5f9;
+}
+
+.dark-editor input::placeholder,
+.dark-editor textarea::placeholder {
+  color: #64748b !important;
+  opacity: 1;
+}
+
 /* Custom scrollbar - subtle and minimal */
 ::-webkit-scrollbar {
   width: 5px;

@@ -2,6 +2,72 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
 
+// ─── Token Refresh ────────────────────────────────────────────────────────────
+// Transparently refreshes the JWT when it expires (401), using the httpOnly
+// refresh-token cookie. Only one refresh request runs at a time.
+
+let _refreshPromise: Promise<boolean> | null = null
+
+export async function tryRefreshToken(): Promise<boolean> {
+  // Deduplicate concurrent refresh attempts
+  if (_refreshPromise) return _refreshPromise
+
+  _refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+        method: 'POST',
+        credentials: 'include', // sends httpOnly refresh-token cookie
+      })
+      if (!res.ok) return false
+      const data = await res.json()
+      if (data.success && data.token) {
+        localStorage.setItem('token', data.token)
+        return true
+      }
+      return false
+    } catch {
+      return false
+    } finally {
+      _refreshPromise = null
+    }
+  })()
+
+  return _refreshPromise
+}
+
+// ─── Idle Timeout ─────────────────────────────────────────────────────────────
+// After 30 minutes of inactivity (no mouse, keyboard, touch), auto-logout
+
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
+let _idleTimer: ReturnType<typeof setTimeout> | null = null
+let _idleInitialized = false
+
+function resetIdleTimer() {
+  if (_idleTimer) clearTimeout(_idleTimer)
+  _idleTimer = setTimeout(() => {
+    // Auto-logout
+    localStorage.removeItem('token')
+    window.location.href = '/'
+  }, IDLE_TIMEOUT_MS)
+}
+
+export function initIdleTimeout() {
+  if (typeof window === 'undefined' || _idleInitialized) return
+  _idleInitialized = true
+
+  const events = ['mousemove', 'keydown', 'click', 'touchstart', 'scroll']
+  events.forEach(evt => window.addEventListener(evt, resetIdleTimer, { passive: true }))
+  resetIdleTimer()
+}
+
+export function clearIdleTimeout() {
+  if (_idleTimer) {
+    clearTimeout(_idleTimer)
+    _idleTimer = null
+  }
+  _idleInitialized = false
+}
+
 // ─── Version Detection ────────────────────────────────────────────────────────
 // Tracks server version from X-Clarin-Version header and notifies listeners
 let _latestServerVersion: string | null = null
@@ -73,8 +139,25 @@ export async function api<T>(
     }
 
     if (!res.ok) {
-      // Handle 401 - redirect to login
-      if (res.status === 401 && typeof window !== 'undefined') {
+      // Handle 401 - try to refresh token before giving up
+      if (res.status === 401 && typeof window !== 'undefined' && !skipAuth) {
+        const refreshed = await tryRefreshToken()
+        if (refreshed) {
+          // Retry the original request with the new token
+          const newToken = localStorage.getItem('token')
+          if (newToken) {
+            (headers as Record<string, string>)['Authorization'] = `Bearer ${newToken}`
+          }
+          const retryRes = await fetch(`${API_BASE}${endpoint}`, {
+            ...fetchOptions,
+            headers,
+          })
+          if (retryRes.ok) {
+            const retryData = await retryRes.json().catch(() => undefined)
+            return { success: true, data: retryData as T }
+          }
+        }
+        // Refresh failed — session truly expired
         localStorage.removeItem('token')
         window.location.href = '/'
         return { success: false, error: 'Sesión expirada' }
@@ -106,6 +189,36 @@ export const apiPut = <T>(endpoint: string, body: unknown) =>
 
 export const apiDelete = <T>(endpoint: string) =>
   api<T>(endpoint, { method: 'DELETE' })
+
+export async function apiUpload<T = any>(endpoint: string, formData: FormData): Promise<{ success: boolean; data?: T; error?: string }> {
+  const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('token') : null
+
+  const doFetch = async (token: string | null) => {
+    return fetch(`${API_BASE}${endpoint}`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    })
+  }
+
+  try {
+    let res = await doFetch(getToken())
+    if (res.status === 401 && typeof window !== 'undefined') {
+      const refreshed = await tryRefreshToken()
+      if (refreshed) {
+        res = await doFetch(getToken())
+      } else {
+        return { success: false, error: 'Sesión expirada' }
+      }
+    }
+    const data = await res.json().catch(() => undefined)
+    if (!res.ok) return { success: false, error: (data as any)?.error || `Error ${res.status}` }
+    return { success: true, data: data as T }
+  } catch (err) {
+    console.error('Upload Error:', err)
+    return { success: false, error: 'Error de conexión' }
+  }
+}
 
 // WebSocket helper with auto-reconnect and exponential backoff
 export function createWebSocket(

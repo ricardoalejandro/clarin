@@ -20,8 +20,8 @@ func Connect(databaseURL string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("failed to parse database URL: %w", err)
 	}
 
-	poolConfig.MaxConns = 25
-	poolConfig.MinConns = 5
+	poolConfig.MaxConns = 50
+	poolConfig.MinConns = 10
 	poolConfig.MaxConnLifetime = time.Hour
 	poolConfig.MaxConnIdleTime = 30 * time.Minute
 
@@ -888,14 +888,30 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_leads_archived ON leads(account_id) WHERE is_archived = true`,
 		`CREATE INDEX IF NOT EXISTS idx_leads_blocked ON leads(account_id) WHERE is_blocked = true`,
 
+		// Kommo deletion tracking
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_deleted_at TIMESTAMPTZ`,
+
+		// Address field on contacts and leads (must be before data unification)
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS address TEXT`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS address TEXT`,
+
+		// Distrito and Ocupacion fields on contacts and leads
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS distrito VARCHAR(255) DEFAULT ''`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS ocupacion VARCHAR(255) DEFAULT ''`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS distrito VARCHAR(255) DEFAULT ''`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ocupacion VARCHAR(255) DEFAULT ''`,
+
+		// Per-account Kommo integration flag
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS kommo_enabled BOOLEAN DEFAULT FALSE`,
+
 		// ─── Data Unification: Contact = source of truth ───────────────────
 
 		// Index on leads.contact_id for JOIN performance
 		`CREATE INDEX IF NOT EXISTS idx_leads_contact_id ON leads(contact_id) WHERE contact_id IS NOT NULL`,
 
 		// Auto-create contacts for manual leads (no phone) that lack a contact_id
-		`INSERT INTO contacts (id, account_id, jid, name, last_name, short_name, phone, email, company, age, dni, birth_date, notes, source, is_group, created_at, updated_at)
-		 SELECT gen_random_uuid(), l.account_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.dni, l.birth_date, l.notes, l.source, false, l.created_at, NOW()
+		`INSERT INTO contacts (id, account_id, jid, name, last_name, short_name, phone, email, company, age, dni, birth_date, address, distrito, ocupacion, notes, source, is_group, created_at, updated_at)
+		 SELECT gen_random_uuid(), l.account_id, l.jid, l.name, l.last_name, l.short_name, l.phone, l.email, l.company, l.age, l.dni, l.birth_date, l.address, l.distrito, l.ocupacion, l.notes, l.source, false, l.created_at, NOW()
 		 FROM leads l
 		 WHERE l.contact_id IS NULL
 		   AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.account_id = l.account_id AND c.jid = l.jid)
@@ -919,6 +935,9 @@ func Migrate(db *pgxpool.Pool) error {
 		   age = COALESCE(contacts.age, l.age),
 		   dni = COALESCE(contacts.dni, l.dni),
 		   birth_date = COALESCE(contacts.birth_date, l.birth_date),
+		   address = COALESCE(contacts.address, l.address),
+		   distrito = COALESCE(NULLIF(contacts.distrito, ''), NULLIF(l.distrito, '')),
+		   ocupacion = COALESCE(NULLIF(contacts.ocupacion, ''), NULLIF(l.ocupacion, '')),
 		   notes = COALESCE(contacts.notes, l.notes),
 		   updated_at = NOW()
 		 FROM leads l
@@ -1149,6 +1168,121 @@ func Migrate(db *pgxpool.Pool) error {
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_contact_phones_contact_id ON contact_phones(contact_id)`,
+
+		// ─── Tasks & Reminders ──
+		`CREATE TABLE IF NOT EXISTS tasks (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			assigned_to UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			title TEXT NOT NULL,
+			description TEXT DEFAULT '',
+			type TEXT NOT NULL DEFAULT 'reminder',
+			due_at TIMESTAMPTZ NOT NULL,
+			due_end_at TIMESTAMPTZ,
+			priority TEXT NOT NULL DEFAULT 'medium',
+			status TEXT NOT NULL DEFAULT 'pending',
+			completed_at TIMESTAMPTZ,
+			completed_by UUID REFERENCES users(id),
+			lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+			event_id UUID REFERENCES events(id) ON DELETE SET NULL,
+			program_id UUID REFERENCES programs(id) ON DELETE SET NULL,
+			contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
+			recurrence_rule TEXT DEFAULT '',
+			recurrence_parent_id UUID REFERENCES tasks(id) ON DELETE SET NULL,
+			reminder_minutes INT,
+			notes TEXT DEFAULT '',
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_assigned_status ON tasks(account_id, assigned_to, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_due_at ON tasks(account_id, due_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_lead_id ON tasks(lead_id) WHERE lead_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_event_id ON tasks(event_id) WHERE event_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_program_id ON tasks(program_id) WHERE program_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_contact_id ON tasks(contact_id) WHERE contact_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_recurrence_parent ON tasks(recurrence_parent_id) WHERE recurrence_parent_id IS NOT NULL`,
+
+		`CREATE TABLE IF NOT EXISTS task_reminders (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			assigned_to UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			reminder_at TIMESTAMPTZ NOT NULL,
+			delivered BOOLEAN DEFAULT FALSE,
+			delivered_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_reminders_pending ON task_reminders(reminder_at) WHERE delivered = FALSE`,
+
+		// ─── Make due_at optional ──
+		`ALTER TABLE tasks ALTER COLUMN due_at DROP NOT NULL`,
+
+		// ─── Subtasks ──
+		`CREATE TABLE IF NOT EXISTS subtasks (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			title TEXT NOT NULL DEFAULT '',
+			completed BOOLEAN DEFAULT FALSE,
+			completed_at TIMESTAMPTZ,
+			sort_order INT DEFAULT 0,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_subtasks_task_id ON subtasks(task_id)`,
+
+		// ─── Performance indexes ──
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account ON tasks(account_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_lead ON tasks(lead_id) WHERE lead_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_contact ON tasks(contact_id) WHERE contact_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_events_account ON events(account_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_event_tags_event ON event_tags(event_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_tags_contact ON contact_tags(contact_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_pipeline_stages_pipeline ON pipeline_stages(pipeline_id)`,
+
+		// ─── Backfill: auto-link contact_id for tasks with lead_id ──
+		`UPDATE tasks SET contact_id = l.contact_id FROM leads l WHERE tasks.lead_id = l.id AND tasks.contact_id IS NULL AND l.contact_id IS NOT NULL`,
+
+		// ─── Document Templates ──
+		`CREATE TABLE IF NOT EXISTS document_templates (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			canvas_json JSONB NOT NULL DEFAULT '{}',
+			thumbnail_url TEXT NOT NULL DEFAULT '',
+			page_width DOUBLE PRECISION NOT NULL DEFAULT 210,
+			page_height DOUBLE PRECISION NOT NULL DEFAULT 297,
+			page_orientation TEXT NOT NULL DEFAULT 'portrait',
+			fields_used TEXT[] NOT NULL DEFAULT '{}',
+			created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_document_templates_account ON document_templates(account_id)`,
+		// Sync monitor: persistent log entries (24h retention, auto-cleanup)
+		`CREATE TABLE IF NOT EXISTS sync_monitor_entries (
+			id BIGSERIAL PRIMARY KEY,
+			source TEXT NOT NULL,
+			message TEXT NOT NULL,
+			level TEXT NOT NULL DEFAULT 'info',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_monitor_created_at ON sync_monitor_entries(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_monitor_source ON sync_monitor_entries(source)`,
+
+		// Three-way merge baseline for tag sync (Clarin ↔ Kommo)
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_synced_tags TEXT[] DEFAULT '{}'`,
+		// Bootstrap: initialize baseline from current tags for existing Kommo-linked leads
+		`UPDATE leads SET kommo_synced_tags = COALESCE(tags, '{}') WHERE kommo_id IS NOT NULL AND (kommo_synced_tags IS NULL OR kommo_synced_tags = '{}')`,
+
+		// ── Event participant personal data fields ─────────────────────
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS company VARCHAR(255)`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS dni VARCHAR(50)`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS birth_date DATE`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS address TEXT`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS distrito VARCHAR(255)`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS ocupacion VARCHAR(255)`,
 	}
 
 	for _, migration := range migrations {
@@ -1332,6 +1466,28 @@ func SeedAdmin(db *pgxpool.Pool, cfg *config.Config) error {
 	`)
 	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_auto_exec_logs ON automation_execution_logs(execution_id, created_at)`)
 
+	// ── Task Lists ──
+	_, _ = db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS task_lists (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			color TEXT DEFAULT '',
+			sort_order INT DEFAULT 0,
+			created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)
+	`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_task_lists_account_id ON task_lists(account_id)`)
+	_, _ = db.Exec(ctx, `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS list_id UUID REFERENCES task_lists(id) ON DELETE SET NULL`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_tasks_list_id ON tasks(list_id) WHERE list_id IS NOT NULL`)
+
+	// ── Task starred + sort_order ──
+	_, _ = db.Exec(ctx, `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS starred BOOLEAN DEFAULT FALSE`)
+	_, _ = db.Exec(ctx, `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS sort_order INT DEFAULT 0`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_tasks_starred ON tasks(account_id, starred) WHERE starred = TRUE`)
+
 	return nil
 }
 
@@ -1508,6 +1664,9 @@ func MigrateEventPipelines(db *pgxpool.Pool) error {
 			}
 		}
 	}
+
+	// ── Task Lists ──
+	// (Moved to Migrate function)
 
 	return nil
 }

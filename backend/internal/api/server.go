@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,14 +89,15 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 
 	// Security Headers (Helmet)
 	app.Use(helmet.New(helmet.Config{
-		XSSProtection:         "1; mode=block",
-		ContentTypeNosniff:    "nosniff",
-		XFrameOptions:         "DENY",
-		ReferrerPolicy:        "strict-origin-when-cross-origin",
+		XSSProtection:             "1; mode=block",
+		ContentTypeNosniff:        "nosniff",
+		XFrameOptions:             "DENY",
+		ReferrerPolicy:            "strict-origin-when-cross-origin",
 		CrossOriginEmbedderPolicy: "require-corp",
 		CrossOriginOpenerPolicy:   "same-origin",
 		CrossOriginResourcePolicy: "same-origin",
 		PermissionPolicy:          "geolocation=(), microphone=(), camera=()",
+		ContentSecurityPolicy:     "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' wss: https:; font-src 'self' data:; frame-ancestors 'none'",
 	}))
 
 	// Rate Limiting - 500 requests per minute per IP (skip media file serving)
@@ -208,6 +211,10 @@ func (s *Server) setupRoutes() {
 	// Auth routes (no auth required)
 	auth := api.Group("/auth")
 	auth.Post("/login", s.handleLogin)
+	auth.Post("/refresh", s.handleRefreshToken)
+
+	// Kommo webhook (public — called by Kommo, secret in URL for validation)
+	api.Post("/kommo/webhook/:secret", s.handleKommoWebhook)
 
 	// Protected routes
 	protected := api.Group("", s.authMiddleware)
@@ -224,6 +231,9 @@ func (s *Server) setupRoutes() {
 	protected.Put("/settings/account", s.handleUpdateAccount)
 	protected.Put("/settings/password", s.handleChangePassword)
 	protected.Put("/settings/incoming-stage", s.handleSetIncomingStage)
+
+	// Account users — any authenticated user can list users in their account (for assignment dropdowns)
+	protected.Get("/account/users", s.handleGetAccountUsers)
 
 	// API Key management routes
 	protected.Post("/settings/api-keys", s.handleCreateAPIKey)
@@ -264,6 +274,7 @@ func (s *Server) setupRoutes() {
 	messages.Post("/forward", s.handleForwardMessage)
 	messages.Post("/react", s.handleSendReaction)
 	messages.Post("/poll", s.handleSendPoll)
+
 	messages.Post("/typing", s.handleSendTyping)
 	messages.Post("/read-receipt", s.handleSendReadReceipt)
 	messages.Post("/delete", s.handleDeleteMessage)
@@ -465,9 +476,42 @@ func (s *Server) setupRoutes() {
 	interactions.Get("/", s.handleGetInteractions)
 	interactions.Delete("/:id", s.handleDeleteInteraction)
 
+	// Task routes
+	tasks := protected.Group("/tasks", s.requirePermission(domain.PermTasks))
+	tasks.Get("/lists", s.handleGetTaskLists)
+	tasks.Post("/lists", s.handleCreateTaskList)
+	tasks.Post("/lists/reorder", s.handleReorderLists)
+	tasks.Put("/lists/:listId", s.handleUpdateTaskList)
+	tasks.Delete("/lists/:listId", s.handleDeleteTaskList)
+	tasks.Get("/calendar", s.handleGetTasksCalendar)
+	tasks.Get("/stats", s.handleGetTaskStats)
+	tasks.Post("/reorder", s.handleReorderTasks)
+	tasks.Post("/", s.handleCreateTask)
+	tasks.Get("/", s.handleGetTasks)
+	tasks.Get("/:id", s.handleGetTask)
+	tasks.Put("/:id", s.handleUpdateTask)
+	tasks.Delete("/:id", s.handleDeleteTask)
+	tasks.Post("/:id/complete", s.handleCompleteTask)
+	tasks.Post("/:id/star", s.handleToggleStar)
+	tasks.Get("/:id/subtasks", s.handleGetSubtasks)
+	tasks.Post("/:id/subtasks", s.handleCreateSubtask)
+	tasks.Put("/:id/subtasks/:subId", s.handleUpdateSubtask)
+	tasks.Delete("/:id/subtasks/:subId", s.handleDeleteSubtask)
+	tasks.Post("/:id/subtasks/:subId/toggle", s.handleToggleSubtask)
+
 	// Contact interactions and events
 	contacts.Get("/:id/interactions", s.handleGetContactInteractions)
 	contacts.Get("/:id/events", s.handleGetContactEvents)
+
+	// Document template routes
+	docTemplates := protected.Group("/document-templates", s.requirePermission(domain.PermDocuments))
+	docTemplates.Get("/", s.handleListDocumentTemplates)
+	docTemplates.Post("/", s.handleCreateDocumentTemplate)
+	docTemplates.Post("/import", s.handleImportDocumentTemplate)
+	docTemplates.Get("/:id", s.handleGetDocumentTemplate)
+	docTemplates.Put("/:id", s.handleUpdateDocumentTemplate)
+	docTemplates.Delete("/:id", s.handleDeleteDocumentTemplate)
+	docTemplates.Post("/:id/duplicate", s.handleDuplicateDocumentTemplate)
 
 	// Quick replies (canned responses)
 	quickReplies := protected.Group("/quick-replies", s.requirePermission(domain.PermChats))
@@ -484,8 +528,13 @@ func (s *Server) setupRoutes() {
 	kommoGroup.Get("/connected", s.handleKommoGetConnected)
 	kommoGroup.Post("/pipelines/:kommoId/connect", s.handleKommoConnectPipeline)
 	kommoGroup.Delete("/pipelines/:kommoId/connect", s.handleKommoDisconnectPipeline)
+	kommoGroup.Post("/pipelines/toggle-all", s.handleKommoToggleAllPipelines)
+	kommoGroup.Post("/toggle", s.handleKommoToggleEnabled)
 	kommoGroup.Get("/sync/status", s.handleKommoSyncStatus)
 	kommoGroup.Get("/sync/full-status", s.handleKommoFullSyncStatus)
+	kommoGroup.Get("/sync/events-poller", s.handleEventsPollerStatus)
+	kommoGroup.Post("/sync/events-poller/force", s.handleForceEventsPoll)
+	kommoGroup.Get("/sync/monitor", s.handleSyncMonitor)
 
 	// Google Contacts integration routes
 	googleGroup := protected.Group("/google", s.requirePermission(domain.PermIntegrations))
@@ -648,6 +697,14 @@ func (s *Server) authMiddleware(c *fiber.Ctx) error {
 		})
 	}
 
+	// Check if user sessions were invalidated (admin toggled/deleted the user)
+	if s.services.Auth.IsUserSessionInvalidated(claims) {
+		return c.Status(401).JSON(fiber.Map{
+			"success": false,
+			"error":   "Session invalidated",
+		})
+	}
+
 	c.Locals("claims", claims)
 	c.Locals("user_id", claims.UserID)
 	c.Locals("account_id", claims.AccountID)
@@ -674,8 +731,12 @@ func (s *Server) requirePermission(module string) fiber.Handler {
 		if !ok {
 			return c.Status(401).JSON(fiber.Map{"success": false, "error": "Unauthorized"})
 		}
+
+		// Derive admin status from JWT role (covers old tokens with stale IsAdmin flag)
+		isAdmin := claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin
+
 		// Admins always have full access
-		if claims.IsAdmin || claims.IsSuperAdmin {
+		if isAdmin {
 			return c.Next()
 		}
 		// Check permissions slice
@@ -684,6 +745,16 @@ func (s *Server) requirePermission(module string) fiber.Handler {
 				return c.Next()
 			}
 		}
+
+		// Fallback: check actual per-account role from DB (handles stale JWTs)
+		var dbRole string
+		err := s.repos.DB().QueryRow(c.Context(),
+			`SELECT role FROM user_accounts WHERE user_id = $1 AND account_id = $2`,
+			claims.UserID, claims.AccountID).Scan(&dbRole)
+		if err == nil && (dbRole == domain.RoleAdmin || dbRole == domain.RoleSuperAdmin) {
+			return c.Next()
+		}
+
 		return c.Status(403).JSON(fiber.Map{
 			"success": false,
 			"error":   "No tienes permiso para acceder a este módulo",
@@ -722,19 +793,30 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
-	token, user, userAccounts, err := s.services.Auth.Login(c.Context(), req.Username, req.Password, s.cfg.JWTSecret)
+	token, refreshToken, user, userAccounts, err := s.services.Auth.Login(c.Context(), req.Username, req.Password, s.cfg.JWTSecret)
 	if err != nil {
 		return c.Status(401).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Set cookie
+	// Set access token cookie (short-lived, 1 hour)
 	c.Cookie(&fiber.Cookie{
 		Name:     "auth-token",
 		Value:    token,
-		Expires:  time.Now().Add(24 * 7 * time.Hour),
+		Expires:  time.Now().Add(1 * time.Hour),
 		HTTPOnly: true,
 		Secure:   s.cfg.IsProduction(),
 		SameSite: "Lax",
+	})
+
+	// Set refresh token cookie (long-lived, 7 days, httpOnly)
+	c.Cookie(&fiber.Cookie{
+		Name:     "refresh-token",
+		Value:    refreshToken,
+		Expires:  time.Now().Add(7 * 24 * time.Hour),
+		HTTPOnly: true,
+		Secure:   s.cfg.IsProduction(),
+		SameSite: "Strict",
+		Path:     "/api/auth",
 	})
 
 	// Build accounts list for response
@@ -749,9 +831,18 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		})
 	}
 
-	// Build permissions for response
+	// Build permissions for response (mirrors JWT logic)
+	// Per-account admin/super_admin gets full access
+	activeRole := user.Role
+	for _, ua := range userAccounts {
+		if ua.AccountID == user.AccountID {
+			activeRole = ua.Role
+			break
+		}
+	}
+	isAdmin := user.IsAdmin || user.IsSuperAdmin || activeRole == domain.RoleAdmin || activeRole == domain.RoleSuperAdmin
 	permissions := []string{domain.PermAll}
-	if !user.IsAdmin && !user.IsSuperAdmin {
+	if !isAdmin {
 		for _, ua := range userAccounts {
 			if ua.AccountID == user.AccountID {
 				if ua.Permissions != nil {
@@ -772,7 +863,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 			"username":       user.Username,
 			"email":          user.Email,
 			"display_name":   user.DisplayName,
-			"is_admin":       user.IsAdmin,
+			"is_admin":       isAdmin,
 			"is_super_admin": user.IsSuperAdmin,
 			"role":           user.Role,
 			"account_id":     user.AccountID,
@@ -784,12 +875,82 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleLogout(c *fiber.Ctx) error {
+	// Revoke JWT + delete refresh token
+	claims, _ := c.Locals("claims").(*service.JWTClaims)
+	refreshToken := c.Cookies("refresh-token")
+	if claims != nil {
+		s.services.Auth.Logout(c.Context(), claims, refreshToken)
+	}
+
+	// Expire cookies
 	c.Cookie(&fiber.Cookie{
 		Name:    "auth-token",
 		Value:   "",
 		Expires: time.Now().Add(-time.Hour),
 	})
+	c.Cookie(&fiber.Cookie{
+		Name:     "refresh-token",
+		Value:    "",
+		Expires:  time.Now().Add(-time.Hour),
+		Path:     "/api/auth",
+		HTTPOnly: true,
+	})
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleRefreshToken(c *fiber.Ctx) error {
+	// Get refresh token from cookie
+	refreshToken := c.Cookies("refresh-token")
+	if refreshToken == "" {
+		return c.Status(401).JSON(fiber.Map{"success": false, "error": "No refresh token"})
+	}
+
+	// Blacklist the old JWT before issuing a new one
+	oldToken := c.Cookies("auth-token")
+	if oldToken != "" {
+		if oldClaims, err := s.services.Auth.ValidateToken(oldToken, s.cfg.JWTSecret); err == nil && oldClaims != nil {
+			s.services.Auth.BlacklistJTI(oldClaims)
+		}
+	}
+
+	newToken, newRefreshToken, err := s.services.Auth.RefreshToken(c.Context(), refreshToken, s.cfg.JWTSecret)
+	if err != nil {
+		// Clear cookies on invalid refresh
+		c.Cookie(&fiber.Cookie{
+			Name:     "refresh-token",
+			Value:    "",
+			Expires:  time.Now().Add(-time.Hour),
+			Path:     "/api/auth",
+			HTTPOnly: true,
+		})
+		return c.Status(401).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	// Set new access token cookie
+	c.Cookie(&fiber.Cookie{
+		Name:     "auth-token",
+		Value:    newToken,
+		Expires:  time.Now().Add(1 * time.Hour),
+		HTTPOnly: true,
+		Secure:   s.cfg.IsProduction(),
+		SameSite: "Lax",
+	})
+
+	// Set rotated refresh token cookie
+	c.Cookie(&fiber.Cookie{
+		Name:     "refresh-token",
+		Value:    newRefreshToken,
+		Expires:  time.Now().Add(7 * 24 * time.Hour),
+		HTTPOnly: true,
+		Secure:   s.cfg.IsProduction(),
+		SameSite: "Strict",
+		Path:     "/api/auth",
+	})
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"token":   newToken,
+	})
 }
 
 func (s *Server) handleGetMe(c *fiber.Ctx) error {
@@ -820,6 +981,32 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 	// Extract permissions from JWT claims (already computed and embedded)
 	claims := c.Locals("claims").(*service.JWTClaims)
 
+	// Compute per-account admin status (same logic as login/switchAccount)
+	var activeRole string
+	for _, ua := range userAccounts {
+		if ua.AccountID == accountID {
+			activeRole = ua.Role
+			break
+		}
+	}
+	isAdmin := user.IsAdmin || user.IsSuperAdmin || activeRole == domain.RoleAdmin || activeRole == domain.RoleSuperAdmin
+
+	// Compute permissions: admins get wildcard, agents get role-based permissions
+	var permissions []string
+	if isAdmin {
+		permissions = []string{domain.PermAll}
+	} else {
+		permissions = claims.Permissions
+		// If JWT permissions are empty, try fetching from DB
+		if len(permissions) == 0 {
+			permissions, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), userID, accountID)
+		}
+	}
+
+	// Check if current account has Kommo integration enabled
+	var kommoEnabled bool
+	_ = s.repos.DB().QueryRow(c.Context(), `SELECT COALESCE(kommo_enabled, false) FROM accounts WHERE id = $1`, accountID).Scan(&kommoEnabled)
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"user": fiber.Map{
@@ -827,15 +1014,59 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 			"username":       user.Username,
 			"email":          user.Email,
 			"display_name":   user.DisplayName,
-			"is_admin":       user.IsAdmin,
+			"is_admin":       isAdmin,
 			"is_super_admin": user.IsSuperAdmin,
 			"role":           user.Role,
 			"account_id":     accountID,
 			"account_name":   activeAccountName,
-			"permissions":    claims.Permissions,
+			"permissions":    permissions,
+			"kommo_enabled":  kommoEnabled,
 		},
 		"accounts": accountsList,
 	})
+}
+
+// --- Account Users Handler ---
+
+func (s *Server) handleGetAccountUsers(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// Query users from both users.account_id and user_accounts to include multi-account users
+	rows, err := s.repos.DB().Query(c.Context(), `
+		SELECT DISTINCT u.id, u.display_name, u.username, u.role, u.is_active
+		FROM users u
+		WHERE u.id IN (
+			SELECT u2.id FROM users u2 WHERE u2.account_id = $1
+			UNION
+			SELECT ua.user_id FROM user_accounts ua WHERE ua.account_id = $1
+		)
+		ORDER BY u.display_name
+	`, accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to fetch users"})
+	}
+	defer rows.Close()
+
+	result := make([]fiber.Map, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		var displayName, username, role string
+		var isActive bool
+		if err := rows.Scan(&id, &displayName, &username, &role, &isActive); err != nil {
+			continue
+		}
+		if !isActive {
+			continue
+		}
+		result = append(result, fiber.Map{
+			"id":           id,
+			"display_name": displayName,
+			"username":     username,
+			"role":         role,
+		})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "users": result})
 }
 
 // --- Settings Handlers ---
@@ -1033,6 +1264,7 @@ func (s *Server) handleCreateDevice(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetDevice(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	deviceID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
@@ -1042,7 +1274,7 @@ func (s *Server) handleGetDevice(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	if device == nil {
+	if device == nil || device.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
@@ -1050,9 +1282,13 @@ func (s *Server) handleGetDevice(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleConnectDevice(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	deviceID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	if err := s.services.Device.Connect(c.Context(), deviceID); err != nil {
@@ -1063,9 +1299,13 @@ func (s *Server) handleConnectDevice(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDisconnectDevice(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	deviceID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	if err := s.services.Device.Disconnect(c.Context(), deviceID); err != nil {
@@ -1076,9 +1316,13 @@ func (s *Server) handleDisconnectDevice(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleResetDevice(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	deviceID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	if err := s.services.Device.Reset(c.Context(), deviceID); err != nil {
@@ -1089,9 +1333,13 @@ func (s *Server) handleResetDevice(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeleteDevice(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	deviceID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	if err := s.services.Device.Delete(c.Context(), deviceID); err != nil {
@@ -1102,9 +1350,13 @@ func (s *Server) handleDeleteDevice(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	deviceID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 	var req struct {
 		Name            *string `json:"name"`
@@ -1379,7 +1631,7 @@ func (s *Server) handleRequestHistorySync(c *fiber.Ctx) error {
 
 	// Get the chat to find its JID and device
 	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
-	if err != nil || chat == nil {
+	if err != nil || chat == nil || chat.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
 
@@ -1437,6 +1689,7 @@ func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleSendMessage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID        string `json:"device_id"`
 		To              string `json:"to"`
@@ -1455,6 +1708,9 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	var message *domain.Message
@@ -1478,6 +1734,7 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleSendContact(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID     string `json:"device_id"`
 		To           string `json:"to"`
@@ -1491,6 +1748,9 @@ func (s *Server) handleSendContact(c *fiber.Ctx) error {
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	if req.ContactName == "" || req.ContactPhone == "" {
@@ -1506,6 +1766,7 @@ func (s *Server) handleSendContact(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID  string `json:"device_id"`
 		To        string `json:"to"`  // target chat JID
@@ -1519,6 +1780,9 @@ func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	chatID, err := uuid.Parse(req.ChatID)
@@ -1542,6 +1806,7 @@ func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleSendReaction(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID        string `json:"device_id"`
 		To              string `json:"to"`
@@ -1557,6 +1822,9 @@ func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	}
 
 	if req.TargetMessageID == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "target_message_id is required"})
@@ -1570,6 +1838,7 @@ func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleSendPoll(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID      string   `json:"device_id"`
 		To            string   `json:"to"`
@@ -1584,6 +1853,9 @@ func (s *Server) handleSendPoll(c *fiber.Ctx) error {
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	if req.Question == "" || len(req.Options) < 2 {
@@ -1603,6 +1875,7 @@ func (s *Server) handleSendPoll(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleSendTyping(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID  string `json:"device_id"`
 		To        string `json:"to"`
@@ -1617,6 +1890,9 @@ func (s *Server) handleSendTyping(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	}
 
 	if err := s.services.Chat.SendChatPresence(c.Context(), deviceID, req.To, req.Composing, req.Media); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -1626,6 +1902,7 @@ func (s *Server) handleSendTyping(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleSendReadReceipt(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID   string   `json:"device_id"`
 		ChatJID    string   `json:"chat_jid"`
@@ -1639,6 +1916,9 @@ func (s *Server) handleSendReadReceipt(c *fiber.Ctx) error {
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
 	if len(req.MessageIDs) == 0 {
@@ -1820,7 +2100,8 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 	defer src.Close()
 
 	// Generate unique filename
-	uniqueFilename := uuid.New().String() + "_" + file.Filename
+	cleanFilename := filepath.Base(file.Filename)
+	uniqueFilename := uuid.New().String() + "_" + cleanFilename
 
 	// Detect content type
 	contentType := file.Header.Get("Content-Type")
@@ -1991,11 +2272,12 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 				SELECT l.id, l.account_id, l.contact_id, l.jid,
 				       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
 				       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-				       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date),
+				       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
+				       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
 				       l.status, l.source, COALESCE(c.notes, l.notes),
 				       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 				       ps.name, ps.color, ps.position, l.kommo_id,
-				       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason
+				       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at
 				FROM leads l
 				LEFT JOIN contacts c ON c.id = l.contact_id
 				LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
@@ -2012,10 +2294,10 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 				lead := &domain.Lead{}
 				if scanErr := rows.Scan(
 					&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
-					&lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
+					&lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Address, &lead.Distrito, &lead.Ocupacion, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 					&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 					&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
-					&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
+					&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
 				); scanErr != nil {
 					leadsErr = scanErr
 					return
@@ -2106,7 +2388,83 @@ func (s *Server) invalidatePipelinesCache(accountID uuid.UUID) {
 	}
 }
 
+// invalidateContactsCache invalidates the cached contacts for an account
+func (s *Server) invalidateContactsCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "contacts:"+accountID.String()+":*")
+	}
+}
+
+// invalidateEventsCache invalidates the cached events for an account
+func (s *Server) invalidateEventsCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "events:"+accountID.String()+":*")
+	}
+}
+
+// invalidateTagsCache invalidates the cached tags for an account
+func (s *Server) invalidateTagsCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "tags:"+accountID.String()+":*")
+	}
+}
+
+// invalidateTasksCache invalidates the cached tasks for an account
+func (s *Server) invalidateTasksCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "tasks:"+accountID.String()+":*")
+	}
+}
+
+// invalidateCampaignsCache invalidates the cached campaigns for an account
+func (s *Server) invalidateCampaignsCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "campaigns:"+accountID.String()+":*")
+	}
+}
+
+// invalidateProgramsCache invalidates the cached programs for an account
+func (s *Server) invalidateProgramsCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "programs:"+accountID.String()+":*")
+	}
+}
+
+// invalidateSurveysCache invalidates the cached surveys for an account
+func (s *Server) invalidateSurveysCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "surveys:"+accountID.String()+":*")
+	}
+}
+
+// invalidateDynamicsCache invalidates the cached dynamics for an account
+func (s *Server) invalidateDynamicsCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "dynamics:"+accountID.String()+":*")
+	}
+}
+
+// invalidateAutomationsCache invalidates the cached automations for an account
+func (s *Server) invalidateAutomationsCache(accountID uuid.UUID) {
+	if s.cache != nil {
+		_ = s.cache.DelPattern(context.Background(), "automations:"+accountID.String()+":*")
+	}
+}
+
 // ─── Shared filter helpers ──────────────────────────────────────────────────
+
+// addKommoSyncFilter appends a WHERE clause based on the kommo_sync query param.
+// "kommo" = only leads that exist and are active in Kommo.
+// "clarin" = only leads that are local-only or were deleted from Kommo.
+// "all" (default) = no filter.
+func addKommoSyncFilter(kommoSync string, whereClauses *[]string) {
+	switch kommoSync {
+	case "kommo":
+		*whereClauses = append(*whereClauses, "l.kommo_id IS NOT NULL AND l.kommo_deleted_at IS NULL")
+	case "clarin":
+		*whereClauses = append(*whereClauses, "(l.kommo_id IS NULL OR l.kommo_deleted_at IS NOT NULL)")
+	}
+}
 
 // addDateFilter parses date_field, date_from, date_to from the query and appends a date range WHERE clause.
 // Allowed fields are validated by allowedFields map. tableAlias is the SQL alias (e.g. "l" for leads, "p" for participants).
@@ -2145,36 +2503,36 @@ var participantDateFields = map[string]bool{"created_at": true, "updated_at": tr
 // buildTagFormulaSQL builds a WHERE sub-clause for formula-based tag filtering.
 // Returns the SQL clause, updated args, and updated argIdx.
 // Supports tag_mode=AND (leads must have ALL tags), OR (any tag), and exclude_tag_names.
-func buildTagFormulaSQL(tagNames []string, excludeTagNames []string, tagMode string, args []interface{}, argIdx int) (string, []interface{}, int) {
+func buildTagFormulaSQL(tagNames []string, excludeTagNames []string, tagMode string, accountID uuid.UUID, args []interface{}, argIdx int) (string, []interface{}, int) {
 	var clauses []string
 
 	if len(tagNames) > 0 {
 		if tagMode == "AND" {
-			// Lead must have ALL of the specified tag names
+			// Lead must have ALL of the specified tag names (scoped to this account's tags)
 			clauses = append(clauses, fmt.Sprintf(
-				"l.contact_id IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d) GROUP BY ct.contact_id HAVING COUNT(DISTINCT t.name) = $%d)",
-				argIdx, argIdx+1,
+				"l.contact_id IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.account_id = $%d AND t.name = ANY($%d) GROUP BY ct.contact_id HAVING COUNT(DISTINCT t.name) = $%d)",
+				argIdx, argIdx+1, argIdx+2,
 			))
-			args = append(args, tagNames, len(tagNames))
-			argIdx += 2
+			args = append(args, accountID, tagNames, len(tagNames))
+			argIdx += 3
 		} else {
 			// OR mode (default): lead has at least one tag
 			clauses = append(clauses, fmt.Sprintf(
-				"l.contact_id IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d))",
-				argIdx,
+				"l.contact_id IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.account_id = $%d AND t.name = ANY($%d))",
+				argIdx, argIdx+1,
 			))
-			args = append(args, tagNames)
-			argIdx++
+			args = append(args, accountID, tagNames)
+			argIdx += 2
 		}
 	}
 
 	if len(excludeTagNames) > 0 {
 		clauses = append(clauses, fmt.Sprintf(
-			"l.contact_id NOT IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.name = ANY($%d))",
-			argIdx,
+			"l.contact_id NOT IN (SELECT ct.contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE t.account_id = $%d AND t.name = ANY($%d))",
+			argIdx, argIdx+1,
 		))
-		args = append(args, excludeTagNames)
-		argIdx++
+		args = append(args, accountID, excludeTagNames)
+		argIdx += 2
 	}
 
 	return strings.Join(clauses, " AND "), args, argIdx
@@ -2197,14 +2555,7 @@ func buildAdvancedFormulaSQL(formulaText string, accountID uuid.UUID, args []int
 		return "", args, argIdx, err
 	}
 
-	// Rewrite the inner SQL parameter numbers to fit into our arg sequence.
-	// The formula SQL uses $1, $2, $3... We need to remap them to $argIdx, $argIdx+1...
-	remappedSQL := innerSQL
-	for i := len(innerArgs); i >= 1; i-- {
-		old := fmt.Sprintf("$%d", i)
-		new := fmt.Sprintf("$%d", argIdx+i-1)
-		remappedSQL = strings.ReplaceAll(remappedSQL, old, new)
-	}
+	remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
 
 	clause := fmt.Sprintf("l.id IN (%s)", remappedSQL)
 	args = append(args, innerArgs...)
@@ -2227,12 +2578,7 @@ func buildAdvancedFormulaSQLAll(formulaText string, accountID uuid.UUID, args []
 	if err != nil {
 		return "", args, argIdx, err
 	}
-	remappedSQL := innerSQL
-	for i := len(innerArgs); i >= 1; i-- {
-		old := fmt.Sprintf("$%d", i)
-		new := fmt.Sprintf("$%d", argIdx+i-1)
-		remappedSQL = strings.ReplaceAll(remappedSQL, old, new)
-	}
+	remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
 	clause := fmt.Sprintf("l.id IN (%s)", remappedSQL)
 	args = append(args, innerArgs...)
 	argIdx += len(innerArgs)
@@ -2300,9 +2646,11 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		whereClauses = append(whereClauses, "l.is_archived = false AND l.is_blocked = false")
 	}
 
-	if pipelineID != "" {
+	if pipelineID == "__no_pipeline__" {
+		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
+	} else if pipelineID != "" {
 		if pid, err := uuid.Parse(pipelineID); err == nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", argIdx))
+			whereClauses = append(whereClauses, fmt.Sprintf("l.pipeline_id = $%d", argIdx))
 			args = append(args, pid)
 			argIdx++
 		}
@@ -2326,13 +2674,15 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 
 	if tagFormulaRaw != "" {
 		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQL(tagFormulaRaw, accountID, args, argIdx)
-		if fErr == nil && fSQL != "" {
+		if fErr != nil {
+			log.Printf("[LEADS] Formula parse/build error: %v (formula: %s)", fErr, tagFormulaRaw)
+		} else if fSQL != "" {
 			whereClauses = append(whereClauses, fSQL)
 			args = newArgs
 			argIdx = newIdx
 		}
 	} else if len(tagNames) > 0 || len(excludeTagNames) > 0 {
-		tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, args, argIdx)
+		tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, accountID, args, argIdx)
 		if tagSQL != "" {
 			whereClauses = append(whereClauses, tagSQL)
 			args = newArgs
@@ -2355,6 +2705,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	}
 
 	addDateFilter(c, "l", leadDateFields, &whereClauses, &args, &argIdx)
+	addKommoSyncFilter(c.Query("kommo_sync", "all"), &whereClauses)
 
 	whereSQL := strings.Join(whereClauses, " AND ")
 
@@ -2451,11 +2802,11 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 				SELECT l.id, l.account_id, l.contact_id, l.jid,
 				       COALESCE(c.custom_name, c.name, l.name) AS name, COALESCE(c.last_name, l.last_name) AS last_name, COALESCE(c.short_name, l.short_name) AS short_name,
 				       COALESCE(c.phone, l.phone) AS phone, COALESCE(c.email, l.email) AS email, COALESCE(c.company, l.company) AS company,
-				       COALESCE(c.age, l.age) AS age, COALESCE(c.dni, l.dni) AS dni, COALESCE(c.birth_date, l.birth_date) AS birth_date,
+				       COALESCE(c.age, l.age) AS age, COALESCE(c.dni, l.dni) AS dni, COALESCE(c.birth_date, l.birth_date) AS birth_date, COALESCE(c.address, l.address) AS address, COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')) AS distrito, COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')) AS ocupacion,
 				       l.status, l.source, COALESCE(c.notes, l.notes) AS notes,
 				       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 				       l.created_at, l.updated_at, l.kommo_id,
-				       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason,
+				       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at,
 				       ps.name AS stage_name, ps.color AS stage_color, ps.position AS stage_position,
 				       ROW_NUMBER() OVER (PARTITION BY l.stage_id ORDER BY l.created_at DESC) AS rn
 				FROM leads l
@@ -2464,10 +2815,10 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 				WHERE %s AND l.stage_id IS NOT NULL
 			)
 			SELECT id, account_id, contact_id, jid, name, last_name, short_name,
-			       phone, email, company, age, dni, birth_date, status, source, notes,
+			       phone, email, company, age, dni, birth_date, address, distrito, ocupacion, status, source, notes,
 			       tags, custom_fields, assigned_to, pipeline_id, stage_id,
 			       created_at, updated_at, kommo_id,
-			       is_archived, archived_at, is_blocked, blocked_at, block_reason,
+			       is_archived, archived_at, is_blocked, blocked_at, block_reason, kommo_deleted_at,
 			       stage_name, stage_color, stage_position
 			FROM ranked WHERE rn <= %d
 			ORDER BY stage_position NULLS LAST, created_at DESC
@@ -2482,10 +2833,10 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			lead := &domain.Lead{}
 			if err := rows.Scan(
 				&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName,
-				&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes,
+				&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Address, &lead.Distrito, &lead.Ocupacion, &lead.Status, &lead.Source, &lead.Notes,
 				&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
 				&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
-				&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
+				&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
 				&lead.StageName, &lead.StageColor, &lead.StagePosition,
 			); err != nil {
 				leadsErr = err
@@ -2558,9 +2909,11 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		hIdx := 2
 		hClauses := []string{"l.account_id = $1"}
 		// NO status filter — count ALL statuses
-		if pipelineID != "" {
+		if pipelineID == "__no_pipeline__" {
+			hClauses = append(hClauses, "l.pipeline_id IS NULL")
+		} else if pipelineID != "" {
 			if pid, err := uuid.Parse(pipelineID); err == nil {
-				hClauses = append(hClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", hIdx))
+				hClauses = append(hClauses, fmt.Sprintf("l.pipeline_id = $%d", hIdx))
 				hArgs = append(hArgs, pid)
 				hIdx++
 			}
@@ -2581,13 +2934,15 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		}
 		if tagFormulaRaw != "" {
 			fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQLAll(tagFormulaRaw, accountID, hArgs, hIdx)
-			if fErr == nil && fSQL != "" {
+			if fErr != nil {
+				log.Printf("[LEADS] Formula parse/build error (hidden count): %v (formula: %s)", fErr, tagFormulaRaw)
+			} else if fSQL != "" {
 				hClauses = append(hClauses, fSQL)
 				hArgs = newArgs
 				hIdx = newIdx
 			}
 		} else if len(tagNames) > 0 || len(excludeTagNames) > 0 {
-			tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, hArgs, hIdx)
+			tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, accountID, hArgs, hIdx)
 			if tagSQL != "" {
 				hClauses = append(hClauses, tagSQL)
 				hArgs = newArgs
@@ -2608,6 +2963,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			}
 		}
 		addDateFilter(c, "l", leadDateFields, &hClauses, &hArgs, &hIdx)
+		addKommoSyncFilter(c.Query("kommo_sync", "all"), &hClauses)
 		hWhereSQL := strings.Join(hClauses, " AND ")
 		var totalAll int
 		err := s.repos.DB().QueryRow(c.Context(),
@@ -2682,11 +3038,12 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			SELECT l.id, l.account_id, l.contact_id, l.jid,
 			       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
 			       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-			       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date),
+			       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
+			       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
 			       l.status, l.source, COALESCE(c.notes, l.notes),
 			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 			       l.created_at, l.updated_at, l.kommo_id,
-			       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason
+			       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at
 			FROM leads l
 			LEFT JOIN contacts c ON c.id = l.contact_id
 			WHERE %s AND l.stage_id IS NULL
@@ -2700,10 +3057,10 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 				lead := &domain.Lead{}
 				if err := rows.Scan(
 					&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName,
-					&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes,
+					&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Address, &lead.Distrito, &lead.Ocupacion, &lead.Status, &lead.Source, &lead.Notes,
 					&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
 					&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
-					&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
+					&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
 				); err == nil {
 					lead.StructuredTags = tagMap[lead.ID]
 					unassignedLeads = append(unassignedLeads, lead)
@@ -2804,9 +3161,11 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 		}
 	}
 
-	if pipelineID != "" {
+	if pipelineID == "__no_pipeline__" {
+		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
+	} else if pipelineID != "" {
 		if pid, err := uuid.Parse(pipelineID); err == nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", argIdx))
+			whereClauses = append(whereClauses, fmt.Sprintf("l.pipeline_id = $%d", argIdx))
 			args = append(args, pid)
 			argIdx++
 		}
@@ -2838,13 +3197,15 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 	}
 	if tagFormulaRaw2 != "" {
 		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQL(tagFormulaRaw2, accountID, args, argIdx)
-		if fErr == nil && fSQL != "" {
+		if fErr != nil {
+			log.Printf("[LEADS] Formula parse/build error (list): %v (formula: %s)", fErr, tagFormulaRaw2)
+		} else if fSQL != "" {
 			whereClauses = append(whereClauses, fSQL)
 			args = newArgs
 			argIdx = newIdx
 		}
 	} else if len(tagNames) > 0 || len(excludeTagNames) > 0 {
-		tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, args, argIdx)
+		tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, accountID, args, argIdx)
 		if tagSQL != "" {
 			whereClauses = append(whereClauses, tagSQL)
 			args = newArgs
@@ -2853,6 +3214,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 	}
 
 	addDateFilter(c, "l", leadDateFields, &whereClauses, &args, &argIdx)
+	addKommoSyncFilter(c.Query("kommo_sync", "all"), &whereClauses)
 
 	whereSQL := strings.Join(whereClauses, " AND ")
 
@@ -2861,11 +3223,12 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 		SELECT l.id, l.account_id, l.contact_id, l.jid,
 		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
 		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date),
+		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
+		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
 		       l.status, l.source, COALESCE(c.notes, l.notes),
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 		       l.created_at, l.updated_at, l.kommo_id,
-		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason,
+		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at,
 		       ps.name, ps.color, ps.position
 		FROM leads l
 		LEFT JOIN contacts c ON c.id = l.contact_id
@@ -2886,10 +3249,10 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 		lead := &domain.Lead{}
 		if err := rows.Scan(
 			&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName,
-			&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes,
+			&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Address, &lead.Distrito, &lead.Ocupacion, &lead.Status, &lead.Source, &lead.Notes,
 			&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
 			&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
-			&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
+			&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
 			&lead.StageName, &lead.StageColor, &lead.StagePosition,
 		); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -2983,9 +3346,11 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 		whereClauses = append(whereClauses, "l.is_archived = false AND l.is_blocked = false")
 	}
 
-	if pipelineID != "" {
+	if pipelineID == "__no_pipeline__" {
+		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
+	} else if pipelineID != "" {
 		if pid, err := uuid.Parse(pipelineID); err == nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", argIdx))
+			whereClauses = append(whereClauses, fmt.Sprintf("l.pipeline_id = $%d", argIdx))
 			args = append(args, pid)
 			argIdx++
 		}
@@ -3014,13 +3379,15 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 	}
 	if tagFormulaRaw3 != "" {
 		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQL(tagFormulaRaw3, accountID, args, argIdx)
-		if fErr == nil && fSQL != "" {
+		if fErr != nil {
+			log.Printf("[LEADS] Formula parse/build error (load-more): %v (formula: %s)", fErr, tagFormulaRaw3)
+		} else if fSQL != "" {
 			whereClauses = append(whereClauses, fSQL)
 			args = newArgs
 			argIdx = newIdx
 		}
 	} else if len(tagNames) > 0 || len(excludeTagNames) > 0 {
-		tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, args, argIdx)
+		tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, accountID, args, argIdx)
 		if tagSQL != "" {
 			whereClauses = append(whereClauses, tagSQL)
 			args = newArgs
@@ -3042,6 +3409,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 	}
 
 	addDateFilter(c, "l", leadDateFields, &whereClauses, &args, &argIdx)
+	addKommoSyncFilter(c.Query("kommo_sync", "all"), &whereClauses)
 
 	whereSQL := strings.Join(whereClauses, " AND ")
 
@@ -3064,11 +3432,12 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 			SELECT l.id, l.account_id, l.contact_id, l.jid,
 			       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
 			       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-			       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date),
+			       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
+			       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
 			       l.status, l.source, COALESCE(c.notes, l.notes),
 			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 			       l.created_at, l.updated_at, l.kommo_id,
-			       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason,
+			       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at,
 			       ps.name, ps.color, ps.position
 			FROM leads l
 			LEFT JOIN contacts c ON c.id = l.contact_id
@@ -3087,10 +3456,10 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 			lead := &domain.Lead{}
 			if err := rows.Scan(
 				&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName,
-				&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Status, &lead.Source, &lead.Notes,
+				&lead.Phone, &lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Address, &lead.Distrito, &lead.Ocupacion, &lead.Status, &lead.Source, &lead.Notes,
 				&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
 				&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
-				&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason,
+				&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
 				&lead.StageName, &lead.StageColor, &lead.StagePosition,
 			); err != nil {
 				leadsErr = err
@@ -3170,6 +3539,9 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		Notes     string     `json:"notes"`
 		DNI       string     `json:"dni"`
 		BirthDate *string    `json:"birth_date"`
+		Address   string     `json:"address"`
+		Distrito  string     `json:"distrito"`
+		Ocupacion string     `json:"ocupacion"`
 		StageID   *uuid.UUID `json:"stage_id"`
 		Tags      []string   `json:"tags"`
 	}
@@ -3216,6 +3588,9 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		Notes:     strPtr(req.Notes),
 		DNI:       strPtr(req.DNI),
 		BirthDate: birthDate,
+		Address:   strPtr(req.Address),
+		Distrito:  strPtr(req.Distrito),
+		Ocupacion: strPtr(req.Ocupacion),
 		Status:    strPtr(domain.LeadStatusNew),
 	}
 
@@ -3284,6 +3659,9 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		if lead.BirthDate == nil {
 			lead.BirthDate = contact.BirthDate
 		}
+		if lead.Address == nil || *lead.Address == "" {
+			lead.Address = contact.Address
+		}
 		lead.LastName = contact.LastName
 		lead.ShortName = contact.ShortName
 		lead.Company = contact.Company
@@ -3294,6 +3672,7 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		contact.Notes = lead.Notes
 		contact.DNI = lead.DNI
 		contact.BirthDate = lead.BirthDate
+		contact.Address = lead.Address
 		if lead.Name != nil && *lead.Name != "" {
 			contact.CustomName = lead.Name
 		}
@@ -3309,6 +3688,7 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 			contact.Source = strPtr("manual")
 			contact.DNI = lead.DNI
 			contact.BirthDate = lead.BirthDate
+			contact.Address = lead.Address
 			if req.Name != "" {
 				contact.CustomName = &req.Name
 			}
@@ -3343,26 +3723,27 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetLead(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	leadID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
-	}
-
-	// Try Redis cache first (30s TTL)
-	cacheKey := "lead_detail:" + leadID.String()
-	if s.cache != nil {
-		if cached, err := s.cache.Get(c.Context(), cacheKey); err == nil && cached != nil {
-			c.Set("Content-Type", "application/json")
-			return c.Send(cached)
-		}
 	}
 
 	lead, err := s.services.Lead.GetByID(c.Context(), leadID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	if lead == nil {
+	if lead == nil || lead.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
+	}
+
+	// Try Redis cache for enriched response (tags)
+	cacheKey := "lead_detail:" + leadID.String()
+	if s.cache != nil {
+		if cached, err := s.cache.Get(c.Context(), cacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
 	}
 
 	tags, _ := s.services.Tag.GetByEntity(c.Context(), "lead", lead.ID)
@@ -3388,6 +3769,9 @@ func (s *Server) handleSyncLeadFromKommo(c *fiber.Ctx) error {
 	if s.kommoSync == nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo integration not configured"})
 	}
+	if lead, _ := s.services.Lead.GetByID(c.Context(), leadID); lead == nil || lead.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
+	}
 
 	if err := s.kommoSync.SyncSingleLead(c.Context(), accountID, leadID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -3409,6 +3793,7 @@ func (s *Server) handleSyncLeadFromKommo(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	leadID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
@@ -3419,7 +3804,7 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	if lead == nil {
+	if lead == nil || lead.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
 	}
 
@@ -3440,6 +3825,9 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 		Age          *int                   `json:"age"`
 		DNI          *string                `json:"dni"`
 		BirthDate    *string                `json:"birth_date"`
+		Address      *string                `json:"address"`
+		Distrito     *string                `json:"distrito"`
+		Ocupacion    *string                `json:"ocupacion"`
 		Status       *string                `json:"status"`
 		Source       *string                `json:"source"`
 		Notes        *string                `json:"notes"`
@@ -3485,6 +3873,15 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 			lead.BirthDate = &t
 		}
 	}
+	if req.Address != nil {
+		if *req.Address == "" { lead.Address = nil } else { lead.Address = req.Address }
+	}
+	if req.Distrito != nil {
+		if *req.Distrito == "" { lead.Distrito = nil } else { lead.Distrito = req.Distrito }
+	}
+	if req.Ocupacion != nil {
+		if *req.Ocupacion == "" { lead.Ocupacion = nil } else { lead.Ocupacion = req.Ocupacion }
+	}
 	if req.Status != nil {
 		if *req.Status == "" { lead.Status = nil } else { lead.Status = req.Status }
 	}
@@ -3524,6 +3921,17 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 
 	if err := s.services.Lead.Update(c.Context(), lead); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	// Re-fetch lead to get updated JOIN fields (stage_name, stage_color, stage_position)
+	if req.StageID != nil || req.PipelineID != nil {
+		if refreshed, err := s.services.Lead.GetByID(c.Context(), lead.ID); err == nil && refreshed != nil {
+			lead.StageName = refreshed.StageName
+			lead.StageColor = refreshed.StageColor
+			lead.StagePosition = refreshed.StagePosition
+			lead.PipelineID = refreshed.PipelineID
+			lead.StageID = refreshed.StageID
+		}
 	}
 
 	// Sync shared fields to linked contact
@@ -3589,9 +3997,13 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateLeadStatus(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	leadID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
+	}
+	if lead, _ := s.services.Lead.GetByID(c.Context(), leadID); lead == nil || lead.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
 	}
 
 	var req struct {
@@ -3616,6 +4028,33 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
 	}
 
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// If delete_from_kommo=true, move lead to "Perdido" (status 143) in Kommo first
+	if c.Query("delete_from_kommo") == "true" && s.kommoSync != nil {
+		var kommoLeadID *int64
+		var kommoPipelineID *int64
+		err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT l.kommo_id, p.kommo_id
+			FROM leads l
+			LEFT JOIN pipelines p ON l.pipeline_id = p.id
+			WHERE l.id = $1 AND l.account_id = $2
+		`, leadID, accountID).Scan(&kommoLeadID, &kommoPipelineID)
+		if err != nil || kommoLeadID == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Lead no está vinculado a Kommo"})
+		}
+		if kommoPipelineID == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Pipeline no está vinculado a Kommo"})
+		}
+		// Move to "Perdido" (status 143) in Kommo
+		_, pushErr := s.kommoSync.GetClient().UpdateLeadStatus(int(*kommoLeadID), 143, int(*kommoPipelineID))
+		if pushErr != nil {
+			log.Printf("[DELETE+KOMMO] Failed to move lead %s (Kommo %d) to Perdido: %v", leadID, *kommoLeadID, pushErr)
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo mover a Perdido en Kommo: " + pushErr.Error()})
+		}
+		log.Printf("[DELETE+KOMMO] Lead %s (Kommo %d) moved to Perdido (143) in Kommo pipeline %d", leadID, *kommoLeadID, *kommoPipelineID)
+	}
+
 	// Transfer orphaned interactions to the lead's contact before deleting
 	_, _ = s.repos.DB().Exec(c.Context(), `
 		UPDATE interactions SET contact_id = l.contact_id
@@ -3630,7 +4069,6 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	accountID := c.Locals("account_id").(uuid.UUID)
 	s.invalidateLeadsCache(accountID)
 	s.invalidateLeadDetailCache(leadID)
 	// Broadcast delete with just the ID
@@ -3641,6 +4079,7 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 
 func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	deleteFromKommo := c.Query("delete_from_kommo") == "true"
 
 	var req struct {
 		IDs       []string `json:"ids"`
@@ -3680,6 +4119,37 @@ func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 
 	if len(uuids) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No valid IDs provided"})
+	}
+
+	// If delete_from_kommo=true, move synced leads to "Perdido" in Kommo first
+	if deleteFromKommo && s.kommoSync != nil {
+		rows, err := s.repos.DB().Query(c.Context(), `
+			SELECT l.id, l.kommo_id, p.kommo_id
+			FROM leads l
+			LEFT JOIN pipelines p ON l.pipeline_id = p.id
+			WHERE l.id = ANY($1) AND l.account_id = $2
+			  AND l.kommo_id IS NOT NULL AND l.kommo_deleted_at IS NULL
+		`, uuids, accountID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var leadID uuid.UUID
+				var kommoLeadID, kommoPipelineID *int64
+				if err := rows.Scan(&leadID, &kommoLeadID, &kommoPipelineID); err != nil {
+					continue
+				}
+				if kommoLeadID == nil || kommoPipelineID == nil {
+					continue
+				}
+				// Move to "Perdido" (status 143) in Kommo
+				_, pushErr := s.kommoSync.GetClient().UpdateLeadStatus(int(*kommoLeadID), 143, int(*kommoPipelineID))
+				if pushErr != nil {
+					log.Printf("[DELETE+KOMMO BATCH] Failed to move lead %s (Kommo %d) to Perdido: %v", leadID, *kommoLeadID, pushErr)
+				} else {
+					log.Printf("[DELETE+KOMMO BATCH] Lead %s (Kommo %d) moved to Perdido (143) in Kommo pipeline %d", leadID, *kommoLeadID, *kommoPipelineID)
+				}
+			}
+		}
 	}
 
 	// Transfer orphaned interactions to contacts before batch delete
@@ -3970,8 +4440,38 @@ func (s *Server) handleBlockLeadsBatch(c *fiber.Ctx) error {
 
 func (s *Server) handleGetLeadCounts(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	kommoSync := c.Query("kommo_sync", "all")
+	pipelineID := c.Query("pipeline_id")
 
-	active, archived, blocked, err := s.services.Lead.GetArchivedBlockedCounts(c.Context(), accountID)
+	var extraWhere string
+	var args []interface{}
+	args = append(args, accountID)
+
+	switch kommoSync {
+	case "kommo":
+		extraWhere += " AND kommo_id IS NOT NULL AND kommo_deleted_at IS NULL"
+	case "clarin":
+		extraWhere += " AND (kommo_id IS NULL OR kommo_deleted_at IS NOT NULL)"
+	}
+
+	// Filter by pipeline if specified
+	if pipelineID != "" && pipelineID != "__no_pipeline__" {
+		if uid, err := uuid.Parse(pipelineID); err == nil {
+			extraWhere += fmt.Sprintf(" AND stage_id IN (SELECT id FROM pipeline_stages WHERE pipeline_id = $%d)", len(args)+1)
+			args = append(args, uid)
+		}
+	} else if pipelineID == "__no_pipeline__" {
+		extraWhere += " AND stage_id IS NULL"
+	}
+
+	var active, archived, blocked int
+	err := s.repos.DB().QueryRow(c.Context(), fmt.Sprintf(`
+		SELECT
+			COUNT(*) FILTER (WHERE NOT is_archived AND NOT is_blocked),
+			COUNT(*) FILTER (WHERE is_archived AND NOT is_blocked),
+			COUNT(*) FILTER (WHERE is_blocked)
+		FROM leads WHERE account_id = $1%s
+	`, extraWhere), args...).Scan(&active, &archived, &blocked)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -4078,12 +4578,13 @@ func (s *Server) handleCreatePipeline(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdatePipeline(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pipelineID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
 	}
 	pipeline, err := s.services.Pipeline.GetByID(c.Context(), pipelineID)
-	if err != nil || pipeline == nil {
+	if err != nil || pipeline == nil || pipeline.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
 	}
 	var req struct {
@@ -4704,27 +5205,56 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 		filter.SortOrder = sortOrder
 	}
 
+	// Redis cache for default load (no complex filters) — 30s TTL
+	isDefaultContactsLoad := filter.Search == "" && len(filter.Tags) == 0 && len(filter.TagIDs) == 0 && len(filter.TagNames) == 0 && len(filter.MatchingContactIDs) == 0 && filter.DeviceID == nil && filter.DateField == "" && !filter.HasPhone
+	contactsCacheKey := ""
+	if isDefaultContactsLoad && s.cache != nil {
+		contactsCacheKey = fmt.Sprintf("contacts:%s:%d:%d", accountID.String(), filter.Limit, filter.Offset)
+		if cached, err := s.cache.Get(c.Context(), contactsCacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
+	}
+
 	contacts, total, err := s.services.Contact.GetByAccountIDWithFilters(c.Context(), accountID, filter)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Load structured tags for each contact
-	for _, contact := range contacts {
-		tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID)
-		contact.StructuredTags = tags
+	// Load structured tags for all contacts in one batch query
+	if len(contacts) > 0 {
+		contactIDs := make([]uuid.UUID, len(contacts))
+		for i, c := range contacts {
+			contactIDs[i] = c.ID
+		}
+		tagMap, err := s.repos.Tag.GetByContactsBatch(c.Context(), contactIDs)
+		if err == nil {
+			for _, contact := range contacts {
+				contact.StructuredTags = tagMap[contact.ID]
+			}
+		}
 	}
 
-	return c.JSON(fiber.Map{
+	result := fiber.Map{
 		"success":  true,
 		"contacts": contacts,
 		"total":    total,
 		"limit":    filter.Limit,
 		"offset":   filter.Offset,
-	})
+	}
+
+	// Cache default load result
+	if contactsCacheKey != "" && s.cache != nil {
+		if data, err := json.Marshal(result); err == nil {
+			_ = s.cache.Set(c.Context(), contactsCacheKey, data, 30*time.Second)
+		}
+	}
+
+	return c.JSON(result)
 }
 
 func (s *Server) handleGetContact(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid id"})
@@ -4734,7 +5264,7 @@ func (s *Server) handleGetContact(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	if contact == nil {
+	if contact == nil || contact.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "contact not found"})
 	}
 
@@ -4754,6 +5284,9 @@ func (s *Server) handleSyncContactFromKommo(c *fiber.Ctx) error {
 	if s.kommoSync == nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo integration not configured"})
 	}
+	if contact, _ := s.services.Contact.GetByID(c.Context(), contactID); contact == nil || contact.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "contact not found"})
+	}
 
 	if err := s.kommoSync.SyncSingleContact(c.Context(), accountID, contactID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -4771,13 +5304,14 @@ func (s *Server) handleSyncContactFromKommo(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid id"})
 	}
 
 	contact, err := s.services.Contact.GetByID(c.Context(), id)
-	if err != nil || contact == nil {
+	if err != nil || contact == nil || contact.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "contact not found"})
 	}
 
@@ -4791,6 +5325,9 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		Age        *int     `json:"age"`
 		DNI        *string  `json:"dni"`
 		BirthDate  *string  `json:"birth_date"`
+		Address    *string  `json:"address"`
+		Distrito   *string  `json:"distrito"`
+		Ocupacion  *string  `json:"ocupacion"`
 		Tags       []string `json:"tags"`
 		Notes      *string  `json:"notes"`
 	}
@@ -4831,6 +5368,15 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 			}
 		}
 	}
+	if body.Address != nil {
+		if *body.Address == "" { contact.Address = nil } else { contact.Address = body.Address }
+	}
+	if body.Distrito != nil {
+		if *body.Distrito == "" { contact.Distrito = nil } else { contact.Distrito = body.Distrito }
+	}
+	if body.Ocupacion != nil {
+		if *body.Ocupacion == "" { contact.Ocupacion = nil } else { contact.Ocupacion = body.Ocupacion }
+	}
 	if body.Tags != nil {
 		contact.Tags = body.Tags
 	}
@@ -4840,6 +5386,11 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 
 	if err := s.services.Contact.Update(c.Context(), contact); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	// Sync tags to contact_tags table
+	if body.Tags != nil {
+		_ = s.repos.Tag.SyncContactTagsByNames(c.Context(), contact.AccountID, contact.ID, body.Tags)
 	}
 
 	// Sync shared fields to all linked event_participants
@@ -4867,13 +5418,18 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		log.Printf("[GOOGLE] Auto-sync skipped for contact %s: google_sync=false", contact.ID)
 	}
 
+	s.invalidateContactsCache(contact.AccountID)
 	return c.JSON(fiber.Map{"success": true, "contact": contact})
 }
 
 func (s *Server) handleResetContactFromDevice(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid id"})
+	}
+	if contact, _ := s.services.Contact.GetByID(c.Context(), id); contact == nil || contact.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "contact not found"})
 	}
 
 	if err := s.services.Contact.ResetFromDevice(c.Context(), id); err != nil {
@@ -4886,6 +5442,7 @@ func (s *Server) handleResetContactFromDevice(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeleteContact(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid id"})
@@ -4894,6 +5451,7 @@ func (s *Server) handleDeleteContact(c *fiber.Ctx) error {
 	if err := s.services.Contact.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateContactsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -4981,6 +5539,7 @@ func (s *Server) handleDeleteContactsBatch(c *fiber.Ctx) error {
 		if err := s.services.Contact.DeleteAll(c.Context(), accountID); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
+		s.invalidateContactsCache(accountID)
 		return c.JSON(fiber.Map{"success": true, "message": "All contacts deleted"})
 	}
 
@@ -4991,6 +5550,7 @@ func (s *Server) handleDeleteContactsBatch(c *fiber.Ctx) error {
 	if err := s.services.Contact.DeleteBatch(c.Context(), body.IDs); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateContactsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -5054,6 +5614,9 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 		Notes     string   `json:"notes"`
 		DNI       string   `json:"dni"`
 		BirthDate string   `json:"birth_date"`
+		Address   string   `json:"address"`
+		Distrito  string   `json:"distrito"`
+		Ocupacion string   `json:"ocupacion"`
 		Tags      []string `json:"tags"`
 	}
 	if err := c.BodyParser(&body); err != nil {
@@ -5117,13 +5680,31 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 			updated = true
 		}
 	}
+	if body.Address != "" {
+		contact.Address = &body.Address
+		updated = true
+	}
+	if body.Distrito != "" {
+		contact.Distrito = &body.Distrito
+		updated = true
+	}
+	if body.Ocupacion != "" {
+		contact.Ocupacion = &body.Ocupacion
+		updated = true
+	}
 	if updated {
 		_ = s.services.Contact.Update(c.Context(), contact)
+	}
+
+	// Sync tags to contact_tags table
+	if len(body.Tags) > 0 {
+		_ = s.repos.Tag.SyncContactTagsByNames(c.Context(), accountID, contact.ID, body.Tags)
 	}
 
 	tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID)
 	contact.StructuredTags = tags
 
+	s.invalidateContactsCache(accountID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "contact": contact})
 }
 
@@ -5140,6 +5721,7 @@ func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
 			Notes     string   `json:"notes"`
 			DNI       string   `json:"dni"`
 			BirthDate string   `json:"birth_date"`
+			Address   string   `json:"address"`
 			Tags      []string `json:"tags"`
 		} `json:"contacts"`
 	}
@@ -5201,12 +5783,25 @@ func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
 				updated = true
 			}
 		}
+		if row.Address != "" {
+			contact.Address = &row.Address
+			updated = true
+		}
+		// Bulk import = manual source
+		src := "manual"
+		contact.Source = &src
+		updated = true
 		if updated {
 			_ = s.services.Contact.Update(c.Context(), contact)
+		}
+		// Sync tags to contact_tags table
+		if len(row.Tags) > 0 {
+			_ = s.repos.Tag.SyncContactTagsByNames(c.Context(), accountID, contact.ID, row.Tags)
 		}
 		created++
 	}
 
+	s.invalidateContactsCache(accountID)
 	return c.JSON(fiber.Map{
 		"success": true,
 		"created": created,
@@ -5225,6 +5820,17 @@ func (s *Server) handleGetTags(c *fiber.Ctx) error {
 		limit := c.QueryInt("limit", 50)
 		offset := c.QueryInt("offset", 0)
 		search := c.Query("search", "")
+
+		// Redis cache for default paginated load — 30s TTL
+		tagsCacheKey := ""
+		if search == "" && s.cache != nil {
+			tagsCacheKey = fmt.Sprintf("tags:%s:%d:%d", accountID.String(), limit, offset)
+			if cached, err := s.cache.Get(c.Context(), tagsCacheKey); err == nil && cached != nil {
+				c.Set("Content-Type", "application/json")
+				return c.Send(cached)
+			}
+		}
+
 		tags, total, err := s.services.Tag.ListPaginated(c.Context(), accountID, search, limit, offset)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -5232,7 +5838,25 @@ func (s *Server) handleGetTags(c *fiber.Ctx) error {
 		if tags == nil {
 			tags = make([]*domain.Tag, 0)
 		}
-		return c.JSON(fiber.Map{"success": true, "tags": tags, "total": total})
+		result := fiber.Map{"success": true, "tags": tags, "total": total}
+
+		if tagsCacheKey != "" && s.cache != nil {
+			if data, err := json.Marshal(result); err == nil {
+				_ = s.cache.Set(c.Context(), tagsCacheKey, data, 30*time.Second)
+			}
+		}
+
+		return c.JSON(result)
+	}
+
+	// Full list (no pagination) — cache for 30s
+	tagsCacheKeyAll := ""
+	if s.cache != nil {
+		tagsCacheKeyAll = fmt.Sprintf("tags:%s:all", accountID.String())
+		if cached, err := s.cache.Get(c.Context(), tagsCacheKeyAll); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
 	}
 
 	tags, err := s.services.Tag.GetByAccountID(c.Context(), accountID)
@@ -5242,7 +5866,15 @@ func (s *Server) handleGetTags(c *fiber.Ctx) error {
 	if tags == nil {
 		tags = make([]*domain.Tag, 0)
 	}
-	return c.JSON(fiber.Map{"success": true, "tags": tags})
+	result := fiber.Map{"success": true, "tags": tags}
+
+	if tagsCacheKeyAll != "" && s.cache != nil {
+		if data, err := json.Marshal(result); err == nil {
+			_ = s.cache.Set(c.Context(), tagsCacheKeyAll, data, 30*time.Second)
+		}
+	}
+
+	return c.JSON(result)
 }
 
 func (s *Server) handleCreateTag(c *fiber.Ctx) error {
@@ -5264,6 +5896,7 @@ func (s *Server) handleCreateTag(c *fiber.Ctx) error {
 	if err := s.services.Tag.Create(c.Context(), tag); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateTagsCache(accountID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "tag": tag})
 }
 
@@ -5283,6 +5916,8 @@ func (s *Server) handleUpdateTag(c *fiber.Ctx) error {
 	if err := s.services.Tag.Update(c.Context(), tag); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	s.invalidateTagsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "tag": tag})
 }
 
@@ -5302,6 +5937,7 @@ func (s *Server) handleDeleteTagsBatch(c *fiber.Ctx) error {
 		}
 		// Reconcile event participants after bulk tag deletion
 		go s.services.Event.ReconcileAllAccountEvents(context.Background(), accountID)
+		s.invalidateTagsCache(accountID)
 		return c.JSON(fiber.Map{"success": true, "message": "All tags deleted"})
 	}
 
@@ -5319,6 +5955,7 @@ func (s *Server) handleDeleteTag(c *fiber.Ctx) error {
 	}
 	// Reconcile event participants after tag deletion (contact_tags rows were removed)
 	go s.services.Event.ReconcileAllAccountEvents(context.Background(), accountID)
+	s.invalidateTagsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -5422,6 +6059,17 @@ func (s *Server) handleGetEntityTags(c *fiber.Ctx) error {
 
 func (s *Server) handleGetCampaigns(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// Redis cache — 30s TTL
+	campaignsCacheKey := ""
+	if s.cache != nil {
+		campaignsCacheKey = fmt.Sprintf("campaigns:%s:all", accountID.String())
+		if cached, err := s.cache.Get(c.Context(), campaignsCacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
+	}
+
 	campaigns, err := s.services.Campaign.GetByAccountID(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -5434,7 +6082,16 @@ func (s *Server) handleGetCampaigns(c *fiber.Ctx) error {
 		attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), camp.ID)
 		camp.Attachments = attachments
 	}
-	return c.JSON(fiber.Map{"success": true, "campaigns": campaigns})
+
+	result := fiber.Map{"success": true, "campaigns": campaigns}
+
+	if campaignsCacheKey != "" && s.cache != nil {
+		if data, err := json.Marshal(result); err == nil {
+			_ = s.cache.Set(c.Context(), campaignsCacheKey, data, 30*time.Second)
+		}
+	}
+
+	return c.JSON(result)
 }
 
 func (s *Server) handleCreateCampaign(c *fiber.Ctx) error {
@@ -5518,10 +6175,12 @@ func (s *Server) handleCreateCampaign(c *fiber.Ctx) error {
 		campaign.Attachments = attachments
 	}
 
+	s.invalidateCampaignsCache(accountID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "campaign": campaign})
 }
 
 func (s *Server) handleGetCampaign(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
@@ -5529,6 +6188,9 @@ func (s *Server) handleGetCampaign(c *fiber.Ctx) error {
 	campaign, err := s.services.Campaign.GetByID(c.Context(), id)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	// Load attachments
 	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), id)
@@ -5537,6 +6199,7 @@ func (s *Server) handleGetCampaign(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
@@ -5544,6 +6207,9 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 	campaign, err := s.services.Campaign.GetByID(c.Context(), id)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	var req struct {
 		Name            *string                `json:"name"`
@@ -5590,10 +6256,12 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 	// Load attachments for response
 	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), campaign.ID)
 	campaign.Attachments = attachments
+	s.invalidateCampaignsCache(campaign.AccountID)
 	return c.JSON(fiber.Map{"success": true, "campaign": campaign})
 }
 
 func (s *Server) handleDeleteCampaign(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
@@ -5601,6 +6269,7 @@ func (s *Server) handleDeleteCampaign(c *fiber.Ctx) error {
 	if err := s.services.Campaign.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -5621,6 +6290,8 @@ func (s *Server) handleBatchDeleteCampaigns(c *fiber.Ctx) error {
 			deleted++
 		}
 	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "deleted": deleted})
 }
 
@@ -5723,9 +6394,11 @@ func (s *Server) handleAddCampaignRecipientsFromLeads(c *fiber.Ctx) error {
 	argIdx := 2
 	whereClauses := []string{"l.account_id = $1", "COALESCE(c.phone, l.phone, '') != ''", "l.is_blocked = false", "l.is_archived = false"}
 
-	if pipelineID != "" {
+	if pipelineID == "__no_pipeline__" {
+		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
+	} else if pipelineID != "" {
 		if pid, err := uuid.Parse(pipelineID); err == nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", argIdx))
+			whereClauses = append(whereClauses, fmt.Sprintf("l.pipeline_id = $%d", argIdx))
 			args = append(args, pid)
 			argIdx++
 		}
@@ -5754,13 +6427,15 @@ func (s *Server) handleAddCampaignRecipientsFromLeads(c *fiber.Ctx) error {
 	}
 	if tagFormulaRaw != "" {
 		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQL(tagFormulaRaw, accountID, args, argIdx)
-		if fErr == nil && fSQL != "" {
+		if fErr != nil {
+			log.Printf("[LEADS] Formula parse/build error (contacts): %v (formula: %s)", fErr, tagFormulaRaw)
+		} else if fSQL != "" {
 			whereClauses = append(whereClauses, fSQL)
 			args = newArgs
 			argIdx = newIdx
 		}
 	} else if len(tagNames) > 0 || len(excludeTagNames) > 0 {
-		tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, args, argIdx)
+		tagSQL, newArgs, newIdx := buildTagFormulaSQL(tagNames, excludeTagNames, tagMode, accountID, args, argIdx)
 		if tagSQL != "" {
 			whereClauses = append(whereClauses, tagSQL)
 			args = newArgs
@@ -6314,6 +6989,18 @@ func (s *Server) handleGetEvents(c *fiber.Ctx) error {
 		Limit:        c.QueryInt("limit", 50),
 		Offset:       c.QueryInt("offset", 0),
 	}
+
+	// Redis cache for default load — 30s TTL
+	isDefaultEventsLoad := filter.Search == "" && filter.Status == "" && filter.FolderFilter == ""
+	eventsCacheKey := ""
+	if isDefaultEventsLoad && s.cache != nil {
+		eventsCacheKey = fmt.Sprintf("events:%s:%d:%d", accountID.String(), filter.Limit, filter.Offset)
+		if cached, err := s.cache.Get(c.Context(), eventsCacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
+	}
+
 	events, total, err := s.services.Event.GetByAccountID(c.Context(), accountID, filter)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -6321,11 +7008,30 @@ func (s *Server) handleGetEvents(c *fiber.Ctx) error {
 	if events == nil {
 		events = make([]*domain.Event, 0)
 	}
-	// Populate tags for each event
-	for _, ev := range events {
-		ev.Tags, _ = s.services.Event.GetEventTags(c.Context(), ev.ID)
+	// Populate tags for all events in one batch query
+	if len(events) > 0 {
+		eventIDs := make([]uuid.UUID, len(events))
+		for i, ev := range events {
+			eventIDs[i] = ev.ID
+		}
+		tagMap, err := s.repos.Event.GetEventTagsBatch(c.Context(), eventIDs)
+		if err == nil {
+			for _, ev := range events {
+				ev.Tags = tagMap[ev.ID]
+			}
+		}
 	}
-	return c.JSON(fiber.Map{"success": true, "events": events, "total": total})
+
+	result := fiber.Map{"success": true, "events": events, "total": total}
+
+	// Cache default load result
+	if eventsCacheKey != "" && s.cache != nil {
+		if data, err := json.Marshal(result); err == nil {
+			_ = s.cache.Set(c.Context(), eventsCacheKey, data, 30*time.Second)
+		}
+	}
+
+	return c.JSON(result)
 }
 
 func (s *Server) handleCreateEvent(c *fiber.Ctx) error {
@@ -6373,10 +7079,12 @@ func (s *Server) handleCreateEvent(c *fiber.Ctx) error {
 	if err := s.services.Event.Create(c.Context(), event); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateEventsCache(accountID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "event": event})
 }
 
 func (s *Server) handleGetEvent(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
@@ -6385,7 +7093,7 @@ func (s *Server) handleGetEvent(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	if event == nil {
+	if event == nil || event.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	// Populate event tags
@@ -6394,12 +7102,13 @@ func (s *Server) handleGetEvent(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
 	}
 	event, err := s.services.Event.GetByID(c.Context(), id)
-	if err != nil || event == nil {
+	if err != nil || event == nil || event.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	var req struct {
@@ -6444,10 +7153,12 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 	if err := s.services.Event.Update(c.Context(), event); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateEventsCache(event.AccountID)
 	return c.JSON(fiber.Map{"success": true, "event": event})
 }
 
 func (s *Server) handleDeleteEvent(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
@@ -6455,17 +7166,19 @@ func (s *Server) handleDeleteEvent(c *fiber.Ctx) error {
 	if err := s.services.Event.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateEventsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
 // handleGetEventTags returns the tags configured for auto-sync on an event (with negate flag and formula mode).
 func (s *Server) handleGetEventTags(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
 	}
 	event, err := s.services.Event.GetByID(c.Context(), eventID)
-	if err != nil || event == nil {
+	if err != nil || event == nil || event.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	tags, err := s.services.Event.GetEventTags(c.Context(), eventID)
@@ -6494,12 +7207,13 @@ func (s *Server) handleGetEventTags(c *fiber.Ctx) error {
 
 // handleSetEventTags sets the tags for auto-sync on an event with formula support (AND/OR + excludes).
 func (s *Server) handleSetEventTags(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
 	}
 	event, err := s.services.Event.GetByID(c.Context(), eventID)
-	if err != nil || event == nil {
+	if err != nil || event == nil || event.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 
@@ -6703,12 +7417,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 		if parseErr == nil && ast != nil {
 			innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, eventID)
 			if buildErr == nil && innerSQL != "" {
-				remappedSQL := innerSQL
-				for i := len(innerArgs); i >= 1; i-- {
-					old := fmt.Sprintf("$%d", i)
-					nw := fmt.Sprintf("$%d", argIdx+i-1)
-					remappedSQL = strings.ReplaceAll(remappedSQL, old, nw)
-				}
+				remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
 				whereClauses = append(whereClauses, fmt.Sprintf("p.id IN (%s)", remappedSQL))
 				args = append(args, innerArgs...)
 				argIdx += len(innerArgs)
@@ -6773,6 +7482,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 	dataQ := fmt.Sprintf(`
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
 		       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
+		       p.company, p.dni, p.birth_date, p.address, p.distrito, p.ocupacion,
 		       p.status, p.notes, p.next_action, p.next_action_date,
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.created_at, p.updated_at,
@@ -6800,6 +7510,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 		if err := rows.Scan(
 			&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID,
 			&p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
+			&p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion,
 			&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate,
 			&p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt,
 			&p.CreatedAt, &p.UpdatedAt,
@@ -6910,12 +7621,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 		if parseErr == nil && ast != nil {
 			innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, eventID)
 			if buildErr == nil && innerSQL != "" {
-				remappedSQL := innerSQL
-				for i := len(innerArgs); i >= 1; i-- {
-					old := fmt.Sprintf("$%d", i)
-					nw := fmt.Sprintf("$%d", argIdx+i-1)
-					remappedSQL = strings.ReplaceAll(remappedSQL, old, nw)
-				}
+				remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
 				whereClauses = append(whereClauses, fmt.Sprintf("p.id IN (%s)", remappedSQL))
 				args = append(args, innerArgs...)
 				argIdx += len(innerArgs)
@@ -7048,6 +7754,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 			WITH ranked AS (
 				SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
 				       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
+				       p.company, p.dni, p.birth_date, p.address, p.distrito, p.ocupacion,
 				       p.status, p.notes, p.next_action, p.next_action_date,
 				       p.invited_at, p.confirmed_at, p.attended_at,
 				       p.created_at, p.updated_at,
@@ -7063,6 +7770,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 			)
 			SELECT id, event_id, contact_id, lead_id, stage_id,
 			       name, last_name, short_name, phone, email, age,
+			       company, dni, birth_date, address, distrito, ocupacion,
 			       status, notes, next_action, next_action_date,
 			       invited_at, confirmed_at, attended_at,
 			       created_at, updated_at,
@@ -7084,6 +7792,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 			if err := rows.Scan(
 				&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID,
 				&p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
+				&p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion,
 				&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate,
 				&p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt,
 				&p.CreatedAt, &p.UpdatedAt,
@@ -7226,6 +7935,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 		q := fmt.Sprintf(`
 			SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
 			       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
+			       p.company, p.dni, p.birth_date, p.address, p.distrito, p.ocupacion,
 			       p.status, p.notes, p.next_action, p.next_action_date,
 			       p.invited_at, p.confirmed_at, p.attended_at,
 			       p.created_at, p.updated_at
@@ -7243,6 +7953,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 				if err := rows.Scan(
 					&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID,
 					&p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
+					&p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion,
 					&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate,
 					&p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt,
 					&p.CreatedAt, &p.UpdatedAt,
@@ -7368,12 +8079,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 		if parseErr == nil && ast != nil {
 			innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, eventID)
 			if buildErr == nil && innerSQL != "" {
-				remappedSQL := innerSQL
-				for i := len(innerArgs); i >= 1; i-- {
-					old := fmt.Sprintf("$%d", i)
-					nw := fmt.Sprintf("$%d", argIdx+i-1)
-					remappedSQL = strings.ReplaceAll(remappedSQL, old, nw)
-				}
+				remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
 				whereClauses = append(whereClauses, fmt.Sprintf("p.id IN (%s)", remappedSQL))
 				args = append(args, innerArgs...)
 				argIdx += len(innerArgs)
@@ -7419,6 +8125,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 	q := fmt.Sprintf(`
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
 		       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
+		       p.company, p.dni, p.birth_date, p.address, p.distrito, p.ocupacion,
 		       p.status, p.notes, p.next_action, p.next_action_date,
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.created_at, p.updated_at,
@@ -7446,6 +8153,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 		if err := rows.Scan(
 			&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID,
 			&p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
+			&p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion,
 			&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate,
 			&p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt,
 			&p.CreatedAt, &p.UpdatedAt,
@@ -7647,9 +8355,13 @@ func (s *Server) handleBatchParticipantObservations(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	if ev, _ := s.services.Event.GetByID(c.Context(), eventID); ev == nil || ev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	var req struct {
 		ContactID *string `json:"contact_id"`
@@ -7712,9 +8424,13 @@ func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	if ev, _ := s.services.Event.GetByID(c.Context(), eventID); ev == nil || ev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	var req struct {
 		Participants []struct {
@@ -7769,12 +8485,17 @@ func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
 	}
 	p, err := s.services.Event.GetParticipant(c.Context(), pid)
 	if err != nil || p == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
+	}
+	// Verify participant's event belongs to the account
+	if ev, _ := s.services.Event.GetByID(c.Context(), p.EventID); ev == nil || ev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 	}
 	var req struct {
@@ -7784,6 +8505,12 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 		Phone          *string    `json:"phone"`
 		Email          *string    `json:"email"`
 		Age            *int       `json:"age"`
+		Company        *string    `json:"company"`
+		DNI            *string    `json:"dni"`
+		BirthDate      *string    `json:"birth_date"`
+		Address        *string    `json:"address"`
+		Distrito       *string    `json:"distrito"`
+		Ocupacion      *string    `json:"ocupacion"`
 		Notes          *string    `json:"notes"`
 		NextAction     *string    `json:"next_action"`
 		NextActionDate *time.Time `json:"next_action_date"`
@@ -7808,6 +8535,28 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 	}
 	if req.Age != nil {
 		if *req.Age == 0 { p.Age = nil } else { p.Age = req.Age }
+	}
+	if req.Company != nil {
+		if *req.Company == "" { p.Company = nil } else { p.Company = req.Company }
+	}
+	if req.DNI != nil {
+		if *req.DNI == "" { p.DNI = nil } else { p.DNI = req.DNI }
+	}
+	if req.BirthDate != nil {
+		if *req.BirthDate == "" {
+			p.BirthDate = nil
+		} else if t, err := time.Parse("2006-01-02", *req.BirthDate); err == nil {
+			p.BirthDate = &t
+		}
+	}
+	if req.Address != nil {
+		if *req.Address == "" { p.Address = nil } else { p.Address = req.Address }
+	}
+	if req.Distrito != nil {
+		if *req.Distrito == "" { p.Distrito = nil } else { p.Distrito = req.Distrito }
+	}
+	if req.Ocupacion != nil {
+		if *req.Ocupacion == "" { p.Ocupacion = nil } else { p.Ocupacion = req.Ocupacion }
 	}
 	if req.Notes != nil {
 		if *req.Notes == "" { p.Notes = nil } else { p.Notes = req.Notes }
@@ -7861,9 +8610,18 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateEventParticipantStatus(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
+	}
+	// Verify participant's event belongs to the account
+	if p, _ := s.services.Event.GetParticipant(c.Context(), pid); p != nil {
+		if ev, _ := s.services.Event.GetByID(c.Context(), p.EventID); ev == nil || ev.AccountID != accountID {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
+		}
+	} else {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 	}
 	var req struct {
 		Status string `json:"status"`
@@ -7910,12 +8668,18 @@ func (s *Server) handleBulkUpdateEventParticipantStatus(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeleteEventParticipant(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
 	}
-	// Get participant's event_id before deleting
+	// Get participant's event_id before deleting and verify ownership
 	delPart, _ := s.services.Event.GetParticipant(c.Context(), pid)
+	if delPart != nil {
+		if ev, _ := s.services.Event.GetByID(c.Context(), delPart.EventID); ev == nil || ev.AccountID != accountID {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
+		}
+	}
 	if err := s.services.Event.DeleteParticipant(c.Context(), pid); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -7929,6 +8693,7 @@ func (s *Server) handleDeleteEventParticipant(c *fiber.Ctx) error {
 
 // handleCheckTagImpact checks if adding/removing a tag would cause a participant to leave/join the event
 func (s *Server) handleCheckTagImpact(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
@@ -7951,7 +8716,7 @@ func (s *Server) handleCheckTagImpact(c *fiber.Ctx) error {
 
 	// Get the event to check its formula
 	event, err := s.services.Event.GetByID(c.Context(), eventID)
-	if err != nil || event == nil {
+	if err != nil || event == nil || event.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	// If no formula, tag changes can't affect membership
@@ -8080,12 +8845,7 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 		if parseErr == nil && ast != nil {
 			innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, eventID)
 			if buildErr == nil && innerSQL != "" {
-				remappedSQL := innerSQL
-				for i := len(innerArgs); i >= 1; i-- {
-					old := fmt.Sprintf("$%d", i)
-					nw := fmt.Sprintf("$%d", pArgIdx+i-1)
-					remappedSQL = strings.ReplaceAll(remappedSQL, old, nw)
-				}
+				remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), pArgIdx)
 				pWhere = append(pWhere, fmt.Sprintf("p.id IN (%s)", remappedSQL))
 				pArgs = append(pArgs, innerArgs...)
 				pArgIdx += len(innerArgs)
@@ -8506,9 +9266,13 @@ func (s *Server) handleDeleteEventPipeline(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleReplaceEventPipelineStages(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
+	}
+	if pipeline, _ := s.services.Event.GetPipeline(c.Context(), pid); pipeline == nil || pipeline.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
 	}
 	var req struct {
 		Stages []struct {
@@ -8545,9 +9309,15 @@ func (s *Server) handleReplaceEventPipelineStages(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
+	}
+	if part, _ := s.services.Event.GetParticipant(c.Context(), pid); part == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
+	} else if ev, _ := s.services.Event.GetByID(c.Context(), part.EventID); ev == nil || ev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 	}
 	var req struct {
 		StageID string `json:"stage_id"`
@@ -8571,6 +9341,14 @@ func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleBulkUpdateEventParticipantStage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	if ev, _ := s.services.Event.GetByID(c.Context(), eventID); ev == nil || ev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
 	var req struct {
 		ParticipantIDs []string `json:"participant_ids"`
 		StageID        string   `json:"stage_id"`
@@ -8594,7 +9372,6 @@ func (s *Server) handleBulkUpdateEventParticipantStage(c *fiber.Ctx) error {
 	if err := s.services.Event.BulkUpdateParticipantStage(c.Context(), ids, stageID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	eventID, _ := uuid.Parse(c.Params("id"))
 	if ev, err := s.services.Event.GetByID(c.Context(), eventID); err == nil && ev != nil && s.hub != nil {
 		s.hub.BroadcastToAccount(ev.AccountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "bulk_stage_changed"})
 	}
@@ -8634,8 +9411,10 @@ func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
 	whereClauses := []string{"l.account_id = $1"}
 
 	if req.LeadPipelineID != nil && *req.LeadPipelineID != "" {
-		if pid, err := uuid.Parse(*req.LeadPipelineID); err == nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("(l.pipeline_id = $%d OR l.pipeline_id IS NULL)", argIdx))
+		if *req.LeadPipelineID == "__no_pipeline__" {
+			whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
+		} else if pid, err := uuid.Parse(*req.LeadPipelineID); err == nil {
+			whereClauses = append(whereClauses, fmt.Sprintf("l.pipeline_id = $%d", argIdx))
 			args = append(args, pid)
 			argIdx++
 		}
@@ -9372,23 +10151,25 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		Name       string `json:"name"`
-		Slug       string `json:"slug"`
-		Plan       string `json:"plan"`
-		MaxDevices int    `json:"max_devices"`
-		MCPEnabled bool   `json:"mcp_enabled"`
+		Name         string `json:"name"`
+		Slug         string `json:"slug"`
+		Plan         string `json:"plan"`
+		MaxDevices   int    `json:"max_devices"`
+		MCPEnabled   bool   `json:"mcp_enabled"`
+		KommoEnabled bool   `json:"kommo_enabled"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
 	account := &domain.Account{
-		ID:         id,
-		Name:       req.Name,
-		Slug:       req.Slug,
-		Plan:       req.Plan,
-		MaxDevices: req.MaxDevices,
-		MCPEnabled: req.MCPEnabled,
+		ID:           id,
+		Name:         req.Name,
+		Slug:         req.Slug,
+		Plan:         req.Plan,
+		MaxDevices:   req.MaxDevices,
+		MCPEnabled:   req.MCPEnabled,
+		KommoEnabled: req.KommoEnabled,
 	}
 
 	if err := s.services.Account.Update(c.Context(), account); err != nil {
@@ -9554,6 +10335,9 @@ func (s *Server) handleAdminToggleUser(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	// Invalidate active sessions so the user must re-login
+	s.services.Auth.InvalidateUserSessions(id)
+
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -9601,6 +10385,9 @@ func (s *Server) handleAdminDeleteUser(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se puede eliminar un super administrador"})
 	}
 
+	// Invalidate active sessions before deleting
+	s.services.Auth.InvalidateUserSessions(id)
+
 	if err := s.services.Account.DeleteUser(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -9625,24 +10412,36 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
 	}
 
-	token, user, err := s.services.Auth.SwitchAccount(c.Context(), userID, targetAccountID, s.cfg.JWTSecret)
+	token, refreshToken, user, err := s.services.Auth.SwitchAccount(c.Context(), userID, targetAccountID, s.cfg.JWTSecret)
 	if err != nil {
 		return c.Status(403).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Set cookie
+	// Set access token cookie
 	c.Cookie(&fiber.Cookie{
 		Name:     "auth-token",
 		Value:    token,
-		Expires:  time.Now().Add(24 * 7 * time.Hour),
+		Expires:  time.Now().Add(1 * time.Hour),
 		HTTPOnly: true,
 		Secure:   s.cfg.IsProduction(),
 		SameSite: "Lax",
 	})
 
-	// Compute permissions for response
+	// Set refresh token cookie
+	c.Cookie(&fiber.Cookie{
+		Name:     "refresh-token",
+		Value:    refreshToken,
+		Expires:  time.Now().Add(7 * 24 * time.Hour),
+		HTTPOnly: true,
+		Secure:   s.cfg.IsProduction(),
+		SameSite: "Strict",
+		Path:     "/api/auth",
+	})
+
+	// Compute permissions for response — per-account admin gets full access
+	isAdmin := user.IsAdmin || user.IsSuperAdmin || user.Role == domain.RoleAdmin || user.Role == domain.RoleSuperAdmin
 	perms := []string{domain.PermAll}
-	if !user.IsAdmin && !user.IsSuperAdmin {
+	if !isAdmin {
 		perms, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), userID, targetAccountID)
 	}
 
@@ -9654,7 +10453,7 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 			"username":       user.Username,
 			"email":          user.Email,
 			"display_name":   user.DisplayName,
-			"is_admin":       user.IsAdmin,
+			"is_admin":       isAdmin,
 			"is_super_admin": user.IsSuperAdmin,
 			"role":           user.Role,
 			"account_id":     user.AccountID,
@@ -9880,6 +10679,92 @@ func (s *Server) handleDeleteQuickReply(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true})
 }
 
+// --- Kommo Webhook Handler (public, no auth — secret in URL) ---
+
+// handleKommoWebhook processes incoming webhooks from Kommo.
+// Validates secret, parses the form-encoded payload, fetches the full lead,
+// and syncs it to ALL accounts with Kommo integration enabled.
+func (s *Server) handleKommoWebhook(c *fiber.Ctx) error {
+	secret := c.Params("secret")
+	if s.kommoSync == nil || s.kommoSync.WebhookSecret == "" || subtle.ConstantTimeCompare([]byte(secret), []byte(s.kommoSync.WebhookSecret)) != 1 {
+		return c.SendStatus(fiber.StatusNotFound) // Return 404 to not reveal webhook exists
+	}
+
+	// Kommo sends form-encoded data with bracket notation:
+	// leads[update][0][id]=12345, leads[add][0][id]=12345, etc.
+	// We just need to extract the lead IDs from the form data.
+	body := string(c.Body())
+	if body == "" {
+		return c.SendStatus(fiber.StatusOK)
+	}
+
+	// Parse form values
+	args := c.Request().PostArgs()
+
+	// Collect all lead IDs from the webhook payload
+	kommoLeadIDs := make(map[int]bool)
+
+	// Check various event patterns: leads[update], leads[add], leads[status]
+	for _, action := range []string{"update", "add", "status"} {
+		for i := 0; i < 50; i++ { // Kommo batches up to ~50 leads per webhook
+			key := fmt.Sprintf("leads[%s][%d][id]", action, i)
+			val := args.Peek(key)
+			if len(val) == 0 {
+				break
+			}
+			if id, err := strconv.Atoi(string(val)); err == nil && id > 0 {
+				kommoLeadIDs[id] = true
+			}
+		}
+	}
+
+	// Check for delete events: leads[delete][0][id]
+	var deletedLeadIDs []int
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("leads[delete][%d][id]", i)
+		val := args.Peek(key)
+		if len(val) == 0 {
+			break
+		}
+		if id, err := strconv.Atoi(string(val)); err == nil && id > 0 {
+			deletedLeadIDs = append(deletedLeadIDs, id)
+		}
+	}
+
+	if len(kommoLeadIDs) == 0 && len(deletedLeadIDs) == 0 {
+		// Might be a contact or other event — acknowledge but don't process
+		return c.SendStatus(fiber.StatusOK)
+	}
+
+	log.Printf("[WEBHOOK] Received %d lead IDs, %d deleted from Kommo", len(kommoLeadIDs), len(deletedLeadIDs))
+
+	// Process asynchronously to avoid blocking the webhook response
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		for kommoID := range kommoLeadIDs {
+			s.kommoSync.ProcessWebhookLead(ctx, kommoID)
+		}
+
+		// Mark deleted leads across all accounts
+		for _, kommoID := range deletedLeadIDs {
+			res, err := s.repos.DB().Exec(ctx,
+				`UPDATE leads SET kommo_deleted_at = NOW(), updated_at = NOW() WHERE kommo_id = $1 AND kommo_deleted_at IS NULL`,
+				int64(kommoID))
+			if err != nil {
+				log.Printf("[WEBHOOK] Failed to mark lead Kommo %d as deleted: %v", kommoID, err)
+				continue
+			}
+			if res.RowsAffected() > 0 {
+				log.Printf("[WEBHOOK] Marked lead Kommo %d as deleted (%d rows)", kommoID, res.RowsAffected())
+			}
+		}
+	}()
+
+	return c.SendStatus(fiber.StatusOK)
+}
+
 // --- Kommo Handlers ---
 
 func (s *Server) handleKommoStatus(c *fiber.Ctx) error {
@@ -9913,6 +10798,13 @@ func (s *Server) handleKommoSync(c *fiber.Ctx) error {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// Check if Kommo is enabled for this account
+	var kommoEnabled bool
+	_ = s.repos.DB().QueryRow(c.Context(), `SELECT COALESCE(kommo_enabled, false) FROM accounts WHERE id = $1`, accountID).Scan(&kommoEnabled)
+	if !kommoEnabled {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo está deshabilitado para esta cuenta"})
+	}
 
 	started := s.kommoSync.StartFullSyncAsync(accountID)
 	if !started {
@@ -10036,6 +10928,84 @@ func (s *Server) handleKommoSyncStatus(c *fiber.Ctx) error {
 	}
 	status := s.kommoSync.GetStatus()
 	return c.JSON(fiber.Map{"success": true, "status": status})
+}
+
+// handleEventsPollerStatus returns the current status of the Kommo Events API poller.
+func (s *Server) handleEventsPollerStatus(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	status := s.kommoSync.GetEventsPollerStatus()
+	return c.JSON(fiber.Map{"success": true, "events_poller": status})
+}
+
+// handleForceEventsPoll triggers an immediate events poll cycle.
+func (s *Server) handleForceEventsPoll(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	events, leads := s.kommoSync.ForceEventsPoll()
+	return c.JSON(fiber.Map{"success": true, "events_found": events, "leads_synced": leads})
+}
+
+// handleSyncMonitor returns the sync monitor data (ring buffer + per-subsystem stats).
+func (s *Server) handleSyncMonitor(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	data := s.kommoSync.Monitor.GetData()
+	return c.JSON(fiber.Map{"success": true, "monitor": data})
+}
+
+// handleKommoToggleEnabled enables or disables Kommo integration for the current account.
+func (s *Server) handleKommoToggleEnabled(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+
+	_, err := s.repos.DB().Exec(c.Context(), `UPDATE accounts SET kommo_enabled = $1 WHERE id = $2`, req.Enabled, accountID)
+	if err != nil {
+		log.Printf("[API] Failed to toggle kommo_enabled for account %s: %v", accountID, err)
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update"})
+	}
+
+	log.Printf("[API] Account %s kommo_enabled set to %v", accountID, req.Enabled)
+	return c.JSON(fiber.Map{"success": true, "kommo_enabled": req.Enabled})
+}
+
+// handleKommoToggleAllPipelines enables or disables ALL connected pipelines for the account.
+func (s *Server) handleKommoToggleAllPipelines(c *fiber.Ctx) error {
+	if s.kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
+	}
+
+	result, err := s.repos.DB().Exec(c.Context(),
+		`UPDATE kommo_connected_pipelines SET enabled = $2 WHERE account_id = $1`,
+		accountID, body.Enabled)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	s.invalidateLeadsCache(accountID)
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"count":   result.RowsAffected(),
+		"enabled": body.Enabled,
+	})
 }
 
 // --- Admin Role Handlers ---

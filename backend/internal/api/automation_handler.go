@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -12,6 +15,17 @@ import (
 
 func (s *Server) handleListAutomations(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// Redis cache — 30s TTL
+	automationsCacheKey := ""
+	if s.cache != nil {
+		automationsCacheKey = fmt.Sprintf("automations:%s:all", accountID.String())
+		if cached, err := s.cache.Get(c.Context(), automationsCacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
+	}
+
 	automations, err := s.repos.Automation.List(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -19,7 +33,16 @@ func (s *Server) handleListAutomations(c *fiber.Ctx) error {
 	if automations == nil {
 		automations = []*domain.Automation{}
 	}
-	return c.JSON(fiber.Map{"success": true, "automations": automations})
+
+	result := fiber.Map{"success": true, "automations": automations}
+
+	if automationsCacheKey != "" && s.cache != nil {
+		if data, err := json.Marshal(result); err == nil {
+			_ = s.cache.Set(c.Context(), automationsCacheKey, data, 30*time.Second)
+		}
+	}
+
+	return c.JSON(result)
 }
 
 func (s *Server) handleGetAutomation(c *fiber.Ctx) error {
@@ -69,6 +92,7 @@ func (s *Server) handleCreateAutomation(c *fiber.Ctx) error {
 	if err := s.repos.Automation.Create(c.Context(), a); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateAutomationsCache(accountID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "automation": a})
 }
 
@@ -109,6 +133,7 @@ func (s *Server) handleUpdateAutomation(c *fiber.Ctx) error {
 	if err := s.repos.Automation.Update(c.Context(), existing); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateAutomationsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "automation": existing})
 }
 
@@ -121,6 +146,7 @@ func (s *Server) handleDeleteAutomation(c *fiber.Ctx) error {
 	if err := s.repos.Automation.Delete(c.Context(), id, accountID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateAutomationsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -139,6 +165,7 @@ func (s *Server) handleToggleAutomation(c *fiber.Ctx) error {
 	if err := s.repos.Automation.SetActive(c.Context(), id, accountID, req.IsActive); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateAutomationsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -190,9 +217,13 @@ func (s *Server) handleGetAutomationExecutions(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetExecutionLogs(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	execID, err := uuid.Parse(c.Params("execId"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid execution ID"})
+	}
+	if exec, _ := s.repos.Automation.GetExecutionByID(c.Context(), execID); exec == nil || exec.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Execution not found"})
 	}
 	logs, err := s.repos.Automation.GetExecutionLogs(c.Context(), execID)
 	if err != nil {

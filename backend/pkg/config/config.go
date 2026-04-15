@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strings"
 )
@@ -28,6 +29,10 @@ type Config struct {
 	KommoClientSecret string
 	KommoAccessToken  string
 	KommoRedirectURI  string
+	KommoWebhookSecret string
+	// PublicURL is the public URL of the Clarin backend (e.g., https://clarin.naperu.cloud)
+	// Used for webhook auto-registration with Kommo.
+	PublicURL string
 	// AI Assistant
 	GeminiAPIKey string
 	GroqAPIKey   string
@@ -65,6 +70,8 @@ func Load() *Config {
 		KommoClientSecret: getEnv("KOMMO_CLIENT_SECRET", ""),
 		KommoAccessToken:  getEnv("KOMMO_ACCESS_TOKEN", ""),
 		KommoRedirectURI:  getEnv("KOMMO_REDIRECT_URI", ""),
+		KommoWebhookSecret: getEnv("KOMMO_WEBHOOK_SECRET", ""),
+		PublicURL:           getEnv("PUBLIC_URL", ""),
 		GeminiAPIKey:      getEnv("GEMINI_API_KEY", ""),
 		GroqAPIKey:        getEnv("GROQ_API_KEY", ""),
 		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
@@ -86,4 +93,17 @@ func (c *Config) IsDevelopment() bool {
 
 func (c *Config) IsProduction() bool {
 	return c.Env == "production"
+}
+
+// Validate checks that critical secrets are not using default values in production.
+func (c *Config) Validate() {
+	if !c.IsProduction() {
+		return
+	}
+	if c.JWTSecret == "clarin_jwt_secret_change_in_production_2026" {
+		log.Fatal("[CONFIG] FATAL: JWT_SECRET is using the default value in production. Set a secure JWT_SECRET environment variable.")
+	}
+	if c.AdminPassword == "clarin123" {
+		log.Fatal("[CONFIG] FATAL: ADMIN_PASSWORD is using the default value in production. Set a secure ADMIN_PASSWORD environment variable.")
+	}
 }

@@ -60,9 +60,15 @@ export default function NotificationProvider({ accountId, children }: Props) {
   // Subscribe to shared WebSocket for notifications
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
-      const msg = data as { event?: string; data?: { is_from_me?: boolean } }
+      const msg = data as { event?: string; data?: Record<string, unknown> }
       if (msg.event === 'new_message' && !msg.data?.is_from_me) {
         handleIncomingMessage(msg.data as Parameters<typeof handleIncomingMessage>[0])
+      }
+      if (msg.event === 'task_reminder') {
+        handleTaskReminder(msg.data as { title?: string; due_at?: string })
+      }
+      if (msg.event === 'task_overdue') {
+        handleTaskOverdue(msg.data as { title?: string; due_at?: string })
       }
     })
 
@@ -98,6 +104,32 @@ export default function NotificationProvider({ accountId, children }: Props) {
         if (data.chat_id) {
           window.location.href = `/dashboard/chats?open=${data.chat_id}`
         }
+      })
+    }
+  }, [])
+
+  const handleTaskReminder = useCallback((data: { title?: string; due_at?: string; type?: string }) => {
+    const s = settingsRef.current
+    if (s?.sound_enabled && s.sound_type !== 'none') {
+      playNotificationSound(s.sound_type, s.sound_volume)
+    }
+    if (s?.browser_notifications) {
+      const dueStr = data.due_at ? new Date(data.due_at).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' }) : ''
+      const body = (data.title || 'Tienes una tarea próxima') + (dueStr ? ` — ${dueStr}` : '')
+      showBrowserNotification('⏰ Recordatorio de tarea', body, () => {
+        window.location.href = '/dashboard/tasks'
+      })
+    }
+  }, [])
+
+  const handleTaskOverdue = useCallback((data: { title?: string; due_at?: string }) => {
+    const s = settingsRef.current
+    if (s?.sound_enabled && s.sound_type !== 'none') {
+      playNotificationSound(s.sound_type, s.sound_volume)
+    }
+    if (s?.browser_notifications) {
+      showBrowserNotification('⚠️ Tarea vencida', data.title || 'Una tarea ha vencido', () => {
+        window.location.href = '/dashboard/tasks'
       })
     }
   }, [])

@@ -48,6 +48,9 @@ const (
 	EventDynamicRegistration     = "dynamic_registration"
 	EventContactUpdate           = "contact_update"
 	EventVersionUpdate           = "version_update"
+	EventTaskUpdate              = "task_update"
+	EventTaskReminder            = "task_reminder"
+	EventTaskOverdue             = "task_overdue"
 )
 
 // Message represents a WebSocket message

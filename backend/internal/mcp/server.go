@@ -450,13 +450,17 @@ func (s *MCPServer) toolListEvents(ctx context.Context, req mcp.CallToolRequest)
 
 // ──── get_event_summary ────
 func (s *MCPServer) toolGetEventSummary(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	accountID, err := s.getAccountID(ctx)
+	if err != nil {
+		return errResult("no se pudo determinar la cuenta"), nil
+	}
 	eventID, err := uuidArg(req, "event_id")
 	if err != nil {
 		return errResult("event_id inválido"), nil
 	}
 
 	ev, err := s.repos.Event.GetByID(ctx, eventID)
-	if err != nil || ev == nil {
+	if err != nil || ev == nil || ev.AccountID != accountID {
 		return errResult("evento no encontrado"), nil
 	}
 
@@ -657,13 +661,17 @@ func (s *MCPServer) toolSearchLeads(ctx context.Context, req mcp.CallToolRequest
 
 // ──── get_lead_detail ────
 func (s *MCPServer) toolGetLeadDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	accountID, err := s.getAccountID(ctx)
+	if err != nil {
+		return errResult("no se pudo determinar la cuenta"), nil
+	}
 	leadID, err := uuidArg(req, "lead_id")
 	if err != nil {
 		return errResult("lead_id inválido"), nil
 	}
 
 	lead, err := s.repos.Lead.GetByID(ctx, leadID)
-	if err != nil || lead == nil {
+	if err != nil || lead == nil || lead.AccountID != accountID {
 		return errResult("lead no encontrado"), nil
 	}
 
@@ -1240,13 +1248,17 @@ func (s *MCPServer) toolListEventLogbooks(ctx context.Context, req mcp.CallToolR
 
 // ──── get_logbook_detail ────
 func (s *MCPServer) toolGetLogbookDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	accountID, err := s.getAccountID(ctx)
+	if err != nil {
+		return errResult("no se pudo determinar la cuenta"), nil
+	}
 	logbookID, err := uuidArg(req, "logbook_id")
 	if err != nil {
 		return errResult("logbook_id inválido"), nil
 	}
 
 	lb, err := s.repos.Logbook.GetByID(ctx, logbookID)
-	if err != nil || lb == nil {
+	if err != nil || lb == nil || lb.AccountID != accountID {
 		return errResult("bitácora no encontrada"), nil
 	}
 

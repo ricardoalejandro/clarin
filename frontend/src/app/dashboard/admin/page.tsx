@@ -65,6 +65,10 @@ const ALL_MODULES = [
   { key: 'tags', label: 'Etiquetas', color: 'teal' },
   { key: 'settings', label: 'Configuración', color: 'slate' },
   { key: 'integrations', label: 'Integraciones', color: 'indigo' },
+  { key: 'surveys', label: 'Encuestas', color: 'amber' },
+  { key: 'dynamics', label: 'Dinámicas', color: 'rose' },
+  { key: 'tasks', label: 'Tareas', color: 'lime' },
+  { key: 'documents', label: 'Plantillas', color: 'purple' },
 ]
 
 type Tab = 'accounts' | 'users' | 'roles'

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
-import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download, Cloud } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download, Cloud } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import { es } from 'date-fns/locale'
@@ -11,10 +11,13 @@ import ImportCSVModal from '@/components/ImportCSVModal'
 import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import { useRouter } from 'next/navigation'
-import { subscribeWebSocket } from '@/lib/api'
+import { api, subscribeWebSocket } from '@/lib/api'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
+import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
+import ConfirmDeleteKommoModal from '@/components/ConfirmDeleteKommoModal'
+import ConfirmBulkDeleteKommoModal, { KommoLeadToDelete } from '@/components/ConfirmBulkDeleteKommoModal'
 import { Chat } from '@/types/chat'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 
@@ -50,6 +53,7 @@ interface LeadCardProps {
   isDetailActive: boolean
   isDragged: boolean
   selectionMode: boolean
+  kommoEnabled: boolean
   onToggleSelection: (id: string) => void
   onOpenDetail: (lead: Lead) => void
   onDelete: (id: string) => void
@@ -58,7 +62,7 @@ interface LeadCardProps {
 }
 
 const LeadCard = memo(function LeadCard({
-  lead, isSelected, isDetailActive, isDragged, selectionMode,
+  lead, isSelected, isDetailActive, isDragged, selectionMode, kommoEnabled,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd,
 }: LeadCardProps) {
   return (
@@ -85,9 +89,9 @@ const LeadCard = memo(function LeadCard({
             </div>
           )}
           <p className="text-[13px] font-medium text-slate-900 truncate max-w-[150px]">{lead.name || 'Sin nombre'}</p>
-          {lead.kommo_id && (
-            <span title={`Vinculado a Kommo #${lead.kommo_id}`} className="flex-shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-50 rounded-full text-[10px] font-medium text-emerald-600 leading-none">
-              <RefreshCw className="w-2.5 h-2.5" />K
+          {kommoEnabled && lead.kommo_id && (
+            <span title={lead.kommo_deleted_at ? `Eliminado de Kommo #${lead.kommo_id}` : `Vinculado a Kommo #${lead.kommo_id}`} className={`flex-shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium leading-none ${lead.kommo_deleted_at ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600'}`}>
+              <RefreshCw className="w-2.5 h-2.5" />{lead.kommo_deleted_at ? 'K✗' : 'K'}
             </span>
           )}
         </div>
@@ -142,6 +146,7 @@ interface VirtualColumnProps {
   draggedLeadId: string | null
   dragOverColumn: string | null
   selectionMode: boolean
+  kommoEnabled: boolean
   onToggleSelection: (id: string) => void
   onOpenDetail: (lead: Lead) => void
   onDelete: (id: string) => void
@@ -154,7 +159,7 @@ interface VirtualColumnProps {
 
 const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   column, totalCount, hasMore, loadingMore, onLoadMore,
-  selectedIds, detailLeadId, draggedLeadId, dragOverColumn, selectionMode,
+  selectedIds, detailLeadId, draggedLeadId, dragOverColumn, selectionMode, kommoEnabled,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
 }: VirtualColumnProps) {
   const parentRef = useRef<HTMLDivElement>(null)
@@ -226,6 +231,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
                     isDetailActive={detailLeadId === lead.id}
                     isDragged={draggedLeadId === lead.id}
                     selectionMode={selectionMode}
+                    kommoEnabled={kommoEnabled}
                     onToggleSelection={onToggleSelection}
                     onOpenDetail={onOpenDetail}
                     onDelete={onDelete}
@@ -311,6 +317,7 @@ function resolveDatePreset(preset: string, customFrom?: string, customTo?: strin
 
 export default function LeadsPage() {
   const router = useRouter()
+  const kommoEnabled = typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true'
   // Server-side paginated data
   const [stageData, setStageData] = useState<StageData[]>([])
   const [unassignedData, setUnassignedData] = useState<{ total_count: number; leads: Lead[]; has_more: boolean }>({ total_count: 0, leads: [], has_more: false })
@@ -357,6 +364,7 @@ export default function LeadsPage() {
   // Detail panel
   const [showDetailPanel, setShowDetailPanel] = useState(false)
   const [detailLead, setDetailLead] = useState<Lead | null>(null)
+  const [scrollToTasks, setScrollToTasks] = useState(false)
   const [observations, setObservations] = useState<Observation[]>([])
   const [loadingObservations, setLoadingObservations] = useState(false)
   const [newObservation, setNewObservation] = useState('')
@@ -416,6 +424,9 @@ export default function LeadsPage() {
   const [filterDateFrom, setFilterDateFrom] = useState('')
   const [filterDateTo, setFilterDateTo] = useState('')
 
+  // Kommo sync filter: all | kommo | clarin
+  const [filterKommoSync, setFilterKommoSync] = useState<'all' | 'kommo' | 'clarin'>('all')
+
   // Broadcast from leads
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
   const [submittingBroadcast, setSubmittingBroadcast] = useState(false)
@@ -445,6 +456,9 @@ export default function LeadsPage() {
   const [exportScope, setExportScope] = useState<'all' | 'filtered'>('filtered')
   const [exporting, setExporting] = useState(false)
 
+  // Bulk document generation
+  const [showBulkDocModal, setShowBulkDocModal] = useState(false)
+
   // Create Event from Leads modal
   const [showCreateEventModal, setShowCreateEventModal] = useState(false)
   const [createEventForm, setCreateEventForm] = useState({ name: '', description: '', event_date: '', event_end: '', location: '', color: '#10b981' })
@@ -460,6 +474,13 @@ export default function LeadsPage() {
   const [loadingListObs, setLoadingListObs] = useState<Set<string>>(new Set())
   const [expandedListLeadId, setExpandedListLeadId] = useState<string | null>(null)
   const [listHistoryLead, setListHistoryLead] = useState<Lead | null>(null)
+
+  // Destructive delete modal for blocked+Kommo leads
+  const [kommoDeleteTarget, setKommoDeleteTarget] = useState<Lead | null>(null)
+  const [kommoDeleting, setKommoDeleting] = useState(false)
+  // Bulk delete with Kommo modal
+  const [bulkKommoDeleteData, setBulkKommoDeleteData] = useState<{ total: number; kommoLeads: KommoLeadToDelete[] } | null>(null)
+  const [bulkKommoDeleting, setBulkKommoDeleting] = useState(false)
 
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
@@ -523,7 +544,10 @@ export default function LeadsPage() {
   const fetchLeadCounts = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/leads/counts', {
+      const params = new URLSearchParams()
+      if (filterKommoSync !== 'all') params.set('kommo_sync', filterKommoSync)
+      if (activePipeline) params.set('pipeline_id', activePipeline.id)
+      const res = await fetch(`/api/leads/counts?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
@@ -533,7 +557,7 @@ export default function LeadsPage() {
     } catch (err) {
       console.error('Failed to fetch lead counts:', err)
     }
-  }, [])
+  }, [filterKommoSync, activePipeline])
 
   const fetchLeadsPaginated = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -558,6 +582,7 @@ export default function LeadsPage() {
         if (dateRange.from) params.set('date_from', dateRange.from)
         if (dateRange.to) params.set('date_to', dateRange.to)
       }
+      if (filterKommoSync !== 'all') params.set('kommo_sync', filterKommoSync)
       const res = await fetch(`/api/leads/paginated?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -574,7 +599,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false)
     }
-  }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo, filterKommoSync])
 
   const fetchListLeads = useCallback(async (reset: boolean = false) => {
     setListLoading(true)
@@ -603,6 +628,7 @@ export default function LeadsPage() {
         if (dateRange.from) params.set('date_from', dateRange.from)
         if (dateRange.to) params.set('date_to', dateRange.to)
       }
+      if (filterKommoSync !== 'all') params.set('kommo_sync', filterKommoSync)
       const res = await fetch(`/api/leads/list-paginated?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -624,7 +650,7 @@ export default function LeadsPage() {
     } finally {
       setListLoading(false)
     }
-  }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo, filterKommoSync])
 
   const loadMoreForStage = useCallback(async (stageId: string) => {
     if (loadingMoreStages.has(stageId)) return
@@ -655,6 +681,7 @@ export default function LeadsPage() {
         if (dateRange.from) params.set('date_from', dateRange.from)
         if (dateRange.to) params.set('date_to', dateRange.to)
       }
+      if (filterKommoSync !== 'all') params.set('kommo_sync', filterKommoSync)
       const endpoint = isUnassigned ? 'unassigned' : stageId
       const res = await fetch(`/api/leads/by-stage/${endpoint}?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -673,7 +700,7 @@ export default function LeadsPage() {
     } finally {
       setLoadingMoreStages(prev => { const next = new Set(prev); next.delete(stageId); return next })
     }
-  }, [loadingMoreStages, stageData, unassignedData, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [loadingMoreStages, stageData, unassignedData, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo, filterKommoSync])
 
   // Helper: update a single lead across all stage data
   const updateLeadInStages = useCallback((leadId: string, updater: (lead: Lead) => Lead) => {
@@ -717,8 +744,10 @@ export default function LeadsPage() {
       const found = (stage.leads || []).find(l => l.id === leadId)
       if (found) return found
     }
-    return (unassignedData.leads || []).find(l => l.id === leadId)
-  }, [stageData, unassignedData])
+    const inUnassigned = (unassignedData.leads || []).find(l => l.id === leadId)
+    if (inUnassigned) return inUnassigned
+    return listLeads.find(l => l.id === leadId) || (detailLead?.id === leadId ? detailLead : undefined)
+  }, [stageData, unassignedData, listLeads, detailLead])
 
   // Total count from server (all matching leads, not just loaded)
   const totalLeadCount = useMemo(() =>
@@ -727,17 +756,9 @@ export default function LeadsPage() {
   )
 
   const fetchDevices = useCallback(async () => {
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch('/api/devices', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        setDevices((data.devices || []).filter((d: Device) => d.status === 'connected'))
-      }
-    } catch (err) {
-      console.error('Failed to fetch devices:', err)
+    const result = await api<{ devices?: Device[] }>('/api/devices')
+    if (result.success && result.data) {
+      setDevices((result.data.devices || []).filter((d: Device) => d.status === 'connected'))
     }
   }, [])
 
@@ -752,6 +773,33 @@ export default function LeadsPage() {
       if (saved) setHiddenStageIds(new Set(JSON.parse(saved)))
     } catch {}
   }, [fetchPipelines])
+
+  // Auto-open lead detail from URL params (e.g. ?lead_id=UUID&scroll=tasks)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const leadId = params.get('lead_id')
+    const scroll = params.get('scroll')
+    if (!leadId) return
+
+    // Clear URL params to avoid re-triggering
+    window.history.replaceState({}, '', window.location.pathname)
+
+    const fetchAndOpenLead = async () => {
+      try {
+        const token = localStorage.getItem('token')
+        const res = await fetch(`/api/leads/${leadId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (data.success && data.lead) {
+          setDetailLead(data.lead)
+          setShowDetailPanel(true)
+          if (scroll === 'tasks') setScrollToTasks(true)
+        }
+      } catch { /* ignore */ }
+    }
+    fetchAndOpenLead()
+  }, [])
 
   // Fetch paginated kanban data when pipelines loaded or pipeline/filters change
   useEffect(() => {
@@ -1028,6 +1076,12 @@ export default function LeadsPage() {
   }
 
   const handleDeleteLead = async (leadId: string) => {
+    const lead = findLeadById(leadId)
+    // Blocked lead with Kommo sync → show special destructive modal
+    if (lead?.is_blocked && lead?.kommo_id && !lead?.kommo_deleted_at) {
+      setKommoDeleteTarget(lead)
+      return
+    }
     if (!confirm('¿Estás seguro de eliminar este lead?')) return
     const token = localStorage.getItem('token')
     try {
@@ -1044,8 +1098,61 @@ export default function LeadsPage() {
     }
   }
 
+  const handleDeleteFromKommo = async () => {
+    if (!kommoDeleteTarget) return
+    setKommoDeleting(true)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${kommoDeleteTarget.id}?delete_from_kommo=true`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setKommoDeleteTarget(null)
+        fetchLeadsPaginated()
+        if (detailLead?.id === kommoDeleteTarget.id) {
+          setShowDetailPanel(false)
+          setDetailLead(null)
+        }
+      } else {
+        alert(data.error || 'Error al eliminar lead de Kommo')
+      }
+    } catch (err) {
+      console.error('Failed to delete lead from Kommo:', err)
+      alert('Error de conexión al eliminar lead')
+    } finally {
+      setKommoDeleting(false)
+    }
+  }
+
   const handleDeleteSelected = async () => {
     if (selectedIds.size === 0) return
+
+    // Find which leads are blocked + synced with Kommo
+    const allLeads = viewMode === 'list' ? listLeads : allLoadedLeads
+    const kommoLeadsToDelete: KommoLeadToDelete[] = []
+    const selectedArray = Array.from(selectedIds)
+
+    for (const id of selectedArray) {
+      const lead = allLeads.find((l) => l.id === id) || (detailLead?.id === id ? detailLead : null)
+      if (lead && lead.is_blocked && lead.kommo_id && !lead.kommo_deleted_at) {
+        kommoLeadsToDelete.push({
+          id: lead.id,
+          name: lead.name || '',
+          phone: lead.phone || '',
+          kommo_id: lead.kommo_id,
+        })
+      }
+    }
+
+    // If any leads are synced with Kommo, show the special modal
+    if (kommoEnabled && kommoLeadsToDelete.length > 0) {
+      setBulkKommoDeleteData({ total: selectedIds.size, kommoLeads: kommoLeadsToDelete })
+      return
+    }
+
+    // Otherwise, simple confirm and delete
     if (!confirm(`¿Estás seguro de eliminar ${selectedIds.size} lead(s)?`)) return
     const token = localStorage.getItem('token')
     setDeleting(true)
@@ -1068,6 +1175,34 @@ export default function LeadsPage() {
       console.error('Failed to delete leads:', err)
     } finally {
       setDeleting(false)
+    }
+  }
+
+  const handleBulkDeleteFromKommo = async () => {
+    if (!bulkKommoDeleteData) return
+    const token = localStorage.getItem('token')
+    setBulkKommoDeleting(true)
+    try {
+      // Delete all leads, passing delete_from_kommo=true for those synced with Kommo
+      const res = await fetch('/api/leads/batch?delete_from_kommo=true', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ ids: Array.from(selectedIds) }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setBulkKommoDeleteData(null)
+        setSelectedIds(new Set())
+        setSelectionMode(false)
+        fetchLeadsPaginated()
+      }
+    } catch (err) {
+      console.error('Failed to bulk delete leads:', err)
+    } finally {
+      setBulkKommoDeleting(false)
     }
   }
 
@@ -1269,7 +1404,8 @@ export default function LeadsPage() {
   }
 
   const selectAll = () => {
-    setSelectedIds(new Set(allLoadedLeads.map(l => l.id)))
+    const leads = viewMode === 'list' ? listLeads : allLoadedLeads
+    setSelectedIds(new Set(leads.map(l => l.id)))
   }
 
   const openDetailPanel = (lead: Lead) => {
@@ -1764,20 +1900,13 @@ export default function LeadsPage() {
   const handleSendWhatsApp = async (phone: string) => {
     setWhatsappPhone(phone)
     const cleanPhone = phone.replace(/[^0-9]/g, '')
-    const token = localStorage.getItem('token')
 
     // Fetch all devices (connected + disconnected)
     let allDevices: Device[] = []
-    try {
-      const res = await fetch('/api/devices', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        allDevices = data.devices || []
-      }
-    } catch (err) {
-      console.error('Failed to fetch devices:', err)
+    const devResult = await api<{ devices?: Device[] }>('/api/devices')
+    if (devResult.success && devResult.data) {
+      allDevices = devResult.data.devices || []
+    } else {
       alert('Error al obtener dispositivos')
       return
     }
@@ -1785,36 +1914,26 @@ export default function LeadsPage() {
     const connectedDevices = allDevices.filter((d: Device) => d.status === 'connected')
     if (connectedDevices.length === 0) {
       // Check if there's an existing chat to show read-only
-      try {
-        const chatRes = await fetch(`/api/chats/find-by-phone/${cleanPhone}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        const chatData = await chatRes.json()
-        if (chatData.success && chatData.chat) {
-          // Open existing chat in read-only mode
-          setInlineChatId(chatData.chat.id)
-          setInlineChat(chatData.chat)
-          setInlineChatDeviceId(chatData.chat.device_id || '')
-          setInlineChatReadOnly(true)
-          setShowInlineChat(true)
-          return
-        }
-      } catch {}
+      const chatResult = await api<{ chat?: any }>(`/api/chats/find-by-phone/${cleanPhone}`)
+      if (chatResult.success && chatResult.data?.chat) {
+        // Open existing chat in read-only mode
+        setInlineChatId(chatResult.data.chat.id)
+        setInlineChat(chatResult.data.chat)
+        setInlineChatDeviceId(chatResult.data.chat.device_id || '')
+        setInlineChatReadOnly(true)
+        setShowInlineChat(true)
+        return
+      }
       alert('No hay dispositivos conectados')
       return
     }
 
     // Check for existing chat with this phone
     let existingChat: any = null
-    try {
-      const chatRes = await fetch(`/api/chats/find-by-phone/${cleanPhone}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const chatData = await chatRes.json()
-      if (chatData.success && chatData.chat) {
-        existingChat = chatData.chat
-      }
-    } catch {}
+    const chatResult = await api<{ chat?: any }>(`/api/chats/find-by-phone/${cleanPhone}`)
+    if (chatResult.success && chatResult.data?.chat) {
+      existingChat = chatResult.data.chat
+    }
 
     // If only 1 connected device → skip modal, open directly
     if (connectedDevices.length === 1) {
@@ -1922,7 +2041,7 @@ export default function LeadsPage() {
     return tag.name.toLowerCase().includes(term.toLowerCase())
   })
 
-  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0)
+  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + (filterKommoSync !== 'all' ? 1 : 0)
 
   // Export leads
   const handleExportLeads = async () => {
@@ -2243,7 +2362,7 @@ export default function LeadsPage() {
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
                     <button
-                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo('') }}
+                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterKommoSync('all') }}
                       className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                     >
                       Limpiar todo
@@ -2260,6 +2379,44 @@ export default function LeadsPage() {
 
                 {/* ══ Left Column — Selections ══ */}
                 <div className="w-full sm:w-[240px] shrink-0 border-b sm:border-b-0 sm:border-r border-slate-100 overflow-y-auto p-3 space-y-4 bg-slate-50/30 max-h-[30vh] sm:max-h-none">
+
+                  {/* Kommo sync filter */}
+                  {kommoEnabled && (
+                  <div>
+                    <div className="flex items-center gap-2 mb-2.5">
+                      <div className="w-1 h-3.5 bg-violet-400 rounded-full" />
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Origen</p>
+                      <span title="Todos: muestra todos los leads.\nSolo Kommo: leads activos en Kommo (conteos coinciden con Kommo).\nSolo Clarin: leads locales o eliminados de Kommo." className="cursor-help">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                      </span>
+                    </div>
+                    <div className="flex rounded-lg border border-slate-200 bg-slate-50/50 overflow-hidden">
+                      <button
+                        onClick={() => setFilterKommoSync('all')}
+                        className={`flex-1 px-2 py-1.5 text-[10px] font-semibold transition-all ${filterKommoSync === 'all' ? 'bg-slate-600 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
+                      >
+                        Todos
+                      </button>
+                      <button
+                        onClick={() => setFilterKommoSync('kommo')}
+                        className={`flex-1 px-2 py-1.5 text-[10px] font-semibold transition-all ${filterKommoSync === 'kommo' ? 'bg-emerald-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
+                      >
+                        Kommo
+                      </button>
+                      <button
+                        onClick={() => setFilterKommoSync('clarin')}
+                        className={`flex-1 px-2 py-1.5 text-[10px] font-semibold transition-all ${filterKommoSync === 'clarin' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
+                      >
+                        Clarin
+                      </button>
+                    </div>
+                    {filterKommoSync !== 'all' && (
+                      <p className="text-[9px] text-slate-400 mt-1.5 leading-snug">
+                        {filterKommoSync === 'kommo' ? 'Mostrando solo leads sincronizados con Kommo' : 'Mostrando leads locales y eliminados de Kommo'}
+                      </p>
+                    )}
+                  </div>
+                  )}
 
                   {/* Stage pills */}
                   {stages.length > 0 && (
@@ -2792,6 +2949,14 @@ export default function LeadsPage() {
                     <Download className="w-4 h-4 text-slate-400" />
                     Exportar leads
                   </button>
+                  <button
+                    onClick={() => { setShowBulkDocModal(true); setShowMoreMenu(false) }}
+                    disabled={(viewMode === 'list' ? listLeads : allLoadedLeads).length === 0}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <FileText className="w-4 h-4 text-slate-400" />
+                    Generar Documentos
+                  </button>
                   <div className="my-1 border-t border-slate-100" />
                   <button
                     onClick={() => { setShowCreateEventModal(true); setShowMoreMenu(false) }}
@@ -2888,19 +3053,25 @@ export default function LeadsPage() {
             }`}>{leadCounts.blocked}</span>
           )}
         </button>
-        {pipelines.length > 1 && (
+        {pipelines.length > 0 && (
           <div className="relative ml-auto">
             <select
               value={activePipeline?.id || ''}
               onChange={(e) => {
-                const p = pipelines.find(p => p.id === e.target.value)
-                if (p) setActivePipeline(p)
+                const val = e.target.value
+                if (val === '__no_pipeline__') {
+                  setActivePipeline({ id: '__no_pipeline__', name: 'Sin pipeline', is_default: false, stages: [] })
+                } else {
+                  const p = pipelines.find(p => p.id === val)
+                  if (p) setActivePipeline(p)
+                }
               }}
               className="pl-2 pr-6 py-1 bg-white border border-slate-200 rounded-lg focus:ring-1 focus:ring-emerald-500 appearance-none cursor-pointer text-xs text-slate-700"
             >
               {pipelines.map(p => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
+              <option value="__no_pipeline__" className="text-slate-400 italic">── Sin pipeline ──</option>
             </select>
             <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
           </div>
@@ -2948,6 +3119,7 @@ export default function LeadsPage() {
               draggedLeadId={draggedLeadId}
               dragOverColumn={dragOverColumn}
               selectionMode={selectionMode}
+              kommoEnabled={kommoEnabled}
               onToggleSelection={toggleSelection}
               onOpenDetail={openDetailPanel}
               onDelete={handleDeleteLead}
@@ -2977,6 +3149,7 @@ export default function LeadsPage() {
               draggedLeadId={draggedLeadId}
               dragOverColumn={dragOverColumn}
               selectionMode={selectionMode}
+              kommoEnabled={kommoEnabled}
               onToggleSelection={toggleSelection}
               onOpenDetail={openDetailPanel}
               onDelete={handleDeleteLead}
@@ -3005,11 +3178,34 @@ export default function LeadsPage() {
           {/* Sticky header */}
           <div className="bg-slate-50 border-b-2 border-slate-200 flex-shrink-0">
             <div className="flex">
+              {selectionMode && (
+                <div className="px-2 py-2.5 w-[36px] flex items-center justify-center">
+                  <button
+                    onClick={() => {
+                      if (selectedIds.size === listLeads.length) {
+                        setSelectedIds(new Set())
+                      } else {
+                        setSelectedIds(new Set(listLeads.map(l => l.id)))
+                      }
+                    }}
+                    className="p-0.5"
+                    title={selectedIds.size === listLeads.length ? 'Deseleccionar todos' : 'Seleccionar todos'}
+                  >
+                    {selectedIds.size > 0 && selectedIds.size === listLeads.length ? (
+                      <CheckSquare className="w-4 h-4 text-emerald-600" />
+                    ) : selectedIds.size > 0 ? (
+                      <MinusSquare className="w-4 h-4 text-emerald-400" />
+                    ) : (
+                      <Square className="w-4 h-4 text-slate-300" />
+                    )}
+                  </button>
+                </div>
+              )}
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[220px]">Lead</div>
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[110px]">Etapa</div>
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[180px]">Etiquetas</div>
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex-1">Últimas observaciones</div>
-              <div className="px-3 py-2.5 w-[40px]"></div>
+              {!selectionMode && <div className="px-3 py-2.5 w-[40px]"></div>}
             </div>
           </div>
           {/* Virtualized rows */}
@@ -3038,10 +3234,19 @@ export default function LeadsPage() {
                     >
                       <div
                         className={`flex items-start group border-b border-slate-200/80 hover:bg-emerald-50/40 hover:shadow-sm transition-all duration-150 cursor-pointer ${
+                          selectionMode && selectedIds.has(lead.id) ? 'bg-emerald-50 border-l-[3px] border-l-emerald-500' :
                           detailLead?.id === lead.id ? 'bg-emerald-100 border-l-[3px] border-l-emerald-500 shadow-sm ring-1 ring-emerald-200/60' : 'border-l-[3px] border-l-transparent'
                         }`}
-                        onClick={() => openDetailPanel(lead)}
+                        onClick={() => selectionMode ? toggleSelection(lead.id) : openDetailPanel(lead)}
                       >
+                        {/* Selection checkbox */}
+                        {selectionMode && (
+                          <div className="px-2 py-2.5 w-[36px] flex items-center justify-center shrink-0">
+                            <button onClick={(e) => { e.stopPropagation(); toggleSelection(lead.id) }} className="p-0.5">
+                              {selectedIds.has(lead.id) ? <CheckSquare className="w-4 h-4 text-emerald-600" /> : <Square className="w-4 h-4 text-slate-300" />}
+                            </button>
+                          </div>
+                        )}
                         {/* Lead info */}
                         <div className="px-3 py-2.5 w-[220px]">
                           <div className="flex items-center gap-2.5">
@@ -3137,6 +3342,7 @@ export default function LeadsPage() {
                         </div>
 
                         {/* Actions */}
+                        {!selectionMode && (
                         <div className="px-3 py-2.5 w-[40px]">
                           <button
                             onClick={(e) => { e.stopPropagation(); handleDeleteLead(lead.id) }}
@@ -3146,6 +3352,7 @@ export default function LeadsPage() {
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
+                        )}
                       </div>
                     </div>
                   )
@@ -3439,11 +3646,12 @@ export default function LeadsPage() {
             <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
               <LeadDetailPanel
                 lead={detailLead}
+                scrollToTasks={scrollToTasks}
                 onLeadChange={(updatedLead: Lead) => {
                   setDetailLead(updatedLead as any)
                   updateLeadInStages(updatedLead.id, () => updatedLead as any)
                 }}
-                onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
+                onClose={() => { setShowDetailPanel(false); setShowInlineChat(false); setScrollToTasks(false) }}
                 onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
                 onObservationChange={(leadId: string) => {
                   if (viewMode === 'list') {
@@ -3816,6 +4024,39 @@ export default function LeadsPage() {
       )}
 
       {/* Export Modal */}
+
+      {/* Bulk Document Generation Modal */}
+      {showBulkDocModal && (
+        <BulkGenerateDocumentModal
+          leads={viewMode === 'list' ? listLeads : allLoadedLeads}
+          onClose={() => setShowBulkDocModal(false)}
+        />
+      )}
+
+      {/* Destructive Kommo Delete Modal */}
+      {kommoEnabled && (
+      <ConfirmDeleteKommoModal
+        isOpen={!!kommoDeleteTarget}
+        onConfirm={handleDeleteFromKommo}
+        onCancel={() => { setKommoDeleteTarget(null); setKommoDeleting(false) }}
+        leadName={kommoDeleteTarget?.name || 'Sin nombre'}
+        kommoId={kommoDeleteTarget?.kommo_id || 0}
+        loading={kommoDeleting}
+      />
+      )}
+
+      {/* Bulk Delete Kommo Modal */}
+      {kommoEnabled && (
+      <ConfirmBulkDeleteKommoModal
+        isOpen={!!bulkKommoDeleteData}
+        onConfirm={handleBulkDeleteFromKommo}
+        onCancel={() => { setBulkKommoDeleteData(null); setBulkKommoDeleting(false) }}
+        totalCount={bulkKommoDeleteData?.total || 0}
+        kommoLeads={bulkKommoDeleteData?.kommoLeads || []}
+        loading={bulkKommoDeleting}
+      />
+      )}
+
       {showExportModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl p-6 w-full max-w-sm">

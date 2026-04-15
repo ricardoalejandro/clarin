@@ -191,6 +191,44 @@ Parameters: map[string]interface{}{
 },
 },
 },
+{
+Type: "function",
+Function: groqFunction{
+Name:        "get_chat_messages",
+Description: "Obtiene los últimos mensajes de WhatsApp de un contacto por su número de teléfono. Devuelve mensajes con dirección (enviado/recibido), contenido y fecha.",
+Parameters: map[string]interface{}{
+"type": "object",
+"properties": map[string]interface{}{
+"phone": map[string]interface{}{
+"type":        "string",
+"description": "Número de teléfono del contacto (ej: 51926494721 o 926494721).",
+},
+"limit": map[string]interface{}{
+"type":        "integer",
+"description": "Cantidad máxima de mensajes a obtener (default 20, máx 100).",
+},
+},
+"required": []string{"phone"},
+},
+},
+},
+{
+Type: "function",
+Function: groqFunction{
+Name:        "search_chat_messages",
+Description: "Busca mensajes de WhatsApp que contengan un texto específico en todas las conversaciones de la cuenta. Devuelve contacto, teléfono, fragmento del mensaje, dirección y fecha.",
+Parameters: map[string]interface{}{
+"type": "object",
+"properties": map[string]interface{}{
+"query": map[string]interface{}{
+"type":        "string",
+"description": "Texto a buscar en los mensajes.",
+},
+},
+"required": []string{"query"},
+},
+},
+},
 }
 }
 
@@ -204,6 +242,10 @@ func (s *Server) executeTool(ctx context.Context, toolName string, args map[stri
 		u := ""
 		if len(userID) > 0 { u = userID[0] }
 		return s.toolGetTokenConsumption(ctx, args, accountID, u)
+	case "get_chat_messages":
+		return s.toolGetChatMessages(ctx, args, accountID)
+	case "search_chat_messages":
+		return s.toolSearchChatMessages(ctx, args, accountID)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", toolName)
 	}

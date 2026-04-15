@@ -191,12 +191,7 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, logbookID uuid.
 			if parseErr == nil && ast != nil {
 				innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, lb.EventID)
 				if buildErr == nil && innerSQL != "" {
-					remappedSQL := innerSQL
-					for i := len(innerArgs); i >= 1; i-- {
-						old := fmt.Sprintf("$%d", i)
-						nw := fmt.Sprintf("$%d", argIdx+i-1)
-						remappedSQL = strings.ReplaceAll(remappedSQL, old, nw)
-					}
+					remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
 					whereClauses = append(whereClauses, fmt.Sprintf("ep.id IN (%s)", remappedSQL))
 					args = append(args, innerArgs...)
 					argIdx += len(innerArgs)
@@ -490,12 +485,7 @@ func (r *LogbookRepository) PreviewParticipants(ctx context.Context, logbookID u
 			if parseErr == nil && ast != nil {
 				innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, lb.EventID)
 				if buildErr == nil && innerSQL != "" {
-					remappedSQL := innerSQL
-					for i := len(innerArgs); i >= 1; i-- {
-						old := fmt.Sprintf("$%d", i)
-						nw := fmt.Sprintf("$%d", argIdx+i-1)
-						remappedSQL = strings.ReplaceAll(remappedSQL, old, nw)
-					}
+					remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
 					whereClauses = append(whereClauses, fmt.Sprintf("ep.id IN (%s)", remappedSQL))
 					args = append(args, innerArgs...)
 					argIdx += len(innerArgs)

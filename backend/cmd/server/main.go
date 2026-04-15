@@ -6,10 +6,13 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/api"
+	"github.com/naperu/clarin/internal/domain"
 	googleclient "github.com/naperu/clarin/internal/google"
 	"github.com/naperu/clarin/internal/kommo"
 	clarinMCP "github.com/naperu/clarin/internal/mcp"
@@ -33,6 +36,7 @@ func main() {
 	log.Printf("🚀 Clarin CRM v%s (built %s)", Version, BuildTime)
 	// Load configuration
 	cfg := config.Load()
+	cfg.Validate()
 
 	// Initialize database
 	db, err := database.Connect(cfg.DatabaseURL)
@@ -125,6 +129,7 @@ func main() {
 	// Inject Redis cache into automation service and start the engine
 	if redisCache != nil {
 		services.Automation.SetCache(redisCache)
+		services.Auth.SetCache(redisCache)
 	}
 	services.Automation.Start()
 	log.Printf("✅ Automation engine started (50 workers, 500/hr rate limit)")
@@ -134,6 +139,8 @@ func main() {
 	if cfg.KommoSubdomain != "" && cfg.KommoAccessToken != "" {
 		kommoClient := kommo.NewClient(cfg.KommoSubdomain, cfg.KommoAccessToken)
 		kommoSyncSvc = kommo.NewSyncService(kommoClient, db, hub)
+		kommoSyncSvc.WebhookSecret = cfg.KommoWebhookSecret
+		kommoSyncSvc.PublicURL = cfg.PublicURL
 		// Wire event reconciliation callback — called after each Kommo sync cycle
 		kommoSyncSvc.OnLeadTagsChanged = services.Event.ReconcileAllAccountEvents
 		kommoSyncSvc.Start() // Start background sync worker + poller
@@ -158,6 +165,45 @@ func main() {
 	eventSyncCtx, eventSyncCancel := context.WithCancel(context.Background())
 	server.StartEventTagSyncWorker(eventSyncCtx)
 
+	// Start task reminder and overdue workers
+	taskCtx, taskCancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[Task Worker] ⚠️ PANIC recovered: %v — restarting in 10s", r)
+						select {
+						case <-taskCtx.Done():
+							return
+						case <-time.After(10 * time.Second):
+						}
+					}
+				}()
+
+				log.Println("📋 Task reminder/overdue worker started")
+				reminderTicker := time.NewTicker(30 * time.Second)
+				overdueTicker := time.NewTicker(60 * time.Second)
+				defer reminderTicker.Stop()
+				defer overdueTicker.Stop()
+				for {
+					select {
+					case <-taskCtx.Done():
+						log.Println("[Task Worker] Shutting down")
+						return
+					case <-reminderTicker.C:
+						services.Task.ProcessReminders(taskCtx)
+					case <-overdueTicker.C:
+						services.Task.ProcessOverdueTasks(taskCtx)
+					}
+				}
+			}()
+			if taskCtx.Err() != nil {
+				return
+			}
+		}
+	}()
+
 	// Recover orphaned campaigns that were running when the process last died.
 	// Mark them as paused so they can be reviewed/restarted manually.
 	go func() {
@@ -177,136 +223,188 @@ func main() {
 		}
 	}()
 
-	// Start campaign worker with proper context, panic recovery, and cancellable sleeps.
+	// Start parallel campaign scheduler — one goroutine per active campaign.
+	// The scheduler polls for running/scheduled campaigns every 5s and spawns
+	// a dedicated goroutine for each one. Each goroutine owns its campaign's
+	// lifecycle (batching, delays, pauses) and terminates when the campaign
+	// completes, is paused, or the process shuts down.
 	campaignCtx, campaignCancel := context.WithCancel(context.Background())
-	go func() {
+	var activeCampaigns sync.Map // map[uuid.UUID]context.CancelFunc
+
+	// campaignWorker runs in its own goroutine for a single campaign.
+	campaignWorker := func(cCtx context.Context, campaignID uuid.UUID) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[Campaign %s] ⚠️ PANIC recovered in worker: %v", campaignID, r)
+			}
+			activeCampaigns.Delete(campaignID)
+			log.Printf("[Campaign %s] Worker stopped", campaignID)
+		}()
+
+		log.Printf("[Campaign %s] Worker started", campaignID)
+
 		for {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("[Campaign Worker] ⚠️ PANIC recovered: %v — restarting in 10s", r)
-						select {
-						case <-campaignCtx.Done():
-							return
-						case <-time.After(10 * time.Second):
-						}
-					}
-				}()
+			// Re-fetch campaign to get fresh status and settings each cycle
+			campaigns, err := services.Campaign.GetRunningCampaigns(cCtx)
+			if err != nil {
+				log.Printf("[Campaign %s] ⚠️ Failed to fetch campaign: %v", campaignID, err)
+				return
+			}
+			var campaign *domain.Campaign
+			for _, c := range campaigns {
+				if c.ID == campaignID {
+					campaign = c
+					break
+				}
+			}
+			if campaign == nil {
+				// Campaign no longer running/scheduled — exit
+				return
+			}
 
-				log.Println("📢 Campaign worker started")
-				ticker := time.NewTicker(10 * time.Second)
-				defer ticker.Stop()
-				for {
+			// Handle scheduled: auto-start when time arrives
+			if campaign.Status == "scheduled" {
+				if campaign.ScheduledAt != nil && time.Now().Before(*campaign.ScheduledAt) {
+					// Not yet time — wait and retry
 					select {
-					case <-campaignCtx.Done():
-						log.Println("[Campaign Worker] Shutting down")
+					case <-cCtx.Done():
 						return
-					case <-ticker.C:
-						campaigns, err := services.Campaign.GetRunningCampaigns(campaignCtx)
-						if err != nil || len(campaigns) == 0 {
-							continue
-						}
-						for _, c := range campaigns {
-							// Check for shutdown between campaigns
-							select {
-							case <-campaignCtx.Done():
-								return
-							default:
-							}
+					case <-time.After(10 * time.Second):
+					}
+					continue
+				}
+				if err := services.Campaign.Start(cCtx, campaign.ID, nil); err != nil {
+					log.Printf("[Campaign %s] Failed to auto-start scheduled: %v", campaignID, err)
+					return
+				}
+				log.Printf("[Campaign %s] Auto-started scheduled campaign", campaignID)
+				campaign.Status = "running"
+			}
 
-							// Handle scheduled campaigns: auto-start when time arrives
-							if c.Status == "scheduled" {
-								if c.ScheduledAt != nil && time.Now().Before(*c.ScheduledAt) {
-									continue // Not yet time
-								}
-								if err := services.Campaign.Start(campaignCtx, c.ID, nil); err != nil {
-									log.Printf("[Campaign %s] Failed to auto-start scheduled: %v", c.ID, err)
-									continue
-								}
-								log.Printf("[Campaign %s] Auto-started scheduled campaign", c.ID)
-								c.Status = "running"
-							}
-							settings := c.Settings
-							minDelay := 8
-							maxDelay := 15
-							batchSize := 25
-							batchPauseMin := 2
+			// Read settings
+			settings := campaign.Settings
+			minDelay := 8
+			maxDelay := 15
+			batchSize := 25
+			batchPauseMin := 2
 
-							// Helper to read int from settings (handles both key variants)
-							readInt := func(keys []string, def int) int {
-								for _, key := range keys {
-									if v, ok := settings[key]; ok {
-										if f, ok := v.(float64); ok {
-											return int(f)
-										}
-									}
-								}
-								return def
-							}
-
-							minDelay = readInt([]string{"min_delay_seconds", "min_delay"}, minDelay)
-							maxDelay = readInt([]string{"max_delay_seconds", "max_delay"}, maxDelay)
-							batchSize = readInt([]string{"batch_size"}, batchSize)
-							batchPauseMin = readInt([]string{"batch_pause_minutes", "batch_pause"}, batchPauseMin)
-
-							if minDelay > maxDelay {
-								minDelay = maxDelay
-							}
-
-							// Process one batch for this campaign
-							sentInBatch := 0
-							var lastSendTime time.Time
-							for i := 0; i < batchSize; i++ {
-								// Check for shutdown between messages
-								select {
-								case <-campaignCtx.Done():
-									return
-								default:
-								}
-								var waitTimeMs *int
-								if !lastSendTime.IsZero() {
-									w := int(time.Since(lastSendTime).Milliseconds())
-									waitTimeMs = &w
-								}
-								hasMore, sendErr := services.Campaign.ProcessNextRecipient(campaignCtx, c.ID, waitTimeMs)
-								if !hasMore {
-									break
-								}
-								lastSendTime = time.Now()
-								sentInBatch++
-								// Random delay between messages (cancellable)
-								delayRange := maxDelay - minDelay
-								if delayRange < 0 {
-									delayRange = 0
-								}
-								delay := time.Duration(minDelay+rand.Intn(delayRange+1)) * time.Second
-								if sendErr != nil {
-									log.Printf("[Campaign %s] ❌ Failed msg %d: %v, waiting %v", c.ID, sentInBatch, sendErr, delay)
-								} else {
-									log.Printf("[Campaign %s] ✅ Sent msg %d, waiting %v", c.ID, sentInBatch, delay)
-								}
-								select {
-								case <-campaignCtx.Done():
-									return
-								case <-time.After(delay):
-								}
-							}
-							// Pause between batches to avoid detection (cancellable)
-							if sentInBatch > 0 && batchPauseMin > 0 {
-								log.Printf("[Campaign %s] Batch done: %d sent, pausing %d min", c.ID, sentInBatch, batchPauseMin)
-								select {
-								case <-campaignCtx.Done():
-									return
-								case <-time.After(time.Duration(batchPauseMin) * time.Minute):
-								}
-							}
+			readInt := func(keys []string, def int) int {
+				for _, key := range keys {
+					if v, ok := settings[key]; ok {
+						if f, ok := v.(float64); ok {
+							return int(f)
 						}
 					}
 				}
-			}()
-			// If we get here without a panic, context was cancelled
-			if campaignCtx.Err() != nil {
+				return def
+			}
+
+			minDelay = readInt([]string{"min_delay_seconds", "min_delay"}, minDelay)
+			maxDelay = readInt([]string{"max_delay_seconds", "max_delay"}, maxDelay)
+			batchSize = readInt([]string{"batch_size"}, batchSize)
+			batchPauseMin = readInt([]string{"batch_pause_minutes", "batch_pause"}, batchPauseMin)
+			if minDelay > maxDelay {
+				minDelay = maxDelay
+			}
+
+			// Verify device is connected
+			if !devicePool.IsDeviceConnected(campaign.DeviceID) {
+				log.Printf("[Campaign %s] ⚠️ Device %s not connected, retrying in 30s", campaignID, campaign.DeviceID)
+				select {
+				case <-cCtx.Done():
+					return
+				case <-time.After(30 * time.Second):
+				}
+				continue
+			}
+
+			// Process one batch
+			sentInBatch := 0
+			var lastSendTime time.Time
+			for i := 0; i < batchSize; i++ {
+				select {
+				case <-cCtx.Done():
+					return
+				default:
+				}
+				var waitTimeMs *int
+				if !lastSendTime.IsZero() {
+					w := int(time.Since(lastSendTime).Milliseconds())
+					waitTimeMs = &w
+				}
+				hasMore, sendErr := services.Campaign.ProcessNextRecipient(cCtx, campaignID, waitTimeMs)
+				if !hasMore {
+					if i == 0 && sendErr != nil {
+						log.Printf("[Campaign %s] ⚠️ ProcessNextRecipient failed: %v", campaignID, sendErr)
+					}
+					break
+				}
+				lastSendTime = time.Now()
+				sentInBatch++
+				delayRange := maxDelay - minDelay
+				if delayRange < 0 {
+					delayRange = 0
+				}
+				delay := time.Duration(minDelay+rand.Intn(delayRange+1)) * time.Second
+				if sendErr != nil {
+					log.Printf("[Campaign %s] ❌ Failed msg %d: %v, waiting %v", campaignID, sentInBatch, sendErr, delay)
+				} else {
+					log.Printf("[Campaign %s] ✅ Sent msg %d, waiting %v", campaignID, sentInBatch, delay)
+				}
+				select {
+				case <-cCtx.Done():
+					return
+				case <-time.After(delay):
+				}
+			}
+
+			if sentInBatch == 0 {
+				// No messages were sent (campaign completed or no pending recipients)
 				return
+			}
+
+			// Pause between batches
+			if batchPauseMin > 0 {
+				log.Printf("[Campaign %s] Batch done: %d sent, pausing %d min", campaignID, sentInBatch, batchPauseMin)
+				select {
+				case <-cCtx.Done():
+					return
+				case <-time.After(time.Duration(batchPauseMin) * time.Minute):
+				}
+			}
+		}
+	}
+
+	// Scheduler goroutine: polls for campaigns and spawns workers
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[Campaign Scheduler] ⚠️ PANIC recovered: %v", r)
+			}
+		}()
+
+		log.Println("📢 Campaign scheduler started (parallel mode)")
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-campaignCtx.Done():
+				log.Println("[Campaign Scheduler] Shutting down")
+				return
+			case <-ticker.C:
+				campaigns, err := services.Campaign.GetRunningCampaigns(campaignCtx)
+				if err != nil || len(campaigns) == 0 {
+					continue
+				}
+				for _, c := range campaigns {
+					if _, loaded := activeCampaigns.Load(c.ID); loaded {
+						continue // Already has a worker
+					}
+					// Spawn a new worker for this campaign
+					workerCtx, workerCancel := context.WithCancel(campaignCtx)
+					activeCampaigns.Store(c.ID, workerCancel)
+					go campaignWorker(workerCtx, c.ID)
+				}
 			}
 		}
 	}()
@@ -427,6 +525,9 @@ func main() {
 
 		// Stop event tag sync worker
 		eventSyncCancel()
+
+		// Stop task worker
+		taskCancel()
 
 		// Stop Kommo sync worker
 		if kommoSyncSvc != nil {

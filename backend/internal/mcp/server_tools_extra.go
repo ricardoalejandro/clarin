@@ -269,13 +269,17 @@ func (s *MCPServer) toolListCampaigns(ctx context.Context, req mcp.CallToolReque
 
 // ──── get_campaign_detail ────
 func (s *MCPServer) toolGetCampaignDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	accountID, err := s.getAccountID(ctx)
+	if err != nil {
+		return errResult("no se pudo determinar la cuenta"), nil
+	}
 	campaignID, err := uuidArg(req, "campaign_id")
 	if err != nil {
 		return errResult("campaign_id inválido"), nil
 	}
 
 	campaign, err := s.repos.Campaign.GetByID(ctx, campaignID)
-	if err != nil || campaign == nil {
+	if err != nil || campaign == nil || campaign.AccountID != accountID {
 		return errResult("campaña no encontrada"), nil
 	}
 

@@ -169,7 +169,7 @@ type KommoContactEmbedded struct {
 }
 
 type KommoTag struct {
-	ID   int    `json:"id"`
+	ID   int    `json:"id,omitempty"`
 	Name string `json:"name"`
 }
 
@@ -183,6 +183,20 @@ type KommoCustomField struct {
 		EnumID   int         `json:"enum_id,omitempty"`
 		EnumCode string      `json:"enum_code,omitempty"`
 	} `json:"values"`
+}
+
+// KommoEvent represents an event from the Kommo Events API (GET /api/v4/events).
+// Events capture ALL changes in Kommo, including UI-initiated tag changes that webhooks miss.
+type KommoEvent struct {
+	ID         string          `json:"id"`
+	Type       string          `json:"type"`
+	EntityID   int             `json:"entity_id"`
+	EntityType string          `json:"entity_type"`
+	CreatedBy  int             `json:"created_by"`
+	CreatedAt  int64           `json:"created_at"`
+	ValueAfter json.RawMessage `json:"value_after"`
+	ValueBefore json.RawMessage `json:"value_before"`
+	AccountID  int             `json:"account_id"`
 }
 
 // --- API methods ---
@@ -367,6 +381,37 @@ func (c *Client) GetLeadsForPipeline(pipelineID int, updatedSince int64, page in
 	return resp.Embedded.Leads, hasMore, nil
 }
 
+// GetLeadsByPipelineStatus returns leads filtered by pipeline+status (for won/lost leads).
+// Kommo's filter[pipeline_id][] excludes won/lost leads; use filter[statuses] instead.
+func (c *Client) GetLeadsByPipelineStatus(pipelineID, statusID, page int) ([]KommoLead, bool, error) {
+	limit := 250
+	path := fmt.Sprintf("/leads?page=%d&limit=%d&with=contacts&filter[statuses][0][pipeline_id]=%d&filter[statuses][0][status_id]=%d",
+		page, limit, pipelineID, statusID)
+
+	data, err := c.get(path)
+	if err != nil {
+		return nil, false, err
+	}
+
+	var resp struct {
+		Page     int `json:"_page"`
+		Embedded struct {
+			Leads []KommoLead `json:"leads"`
+		} `json:"_embedded"`
+		Links struct {
+			Next *struct {
+				Href string `json:"href"`
+			} `json:"next"`
+		} `json:"_links"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, false, fmt.Errorf("kommo parse leads: %w", err)
+	}
+
+	hasMore := resp.Links.Next != nil
+	return resp.Embedded.Leads, hasMore, nil
+}
+
 // GetContactByID returns a single contact by Kommo ID.
 func (c *Client) GetContactByID(contactID int) (*KommoContact, error) {
 	data, err := c.get(fmt.Sprintf("/contacts/%d", contactID))
@@ -406,6 +451,53 @@ func (c *Client) GetContacts(page int) ([]KommoContact, bool, error) {
 
 	hasMore := resp.Links.Next != nil
 	return resp.Embedded.Contacts, hasMore, nil
+}
+
+// GetContactsByIDs fetches multiple contacts in a single API call using filter[id][].
+// Kommo supports up to 250 IDs per request. Returns a map of contactID → KommoContact.
+func (c *Client) GetContactsByIDs(contactIDs []int) (map[int]KommoContact, error) {
+	result := make(map[int]KommoContact)
+	if len(contactIDs) == 0 {
+		return result, nil
+	}
+
+	// Process in chunks of 250 (Kommo API limit)
+	for start := 0; start < len(contactIDs); start += 250 {
+		end := start + 250
+		if end > len(contactIDs) {
+			end = len(contactIDs)
+		}
+		chunk := contactIDs[start:end]
+
+		path := fmt.Sprintf("/contacts?limit=%d", len(chunk))
+		for _, id := range chunk {
+			path += fmt.Sprintf("&filter[id][]=%d", id)
+		}
+
+		data, err := c.get(path)
+		if err != nil {
+			// 204 = no contacts found for these IDs
+			if strings.Contains(err.Error(), "204") || strings.Contains(err.Error(), "No content") {
+				continue
+			}
+			return result, err
+		}
+
+		var resp struct {
+			Embedded struct {
+				Contacts []KommoContact `json:"contacts"`
+			} `json:"_embedded"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return result, fmt.Errorf("kommo parse batch contacts: %w", err)
+		}
+
+		for _, c := range resp.Embedded.Contacts {
+			result[c.ID] = c
+		}
+	}
+
+	return result, nil
 }
 
 // GetTags returns all tags for leads (with pagination).
@@ -877,4 +969,142 @@ func (c *Client) UpdateContactName(kommoContactID int, name string) (int64, erro
 		return 0, fmt.Errorf("no contact in update response")
 	}
 	return resp.Embedded.Contacts[0].UpdatedAt, nil
+}
+
+// --- Webhook Management ---
+
+// KommoWebhook represents a registered webhook in Kommo.
+type KommoWebhook struct {
+	ID          int    `json:"id"`
+	Destination string `json:"destination"`
+}
+
+// ListWebhooks returns all registered webhooks for the Kommo account.
+func (c *Client) ListWebhooks() ([]KommoWebhook, error) {
+	data, err := c.get("/webhooks")
+	if err != nil {
+		// 204 = no webhooks registered
+		if strings.Contains(err.Error(), "204") {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var resp struct {
+		Embedded struct {
+			Webhooks []KommoWebhook `json:"webhooks"`
+		} `json:"_embedded"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("kommo parse webhooks: %w", err)
+	}
+	return resp.Embedded.Webhooks, nil
+}
+
+// RegisterWebhook registers a new webhook in Kommo.
+// destination is the full URL that will receive POST requests.
+// events is a list of event types to subscribe to (e.g., "update_lead", "add_lead").
+func (c *Client) RegisterWebhook(destination string, events []string) error {
+	payload := map[string]interface{}{
+		"destination": destination,
+		"settings":    events,
+	}
+	_, err := c.doRequest("POST", "/webhooks", payload)
+	return err
+}
+
+// DeleteWebhook removes a webhook by ID.
+func (c *Client) DeleteWebhook(id int) error {
+	_, err := c.doRequest("DELETE", fmt.Sprintf("/webhooks/%d", id), nil)
+	return err
+}
+
+// GetEvents returns events from the Kommo Events API with pagination.
+// eventTypes is a comma-separated list of event types to filter (e.g., "entity_tag_added,entity_tag_deleted").
+// entityType filters by entity (e.g., "lead"). since is a Unix timestamp.
+func (c *Client) GetEvents(since int64, eventTypes string, entityType string, page int) ([]KommoEvent, bool, error) {
+	limit := 100
+	path := fmt.Sprintf("/events?page=%d&limit=%d", page, limit)
+	if since > 0 {
+		path += fmt.Sprintf("&filter[created_at][from]=%d", since)
+	}
+	if eventTypes != "" {
+		path += fmt.Sprintf("&filter[type]=%s", eventTypes)
+	}
+	if entityType != "" {
+		path += fmt.Sprintf("&filter[entity]=%s", entityType)
+	}
+
+	data, err := c.get(path)
+	if err != nil {
+		// 204 = no events found
+		if strings.Contains(err.Error(), "204") {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+
+	var resp struct {
+		Embedded struct {
+			Events []KommoEvent `json:"events"`
+		} `json:"_embedded"`
+		Links struct {
+			Next *struct {
+				Href string `json:"href"`
+			} `json:"next"`
+		} `json:"_links"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, false, fmt.Errorf("kommo parse events: %w", err)
+	}
+
+	hasMore := resp.Links.Next != nil
+	return resp.Embedded.Events, hasMore, nil
+}
+
+// GetLeadsByIDs fetches multiple leads by their Kommo IDs in batches.
+// Returns a map of kommoID → KommoLead. Leads not found are silently skipped.
+func (c *Client) GetLeadsByIDs(leadIDs []int) (map[int]KommoLead, error) {
+	result := make(map[int]KommoLead)
+	if len(leadIDs) == 0 {
+		return result, nil
+	}
+
+	// Process in chunks of 50 (conservative to keep URL length manageable)
+	for start := 0; start < len(leadIDs); start += 50 {
+		end := start + 50
+		if end > len(leadIDs) {
+			end = len(leadIDs)
+		}
+		chunk := leadIDs[start:end]
+
+		path := fmt.Sprintf("/leads?limit=%d&with=contacts", len(chunk))
+		for _, id := range chunk {
+			path += fmt.Sprintf("&filter[id][]=%d", id)
+		}
+
+		data, err := c.get(path)
+		if err != nil {
+			// 204 = no leads found for these IDs
+			if strings.Contains(err.Error(), "204") || strings.Contains(err.Error(), "No content") {
+				continue
+			}
+			return result, err
+		}
+
+		var resp struct {
+			Embedded struct {
+				Leads []KommoLead `json:"leads"`
+			} `json:"_embedded"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return result, fmt.Errorf("kommo parse batch leads: %w", err)
+		}
+
+		for _, l := range resp.Embedded.Leads {
+			result[l.ID] = l
+		}
+	}
+
+	return result, nil
 }

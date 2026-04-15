@@ -134,8 +134,15 @@ func (s *Server) handleGoogleStatus(c *fiber.Ctx) error {
 
 	connected := account.GoogleEmail != nil && *account.GoogleEmail != ""
 	syncCount := 0
+	tokenValid := false
 	if connected {
 		syncCount, _ = s.repos.Account.GetGoogleSyncCount(c.Context(), accountID)
+		// Test token validity
+		_, accessToken, refreshToken, _, tokenErr := s.repos.Account.GetGoogleTokens(c.Context(), accountID)
+		if tokenErr == nil && accessToken != "" {
+			_, refreshErr := s.ensureValidToken(c.Context(), accountID, accessToken, refreshToken)
+			tokenValid = refreshErr == nil
+		}
 	}
 
 	return c.JSON(fiber.Map{
@@ -147,6 +154,7 @@ func (s *Server) handleGoogleStatus(c *fiber.Ctx) error {
 		"sync_limit":     account.GoogleSyncLimit,
 		"sync_count":     syncCount,
 		"configured":     s.googleClient != nil,
+		"token_valid":    tokenValid,
 	})
 }
 
@@ -169,6 +177,22 @@ func (s *Server) handleGoogleSyncContact(c *fiber.Ctx) error {
 	}
 	if contact.AccountID != accountID {
 		return c.Status(403).JSON(fiber.Map{"success": false, "error": "forbidden"})
+	}
+
+	// Pre-validate Google connection and refresh token if needed
+	email, accessToken, refreshToken, _, err := s.repos.Account.GetGoogleTokens(c.Context(), accountID)
+	if err != nil || email == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Google no está conectado"})
+	}
+
+	// Proactively refresh the token before background sync
+	_, refreshErr := s.ensureValidToken(c.Context(), accountID, accessToken, refreshToken)
+	if refreshErr != nil {
+		log.Printf("[GOOGLE] Pre-sync token refresh failed for account %s: %v", accountID, refreshErr)
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"error":   "No se pudo renovar el token de Google. Desconecta y vuelve a conectar Google en Configuración → Integraciones.",
+		})
 	}
 
 	// Mark as synced immediately so UI reflects the change
@@ -261,6 +285,18 @@ func (s *Server) handleGoogleBatchSync(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{
 			"success": false,
 			"error":   fmt.Sprintf("Quota exceeded: %d remaining, %d requested", remaining, len(body.ContactIDs)),
+		})
+	}
+
+	// Pre-validate token before starting batch
+	_, accessToken, refreshToken, _, tokenErr := s.repos.Account.GetGoogleTokens(c.Context(), accountID)
+	if tokenErr != nil || accessToken == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Google no está conectado"})
+	}
+	if _, refreshErr := s.ensureValidToken(c.Context(), accountID, accessToken, refreshToken); refreshErr != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"error":   "No se pudo renovar el token de Google. Desconecta y vuelve a conectar Google en Configuración → Integraciones.",
 		})
 	}
 
@@ -386,6 +422,18 @@ func (s *Server) handleGoogleBatchSyncFromLeads(c *fiber.Ctx) error {
 		})
 	}
 
+	// Pre-validate token before starting batch
+	_, accessToken, refreshToken, _, tokenErr := s.repos.Account.GetGoogleTokens(c.Context(), accountID)
+	if tokenErr != nil || accessToken == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Google no está conectado"})
+	}
+	if _, refreshErr := s.ensureValidToken(c.Context(), accountID, accessToken, refreshToken); refreshErr != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"error":   "No se pudo renovar el token de Google. Desconecta y vuelve a conectar Google en Configuración → Integraciones.",
+		})
+	}
+
 	// Mark all contacts as synced immediately
 	for _, cid := range contactIDs {
 		_ = s.repos.Contact.SetGoogleSyncPending(c.Context(), cid)
@@ -504,11 +552,16 @@ func (s *Server) syncContactToGoogle(ctx context.Context, accountID, contactID u
 	// Try the operation, refresh token on 401 and retry once
 	result, err := s.doGoogleSync(ctx, accessToken, contact, person, groupID)
 	if err != nil && strings.Contains(err.Error(), "status 401") && refreshToken != "" {
+		log.Printf("[GOOGLE] Got 401 for contact %s, attempting token refresh...", contactID)
 		newToken, refreshErr := s.googleClient.RefreshAccessToken(ctx, refreshToken)
-		if refreshErr == nil {
-			_ = s.repos.Account.UpdateGoogleAccessToken(ctx, accountID, newToken.AccessToken)
-			result, err = s.doGoogleSync(ctx, newToken.AccessToken, contact, person, groupID)
+		if refreshErr != nil {
+			log.Printf("[GOOGLE] Token refresh FAILED for account %s: %v (token may be revoked or expired — user needs to reconnect Google)", accountID, refreshErr)
+			_ = s.repos.Contact.SetGoogleSyncError(ctx, contactID, "Token de Google expirado o revocado. Reconecta Google en Configuración → Integraciones.")
+			return nil, fmt.Errorf("Google token refresh failed: %w", refreshErr)
 		}
+		log.Printf("[GOOGLE] Token refreshed successfully for account %s", accountID)
+		_ = s.repos.Account.UpdateGoogleAccessToken(ctx, accountID, newToken.AccessToken)
+		result, err = s.doGoogleSync(ctx, newToken.AccessToken, contact, person, groupID)
 	}
 
 	if err != nil {
@@ -647,14 +700,14 @@ func (s *Server) doGoogleSync(ctx context.Context, accessToken string, contact *
 // ensureValidToken refreshes the access token if needed
 func (s *Server) ensureValidToken(ctx context.Context, accountID uuid.UUID, accessToken, refreshToken string) (string, error) {
 	if refreshToken == "" {
-		return accessToken, nil
+		return accessToken, fmt.Errorf("no refresh token available")
 	}
 
 	// Always refresh for manual user-triggered operations (infrequent)
 	newToken, err := s.googleClient.RefreshAccessToken(ctx, refreshToken)
 	if err != nil {
 		log.Printf("[GOOGLE] Token refresh FAILED for account %s: %v", accountID, err)
-		return accessToken, nil
+		return accessToken, fmt.Errorf("token refresh failed: %w", err)
 	}
 
 	_ = s.repos.Account.UpdateGoogleAccessToken(ctx, accountID, newToken.AccessToken)
@@ -746,6 +799,18 @@ func (s *Server) handleEventGoogleSync(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{
 			"success": false,
 			"error":   fmt.Sprintf("Cuota insuficiente: %d disponibles, %d necesarios", remaining, len(contactIDs)),
+		})
+	}
+
+	// Pre-validate token before starting event sync
+	_, accessToken, refreshToken, _, tokenErr := s.repos.Account.GetGoogleTokens(c.Context(), accountID)
+	if tokenErr != nil || accessToken == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Google no está conectado"})
+	}
+	if _, refreshErr := s.ensureValidToken(c.Context(), accountID, accessToken, refreshToken); refreshErr != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"error":   "No se pudo renovar el token de Google. Desconecta y vuelve a conectar Google en Configuración → Integraciones.",
 		})
 	}
 

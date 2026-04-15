@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   Search, Phone, PhoneOff, Mail, Building2, Tag, Edit, Trash2, RefreshCw,
   ChevronDown, CheckSquare, Square, XCircle, MoreVertical, MoreHorizontal,
@@ -17,8 +18,11 @@ import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCamp
 import CreateContactModal from '@/components/CreateContactModal'
 import PasteFromExcelModal from '@/components/PasteFromExcelModal'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
+import ChatPanel from '@/components/chat/ChatPanel'
 import FormulaEditor from '@/components/FormulaEditor'
+import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import type { Lead } from '@/types/contact'
+import type { Chat } from '@/types/chat'
 
 interface ContactDeviceName {
   id: string
@@ -55,6 +59,9 @@ interface Contact {
   age: number | null
   dni: string | null
   birth_date: string | null
+  address: string | null
+  distrito: string | null
+  ocupacion: string | null
   tags: string[] | null
   structured_tags: StructuredTag[] | null
   notes: string | null
@@ -136,6 +143,9 @@ function contactToLead(c: Contact): Lead {
     age: c.age ?? null,
     dni: c.dni ?? null,
     birth_date: c.birth_date ?? null,
+    address: c.address ?? null,
+    distrito: c.distrito ?? null,
+    ocupacion: c.ocupacion ?? null,
     notes: c.notes ?? null,
     tags: c.tags || null,
     structured_tags: c.structured_tags || null,
@@ -161,6 +171,7 @@ function contactToLead(c: Contact): Lead {
 }
 
 export default function ContactsPage() {
+  const kommoEnabled = typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true'
   const [contacts, setContacts] = useState<Contact[]>([])
   const [devices, setDevices] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
@@ -199,6 +210,7 @@ export default function ContactsPage() {
   // Detail / Edit
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null)
   const [showDetailPanel, setShowDetailPanel] = useState(false)
+  const [scrollToTasks, setScrollToTasks] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [editForm, setEditForm] = useState({
     custom_name: '',
@@ -210,6 +222,7 @@ export default function ContactsPage() {
     age: '',
     tags: '',
     notes: '',
+    address: '',
   })
 
   // Duplicates
@@ -229,6 +242,7 @@ export default function ContactsPage() {
   const [showImportModal, setShowImportModal] = useState(false)
   const [showCreateContact, setShowCreateContact] = useState(false)
   const [showPasteExcel, setShowPasteExcel] = useState(false)
+  const [showBulkDocModal, setShowBulkDocModal] = useState(false)
 
   // Toolbar dropdown
   const [showMoreMenu, setShowMoreMenu] = useState(false)
@@ -265,10 +279,17 @@ export default function ContactsPage() {
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
   const [submittingBroadcast, setSubmittingBroadcast] = useState(false)
 
-  // Send message
+  // Send message / Inline chat
   const [showSendMessage, setShowSendMessage] = useState(false)
-  const [sendDeviceId, setSendDeviceId] = useState('')
   const [sendLoading, setSendLoading] = useState(false)
+  const [whatsappPhone, setWhatsappPhone] = useState('')
+  const [showInlineChat, setShowInlineChat] = useState(false)
+  const [inlineChatId, setInlineChatId] = useState('')
+  const [inlineChat, setInlineChat] = useState<Chat | null>(null)
+  const [inlineChatDeviceId, setInlineChatDeviceId] = useState('')
+  const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false)
+  const [existingChatForWA, setExistingChatForWA] = useState<any>(null)
+  const [allDevicesForModal, setAllDevicesForModal] = useState<Device[]>([])
 
   // Ver Leads modal
   const [showContactLeads, setShowContactLeads] = useState(false)
@@ -293,6 +314,14 @@ export default function ContactsPage() {
   const [googleSyncing, setGoogleSyncing] = useState(false)
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+
+  // Virtualizer for contacts table
+  const contactsVirtualizer = useVirtualizer({
+    count: contacts.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => 56,
+    overscan: 15,
+  })
 
   const fetchContacts = useCallback(async (reset: boolean = true) => {
     if (!token) return
@@ -432,11 +461,51 @@ export default function ContactsPage() {
     return () => clearTimeout(timer)
   }, [searchTerm])
 
+  // Debounce tag filter changes to prevent flickering
+  const [debouncedTagNames, setDebouncedTagNames] = useState<Set<string>>(new Set())
+  const [debouncedExcludeTagNames, setDebouncedExcludeTagNames] = useState<Set<string>>(new Set())
+  const [debouncedTagMode, setDebouncedTagMode] = useState<'OR' | 'AND'>('OR')
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedTagNames(filterTagNames)
+      setDebouncedExcludeTagNames(excludeFilterTagNames)
+      setDebouncedTagMode(tagFilterMode)
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [filterTagNames, excludeFilterTagNames, tagFilterMode])
+
   useEffect(() => {
     offsetRef.current = 0
     fetchContacts(true)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch, filterDevice, appliedFormulaType, appliedFormulaText, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder])
+  }, [debouncedSearch, filterDevice, appliedFormulaType, appliedFormulaText, debouncedTagNames, debouncedExcludeTagNames, debouncedTagMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder])
+
+  // Auto-open contact detail from URL params (e.g. ?contact_id=UUID&scroll=tasks)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const cId = params.get('contact_id')
+    const scroll = params.get('scroll')
+    if (!cId) return
+
+    // Clear URL params to avoid re-triggering
+    window.history.replaceState({}, '', window.location.pathname)
+
+    const fetchAndOpenContact = async () => {
+      try {
+        const token = localStorage.getItem('token')
+        const res = await fetch(`/api/contacts/${cId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (data.success && data.contact) {
+          setSelectedContact(data.contact)
+          setShowDetailPanel(true)
+          if (scroll === 'tasks') setScrollToTasks(true)
+        }
+      } catch { /* ignore */ }
+    }
+    fetchAndOpenContact()
+  }, [])
 
   // Lock body scroll when detail panel is open
   useEffect(() => {
@@ -452,14 +521,15 @@ export default function ContactsPage() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (showSendMessage) { setShowSendMessage(false); setSendDeviceId(''); return }
+      if (showSendMessage) { setShowSendMessage(false); return }
       if (showDuplicates) { setShowDuplicates(false); return }
       if (showEditModal) { setShowEditModal(false); setSelectedContact(null); return }
+      if (showInlineChat) { setShowInlineChat(false); setInlineChatReadOnly(false); return }
       if (showDetailPanel) { setShowDetailPanel(false); return }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showSendMessage, showDuplicates, showEditModal, showDetailPanel])
+  }, [showSendMessage, showDuplicates, showEditModal, showInlineChat, showDetailPanel])
 
   const openDetail = async (contact: Contact) => {
     // Fetch full contact with device names
@@ -490,6 +560,7 @@ export default function ContactsPage() {
       age: contact.age ? String(contact.age) : '',
       tags: (contact.tags || []).join(', '),
       notes: contact.notes || '',
+      address: contact.address || '',
     })
     setShowEditModal(true)
   }
@@ -513,6 +584,7 @@ export default function ContactsPage() {
           age: editForm.age ? parseInt(editForm.age) : null,
           tags: editForm.tags.split(',').map(t => t.trim()).filter(Boolean),
           notes: editForm.notes || null,
+          address: editForm.address || null,
         }),
       })
       const data = await res.json()
@@ -530,24 +602,6 @@ export default function ContactsPage() {
     }
   }
 
-  const handleResetFromDevice = async (contactId: string) => {
-    if (!confirm('¿Restaurar datos del dispositivo? Se eliminará el nombre personalizado.')) return
-    try {
-      const res = await fetch(`/api/contacts/${contactId}/reset`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        fetchContacts()
-        if (data.contact) setSelectedContact(data.contact)
-      } else {
-        alert(data.error || 'Error al restaurar')
-      }
-    } catch {
-      alert('Error de conexión')
-    }
-  }
 
   const handleDeleteContact = async (contactId: string) => {
     if (!confirm('¿Estás seguro de eliminar este contacto?')) return
@@ -707,43 +761,115 @@ export default function ContactsPage() {
 
 
 
-  const handleSendMessageToContact = async (deviceId?: string) => {
-    const devId = deviceId || sendDeviceId
-    if (!selectedContact || !devId) return
-    setSendDeviceId(devId)
-    setSendLoading(true)
+  const handleSendWhatsApp = async (phone: string) => {
+    setWhatsappPhone(phone)
+    const cleanPhone = phone.replace(/[^0-9]/g, '')
+    const token = localStorage.getItem('token')
 
-    const phone = selectedContact.phone || selectedContact.jid?.replace(/@.*$/, '') || ''
-    if (!phone) {
-      alert('Este contacto no tiene número de teléfono')
-      setSendLoading(false)
-      return
-    }
-
+    // Fetch all devices (connected + disconnected)
+    let allDevs: Device[] = []
     try {
-      const res = await fetch('/api/chats/new', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          device_id: devId,
-          phone: phone.replace(/[^0-9]/g, ''),
-        }),
+      const res = await fetch('/api/devices', {
+        headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
       if (data.success) {
-        setShowSendMessage(false)
-        setShowDetailPanel(false)
-        router.push(`/dashboard/chats?open=${data.chat.id}`)
+        allDevs = data.devices || []
+      }
+    } catch (err) {
+      console.error('Failed to fetch devices:', err)
+      alert('Error al obtener dispositivos')
+      return
+    }
+
+    const connectedDevices = allDevs.filter((d: Device) => d.status === 'connected')
+    if (connectedDevices.length === 0) {
+      // Check if there's an existing chat to show read-only
+      try {
+        const chatRes = await fetch(`/api/chats/find-by-phone/${cleanPhone}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const chatData = await chatRes.json()
+        if (chatData.success && chatData.chat) {
+          setInlineChatId(chatData.chat.id)
+          setInlineChat(chatData.chat)
+          setInlineChatDeviceId(chatData.chat.device_id || '')
+          setInlineChatReadOnly(true)
+          setShowInlineChat(true)
+          return
+        }
+      } catch {}
+      alert('No hay dispositivos conectados')
+      return
+    }
+
+    // Check for existing chat with this phone
+    let existingChat: any = null
+    try {
+      const chatRes = await fetch(`/api/chats/find-by-phone/${cleanPhone}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const chatData = await chatRes.json()
+      if (chatData.success && chatData.chat) {
+        existingChat = chatData.chat
+      }
+    } catch {}
+
+    // If only 1 connected device → skip modal, open directly
+    if (connectedDevices.length === 1) {
+      const device = connectedDevices[0]
+      if (existingChat && existingChat.device_id === device.id) {
+        setInlineChatId(existingChat.id)
+        setInlineChat(existingChat)
+        setInlineChatDeviceId(device.id)
+        setInlineChatReadOnly(false)
+        setShowInlineChat(true)
+        return
+      }
+      await handleContactDeviceSelected(device)
+      return
+    }
+
+    // Multiple connected devices → show smart modal
+    setExistingChatForWA(existingChat)
+    setAllDevicesForModal(allDevs)
+    setDevices(connectedDevices)
+    setShowSendMessage(true)
+  }
+
+  const handleContactDeviceSelected = async (device: Device) => {
+    setShowSendMessage(false)
+    setInlineChatReadOnly(false)
+    const cleanPhone = whatsappPhone.replace(/[^0-9]/g, '')
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/chats/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ device_id: device.id, phone: cleanPhone }),
+      })
+      const data = await res.json()
+      if (data.success && data.chat) {
+        setInlineChatId(data.chat.id)
+        setInlineChat(data.chat)
+        setInlineChatDeviceId(device.id)
+        setShowInlineChat(true)
       } else {
         alert(data.error || 'Error al crear conversación')
       }
     } catch {
       alert('Error de conexión')
-    } finally {
-      setSendLoading(false)
+    }
+  }
+
+  const handlePreviousDeviceSelected = () => {
+    setShowSendMessage(false)
+    if (existingChatForWA) {
+      setInlineChatId(existingChatForWA.id)
+      setInlineChat(existingChatForWA)
+      setInlineChatDeviceId(existingChatForWA.device_id || '')
+      setInlineChatReadOnly(true)
+      setShowInlineChat(true)
     }
   }
 
@@ -853,6 +979,7 @@ export default function ContactsPage() {
           'notas': c.notes || '',
           'dni': c.dni || '',
           'fecha_nacimiento': c.birth_date ? c.birth_date.split('T')[0] : '',
+          'direccion': c.address || '',
         }
         if (exportIncludeTags) {
           row['tags'] = (c.structured_tags || []).map(t => t.name).join(', ') || (c.tags || []).join(', ')
@@ -1442,6 +1569,14 @@ export default function ContactsPage() {
                       <Download className="w-4 h-4 text-slate-400" />
                       Exportar contactos
                     </button>
+                    <button
+                      onClick={() => { setShowBulkDocModal(true); setShowMoreMenu(false) }}
+                      disabled={contacts.length === 0}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <FileText className="w-4 h-4 text-slate-400" />
+                      Generar Documentos
+                    </button>
                   </div>
                 )}
               </div>
@@ -1472,7 +1607,7 @@ export default function ContactsPage() {
             className="overflow-y-auto overflow-x-auto flex-1 min-h-0"
           >
             <table className="w-full">
-              <thead className="bg-slate-100 border-b-2 border-slate-200 sticky top-0 z-10">
+              <thead className="bg-slate-100 border-b-2 border-slate-200 sticky top-0 z-10" style={{ display: 'table', tableLayout: 'fixed', width: '100%' }}>
                 <tr>
                   {selectionMode && <th className="w-10 px-4 py-3" />}
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none hover:text-slate-700" onClick={() => { if (sortBy === 'name') { setSortOrder(o => o === 'asc' ? 'desc' : 'asc') } else { setSortBy('name'); setSortOrder('asc') } }}>
@@ -1490,20 +1625,26 @@ export default function ContactsPage() {
                   <th className="w-10 px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Acciones</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody style={{ height: contacts.length > 0 ? contactsVirtualizer.getTotalSize() : undefined, position: 'relative', display: 'block' }}>
                 {contacts.length === 0 && !loading ? (
-                  <tr>
+                  <tr style={{ display: 'table-row' }}>
                     <td colSpan={selectionMode ? 8 : 7} className="text-center py-12 text-slate-500">
                       <Users className="w-12 h-12 mx-auto mb-3 text-slate-300" />
                       <p className="text-base font-medium">No hay contactos</p>
                       <p className="text-sm mt-1">Los contactos se sincronizan automáticamente desde tus dispositivos WhatsApp</p>
                     </td>
                   </tr>
-                ) : contacts.map((contact) => (
+                ) : contactsVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const contact = contacts[virtualRow.index]
+                  if (!contact) return null
+                  return (
                   <tr
                     key={contact.id}
-                    className={`hover:bg-slate-50 cursor-pointer transition ${
-                      selectedIds.has(contact.id) ? 'bg-emerald-50' : ''
+                    ref={contactsVirtualizer.measureElement}
+                    data-index={virtualRow.index}
+                    style={{ position: 'absolute', top: 0, left: 0, width: '100%', display: 'table', tableLayout: 'fixed', transform: `translateY(${virtualRow.start}px)` }}
+                    className={`hover:bg-slate-50 cursor-pointer transition border-b border-slate-100 ${
+                      selectedIds.has(contact.id) ? 'bg-emerald-100' : selectedContact?.id === contact.id ? 'bg-emerald-100 border-l-[3px] border-l-emerald-500' : ''
                     }`}
                     onClick={() => selectionMode ? toggleSelection(contact.id) : openDetail(contact)}
                   >
@@ -1564,9 +1705,9 @@ export default function ContactsPage() {
                     </td>
                     <td className="px-4 py-3 text-sm text-slate-500 hidden md:table-cell">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${
-                        contact.source === 'kommo' ? 'bg-blue-50 text-blue-600' : 'bg-emerald-50 text-emerald-600'
+                        kommoEnabled && contact.source === 'kommo' ? 'bg-blue-50 text-blue-600' : 'bg-emerald-50 text-emerald-600'
                       }`}>
-                        {contact.source || 'whatsapp'}
+                        {kommoEnabled ? (contact.source || 'whatsapp') : 'whatsapp'}
                       </span>
                     </td>
                     <td className="px-4 py-3 hidden md:table-cell">
@@ -1629,10 +1770,12 @@ export default function ContactsPage() {
                               onMouseDown={(e) => {
                                 e.preventDefault(); e.stopPropagation()
                                 setSelectedContact(contact)
-                                const connDevices = devices.filter(d => d.status === 'connected')
-                                if (connDevices.length === 0) { alert('No hay dispositivos conectados'); return }
-                                if (connDevices.length === 1) setSendDeviceId(connDevices[0].id); else setSendDeviceId('')
-                                setShowSendMessage(true)
+                                const phone = contact.phone || contact.jid?.replace(/@.*$/, '') || ''
+                                if (phone) {
+                                  handleSendWhatsApp(phone)
+                                } else {
+                                  alert('Este contacto no tiene número de teléfono')
+                                }
                                 setActionsMenuId(null)
                               }}
                               className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
@@ -1664,7 +1807,8 @@ export default function ContactsPage() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
 
@@ -1682,17 +1826,38 @@ export default function ContactsPage() {
           </div>
         </div>
 
-      {/* Detail Panel (Slide-over) */}
-      {showDetailPanel && selectedContact && (
+      {/* Detail Panel (Slide-over) with Inline Chat */}
+      {(showDetailPanel || showInlineChat) && selectedContact && (
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
-          <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => setShowDetailPanel(false)} />
-          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-hidden border-l border-slate-200">
+          <div
+            className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
+            onClick={() => { setShowDetailPanel(false); setShowInlineChat(false); setInlineChatReadOnly(false) }}
+          />
+          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
+
+            {/* Chat Panel - Left Side */}
+            {showInlineChat && inlineChatId && (
+              <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
+                <ChatPanel
+                  chatId={inlineChatId}
+                  deviceId={inlineChatDeviceId}
+                  initialChat={inlineChat || undefined}
+                  readOnly={inlineChatReadOnly}
+                  onClose={() => { setShowInlineChat(false); setInlineChatReadOnly(false) }}
+                  className="h-full"
+                />
+              </div>
+            )}
+
+            {/* Contact Details - Right Side */}
+            <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
             <LeadDetailPanel
               contactMode
               contactId={selectedContact.id}
+              scrollToTasks={scrollToTasks}
               lead={contactToLead(selectedContact)}
               onLeadChange={(updatedLead) => {
-                setSelectedContact({
+                const updatedContact = {
                   ...selectedContact,
                   name: updatedLead.name,
                   last_name: updatedLead.last_name,
@@ -1703,38 +1868,33 @@ export default function ContactsPage() {
                   age: updatedLead.age,
                   dni: updatedLead.dni,
                   birth_date: updatedLead.birth_date,
+                  address: updatedLead.address,
+                  distrito: updatedLead.distrito,
+                  ocupacion: updatedLead.ocupacion,
                   notes: updatedLead.notes,
                   structured_tags: updatedLead.structured_tags,
-                })
+                }
+                setSelectedContact(updatedContact)
+                setContacts(prev => prev.map(c => c.id === updatedContact.id ? { ...c, ...updatedContact } : c))
               }}
-              onClose={() => setShowDetailPanel(false)}
+              onClose={() => { setShowDetailPanel(false); setShowInlineChat(false); setInlineChatReadOnly(false); setScrollToTasks(false) }}
               onDelete={() => {
                 setShowDetailPanel(false)
+                setShowInlineChat(false)
                 setSelectedContact(null)
                 fetchContacts()
               }}
               deviceNames={selectedContact.device_names}
               pushName={selectedContact.push_name}
               avatarUrl={selectedContact.avatar_url}
-              onResetFromDevice={() => handleResetFromDevice(selectedContact.id)}
-              onSendMessage={() => {
-                const connDevices = devices.filter(d => d.status === 'connected')
-                if (connDevices.length === 0) {
-                  alert('No hay dispositivos conectados')
-                  return
-                }
-                if (connDevices.length === 1) {
-                  setSendDeviceId(connDevices[0].id)
-                } else {
-                  setSendDeviceId('')
-                }
-                setShowSendMessage(true)
-              }}
+              onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+              hideWhatsApp={showInlineChat}
               onContactUpdate={(contact) => {
                 setSelectedContact(contact)
-                fetchContacts()
+                setContacts(prev => prev.map(c => c.id === contact.id ? { ...c, ...contact } : c))
               }}
             />
+            </div>
           </div>
         </div>
       )}
@@ -1840,6 +2000,16 @@ export default function ContactsPage() {
                   placeholder="Notas sobre este contacto..."
                 />
               </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Dirección</label>
+                <input
+                  type="text"
+                  value={editForm.address}
+                  onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
+                  placeholder="Dirección del contacto"
+                />
+              </div>
             </div>
             <div className="flex gap-3 mt-6">
               <button
@@ -1919,50 +2089,67 @@ export default function ContactsPage() {
         </div>
       )}
 
-      {/* Send Message Modal */}
+      {/* Device Selector Modal for WhatsApp */}
       {showSendMessage && selectedContact && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-sm">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">
-                <Send className="w-5 h-5 text-emerald-600" />
-              </div>
-              <div>
-                <h3 className="text-lg font-bold text-slate-900">Enviar Mensaje</h3>
-                <p className="text-sm text-slate-500">{getDisplayName(selectedContact)}</p>
-              </div>
-            </div>
-            <p className="text-sm text-slate-600 mb-4">
-              Selecciona el dispositivo para iniciar la conversación:
-            </p>
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
+            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
+            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
             {devices.filter(d => d.status === 'connected').length === 0 ? (
-              <p className="text-sm text-slate-400 text-center py-4">No hay dispositivos conectados</p>
+              <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
               <div className="space-y-2">
-                {devices.filter(d => d.status === 'connected').map((device) => (
-                  <button
-                    key={device.id}
-                    onClick={() => handleSendMessageToContact(device.id)}
-                    disabled={sendLoading}
-                    className="w-full flex items-center gap-3 p-3 border border-slate-200 rounded-lg hover:bg-emerald-50 hover:border-emerald-300 transition text-left disabled:opacity-50"
-                  >
-                    <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">
-                      <Smartphone className="w-5 h-5 text-emerald-600" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                      <p className="text-xs text-slate-500">{device.phone || ''}</p>
-                    </div>
-                    {sendLoading && sendDeviceId === device.id && (
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-emerald-600" />
-                    )}
-                  </button>
-                ))}
+                {/* Connected devices — sort chat owner first */}
+                {[...devices.filter(d => d.status === 'connected')].sort((a, b) => {
+                  if (existingChatForWA?.device_id === a.id) return -1
+                  if (existingChatForWA?.device_id === b.id) return 1
+                  return 0
+                }).map((device) => {
+                  const isChatOwner = existingChatForWA?.device_id === device.id
+                  return (
+                    <button
+                      key={device.id}
+                      onClick={() => handleContactDeviceSelected(device)}
+                      className={`w-full flex items-center gap-3 p-3 border rounded-xl transition text-left ${isChatOwner ? 'border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50' : 'border-slate-100 hover:bg-emerald-50 hover:border-emerald-200'}`}
+                    >
+                      <div className={`w-9 h-9 rounded-full flex items-center justify-center ${isChatOwner ? 'bg-emerald-100' : 'bg-emerald-50'}`}>
+                        <Phone className="w-4 h-4 text-emerald-600" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
+                          {isChatOwner && (
+                            <span className="text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">Chat activo</span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-500">{device.phone || ''}</p>
+                      </div>
+                    </button>
+                  )
+                })}
+
+                {/* Previous device option (disconnected) — read-only mode */}
+                {existingChatForWA && existingChatForWA.device_id && !devices.find(d => d.id === existingChatForWA.device_id && d.status === 'connected') && (
+                  <div className="pt-2 mt-2 border-t border-slate-100">
+                    <button
+                      onClick={handlePreviousDeviceSelected}
+                      className="w-full flex items-center gap-3 p-3 border border-amber-200 bg-amber-50/50 rounded-xl hover:bg-amber-50 transition text-left"
+                    >
+                      <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center">
+                        <Eye className="w-4 h-4 text-amber-600" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-amber-800">Dispositivo anterior</p>
+                        <p className="text-xs text-amber-600">Solo lectura · {existingChatForWA.device_name || 'Desconectado'}</p>
+                      </div>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
             <button
-              onClick={() => { setShowSendMessage(false); setSendDeviceId('') }}
-              className="w-full mt-4 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 text-sm"
+              onClick={() => setShowSendMessage(false)}
+              className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
             >
               Cancelar
             </button>
@@ -2091,6 +2278,48 @@ export default function ContactsPage() {
       )}
 
       {/* Export Modal */}
+
+      {/* Bulk Document Generation Modal */}
+      {showBulkDocModal && (
+        <BulkGenerateDocumentModal
+          leads={contacts.map(c => ({
+            id: c.id,
+            jid: c.jid,
+            contact_id: c.id,
+            name: c.custom_name || c.name || c.push_name || '',
+            last_name: c.last_name || '',
+            short_name: c.short_name || null,
+            phone: c.phone || '',
+            email: c.email || '',
+            company: c.company || null,
+            age: c.age,
+            dni: c.dni || null,
+            birth_date: c.birth_date || null,
+            address: c.address || null,
+            status: '',
+            pipeline_id: null,
+            stage_id: null,
+            stage_name: null,
+            stage_color: null,
+            stage_position: null,
+            notes: c.notes || '',
+            tags: c.tags || [],
+            structured_tags: c.structured_tags || null,
+            kommo_id: c.kommo_id,
+            is_archived: false,
+            archived_at: null,
+            is_blocked: false,
+            blocked_at: null,
+            block_reason: '',
+            kommo_deleted_at: null,
+            assigned_to: '',
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+          }) as Lead)}
+          onClose={() => setShowBulkDocModal(false)}
+        />
+      )}
+
       {showExportModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl p-6 w-full max-w-sm">

@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/whatsapp"
 	"github.com/naperu/clarin/internal/ws"
+	"github.com/naperu/clarin/pkg/cache"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -37,6 +40,8 @@ type Services struct {
 	Role        *RoleService
 	Automation  *AutomationService
 	Survey      *SurveyService
+	Task        *TaskService
+	DocumentTemplate *DocumentTemplateService
 }
 
 func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub *ws.Hub) *Services {
@@ -57,13 +62,32 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Role:        &RoleService{repos: repos},
 		Automation:  NewAutomationService(repos, pool, hub, nil), // cache injected after Init
 		Survey:      NewSurveyService(repos),
+		Task:        NewTaskService(repos, hub),
+		DocumentTemplate: NewDocumentTemplateService(repos),
 	}
 }
 
 // AuthService handles authentication
 type AuthService struct {
 	repos *repository.Repositories
+	cache *cache.Cache
 }
+
+// SetCache injects the Redis cache into AuthService (for refresh tokens, blacklist, rate limiting)
+func (s *AuthService) SetCache(c *cache.Cache) {
+	s.cache = c
+}
+
+const (
+	jwtAccessTTL            = 1 * time.Hour      // Access token lives 1 hour
+	refreshTokenTTL         = 7 * 24 * time.Hour  // Refresh token lives 7 days
+	loginLockoutTTL         = 15 * time.Minute    // Lockout after max failed attempts
+	maxLoginAttempts        = 5                   // Failed attempts before lockout
+	refreshTokenKeyPrefix   = "refresh:"          // Redis key prefix for refresh tokens
+	jwtBlacklistKeyPrefix   = "jwtblk:"           // Redis key prefix for JWT blacklist
+	loginFailuresKeyPrefix  = "loginfail:"        // Redis key prefix for login failures
+	userInvalidatedPrefix   = "userinv:"          // Redis key prefix for invalidated users
+)
 
 type JWTClaims struct {
 	UserID       uuid.UUID `json:"user_id"`
@@ -76,17 +100,38 @@ type JWTClaims struct {
 	jwt.RegisteredClaims
 }
 
-func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, *domain.User, []*domain.UserAccount, error) {
+func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, string, *domain.User, []*domain.UserAccount, error) {
+	// Check login rate limiting
+	if s.cache != nil {
+		failKey := loginFailuresKeyPrefix + strings.ToLower(username)
+		data, _ := s.cache.Get(ctx, failKey)
+		if data != nil {
+			var failures int
+			if err := json.Unmarshal(data, &failures); err == nil && failures >= maxLoginAttempts {
+				return "", "", nil, nil, fmt.Errorf("cuenta bloqueada temporalmente, intente en 15 minutos")
+			}
+		}
+	}
+
 	user, err := s.repos.User.GetByUsername(ctx, username)
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("failed to get user: %w", err)
+		s.recordLoginFailure(ctx, username)
+		return "", "", nil, nil, fmt.Errorf("invalid credentials")
 	}
 	if user == nil {
-		return "", nil, nil, fmt.Errorf("invalid credentials")
+		s.recordLoginFailure(ctx, username)
+		return "", "", nil, nil, fmt.Errorf("invalid credentials")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return "", nil, nil, fmt.Errorf("invalid credentials")
+		s.recordLoginFailure(ctx, username)
+		return "", "", nil, nil, fmt.Errorf("invalid credentials")
+	}
+
+	// Clear login failures on success
+	if s.cache != nil {
+		failKey := loginFailuresKeyPrefix + strings.ToLower(username)
+		_ = s.cache.Del(ctx, failKey)
 	}
 
 	// Get user's account assignments
@@ -107,23 +152,26 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 
 	// Generate JWT with default account
 	// Admins/super_admins get wildcard; agents get their role's permissions
+	isAdmin := user.IsAdmin || user.IsSuperAdmin || activeRole == domain.RoleAdmin || activeRole == domain.RoleSuperAdmin
 	var permissions []string
-	if user.IsAdmin || user.IsSuperAdmin {
+	if isAdmin {
 		permissions = []string{domain.PermAll}
 	} else {
 		permissions, _ = s.repos.UserAccount.GetUserPermissions(ctx, user.ID, activeAccountID)
 	}
 
+	jti := uuid.New().String()
 	claims := &JWTClaims{
 		UserID:       user.ID,
 		AccountID:    activeAccountID,
 		Username:     user.Username,
-		IsAdmin:      user.IsAdmin,
+		IsAdmin:      isAdmin,
 		IsSuperAdmin: user.IsSuperAdmin,
 		Role:         activeRole,
 		Permissions:  permissions,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)), // 7 days
+			ID:        jti,
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtAccessTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "clarin",
 		},
@@ -132,7 +180,19 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", nil, nil, fmt.Errorf("failed to sign token: %w", err)
+		return "", "", nil, nil, fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	// Generate refresh token and store in Redis
+	refreshToken := uuid.New().String()
+	if s.cache != nil {
+		rtData := map[string]string{
+			"user_id":    user.ID.String(),
+			"account_id": activeAccountID.String(),
+			"username":   user.Username,
+		}
+		rtJSON, _ := json.Marshal(rtData)
+		_ = s.cache.Set(ctx, refreshTokenKeyPrefix+refreshToken, rtJSON, refreshTokenTTL)
 	}
 
 	// Update user fields to match active account
@@ -145,23 +205,23 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 		}
 	}
 
-	return tokenString, user, userAccounts, nil
+	return tokenString, refreshToken, user, userAccounts, nil
 }
 
-func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID uuid.UUID, jwtSecret string) (string, *domain.User, error) {
+func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID uuid.UUID, jwtSecret string) (string, string, *domain.User, error) {
 	// Verify user exists
 	user, err := s.repos.User.GetByID(ctx, userID)
 	if err != nil || user == nil {
-		return "", nil, fmt.Errorf("user not found")
+		return "", "", nil, fmt.Errorf("user not found")
 	}
 
 	// Verify user has access to the target account
 	exists, err := s.repos.UserAccount.Exists(ctx, userID, targetAccountID)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to check access: %w", err)
+		return "", "", nil, fmt.Errorf("failed to check access: %w", err)
 	}
 	if !exists {
-		return "", nil, fmt.Errorf("no tiene acceso a esta cuenta")
+		return "", "", nil, fmt.Errorf("no tiene acceso a esta cuenta")
 	}
 
 	// Get the role for this specific account
@@ -177,23 +237,26 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 	}
 
 	// Generate new JWT for the target account
+	isAdmin := user.IsAdmin || user.IsSuperAdmin || accountRole == domain.RoleAdmin || accountRole == domain.RoleSuperAdmin
 	var permissions []string
-	if user.IsAdmin || user.IsSuperAdmin {
+	if isAdmin {
 		permissions = []string{domain.PermAll}
 	} else {
 		permissions, _ = s.repos.UserAccount.GetUserPermissions(ctx, userID, targetAccountID)
 	}
 
+	jti := uuid.New().String()
 	claims := &JWTClaims{
 		UserID:       user.ID,
 		AccountID:    targetAccountID,
 		Username:     user.Username,
-		IsAdmin:      user.IsAdmin,
+		IsAdmin:      isAdmin,
 		IsSuperAdmin: user.IsSuperAdmin,
 		Role:         accountRole,
 		Permissions:  permissions,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)),
+			ID:        jti,
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtAccessTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "clarin",
 		},
@@ -202,7 +265,19 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to sign token: %w", err)
+		return "", "", nil, fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	// Generate refresh token
+	refreshToken := uuid.New().String()
+	if s.cache != nil {
+		rtData := map[string]string{
+			"user_id":    user.ID.String(),
+			"account_id": targetAccountID.String(),
+			"username":   user.Username,
+		}
+		rtJSON, _ := json.Marshal(rtData)
+		_ = s.cache.Set(ctx, refreshTokenKeyPrefix+refreshToken, rtJSON, refreshTokenTTL)
 	}
 
 	// Update user object to reflect active account
@@ -210,7 +285,7 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 	user.Role = accountRole
 	user.AccountName = accountName
 
-	return tokenString, user, nil
+	return tokenString, refreshToken, user, nil
 }
 
 func (s *AuthService) GetUserAccounts(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
@@ -219,6 +294,10 @@ func (s *AuthService) GetUserAccounts(ctx context.Context, userID uuid.UUID) ([]
 
 func (s *AuthService) ValidateToken(tokenString, jwtSecret string) (*JWTClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+		// Verify the signing method to prevent algorithm confusion attacks
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
 		return []byte(jwtSecret), nil
 	})
 	if err != nil {
@@ -230,11 +309,216 @@ func (s *AuthService) ValidateToken(tokenString, jwtSecret string) (*JWTClaims, 
 		return nil, fmt.Errorf("invalid token claims")
 	}
 
+	// Check JWT blacklist (revoked tokens)
+	if s.cache != nil && claims.ID != "" {
+		ctx := context.Background()
+		data, _ := s.cache.Get(ctx, jwtBlacklistKeyPrefix+claims.ID)
+		if data != nil {
+			return nil, fmt.Errorf("token has been revoked")
+		}
+	}
+
 	return claims, nil
 }
 
 func (s *AuthService) GetUser(ctx context.Context, userID uuid.UUID) (*domain.User, error) {
 	return s.repos.User.GetByID(ctx, userID)
+}
+
+// Logout revokes the current JWT and deletes the refresh token from Redis
+func (s *AuthService) Logout(ctx context.Context, claims *JWTClaims, refreshToken string) {
+	if s.cache == nil {
+		return
+	}
+	// Blacklist the JWT by its jti for its remaining lifetime
+	if claims.ID != "" && claims.ExpiresAt != nil {
+		remaining := time.Until(claims.ExpiresAt.Time)
+		if remaining > 0 {
+			_ = s.cache.Set(ctx, jwtBlacklistKeyPrefix+claims.ID, []byte("1"), remaining)
+		}
+	}
+	// Delete the refresh token
+	if refreshToken != "" {
+		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+refreshToken)
+	}
+}
+
+// BlacklistJTI blacklists a JWT's JTI for its remaining lifetime (used on token refresh)
+func (s *AuthService) BlacklistJTI(claims *JWTClaims) {
+	if s.cache == nil || claims == nil || claims.ID == "" || claims.ExpiresAt == nil {
+		return
+	}
+	remaining := time.Until(claims.ExpiresAt.Time)
+	if remaining > 0 {
+		_ = s.cache.Set(context.Background(), jwtBlacklistKeyPrefix+claims.ID, []byte("1"), remaining)
+	}
+}
+
+// InvalidateUserSessions marks a user as invalidated so all their existing tokens are rejected.
+func (s *AuthService) InvalidateUserSessions(userID uuid.UUID) {
+	if s.cache == nil {
+		return
+	}
+	// Store invalidation timestamp; any JWT issued before this is rejected
+	_ = s.cache.Set(context.Background(), userInvalidatedPrefix+userID.String(), []byte(fmt.Sprintf("%d", time.Now().Unix())), jwtAccessTTL)
+}
+
+// IsUserSessionInvalidated checks if a user's sessions have been invalidated after their token was issued.
+func (s *AuthService) IsUserSessionInvalidated(claims *JWTClaims) bool {
+	if s.cache == nil || claims == nil {
+		return false
+	}
+	data, _ := s.cache.Get(context.Background(), userInvalidatedPrefix+claims.UserID.String())
+	if data == nil {
+		return false
+	}
+	// If the invalidation happened after the token was issued, reject
+	invalidatedAt, err := strconv.ParseInt(string(data), 10, 64)
+	if err != nil {
+		return true // corrupted data = reject
+	}
+	if claims.IssuedAt != nil && claims.IssuedAt.Time.Unix() < invalidatedAt {
+		return true
+	}
+	return false
+}
+
+// RefreshToken validates a refresh token and issues a new JWT + rotated refresh token
+func (s *AuthService) RefreshToken(ctx context.Context, oldRefreshToken, jwtSecret string) (string, string, error) {
+	if s.cache == nil {
+		return "", "", fmt.Errorf("session service unavailable")
+	}
+
+	// Look up refresh token in Redis
+	data, err := s.cache.Get(ctx, refreshTokenKeyPrefix+oldRefreshToken)
+	if err != nil || data == nil {
+		return "", "", fmt.Errorf("invalid or expired refresh token")
+	}
+
+	// Parse stored data
+	var rtData map[string]string
+	if err := json.Unmarshal(data, &rtData); err != nil {
+		return "", "", fmt.Errorf("corrupted refresh token data")
+	}
+
+	userID, err := uuid.Parse(rtData["user_id"])
+	if err != nil {
+		return "", "", fmt.Errorf("invalid user in refresh token")
+	}
+	accountID, err := uuid.Parse(rtData["account_id"])
+	if err != nil {
+		return "", "", fmt.Errorf("invalid account in refresh token")
+	}
+
+	// Verify user still exists and is active
+	user, err := s.repos.User.GetByID(ctx, userID)
+	if err != nil || user == nil || !user.IsActive {
+		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken)
+		return "", "", fmt.Errorf("user not found")
+	}
+
+	// Verify user still has access to account
+	exists, _ := s.repos.UserAccount.Exists(ctx, userID, accountID)
+	if !exists {
+		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken)
+		return "", "", fmt.Errorf("account access revoked")
+	}
+
+	// Get current permissions
+	// Get role for this account
+	userAccounts, _ := s.repos.UserAccount.GetByUserID(ctx, userID)
+	accountRole := user.Role
+	for _, ua := range userAccounts {
+		if ua.AccountID == accountID {
+			accountRole = ua.Role
+			break
+		}
+	}
+
+	// Get current permissions — per-account admin gets full access
+	isAdmin := user.IsAdmin || user.IsSuperAdmin || accountRole == domain.RoleAdmin || accountRole == domain.RoleSuperAdmin
+	var permissions []string
+	if isAdmin {
+		permissions = []string{domain.PermAll}
+	} else {
+		permissions, _ = s.repos.UserAccount.GetUserPermissions(ctx, userID, accountID)
+	}
+
+	// Generate new JWT
+	jti := uuid.New().String()
+	claims := &JWTClaims{
+		UserID:       user.ID,
+		AccountID:    accountID,
+		Username:     user.Username,
+		IsAdmin:      isAdmin,
+		IsSuperAdmin: user.IsSuperAdmin,
+		Role:         accountRole,
+		Permissions:  permissions,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        jti,
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtAccessTTL)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "clarin",
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString([]byte(jwtSecret))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	// Rotate refresh token: delete old, create new
+	_ = s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken)
+	newRefreshToken := uuid.New().String()
+	newRTData := map[string]string{
+		"user_id":    user.ID.String(),
+		"account_id": accountID.String(),
+		"username":   user.Username,
+	}
+	rtJSON, _ := json.Marshal(newRTData)
+	_ = s.cache.Set(ctx, refreshTokenKeyPrefix+newRefreshToken, rtJSON, refreshTokenTTL)
+
+	return tokenString, newRefreshToken, nil
+}
+
+// ChangePassword validates the current password and updates to the new one
+func (s *AuthService) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string) error {
+	user, err := s.repos.User.GetByID(ctx, userID)
+	if err != nil || user == nil {
+		return fmt.Errorf("user not found")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return fmt.Errorf("contraseña actual incorrecta")
+	}
+
+	if len(newPassword) < 8 {
+		return fmt.Errorf("la nueva contraseña debe tener al menos 8 caracteres")
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("failed to hash password: %w", err)
+	}
+
+	return s.repos.User.UpdatePassword(ctx, userID, string(hashedPassword))
+}
+
+// recordLoginFailure increments the failed login counter for a username
+func (s *AuthService) recordLoginFailure(ctx context.Context, username string) {
+	if s.cache == nil {
+		return
+	}
+	failKey := loginFailuresKeyPrefix + strings.ToLower(username)
+	data, _ := s.cache.Get(ctx, failKey)
+	failures := 0
+	if data != nil {
+		_ = json.Unmarshal(data, &failures)
+	}
+	failures++
+	countJSON, _ := json.Marshal(failures)
+	_ = s.cache.Set(ctx, failKey, countJSON, loginLockoutTTL)
 }
 
 // AccountService handles account management (super admin)
@@ -274,6 +558,9 @@ func (s *AccountService) GetUsers(ctx context.Context, accountID *uuid.UUID) ([]
 }
 
 func (s *AccountService) CreateUser(ctx context.Context, user *domain.User, password string) error {
+	if len(password) < 8 {
+		return fmt.Errorf("la contraseña debe tener al menos 8 caracteres")
+	}
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)
@@ -297,6 +584,9 @@ func (s *AccountService) UpdateUser(ctx context.Context, user *domain.User) erro
 }
 
 func (s *AccountService) ResetPassword(ctx context.Context, userID uuid.UUID, password string) error {
+	if len(password) < 8 {
+		return fmt.Errorf("la contraseña debe tener al menos 8 caracteres")
+	}
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash password: %w", err)

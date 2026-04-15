@@ -5,32 +5,33 @@ import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
 import ErosAssistant from '@/components/ErosAssistant'
-import { subscribeWebSocket, onServerVersionChange } from '@/lib/api'
+import TaskBadge from '@/components/TaskBadge'
+import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken } from '@/lib/api'
 import {
   MessageSquare,
-  Smartphone,
-  Users,
   Settings,
   LogOut,
   Menu,
   X,
   LayoutDashboard,
-  ChevronRight,
-  BookUser,
+  Contact,
   PanelLeftClose,
   PanelLeftOpen,
-  Radio,
+  Megaphone,
   Tags,
   CalendarDays,
   Shield,
   ChevronsUpDown,
   Building2,
-  BookOpen,
+  GraduationCap,
   Zap,
-  ClipboardList,
-  Sparkles,
+  FileQuestion,
+  Dices,
   RefreshCw,
-  FileText
+  FileText,
+  CheckSquare,
+  UserPlus,
+  Stamp
 } from 'lucide-react'
 
 interface User {
@@ -43,6 +44,7 @@ interface User {
   account_id: string
   account_name: string
   permissions?: string[]
+  kommo_enabled?: boolean
 }
 
 interface UserAccount {
@@ -112,15 +114,38 @@ export default function DashboardLayout({
       try {
         const token = localStorage.getItem('token')
         if (!token) {
-          router.push('/')
-          return
+          // Try refresh — maybe the JWT expired but refresh token cookie is valid
+          const refreshed = await tryRefreshToken()
+          if (!refreshed) {
+            router.push('/')
+            return
+          }
         }
 
+        const currentToken = localStorage.getItem('token')
         const res = await fetch('/api/me', {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${currentToken}` },
         })
 
         if (!res.ok) {
+          // Try refreshing the token
+          const refreshed = await tryRefreshToken()
+          if (refreshed) {
+            const newToken = localStorage.getItem('token')
+            const retryRes = await fetch('/api/me', {
+              headers: { Authorization: `Bearer ${newToken}` },
+            })
+            if (retryRes.ok) {
+              const retryData = await retryRes.json()
+              if (retryData.success) {
+                setUser(retryData.user)
+                if (retryData.accounts) setAccounts(retryData.accounts)
+                localStorage.setItem('kommo_enabled', String(retryData.user.kommo_enabled || false))
+                initIdleTimeout()
+                return
+              }
+            }
+          }
           localStorage.removeItem('token')
           router.push('/')
           return
@@ -130,6 +155,8 @@ export default function DashboardLayout({
         if (data.success) {
           setUser(data.user)
           if (data.accounts) setAccounts(data.accounts)
+          localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
+          initIdleTimeout() // Start idle timeout detector
         } else {
           router.push('/')
         }
@@ -141,6 +168,7 @@ export default function DashboardLayout({
     }
 
     checkAuth()
+    return () => clearIdleTimeout()
   }, [router])
 
   // Version detection — WebSocket + header interception + polling fallback
@@ -214,8 +242,14 @@ export default function DashboardLayout({
   }
 
   const handleLogout = async () => {
+    const token = localStorage.getItem('token')
+    clearIdleTimeout()
     localStorage.removeItem('token')
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
     router.push('/')
   }
 
@@ -227,10 +261,12 @@ export default function DashboardLayout({
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ account_id: accountId }),
+        credentials: 'include',
       })
       const data = await res.json()
       if (data.success) {
         localStorage.setItem('token', data.token)
+        localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
         setUser(data.user)
         setShowAccountSwitcher(false)
         window.location.href = '/dashboard'
@@ -252,6 +288,8 @@ export default function DashboardLayout({
     '/dashboard/broadcasts': 'broadcasts',
     '/dashboard/surveys': 'surveys',
     '/dashboard/dynamics': 'dynamics',
+    '/dashboard/tasks': 'tasks',
+    '/dashboard/documents': 'documents',
       '/dashboard/tags': 'tags',
     '/dashboard/settings': 'settings',
   }
@@ -266,19 +304,21 @@ export default function DashboardLayout({
   }
 
   const navItems = [
-    { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-    { href: '/dashboard/chats', icon: MessageSquare, label: 'Chats' },
-    { href: '/dashboard/contacts', icon: BookUser, label: 'Contactos' },
-    { href: '/dashboard/programs', icon: BookOpen, label: 'Programas' },
-    { href: '/dashboard/automations', icon: Zap, label: 'Automatizaciones' },
-    { href: '/dashboard/leads', icon: Users, label: 'Leads' },
-    { href: '/dashboard/events', icon: CalendarDays, label: 'Eventos' },
-    { href: '/dashboard/broadcasts', icon: Radio, label: 'Difusión' },
-    { href: '/dashboard/surveys', icon: ClipboardList, label: 'Encuestas' },
-    { href: '/dashboard/dynamics', icon: Sparkles, label: 'Dinámicas' },
-      { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas' },
-    { href: '/dashboard/settings', icon: Settings, label: 'Configuración' },
-    ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin' }] : []),
+    { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', desc: 'Panel principal' },
+    { href: '/dashboard/chats', icon: MessageSquare, label: 'Chats', desc: 'Conversaciones WhatsApp' },
+    { href: '/dashboard/contacts', icon: Contact, label: 'Contactos', desc: 'Directorio de contactos' },
+    { href: '/dashboard/programs', icon: GraduationCap, label: 'Programas', desc: 'Programas educativos' },
+    { href: '/dashboard/automations', icon: Zap, label: 'Automatizaciones', desc: 'Flujos automáticos' },
+    { href: '/dashboard/leads', icon: UserPlus, label: 'Leads', desc: 'Prospectos y oportunidades' },
+    { href: '/dashboard/events', icon: CalendarDays, label: 'Eventos', desc: 'Gestión de eventos' },
+    { href: '/dashboard/broadcasts', icon: Megaphone, label: 'Difusión', desc: 'Mensajes masivos' },
+    { href: '/dashboard/surveys', icon: FileQuestion, label: 'Encuestas', desc: 'Formularios y encuestas' },
+    { href: '/dashboard/tasks', icon: CheckSquare, label: 'Tareas', desc: 'Pendientes y seguimiento' },
+    { href: '/dashboard/dynamics', icon: Dices, label: 'Dinámicas', desc: 'Actividades interactivas' },
+    { href: '/dashboard/documents', icon: Stamp, label: 'Plantillas', desc: 'Editor de plantillas' },
+    { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas', desc: 'Organización por etiquetas' },
+    { href: '/dashboard/settings', icon: Settings, label: 'Configuración', desc: 'Ajustes del sistema' },
+    ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin', desc: 'Administración global' }] : []),
   ].filter(item => hasPermission(item.href))
 
   // When mobile overlay is open, always show expanded (not collapsed)
@@ -314,29 +354,29 @@ export default function DashboardLayout({
       <aside className={`
         fixed lg:static inset-y-0 left-0 z-40
         ${isCollapsed ? 'lg:w-[68px]' : 'lg:w-60'} w-64
-        bg-white border-r border-slate-200/80
+        bg-slate-800/95 backdrop-blur-md border-r border-slate-700/50
         transform transition-all duration-200 ease-in-out
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
-        flex flex-col
+        flex flex-col shadow-xl shadow-slate-900/20
       `}>
         {/* Logo */}
-        <div className={`h-14 flex items-center justify-between ${isCollapsed ? 'px-3' : 'px-4'} border-b border-slate-100 shrink-0`}>
-          <Link href="/dashboard" className="flex items-center gap-2.5 overflow-hidden">
-            <div className="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center shrink-0">
+        <div className={`h-14 flex items-center justify-between ${isCollapsed ? 'px-3' : 'px-4'} border-b border-slate-700/50 shrink-0`}>
+          <Link href="/dashboard" className="flex items-center gap-2.5 overflow-hidden group">
+            <div className="w-8 h-8 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-lg flex items-center justify-center shrink-0 shadow-lg shadow-emerald-500/25 group-hover:shadow-emerald-500/40 transition-all duration-200">
               <MessageSquare className="w-[18px] h-[18px] text-white" />
             </div>
-            {!isCollapsed && <span className="font-bold text-lg text-slate-800 whitespace-nowrap tracking-tight">Clarin</span>}
+            {!isCollapsed && <span className="font-bold text-lg text-white whitespace-nowrap tracking-tight">Clarin</span>}
           </Link>
           <button
             onClick={() => setSidebarOpen(false)}
-            className="lg:hidden p-1 hover:bg-slate-100 rounded-lg"
+            className="lg:hidden p-1 hover:bg-slate-700 rounded-lg transition-colors"
           >
-            <X className="w-5 h-5 text-slate-500" />
+            <X className="w-5 h-5 text-slate-400" />
           </button>
           <div className="flex items-center gap-0.5">
             <button
               onClick={toggleSidebarCollapsed}
-              className="hidden lg:flex p-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors"
+              className="hidden lg:flex p-1.5 hover:bg-slate-700/60 rounded-lg text-slate-500 hover:text-slate-300 transition-all duration-200"
               title={sidebarCollapsed ? 'Expandir menú' : 'Colapsar menú'}
             >
               {sidebarCollapsed ? <PanelLeftOpen className="w-[18px] h-[18px]" /> : <PanelLeftClose className="w-[18px] h-[18px]" />}
@@ -345,7 +385,7 @@ export default function DashboardLayout({
         </div>
 
         {/* Navigation */}
-        <nav className={`${isCollapsed ? 'px-2 py-3' : 'px-3 py-3'} space-y-0.5 flex-1 overflow-y-auto`}>
+        <nav className={`${isCollapsed ? 'px-2 py-3' : 'px-2.5 py-3'} space-y-0.5 flex-1 overflow-y-auto`}>
           {navItems.map((item) => {
             const isActive = pathname === item.href ||
               (item.href !== '/dashboard' && pathname.startsWith(item.href))
@@ -355,18 +395,25 @@ export default function DashboardLayout({
                 key={item.href}
                 href={item.href}
                 onClick={() => setSidebarOpen(false)}
-                title={isCollapsed ? item.label : undefined}
                 className={`
-                  flex items-center ${isCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-lg transition-all text-[13px]
+                  group/nav relative flex items-center ${isCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-lg transition-all duration-200 text-[13px]
                   ${isActive
-                    ? 'bg-emerald-50 text-emerald-700 font-semibold'
-                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'
+                    ? 'bg-emerald-500/15 text-emerald-400 font-semibold shadow-sm shadow-emerald-500/10'
+                    : 'text-slate-400 hover:bg-slate-700/50 hover:text-slate-200'
                   }
                 `}
               >
-                <item.icon className={`w-[18px] h-[18px] shrink-0 ${isActive ? 'text-emerald-600' : ''}`} />
-                {!isCollapsed && <span>{item.label}</span>}
-                {!isCollapsed && isActive && <ChevronRight className="w-3.5 h-3.5 ml-auto opacity-50" />}
+                <item.icon className={`w-[18px] h-[18px] shrink-0 transition-transform duration-200 group-hover/nav:scale-110 ${isActive ? 'text-emerald-400' : ''}`} />
+                {!isCollapsed && <span className="truncate">{item.label}</span>}
+                {!isCollapsed && item.href === '/dashboard/tasks' && <TaskBadge />}
+                {!isCollapsed && isActive && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+                {isCollapsed && (
+                  <div className="absolute left-full ml-3 px-3 py-2 bg-slate-900 rounded-lg shadow-xl shadow-black/30 opacity-0 invisible group-hover/nav:opacity-100 group-hover/nav:visible transition-all duration-150 pointer-events-none z-50 whitespace-nowrap border border-slate-700/50">
+                    <p className="text-sm font-medium text-white">{item.label}</p>
+                    {'desc' in item && <p className="text-[11px] text-slate-400 mt-0.5">{(item as any).desc}</p>}
+                    <div className="absolute top-1/2 -left-1 -translate-y-1/2 w-2 h-2 bg-slate-900 rotate-45 border-l border-b border-slate-700/50" />
+                  </div>
+                )}
               </Link>
             )
           })}
@@ -374,27 +421,27 @@ export default function DashboardLayout({
 
         {/* Account name / switcher */}
         {accounts.length >= 1 && (
-          <div ref={accountSwitcherRef} className={`shrink-0 border-t border-slate-100 ${isCollapsed ? 'p-2' : 'px-3 py-2'} relative`}>
+          <div ref={accountSwitcherRef} className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'} relative`}>
             {accounts.length > 1 ? (
               <button
                 onClick={() => setShowAccountSwitcher(!showAccountSwitcher)}
                 title={isCollapsed ? (user.account_name || 'Cambiar cuenta') : undefined}
-                className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} rounded-lg hover:bg-slate-50 transition-colors text-slate-600`}
+                className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} rounded-lg hover:bg-slate-700/50 transition-all duration-200 text-slate-400 hover:text-slate-300`}
               >
-                <Building2 className="w-4 h-4 shrink-0 text-slate-400" />
+                <Building2 className="w-4 h-4 shrink-0 text-slate-500" />
                 {!isCollapsed && (
                   <>
                     <span className="flex-1 text-left text-xs truncate font-medium">{user.account_name || 'Cuenta'}</span>
-                    <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-slate-300" />
+                    <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-slate-500" />
                   </>
                 )}
               </button>
             ) : (
               <div
                 title={isCollapsed ? (user.account_name || 'Cuenta') : undefined}
-                className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} text-slate-500`}
+                className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} text-slate-400`}
               >
-                <Building2 className="w-4 h-4 shrink-0 text-slate-400" />
+                <Building2 className="w-4 h-4 shrink-0 text-slate-500" />
                 {!isCollapsed && (
                   <span className="flex-1 text-left text-xs truncate font-medium">{user.account_name || 'Cuenta'}</span>
                 )}
@@ -422,41 +469,41 @@ export default function DashboardLayout({
         )}
 
         {/* User section */}
-        <div className={`shrink-0 ${isCollapsed ? 'p-2' : 'px-3 py-3'} border-t border-slate-100`}>
+        <div className={`shrink-0 ${isCollapsed ? 'p-2' : 'px-2.5 py-3'} border-t border-slate-700/50`}>
           {isCollapsed ? (
             <div className="flex flex-col items-center gap-2">
-              <div className="w-9 h-9 bg-emerald-50 rounded-lg flex items-center justify-center">
-                <span className="text-emerald-700 font-semibold text-sm">
+              <div className="w-9 h-9 bg-emerald-500/15 rounded-lg flex items-center justify-center ring-1 ring-emerald-500/20">
+                <span className="text-emerald-400 font-semibold text-sm">
                   {user.display_name?.charAt(0) || user.username.charAt(0).toUpperCase()}
                 </span>
               </div>
               <button
                 onClick={handleLogout}
                 title="Cerrar Sesión"
-                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all duration-200"
               >
                 <LogOut className="w-4 h-4" />
               </button>
             </div>
           ) : (
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 bg-emerald-50 rounded-lg flex items-center justify-center shrink-0">
-                <span className="text-emerald-700 font-semibold text-sm">
+              <div className="w-9 h-9 bg-emerald-500/15 rounded-lg flex items-center justify-center shrink-0 ring-1 ring-emerald-500/20">
+                <span className="text-emerald-400 font-semibold text-sm">
                   {user.display_name?.charAt(0) || user.username.charAt(0).toUpperCase()}
                 </span>
               </div>
               <div className="flex-1 min-w-0">
-                <p className="font-medium text-slate-800 truncate text-sm leading-tight">
+                <p className="font-medium text-slate-200 truncate text-sm leading-tight">
                   {user.display_name || user.username}
                 </p>
-                <p className="text-[11px] text-slate-400 truncate">
+                <p className="text-[11px] text-slate-500 truncate">
                   {user.is_super_admin ? 'Super Admin' : user.is_admin ? 'Admin' : user.role || 'Usuario'}
                 </p>
               </div>
               <button
                 onClick={handleLogout}
                 title="Cerrar Sesión"
-                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors shrink-0"
+                className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all duration-200 shrink-0"
               >
                 <LogOut className="w-4 h-4" />
               </button>
@@ -465,15 +512,15 @@ export default function DashboardLayout({
         </div>
 
         {/* Version */}
-        <div className={`shrink-0 ${isCollapsed ? 'px-2 pb-2' : 'px-3 pb-3'}`}>
+        <div className={`shrink-0 ${isCollapsed ? 'px-2 pb-2' : 'px-2.5 pb-3'}`}>
           <button
             onClick={openChangelog}
             title="Ver changelog"
-            className={`w-full flex items-center ${isCollapsed ? 'justify-center' : 'gap-1.5 px-2.5'} py-1 rounded-md hover:bg-slate-50 transition-colors group`}
+            className={`w-full flex items-center ${isCollapsed ? 'justify-center' : 'gap-1.5 px-2.5'} py-1 rounded-md hover:bg-slate-700/50 transition-all duration-200 group`}
           >
-            <FileText className="w-3 h-3 text-slate-300 group-hover:text-slate-400 shrink-0" />
+            <FileText className="w-3 h-3 text-slate-600 group-hover:text-slate-400 shrink-0" />
             {!isCollapsed && (
-              <span className="text-[10px] text-slate-300 group-hover:text-slate-400 font-mono truncate">
+              <span className="text-[10px] text-slate-600 group-hover:text-slate-400 font-mono truncate">
                 v{clientVersion}
               </span>
             )}
@@ -532,7 +579,7 @@ export default function DashboardLayout({
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          pathname === '/dashboard/chats' ? 'p-0 md:p-4 lg:p-5' : 'p-3 sm:p-4 lg:p-5'
+          pathname === '/dashboard/chats' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : 'p-3 sm:p-4 lg:p-5'
         }`}>
           {children}
         </main>

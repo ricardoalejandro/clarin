@@ -2,6 +2,7 @@ package formula
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -364,4 +365,14 @@ func buildParticipantSetOp(node *Node, op string, args []interface{}, argIdx int
 	}
 	sql := strings.Join(parts, " "+op+" ")
 	return sql, currentArgs, currentIdx, nil
+}
+
+// RemapSQLParams rewrites $1, $2... in a SQL string to $offset+0, $offset+1...
+// Uses regexp word boundaries to avoid corrupting $10 when replacing $1.
+func RemapSQLParams(sql string, paramCount int, offset int) string {
+	for i := paramCount; i >= 1; i-- {
+		re := regexp.MustCompile(fmt.Sprintf(`\$%d\b`, i))
+		sql = re.ReplaceAllLiteralString(sql, fmt.Sprintf("$%d", offset+i-1))
+	}
+	return sql
 }

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -18,6 +19,17 @@ import (
 
 func (s *Server) handleListSurveys(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+
+	// Redis cache — 30s TTL
+	surveysCacheKey := ""
+	if s.cache != nil {
+		surveysCacheKey = fmt.Sprintf("surveys:%s:all", accountID.String())
+		if cached, err := s.cache.Get(c.Context(), surveysCacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
+	}
+
 	surveys, err := s.services.Survey.ListSurveys(c.Context(), accountID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
@@ -25,6 +37,13 @@ func (s *Server) handleListSurveys(c *fiber.Ctx) error {
 	if surveys == nil {
 		surveys = []*domain.Survey{}
 	}
+
+	if surveysCacheKey != "" && s.cache != nil {
+		if data, err := json.Marshal(surveys); err == nil {
+			_ = s.cache.Set(c.Context(), surveysCacheKey, data, 30*time.Second)
+		}
+	}
+
 	return c.JSON(surveys)
 }
 
@@ -64,6 +83,7 @@ func (s *Server) handleCreateSurvey(c *fiber.Ctx) error {
 	if err := s.services.Survey.CreateSurvey(c.Context(), survey); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	s.invalidateSurveysCache(accountID)
 	return c.Status(fiber.StatusCreated).JSON(survey)
 }
 
@@ -123,6 +143,7 @@ func (s *Server) handleUpdateSurvey(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	s.invalidateSurveysCache(accountID)
 	// Fetch updated survey to return with counts
 	updated, err := s.services.Survey.GetSurvey(c.Context(), id, accountID)
 	if err != nil {
@@ -141,6 +162,7 @@ func (s *Server) handleDeleteSurvey(c *fiber.Ctx) error {
 	if err := s.services.Survey.DeleteSurvey(c.Context(), id, accountID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	s.invalidateSurveysCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -161,6 +183,7 @@ func (s *Server) handleSetSurveyStatus(c *fiber.Ctx) error {
 	if err := s.services.Survey.SetStatus(c.Context(), id, accountID, req.Status); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	s.invalidateSurveysCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -197,9 +220,13 @@ func (s *Server) handleDuplicateSurvey(c *fiber.Ctx) error {
 // ─── Questions ──────────────────────────────────────────────────────────────
 
 func (s *Server) handleGetSurveyQuestions(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid survey ID"})
+	}
+	if srv, _ := s.services.Survey.GetSurvey(c.Context(), id, accountID); srv == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found"})
 	}
 
 	questions, err := s.services.Survey.GetQuestions(c.Context(), id)
@@ -213,9 +240,13 @@ func (s *Server) handleGetSurveyQuestions(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleSaveSurveyQuestions(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid survey ID"})
+	}
+	if srv, _ := s.services.Survey.GetSurvey(c.Context(), id, accountID); srv == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found"})
 	}
 
 	var questions []domain.SurveyQuestion
@@ -233,9 +264,13 @@ func (s *Server) handleSaveSurveyQuestions(c *fiber.Ctx) error {
 // ─── Responses ──────────────────────────────────────────────────────────────
 
 func (s *Server) handleListSurveyResponses(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid survey ID"})
+	}
+	if srv, _ := s.services.Survey.GetSurvey(c.Context(), id, accountID); srv == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found"})
 	}
 
 	limit, _ := strconv.Atoi(c.Query("limit", "50"))
@@ -252,22 +287,27 @@ func (s *Server) handleListSurveyResponses(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetSurveyResponse(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	rid, err := uuid.Parse(c.Params("rid"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid response ID"})
 	}
 
 	resp, err := s.services.Survey.GetResponse(c.Context(), rid)
-	if err != nil {
+	if err != nil || resp == nil || resp.AccountID != accountID {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Response not found"})
 	}
 	return c.JSON(resp)
 }
 
 func (s *Server) handleDeleteSurveyResponse(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	rid, err := uuid.Parse(c.Params("rid"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid response ID"})
+	}
+	if resp, _ := s.services.Survey.GetResponse(c.Context(), rid); resp == nil || resp.AccountID != accountID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Response not found"})
 	}
 
 	if err := s.services.Survey.DeleteResponse(c.Context(), rid); err != nil {
@@ -279,9 +319,13 @@ func (s *Server) handleDeleteSurveyResponse(c *fiber.Ctx) error {
 // ─── Analytics ──────────────────────────────────────────────────────────────
 
 func (s *Server) handleGetSurveyAnalytics(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid survey ID"})
+	}
+	if srv, _ := s.services.Survey.GetSurvey(c.Context(), id, accountID); srv == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found"})
 	}
 
 	analytics, err := s.services.Survey.GetAnalytics(c.Context(), id)
@@ -292,9 +336,13 @@ func (s *Server) handleGetSurveyAnalytics(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleExportSurveyCSV(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid survey ID"})
+	}
+	if srv, _ := s.services.Survey.GetSurvey(c.Context(), id, accountID); srv == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found"})
 	}
 
 	data, err := s.services.Survey.GetExportData(c.Context(), id)

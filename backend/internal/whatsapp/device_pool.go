@@ -3180,6 +3180,15 @@ func (p *DevicePool) GetConnectedCount() int {
 	return count
 }
 
+// IsDeviceConnected checks if a specific device is connected
+func (p *DevicePool) IsDeviceConnected(deviceID uuid.UUID) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	instance, exists := p.devices[deviceID]
+	return exists && instance.Client != nil && instance.Client.IsConnected()
+}
+
 // GetFirstConnectedDeviceForAccount returns the ID of the first connected device for a given account
 func (p *DevicePool) GetFirstConnectedDeviceForAccount(accountID uuid.UUID) (uuid.UUID, error) {
 	p.mu.RLock()

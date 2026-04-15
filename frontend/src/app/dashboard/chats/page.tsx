@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { Search, Plus, X, Trash2, CheckSquare, Square, MessageCircle, ShieldBan } from 'lucide-react'
 import { formatTime } from '@/utils/format'
 import { subscribeWebSocket } from '@/lib/api'
@@ -47,6 +48,14 @@ export default function ChatsPage() {
 
   // Contact info (3rd column)
   const [showContactInfo, setShowContactInfo] = useState(false)
+
+  // Virtualizer for chat list
+  const chatVirtualizer = useVirtualizer({
+    count: chats.length,
+    getScrollElement: () => chatListRef.current,
+    estimateSize: () => 80,
+    overscan: 10,
+  })
 
   // Responsive
   const [isMdScreen, setIsMdScreen] = useState(true)
@@ -377,9 +386,16 @@ export default function ChatsPage() {
             ) : chats.length === 0 ? (
                 <div className="p-8 text-center text-slate-500 text-sm">No se encontraron chats</div>
             ) : (
-                chats.map(chat => (
+                <div style={{ height: chatVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
+                {chatVirtualizer.getVirtualItems().map(virtualRow => {
+                    const chat = chats[virtualRow.index]
+                    if (!chat) return null
+                    return (
                     <div
                         key={chat.id}
+                        ref={chatVirtualizer.measureElement}
+                        data-index={virtualRow.index}
+                        style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualRow.start}px)` }}
                         onContextMenu={(e) => { e.preventDefault(); setSelectionMode(true); toggleChatSelection(chat.id) }}
                         onClick={() => {
                             if (selectionMode) toggleChatSelection(chat.id)
@@ -442,7 +458,9 @@ export default function ChatsPage() {
                             </div>
                         </div>
                     </div>
-                ))
+                    )
+                })}
+                </div>
             )}
             {/* Loading more indicator */}
             {loadingMore && (
