@@ -407,4 +407,9 @@ url, err := s.storage.Upload(ctx, file, "carpeta/nombre.ext", contentType)
 - [ ] ¿Los eventos de componentes usan stopPropagation donde es necesario?
 
 ## Recent Changes
+- 003-programs-fix-filters: Added TypeScript 5.4 (frontend), Go 1.24 (backend — no changes needed) + Next.js 14, React 18, Tailwind CSS 3.4, FormulaEditor component
 - 001-program-contacts-only: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
+
+## Active Technologies
+- TypeScript 5.4 (frontend), Go 1.24 (backend — no changes needed) + Next.js 14, React 18, Tailwind CSS 3.4, FormulaEditor component (003-programs-fix-filters)
+- PostgreSQL 16 (no schema changes) (003-programs-fix-filters)
