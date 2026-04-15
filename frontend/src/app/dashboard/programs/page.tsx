@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, Search, BookOpen, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, MoreHorizontal, LayoutGrid, LayoutTemplate, List } from 'lucide-react';
+import { Plus, Search, BookOpen, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, MoreHorizontal, LayoutGrid, LayoutTemplate, List, AlertCircle } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program, ProgramFolder } from '@/types/program';
 import Link from 'next/link';
@@ -43,6 +43,25 @@ export default function ProgramsPage() {
 
   // View mode
   const [viewMode, setViewMode] = useState<'grid' | 'list' | 'compact'>('grid');
+
+  // Toast state
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastType, setToastType] = useState<'success' | 'error'>('success');
+
+  // Confirmation dialog state
+  const [confirmAction, setConfirmAction] = useState<{ message: string; onConfirm: () => void } | null>(null);
+
+  // Toast auto-dismiss
+  useEffect(() => {
+    if (!toastMessage) return;
+    const t = setTimeout(() => setToastMessage(null), 3000);
+    return () => clearTimeout(t);
+  }, [toastMessage]);
+
+  const showToast = (message: string, type: 'success' | 'error') => {
+    setToastMessage(message);
+    setToastType(type);
+  };
 
   useEffect(() => {
     fetchPrograms();
@@ -103,19 +122,31 @@ export default function ProgramsPage() {
     }
   };
 
-  const handleDeleteProgram = async (id: string, e: React.MouseEvent) => {
+  const handleDeleteProgram = (id: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm('¿Estás seguro de eliminar este programa? Se eliminarán también todos sus participantes, sesiones y asistencia.')) return;
-    setDeleting(id);
-    try {
-      await api(`/api/programs/${id}`, { method: 'DELETE' });
-      fetchPrograms();
-    } catch (error) {
-      console.error('Error deleting program:', error);
-    } finally {
-      setDeleting(null);
-    }
+    setMenuID(null);
+    setConfirmAction({
+      message: '¿Estás seguro de eliminar este programa? Se eliminarán también todos sus participantes, sesiones y asistencia.',
+      onConfirm: async () => {
+        setConfirmAction(null);
+        setDeleting(id);
+        try {
+          const res = await api(`/api/programs/${id}`, { method: 'DELETE' });
+          if (res.success) {
+            showToast('Programa eliminado', 'success');
+            fetchPrograms();
+          } else {
+            showToast('Error al eliminar programa', 'error');
+          }
+        } catch (error) {
+          console.error('Error deleting program:', error);
+          showToast('Error al eliminar programa', 'error');
+        } finally {
+          setDeleting(null);
+        }
+      },
+    });
   };
 
   const openEditProgram = (program: Program, e: React.MouseEvent) => {
@@ -141,10 +172,14 @@ export default function ProgramsPage() {
       });
       if (res.success) {
         setEditingProgram(null);
+        showToast('Programa actualizado', 'success');
         fetchPrograms();
+      } else {
+        showToast('Error al actualizar programa', 'error');
       }
     } catch (error) {
       console.error('Error updating program:', error);
+      showToast('Error al actualizar programa', 'error');
     } finally {
       setSavingEdit(false);
     }
@@ -188,46 +223,68 @@ export default function ProgramsPage() {
   };
 
   const handleSaveFolder = async () => {
-    if (editFolder) {
-      await fetch(`/api/programs/folders/${editFolder.id}`, {
-        method: 'PUT',
-        headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(folderForm),
-      });
-    } else {
-      await fetch('/api/programs/folders', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...folderForm, parent_id: currentFolderID || undefined }),
-      });
+    try {
+      const endpoint = editFolder ? `/api/programs/folders/${editFolder.id}` : '/api/programs/folders';
+      const method = editFolder ? 'PUT' : 'POST';
+      const body = editFolder ? folderForm : { ...folderForm, parent_id: currentFolderID || undefined };
+      const res = await api(endpoint, { method, body: JSON.stringify(body) });
+      if (res.success) {
+        showToast(editFolder ? 'Carpeta actualizada' : 'Carpeta creada', 'success');
+        setShowFolderModal(false);
+        setEditFolder(null);
+        fetchFolders();
+      } else {
+        showToast('Error al guardar carpeta', 'error');
+      }
+    } catch (error) {
+      console.error('Error saving folder:', error);
+      showToast('Error al guardar carpeta', 'error');
     }
-    setShowFolderModal(false);
-    setEditFolder(null);
-    fetchFolders();
   };
 
-  const handleDeleteFolder = async (id: string, e: React.MouseEvent) => {
+  const handleDeleteFolder = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setMenuID(null);
-    if (!confirm('¿Eliminar carpeta? Los programas se moverán a la carpeta padre.')) return;
-    await fetch(`/api/programs/folders/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token()}` },
+    setConfirmAction({
+      message: '¿Eliminar carpeta? Los programas se moverán a la carpeta padre.',
+      onConfirm: async () => {
+        setConfirmAction(null);
+        try {
+          const res = await api(`/api/programs/folders/${id}`, { method: 'DELETE' });
+          if (res.success) {
+            showToast('Carpeta eliminada', 'success');
+            fetchFolders();
+            fetchPrograms();
+          } else {
+            showToast('Error al eliminar carpeta', 'error');
+          }
+        } catch (error) {
+          console.error('Error deleting folder:', error);
+          showToast('Error al eliminar carpeta', 'error');
+        }
+      },
     });
-    fetchFolders();
-    fetchPrograms();
   };
 
   const handleMoveToFolder = async (programId: string, folderId: string | null, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setMenuID(null);
-    await fetch(`/api/programs/${programId}/move-folder`, {
-      method: 'PATCH',
-      headers: { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folder_id: folderId }),
-    });
-    fetchPrograms();
+    try {
+      const res = await api(`/api/programs/${programId}/move-folder`, {
+        method: 'PATCH',
+        body: JSON.stringify({ folder_id: folderId }),
+      });
+      if (res.success) {
+        showToast('Programa movido', 'success');
+        fetchPrograms();
+      } else {
+        showToast('Error al mover programa', 'error');
+      }
+    } catch (error) {
+      console.error('Error moving program:', error);
+      showToast('Error al mover programa', 'error');
+    }
   };
 
   // Filter programs for current folder
@@ -255,7 +312,7 @@ export default function ProgramsPage() {
       <Link href={`/dashboard/programs/${program.id}`} key={program.id}>
         <div className="group bg-white rounded-xl border border-slate-200 p-4 hover:shadow-md hover:border-slate-300 transition-all duration-200 cursor-pointer h-full flex flex-col relative">
           {/* Action buttons */}
-          <div className="absolute top-3 right-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+          <div className={`absolute top-3 right-3 flex gap-1 transition-all ${menuID === program.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
             <div className="relative">
               <button
                 data-menu-toggle
@@ -266,7 +323,7 @@ export default function ProgramsPage() {
                 <MoreHorizontal className="w-3.5 h-3.5" />
               </button>
               {menuID === program.id && (
-                <div className="absolute top-full right-0 mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" onClick={e => e.stopPropagation()}>
+                <div className="absolute top-full right-0 mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
                   <button onClick={(e) => openEditProgram(program, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                     <Edit2 className="w-3.5 h-3.5" /> Editar
                   </button>
@@ -601,7 +658,7 @@ export default function ProgramsPage() {
                     <p className="mt-2 text-sm font-semibold text-slate-800 truncate">{folder.name}</p>
                     <p className="text-xs text-slate-400 mt-0.5">{folder.program_count} programa{folder.program_count !== 1 ? 's' : ''}</p>
                     {menuID === `f-${folder.id}` && (
-                      <div className="absolute top-8 right-2 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[120px]" onClick={e => e.stopPropagation()}>
+                      <div className="absolute top-8 right-2 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[120px]" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
                         <button onClick={e => openEditFolder(folder, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                           <Edit2 className="w-3.5 h-3.5" /> Editar
                         </button>
@@ -836,6 +893,47 @@ export default function ProgramsPage() {
                   {editFolder ? 'Guardar' : 'Crear'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toastMessage && (
+        <div className={`fixed bottom-6 right-6 z-[70] flex items-center gap-2 px-4 py-3 rounded-xl shadow-lg text-white text-sm font-medium transition-all ${
+          toastType === 'success' ? 'bg-emerald-600' : 'bg-red-600'
+        }`}>
+          {toastType === 'success' ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+          {toastMessage}
+          <button onClick={() => setToastMessage(null)} className="ml-1 p-0.5 hover:bg-white/20 rounded">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Confirmation Dialog */}
+      {confirmAction && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5 text-red-500" />
+              </div>
+              <p className="text-sm text-slate-700 leading-relaxed">{confirmAction.message}</p>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmAction(null)}
+                className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium text-sm"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmAction.onConfirm}
+                className="px-5 py-2.5 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-all shadow-sm font-medium text-sm"
+              >
+                Confirmar
+              </button>
             </div>
           </div>
         </div>

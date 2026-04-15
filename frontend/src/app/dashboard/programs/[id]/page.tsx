@@ -96,6 +96,13 @@ export default function ProgramDetailPage() {
   // Campaign state
   const [creatingCampaign, setCreatingCampaign] = useState(false);
 
+  // Toast state
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastType, setToastType] = useState<'success' | 'error'>('success');
+
+  // Confirmation dialog state
+  const [confirmAction, setConfirmAction] = useState<{ message: string; onConfirm: () => void } | null>(null);
+
   // Edit program state
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editForm, setEditForm] = useState({ name: '', description: '', color: '#10b981', status: 'active' });
@@ -132,6 +139,18 @@ export default function ProgramDetailPage() {
   const [statsData, setStatsData] = useState<{ session_stats: any[]; participant_stats: any[] } | null>(null);
   const [loadingStats, setLoadingStats] = useState(false);
   const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
+
+  // Toast auto-dismiss
+  useEffect(() => {
+    if (!toastMessage) return;
+    const t = setTimeout(() => setToastMessage(null), 3000);
+    return () => clearTimeout(t);
+  }, [toastMessage]);
+
+  const showToast = (message: string, type: 'success' | 'error') => {
+    setToastMessage(message);
+    setToastType(type);
+  };
 
   useEffect(() => {
     if (programId) {
@@ -252,37 +271,59 @@ export default function ProgramDetailPage() {
       });
       if (res.success) {
         setIsEditModalOpen(false);
+        showToast('Programa actualizado', 'success');
         fetchProgramData();
+      } else {
+        showToast('Error al actualizar programa', 'error');
       }
     } catch (error) {
       console.error('Error updating program:', error);
+      showToast('Error al actualizar programa', 'error');
     } finally {
       setSaving(false);
     }
   };
 
   const handleDeleteProgram = async () => {
-    if (!confirm('¿Estás seguro de eliminar este programa? Se eliminarán también todos sus participantes, sesiones y asistencia.')) return;
-    try {
-      await api(`/api/programs/${programId}`, { method: 'DELETE' });
-      router.push('/dashboard/programs');
-    } catch (error) {
-      console.error('Error deleting program:', error);
-    }
+    setShowHeaderMenu(false);
+    setConfirmAction({
+      message: '¿Estás seguro de eliminar este programa? Se eliminarán también todos sus participantes, sesiones y asistencia.',
+      onConfirm: async () => {
+        setConfirmAction(null);
+        try {
+          const res = await api(`/api/programs/${programId}`, { method: 'DELETE' });
+          if (res.success) {
+            showToast('Programa eliminado', 'success');
+            router.push('/dashboard/programs');
+          } else {
+            showToast('Error al eliminar programa', 'error');
+          }
+        } catch (error) {
+          console.error('Error deleting program:', error);
+          showToast('Error al eliminar programa', 'error');
+        }
+      },
+    });
   };
 
   const handleArchiveProgram = async () => {
     if (!program) return;
     const newStatus = program.status === 'archived' ? 'active' : 'archived';
     try {
-      await api(`/api/programs/${programId}`, {
+      const res = await api(`/api/programs/${programId}`, {
         method: 'PUT',
         body: JSON.stringify({ ...program, status: newStatus, description: program.description || '' })
       });
-      fetchProgramData();
+      if (res.success) {
+        showToast(newStatus === 'archived' ? 'Programa archivado' : 'Programa desarchivado', 'success');
+        fetchProgramData();
+      } else {
+        showToast('Error al cambiar estado del programa', 'error');
+      }
       setShowHeaderMenu(false);
     } catch (error) {
       console.error('Error archiving program:', error);
+      showToast('Error al cambiar estado del programa', 'error');
     }
   };
 
@@ -366,19 +407,30 @@ export default function ProgramDetailPage() {
   };
 
   const handleRemoveParticipant = async (participantId: string) => {
-    if (!confirm('¿Estás seguro de eliminar a este participante?')) return;
-    try {
-      await api(`/api/programs/${programId}/participants/${participantId}`, { method: 'DELETE' });
-      fetchProgramData();
-    } catch (error) {
-      console.error('Error removing participant:', error);
-    }
+    setConfirmAction({
+      message: '¿Estás seguro de eliminar a este participante?',
+      onConfirm: async () => {
+        setConfirmAction(null);
+        try {
+          const res = await api(`/api/programs/${programId}/participants/${participantId}`, { method: 'DELETE' });
+          if (res.success) {
+            showToast('Participante eliminado', 'success');
+            fetchProgramData();
+          } else {
+            showToast('Error al eliminar participante', 'error');
+          }
+        } catch (error) {
+          console.error('Error removing participant:', error);
+          showToast('Error al eliminar participante', 'error');
+        }
+      },
+    });
   };
 
   const handleCreateSession = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api(`/api/programs/${programId}/sessions`, {
+      const res = await api(`/api/programs/${programId}/sessions`, {
         method: 'POST',
         body: JSON.stringify({
           ...newSession,
@@ -387,11 +439,17 @@ export default function ProgramDetailPage() {
           location: newSession.location || undefined,
         })
       });
-      setIsCreateSessionOpen(false);
-      setNewSession({ date: new Date().toISOString().split('T')[0], topic: '', start_time: '', end_time: '', location: '' });
-      fetchProgramData();
+      if (res.success) {
+        setIsCreateSessionOpen(false);
+        setNewSession({ date: new Date().toISOString().split('T')[0], topic: '', start_time: '', end_time: '', location: '' });
+        showToast('Sesión creada', 'success');
+        fetchProgramData();
+      } else {
+        showToast('Error al crear sesión', 'error');
+      }
     } catch (error) {
       console.error('Error creating session:', error);
+      showToast('Error al crear sesión', 'error');
     }
   };
 
@@ -422,23 +480,38 @@ export default function ProgramDetailPage() {
       });
       if (res.success) {
         setEditingSession(null);
+        showToast('Sesión actualizada', 'success');
         fetchProgramData();
+      } else {
+        showToast('Error al actualizar sesión', 'error');
       }
     } catch (error) {
       console.error('Error updating session:', error);
+      showToast('Error al actualizar sesión', 'error');
     } finally {
       setSavingSession(false);
     }
   };
 
   const handleDeleteSession = async (sessionId: string) => {
-    if (!confirm('¿Estás seguro de eliminar esta sesión?')) return;
-    try {
-      await api(`/api/programs/${programId}/sessions/${sessionId}`, { method: 'DELETE' });
-      fetchProgramData();
-    } catch (error) {
-      console.error('Error deleting session:', error);
-    }
+    setConfirmAction({
+      message: '¿Estás seguro de eliminar esta sesión?',
+      onConfirm: async () => {
+        setConfirmAction(null);
+        try {
+          const res = await api(`/api/programs/${programId}/sessions/${sessionId}`, { method: 'DELETE' });
+          if (res.success) {
+            showToast('Sesión eliminada', 'success');
+            fetchProgramData();
+          } else {
+            showToast('Error al eliminar sesión', 'error');
+          }
+        } catch (error) {
+          console.error('Error deleting session:', error);
+          showToast('Error al eliminar sesión', 'error');
+        }
+      },
+    });
   };
 
   const openAttendance = async (session: ProgramSession) => {
@@ -1235,6 +1308,7 @@ export default function ProgramDetailPage() {
                 confirmLabel="Agregar Seleccionados"
                 excludeIds={new Set(participants.map(p => p.contact_id))}
                 sourceFilter="contact"
+                advancedFilters
               />
             </div>
           </div>
@@ -1854,6 +1928,47 @@ export default function ProgramDetailPage() {
               </div>
             )}
             <button onClick={() => setShowDeviceSelector(false)} className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toastMessage && (
+        <div className={`fixed bottom-6 right-6 z-[70] flex items-center gap-2.5 px-5 py-3 rounded-xl shadow-lg text-sm font-medium transition-all animate-in slide-in-from-bottom-4 ${
+          toastType === 'success' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
+        }`}>
+          {toastType === 'success' ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+          {toastMessage}
+          <button onClick={() => setToastMessage(null)} className="ml-1 p-0.5 hover:bg-white/20 rounded">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Confirmation Dialog */}
+      {confirmAction && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5 text-red-500" />
+              </div>
+              <p className="text-sm text-slate-700 leading-relaxed">{confirmAction.message}</p>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmAction(null)}
+                className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium text-sm"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmAction.onConfirm}
+                className="px-5 py-2.5 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-all shadow-sm font-medium text-sm"
+              >
+                Confirmar
+              </button>
+            </div>
           </div>
         </div>
       )}
