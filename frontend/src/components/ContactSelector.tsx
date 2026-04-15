@@ -24,6 +24,7 @@ export interface SelectedPerson {
   phone: string
   email: string
   source_type: 'contact' | 'lead'
+  tags?: { id: string; name: string; color: string }[]
 }
 
 interface ContactSelectorProps {
@@ -35,6 +36,8 @@ interface ContactSelectorProps {
   confirmLabel?: string
   /** Exclude these IDs from results (e.g. already-added participants) */
   excludeIds?: Set<string>
+  /** Force a source type and hide the type filter */
+  sourceFilter?: 'contact' | 'lead'
 }
 
 export default function ContactSelector({
@@ -45,6 +48,7 @@ export default function ContactSelector({
   subtitle = 'Busca entre tus contactos y leads',
   confirmLabel = 'Agregar',
   excludeIds,
+  sourceFilter,
 }: ContactSelectorProps) {
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -54,7 +58,7 @@ export default function ContactSelector({
   const [selected, setSelected] = useState<Map<string, SelectedPerson>>(new Map())
 
   // Filters
-  const [sourceType, setSourceType] = useState<'all' | 'contact' | 'lead'>('all')
+  const [sourceType, setSourceType] = useState<'all' | 'contact' | 'lead'>(sourceFilter || 'all')
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
   const [allTags, setAllTags] = useState<TagItem[]>([])
   const [filterTagIds, setFilterTagIds] = useState<Set<string>>(new Set())
@@ -90,7 +94,7 @@ export default function ContactSelector({
       setDebouncedSearch('')
       setResults([])
       setSelected(new Map())
-      setSourceType('all')
+      setSourceType(sourceFilter || 'all')
       setFilterTagIds(new Set())
       setHasPhone(false)
       setShowFilterDropdown(false)
@@ -159,6 +163,7 @@ export default function ContactSelector({
         phone: person.phone,
         email: person.email,
         source_type: person.source_type,
+        tags: person.tags,
       })
     }
     setSelected(next)
@@ -168,7 +173,7 @@ export default function ContactSelector({
     const next = new Map(selected)
     results.forEach(p => {
       if (!next.has(p.id)) {
-        next.set(p.id, { id: p.id, name: p.name, phone: p.phone, email: p.email, source_type: p.source_type })
+        next.set(p.id, { id: p.id, name: p.name, phone: p.phone, email: p.email, source_type: p.source_type, tags: p.tags })
       }
     })
     setSelected(next)
@@ -178,7 +183,7 @@ export default function ContactSelector({
     onConfirm(Array.from(selected.values()))
   }
 
-  const activeFilterCount = (sourceType !== 'all' ? 1 : 0) + (filterTagIds.size > 0 ? 1 : 0) + (hasPhone ? 1 : 0)
+  const activeFilterCount = (!sourceFilter && sourceType !== 'all' ? 1 : 0) + (filterTagIds.size > 0 ? 1 : 0) + (hasPhone ? 1 : 0)
 
   // Tag search with wildcard support (% as wildcard, like leads page)
   const filteredTags = allTags.filter(tag => {
@@ -239,7 +244,7 @@ export default function ContactSelector({
                     <div className="flex items-center gap-2">
                       {activeFilterCount > 0 && (
                         <button
-                          onClick={() => { setSourceType('all'); setFilterTagIds(new Set()); setHasPhone(false) }}
+                          onClick={() => { setSourceType(sourceFilter || 'all'); setFilterTagIds(new Set()); setHasPhone(false) }}
                           className="text-xs text-red-500 hover:text-red-700"
                         >
                           Limpiar filtros
@@ -252,6 +257,7 @@ export default function ContactSelector({
                   </div>
 
                   {/* Source type filter */}
+                  {!sourceFilter && (
                   <div className="p-3 border-b border-gray-100">
                     <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Tipo</p>
                     <div className="flex flex-wrap gap-1.5">
@@ -274,6 +280,7 @@ export default function ContactSelector({
                       ))}
                     </div>
                   </div>
+                  )}
 
                   {/* Has phone filter */}
                   <div className="p-3 border-b border-gray-100">
