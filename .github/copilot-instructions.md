@@ -405,3 +405,6 @@ url, err := s.storage.Upload(ctx, file, "carpeta/nombre.ext", contentType)
 - [ ] ¿Se normaliza el teléfono si aplica?
 - [ ] ¿Se invalida cache si aplica?
 - [ ] ¿Los eventos de componentes usan stopPropagation donde es necesario?
+
+## Recent Changes
+- 001-program-contacts-only: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]

@@ -1,14 +1,14 @@
 package api
 
 import (
-"log"
+"encoding/json"
+"fmt"
 "strings"
 "time"
 
 "github.com/gofiber/fiber/v2"
 "github.com/google/uuid"
 "github.com/naperu/clarin/internal/domain"
-"github.com/naperu/clarin/internal/kommo"
 )
 
 // --- Programs ---
@@ -63,9 +63,25 @@ return c.Status(fiber.StatusCreated).JSON(program)
 func (s *Server) handleListPrograms(c *fiber.Ctx) error {
 accountID := c.Locals("account_id").(uuid.UUID)
 
+// Redis cache — 30s TTL
+programsCacheKey := ""
+if s.cache != nil {
+programsCacheKey = fmt.Sprintf("programs:%s:all", accountID.String())
+if cached, err := s.cache.Get(c.Context(), programsCacheKey); err == nil && cached != nil {
+c.Set("Content-Type", "application/json")
+return c.Send(cached)
+}
+}
+
 programs, err := s.services.Program.ListPrograms(c.Context(), accountID)
 if err != nil {
 return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+}
+
+if programsCacheKey != "" && s.cache != nil {
+if data, err := json.Marshal(programs); err == nil {
+_ = s.cache.Set(c.Context(), programsCacheKey, data, 30*time.Second)
+}
 }
 
 return c.JSON(programs)
@@ -140,6 +156,7 @@ if err := s.services.Program.UpdateProgram(c.Context(), program); err != nil {
 return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 }
 
+s.invalidateProgramsCache(accountID)
 return c.JSON(program)
 }
 
@@ -155,6 +172,7 @@ if err := s.services.Program.DeleteProgram(c.Context(), accountID, id); err != n
 return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 }
 
+s.invalidateProgramsCache(accountID)
 return c.SendStatus(fiber.StatusNoContent)
 }
 
@@ -165,91 +183,22 @@ programID, err := uuid.Parse(c.Params("id"))
 if err != nil {
 return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
 }
-accountID := c.Locals("account_id").(uuid.UUID)
 
 var req struct {
-	ContactID *uuid.UUID `json:"contact_id"`
-	LeadID    *uuid.UUID `json:"lead_id"`
-	Status    string     `json:"status"`
+	ContactID uuid.UUID `json:"contact_id"`
+	Status    string    `json:"status"`
 }
 if err := c.BodyParser(&req); err != nil {
 	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 }
 
-var contactID uuid.UUID
-var leadID *uuid.UUID
-
-if req.ContactID != nil && *req.ContactID != uuid.Nil {
-	// Direct contact reference
-	contactID = *req.ContactID
-	// Also check if this contact has a lead
-	if req.LeadID != nil && *req.LeadID != uuid.Nil {
-		leadID = req.LeadID
-	}
-} else if req.LeadID != nil && *req.LeadID != uuid.Nil {
-	// Lead selected — resolve to a contact
-	leadID = req.LeadID
-	lead, err := s.repos.Lead.GetByID(c.Context(), *req.LeadID)
-	if err != nil || lead == nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Lead no encontrado"})
-	}
-
-	if lead.ContactID != nil && *lead.ContactID != uuid.Nil {
-		// Lead already has a linked contact
-		contactID = *lead.ContactID
-		log.Printf("[Programs] Lead %s already linked to contact %s", lead.ID, contactID)
-	} else {
-		// Try to find contact by phone
-		var phone string
-		if lead.Phone != nil && *lead.Phone != "" {
-			phone = kommo.NormalizePhone(*lead.Phone)
-		}
-
-		var contact *domain.Contact
-		if phone != "" {
-			contact, _ = s.repos.Contact.GetByPhone(c.Context(), accountID, phone)
-		}
-
-		if contact != nil {
-			contactID = contact.ID
-			// Link lead to this contact for future use
-			_, _ = s.repos.DB().Exec(c.Context(), "UPDATE leads SET contact_id = $1 WHERE id = $2", contact.ID, lead.ID)
-			log.Printf("[Programs] Linked lead %s to existing contact %s via phone %s", lead.ID, contact.ID, phone)
-		} else {
-			// Create a new contact from the lead data
-			var leadName string
-			if lead.Name != nil {
-				leadName = *lead.Name
-			}
-			if lead.LastName != nil && *lead.LastName != "" {
-				leadName += " " + *lead.LastName
-			}
-			if leadName == "" {
-				leadName = phone
-			}
-			jid := ""
-			if phone != "" {
-				jid = phone + "@s.whatsapp.net"
-			}
-			newContact, err := s.repos.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, leadName, "", false)
-			if err != nil {
-				log.Printf("[Programs] Error creating contact from lead %s: %v", lead.ID, err)
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error creando contacto desde lead"})
-			}
-			contactID = newContact.ID
-			// Link lead to new contact
-			_, _ = s.repos.DB().Exec(c.Context(), "UPDATE leads SET contact_id = $1 WHERE id = $2", newContact.ID, lead.ID)
-			log.Printf("[Programs] Created contact %s from lead %s (phone: %s)", newContact.ID, lead.ID, phone)
-		}
-	}
-} else {
-	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Se requiere contact_id o lead_id"})
+if req.ContactID == uuid.Nil {
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Se requiere contact_id"})
 }
 
 participant := &domain.ProgramParticipant{
 	ProgramID: programID,
-	ContactID: contactID,
-	LeadID:    leadID,
+	ContactID: req.ContactID,
 	Status:    "active",
 }
 

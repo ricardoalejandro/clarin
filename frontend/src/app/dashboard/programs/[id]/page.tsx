@@ -215,8 +215,7 @@ export default function ProgramDetailPage() {
         await api(`/api/programs/${programId}/participants`, {
           method: 'POST',
           body: JSON.stringify({
-            contact_id: person.source_type === 'contact' ? person.id : null,
-            lead_id: person.source_type === 'lead' ? person.id : null,
+            contact_id: person.id,
             status: 'active'
           })
         });
@@ -1235,6 +1234,7 @@ export default function ProgramDetailPage() {
                 title="Agregar Participantes"
                 confirmLabel="Agregar Seleccionados"
                 excludeIds={new Set(participants.map(p => p.contact_id))}
+                sourceFilter="contact"
               />
             </div>
           </div>
