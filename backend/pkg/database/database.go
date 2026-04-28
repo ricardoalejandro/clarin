@@ -90,6 +90,7 @@ func Migrate(db *pgxpool.Pool) error {
 			name VARCHAR(255),
 			push_name VARCHAR(255),
 			avatar_url TEXT,
+			avatar_checked_at TIMESTAMPTZ,
 			is_group BOOLEAN DEFAULT FALSE,
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -474,6 +475,7 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_message_reactions_chat ON message_reactions(chat_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_message_reactions_target ON message_reactions(target_message_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_message_reactions_filter ON message_reactions(account_id, chat_id, is_from_me, timestamp DESC)`,
 
 		// Poll options table
 		`CREATE TABLE IF NOT EXISTS poll_options (
@@ -583,6 +585,47 @@ func Migrate(db *pgxpool.Pool) error {
 			UNIQUE(account_id, kommo_pipeline_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_kommo_connected_pipelines_account ON kommo_connected_pipelines(account_id)`,
+
+		// Integration framework: global, multi-account and per-account instances.
+		`CREATE TABLE IF NOT EXISTS integration_instances (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			provider VARCHAR(50) NOT NULL,
+			scope VARCHAR(50) NOT NULL DEFAULT 'account',
+			name VARCHAR(255) NOT NULL,
+			status VARCHAR(50) NOT NULL DEFAULT 'active',
+			is_active BOOLEAN NOT NULL DEFAULT TRUE,
+			subdomain VARCHAR(255) NOT NULL DEFAULT '',
+			client_id TEXT NOT NULL DEFAULT '',
+			client_secret TEXT NOT NULL DEFAULT '',
+			access_token TEXT NOT NULL DEFAULT '',
+			refresh_token TEXT NOT NULL DEFAULT '',
+			redirect_uri TEXT NOT NULL DEFAULT '',
+			webhook_secret TEXT NOT NULL DEFAULT '',
+			config JSONB NOT NULL DEFAULT '{}'::jsonb,
+			last_sync_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(provider, name)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_integration_instances_provider_name ON integration_instances(provider, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_integration_instances_provider_active ON integration_instances(provider, is_active)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_integration_instances_webhook_secret ON integration_instances(provider, webhook_secret) WHERE webhook_secret <> ''`,
+		`CREATE TABLE IF NOT EXISTS integration_instance_accounts (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			integration_instance_id UUID NOT NULL REFERENCES integration_instances(id) ON DELETE CASCADE,
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			last_synced_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(integration_instance_id, account_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_integration_instance_accounts_account ON integration_instance_accounts(account_id, enabled)`,
+		`CREATE INDEX IF NOT EXISTS idx_integration_instance_accounts_instance ON integration_instance_accounts(integration_instance_id, enabled)`,
+		`ALTER TABLE kommo_connected_pipelines ADD COLUMN IF NOT EXISTS integration_instance_id UUID REFERENCES integration_instances(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_kommo_connected_pipelines_instance ON kommo_connected_pipelines(integration_instance_id) WHERE integration_instance_id IS NOT NULL`,
+		`ALTER TABLE kommo_connected_pipelines DROP CONSTRAINT IF EXISTS kommo_connected_pipelines_account_id_kommo_pipeline_id_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_kommo_connected_pipelines_instance_account_pipeline ON kommo_connected_pipelines(COALESCE(integration_instance_id, '00000000-0000-0000-0000-000000000000'::uuid), account_id, kommo_pipeline_id)`,
 
 		// Anti-loop: track last push timestamp to detect echoes from Kommo poller
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_last_pushed_at BIGINT DEFAULT 0`,
@@ -898,6 +941,7 @@ func Migrate(db *pgxpool.Pool) error {
 		// Distrito and Ocupacion fields on contacts and leads
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS distrito VARCHAR(255) DEFAULT ''`,
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS ocupacion VARCHAR(255) DEFAULT ''`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_checked_at TIMESTAMPTZ`,
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS distrito VARCHAR(255) DEFAULT ''`,
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ocupacion VARCHAR(255) DEFAULT ''`,
 
@@ -990,6 +1034,18 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS folder_id UUID REFERENCES program_folders(id) ON DELETE SET NULL`,
 		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS receive_messages BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS provider VARCHAR(50) NOT NULL DEFAULT 'whatsapp_web'`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS waba_id VARCHAR(100)`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS phone_number_id VARCHAR(100)`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS api_display_phone VARCHAR(50)`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS api_webhook_status VARCHAR(50) NOT NULL DEFAULT 'not_configured'`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS api_billing_status VARCHAR(50) NOT NULL DEFAULT 'not_configured'`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS api_sending_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS api_templates_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS capabilities JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		`UPDATE devices SET provider = 'whatsapp_web' WHERE provider IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_devices_account_provider ON devices(account_id, provider)`,
+		`CREATE INDEX IF NOT EXISTS idx_devices_phone_number_id ON devices(phone_number_id) WHERE phone_number_id IS NOT NULL`,
 
 		// Backfill contact_id for event_participants that have lead_id but missing contact_id
 		`UPDATE event_participants SET contact_id = l.contact_id FROM leads l WHERE l.id = event_participants.lead_id AND event_participants.contact_id IS NULL AND l.contact_id IS NOT NULL`,
@@ -1134,6 +1190,52 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_dynamic_link_registrations_link ON dynamic_link_registrations(link_id, created_at)`,
 
+		// ─── Dynamic Link: multi-image extras + registration tracking (2026-04) ─
+		// Make age nullable (no longer required)
+		`ALTER TABLE dynamic_link_registrations ALTER COLUMN age DROP NOT NULL`,
+		`ALTER TABLE dynamic_link_registrations ALTER COLUMN age DROP DEFAULT`,
+		// Link registrations to global contact/lead + track WA send status
+		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL`,
+		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS lead_id UUID REFERENCES leads(id) ON DELETE SET NULL`,
+		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS whatsapp_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS whatsapp_error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS session_token TEXT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_dynamic_link_reg_session_token ON dynamic_link_registrations(session_token) WHERE session_token IS NOT NULL`,
+
+		// ─── Share feature (2026-04) ───────────────────────────────────
+		// When set, the registration was created as a "share" by another
+		// registration (the sharer). NULL = self-registration.
+		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS shared_by_registration_id UUID REFERENCES dynamic_link_registrations(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_dynamic_link_reg_shared_by ON dynamic_link_registrations(shared_by_registration_id) WHERE shared_by_registration_id IS NOT NULL`,
+		// Replace the strict (link_id, phone) unique constraint with a partial
+		// one that only applies to self-registrations. This allows the same
+		// phone to receive multiple shared messages.
+		`ALTER TABLE dynamic_link_registrations DROP CONSTRAINT IF EXISTS uq_link_phone`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_link_phone_self ON dynamic_link_registrations(link_id, phone) WHERE shared_by_registration_id IS NULL`,
+
+		// Multi-image extras per link (up to 10, each with optional caption)
+		`CREATE TABLE IF NOT EXISTS dynamic_link_extra_media (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			link_id UUID NOT NULL REFERENCES dynamic_links(id) ON DELETE CASCADE,
+			url TEXT NOT NULL,
+			media_type TEXT NOT NULL DEFAULT 'image',
+			caption TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_dynamic_link_extra_media_link ON dynamic_link_extra_media(link_id, sort_order)`,
+
+		// One-shot migration of legacy single-slot extra to the new table
+		`INSERT INTO dynamic_link_extra_media (link_id, url, media_type, caption, sort_order)
+		 SELECT dl.id, dl.extra_message_media_url,
+		        COALESCE(NULLIF(dl.extra_message_media_type,''), 'image'),
+		        COALESCE(dl.extra_message_text,''), 0
+		 FROM dynamic_links dl
+		 WHERE dl.extra_message_media_url <> ''
+		   AND NOT EXISTS (
+		     SELECT 1 FROM dynamic_link_extra_media dlem WHERE dlem.link_id = dl.id
+		   )`,
+
 		// Migrate existing dynamics: create a dynamic_link for each dynamic using its slug
 		`INSERT INTO dynamic_links (dynamic_id, slug, is_active)
 		 SELECT d.id, d.slug, d.is_active FROM dynamics d
@@ -1268,8 +1370,11 @@ func Migrate(db *pgxpool.Pool) error {
 			level TEXT NOT NULL DEFAULT 'info',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`ALTER TABLE sync_monitor_entries ADD COLUMN IF NOT EXISTS integration_instance_id UUID REFERENCES integration_instances(id) ON DELETE SET NULL`,
+		`ALTER TABLE sync_monitor_entries ADD COLUMN IF NOT EXISTS account_id UUID REFERENCES accounts(id) ON DELETE SET NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_monitor_created_at ON sync_monitor_entries(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_monitor_source ON sync_monitor_entries(source)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_monitor_instance_created ON sync_monitor_entries(integration_instance_id, created_at DESC) WHERE integration_instance_id IS NOT NULL`,
 
 		// Three-way merge baseline for tag sync (Clarin ↔ Kommo)
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_synced_tags TEXT[] DEFAULT '{}'`,
@@ -1283,6 +1388,191 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS address TEXT`,
 		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS distrito VARCHAR(255)`,
 		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS ocupacion VARCHAR(255)`,
+
+		// ── Custom field definitions ─────────────────────
+		`CREATE TABLE IF NOT EXISTS custom_field_definitions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			slug VARCHAR(255) NOT NULL,
+			field_type VARCHAR(50) NOT NULL CHECK(field_type IN ('text','number','date','select','multi_select','checkbox','email','phone','url','currency')),
+			config JSONB NOT NULL DEFAULT '{}',
+			is_required BOOLEAN NOT NULL DEFAULT FALSE,
+			default_value TEXT,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(account_id, slug)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cfd_account ON custom_field_definitions(account_id, sort_order)`,
+
+		// ── Custom field values ─────────────────────
+		`CREATE TABLE IF NOT EXISTS custom_field_values (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			field_id UUID NOT NULL REFERENCES custom_field_definitions(id) ON DELETE CASCADE,
+			contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+			value_text TEXT,
+			value_number NUMERIC(18,4),
+			value_date TIMESTAMPTZ,
+			value_bool BOOLEAN,
+			value_json JSONB,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(field_id, contact_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_cfv_contact ON custom_field_values(contact_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cfv_field ON custom_field_values(field_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cfv_text ON custom_field_values(field_id, value_text) WHERE value_text IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_cfv_number ON custom_field_values(field_id, value_number) WHERE value_number IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_cfv_date ON custom_field_values(field_id, value_date) WHERE value_date IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_cfv_bool ON custom_field_values(field_id, value_bool) WHERE value_bool IS NOT NULL`,
+
+		// ─── Programs: dual type (course | event) ──────────────────────────
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS type VARCHAR(20) NOT NULL DEFAULT 'course'`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS pipeline_id UUID REFERENCES event_pipelines(id) ON DELETE SET NULL`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS tag_formula TEXT DEFAULT ''`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS tag_formula_mode VARCHAR(10) DEFAULT 'OR'`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS tag_formula_type VARCHAR(20) DEFAULT 'simple'`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS event_date TIMESTAMPTZ`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS event_end TIMESTAMPTZ`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS location TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_programs_type ON programs(type)`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS stage_id UUID REFERENCES event_pipeline_stages(id) ON DELETE SET NULL`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS auto_tag_sync BOOLEAN DEFAULT FALSE`,
+		`CREATE INDEX IF NOT EXISTS idx_program_participants_stage ON program_participants(stage_id)`,
+
+		// ─── Kommo Push Outbox: batched, coalesced push worker ─────────────
+		// Enables bulk PATCH to Kommo (up to 250 items/req) with coalescing
+		// by (entity_id, operation) via unique partial index.
+		`CREATE TABLE IF NOT EXISTS kommo_push_outbox (
+			id UUID PRIMARY KEY,
+			integration_instance_id UUID REFERENCES integration_instances(id) ON DELETE SET NULL,
+			account_id UUID NOT NULL,
+			operation TEXT NOT NULL,
+			entity_id UUID NOT NULL,
+			kommo_entity_id BIGINT NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+			enqueued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			processing_started_at TIMESTAMPTZ,
+			attempts INT NOT NULL DEFAULT 0,
+			last_error TEXT
+		)`,
+		`ALTER TABLE kommo_push_outbox ADD COLUMN IF NOT EXISTS integration_instance_id UUID REFERENCES integration_instances(id) ON DELETE SET NULL`,
+		`DROP INDEX IF EXISTS uq_kommo_outbox_pending`,
+		`CREATE INDEX IF NOT EXISTS idx_kommo_outbox_instance_pending ON kommo_push_outbox(integration_instance_id, operation, enqueued_at) WHERE processing_started_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_kommo_outbox_pending ON kommo_push_outbox(operation, enqueued_at) WHERE processing_started_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_kommo_outbox_processing ON kommo_push_outbox(processing_started_at) WHERE processing_started_at IS NOT NULL`,
+
+		// ─── WhatsApp Cloud API: safe infrastructure, no paid sends by default ──
+		`ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_inbound_at TIMESTAMPTZ`,
+		`ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_outbound_at TIMESTAMPTZ`,
+		`ALTER TABLE chats ADD COLUMN IF NOT EXISTS customer_service_window_expires_at TIMESTAMPTZ`,
+		`ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_message_provider VARCHAR(50) NOT NULL DEFAULT 'whatsapp_web'`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS provider VARCHAR(50) NOT NULL DEFAULT 'whatsapp_web'`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name VARCHAR(255)`,
+		`CREATE INDEX IF NOT EXISTS idx_chats_service_window ON chats(account_id, customer_service_window_expires_at) WHERE customer_service_window_expires_at IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(account_id, provider)`,
+
+		`CREATE TABLE IF NOT EXISTS whatsapp_message_templates (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			device_id UUID REFERENCES devices(id) ON DELETE SET NULL,
+			name VARCHAR(255) NOT NULL,
+			language VARCHAR(20) NOT NULL DEFAULT 'es',
+			category VARCHAR(50) NOT NULL DEFAULT 'UTILITY',
+			status VARCHAR(50) NOT NULL DEFAULT 'draft',
+			components JSONB NOT NULL DEFAULT '[]'::jsonb,
+			meta_template_id VARCHAR(255),
+			rejection_reason TEXT,
+			last_synced_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(account_id, name, language)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_templates_account_status ON whatsapp_message_templates(account_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_templates_device ON whatsapp_message_templates(device_id) WHERE device_id IS NOT NULL`,
+
+		`CREATE TABLE IF NOT EXISTS whatsapp_webhook_events (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID REFERENCES accounts(id) ON DELETE SET NULL,
+			device_id UUID REFERENCES devices(id) ON DELETE SET NULL,
+			phone_number_id VARCHAR(100) NOT NULL DEFAULT '',
+			event_id VARCHAR(255) NOT NULL,
+			event_type VARCHAR(100) NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+			processed BOOLEAN NOT NULL DEFAULT FALSE,
+			error_message TEXT,
+			received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(event_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_webhook_events_account ON whatsapp_webhook_events(account_id, received_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_webhook_events_device ON whatsapp_webhook_events(device_id, received_at DESC) WHERE device_id IS NOT NULL`,
+
+		`CREATE TABLE IF NOT EXISTS bot_flows (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			channel VARCHAR(50) NOT NULL DEFAULT 'whatsapp',
+			trigger_type VARCHAR(100) NOT NULL DEFAULT 'message_received',
+			trigger_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+			graph JSONB NOT NULL DEFAULT '{"nodes":[],"edges":[]}'::jsonb,
+			is_active BOOLEAN NOT NULL DEFAULT FALSE,
+			is_published BOOLEAN NOT NULL DEFAULT FALSE,
+			draft_version INT NOT NULL DEFAULT 1,
+			published_version INT NOT NULL DEFAULT 0,
+			execution_count INT NOT NULL DEFAULT 0,
+			last_triggered_at TIMESTAMPTZ,
+			published_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_flows_account ON bot_flows(account_id, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_flows_active ON bot_flows(account_id, channel, trigger_type) WHERE is_active = TRUE AND is_published = TRUE`,
+
+		`CREATE TABLE IF NOT EXISTS bot_flow_versions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			flow_id UUID NOT NULL REFERENCES bot_flows(id) ON DELETE CASCADE,
+			version INT NOT NULL,
+			graph JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(flow_id, version)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_flow_versions_flow ON bot_flow_versions(flow_id, version DESC)`,
+
+		`CREATE TABLE IF NOT EXISTS bot_sessions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			flow_id UUID NOT NULL REFERENCES bot_flows(id) ON DELETE CASCADE,
+			chat_id UUID REFERENCES chats(id) ON DELETE SET NULL,
+			contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
+			lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+			status VARCHAR(50) NOT NULL DEFAULT 'active',
+			current_node_id VARCHAR(255) NOT NULL DEFAULT '',
+			context_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+			started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			ended_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_sessions_account_status ON bot_sessions(account_id, status, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_sessions_chat ON bot_sessions(chat_id) WHERE chat_id IS NOT NULL`,
+
+		`CREATE TABLE IF NOT EXISTS bot_execution_logs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			flow_id UUID NOT NULL REFERENCES bot_flows(id) ON DELETE CASCADE,
+			session_id UUID REFERENCES bot_sessions(id) ON DELETE SET NULL,
+			node_id VARCHAR(255) NOT NULL DEFAULT '',
+			node_type VARCHAR(100) NOT NULL DEFAULT '',
+			status VARCHAR(50) NOT NULL DEFAULT 'success',
+			input JSONB NOT NULL DEFAULT '{}'::jsonb,
+			output JSONB NOT NULL DEFAULT '{}'::jsonb,
+			error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_execution_logs_flow ON bot_execution_logs(flow_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_bot_execution_logs_account ON bot_execution_logs(account_id, created_at DESC)`,
 	}
 
 	for _, migration := range migrations {

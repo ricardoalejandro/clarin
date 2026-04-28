@@ -1,20 +1,19 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { X, FileText, Download, Loader2, Image, FileDown, Package, CheckSquare, Square } from 'lucide-react'
+import { X, FileText, Download, Loader2, Package, CheckSquare, Square } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { DocumentTemplate } from '@/types/document'
 import type { Lead } from '@/types/contact'
 import {
   generateBulk,
   packageAsZip,
-  mergePdfs,
   downloadBlob,
   type RenderOptions,
   type BulkProgress,
 } from '@/utils/documentGeneration'
 
-type OutputMode = 'zip-individual' | 'pdf-multipage'
+type OutputMode = 'zip-individual'
 
 interface Props {
   leads: Lead[]
@@ -40,10 +39,8 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
   const [selectedTemplate, setSelectedTemplate] = useState<DocumentTemplate | null>(null)
   const [step, setStep] = useState<'template' | 'options' | 'generating'>('template')
 
-  // Options
-  const [format, setFormat] = useState<'png' | 'pdf'>('pdf')
-  const [quality, setQuality] = useState<'normal' | 'hd'>('normal')
-  const [outputMode, setOutputMode] = useState<OutputMode>('zip-individual')
+  // Options — PNG HD is fixed; only the output packaging is configurable.
+  const [outputMode] = useState<OutputMode>('zip-individual')
 
   // Lead selection (subset from passed leads, max 50)
   const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(() => {
@@ -118,9 +115,22 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
     cancelledRef.current = false
 
     try {
+      // Enrich leads with custom field values for document substitution
+      const enrichedLeads = await Promise.all(selectedLeads.map(async (lead) => {
+        if (lead.contact_id && (!lead.custom_field_values || lead.custom_field_values.length === 0)) {
+          try {
+            const cfRes = await api<{ values: any[] }>(`/api/contacts/${lead.contact_id}/custom-fields`)
+            if (cfRes.success && Array.isArray(cfRes.data?.values)) {
+              return { ...lead, custom_field_values: cfRes.data.values }
+            }
+          } catch { /* non-critical */ }
+        }
+        return lead
+      }))
+
       const opts: RenderOptions = {
-        format: outputMode === 'pdf-multipage' ? 'pdf' : format,
-        scale: quality === 'hd' ? 4 : 2,
+        format: 'png',
+        scale: 4, // HD (~200 DPI)
       }
 
       const onProgress = (p: BulkProgress) => {
@@ -130,17 +140,12 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
 
       const templateName = fullTemplate.name.replace(/[^a-zA-Z0-9áéíóúñÁÉÍÓÚÑ\s_-]/g, '').replace(/\s+/g, '_')
 
-      if (outputMode === 'pdf-multipage') {
-        const blob = await mergePdfs(fullTemplate, selectedLeads, { scale: opts.scale }, onProgress)
-        downloadBlob(blob, `${templateName}_${selectedLeads.length}_leads.pdf`)
+      const results = await generateBulk(fullTemplate, enrichedLeads, opts, onProgress)
+      if (results.length === 1) {
+        downloadBlob(results[0].blob, results[0].filename)
       } else {
-        const results = await generateBulk(fullTemplate, selectedLeads, opts, onProgress)
-        if (results.length === 1) {
-          downloadBlob(results[0].blob, results[0].filename)
-        } else {
-          const zipBlob = await packageAsZip(results)
-          downloadBlob(zipBlob, `${templateName}_${results.length}_documentos.zip`)
-        }
+        const zipBlob = await packageAsZip(results)
+        downloadBlob(zipBlob, `${templateName}_${results.length}_documentos.zip`)
       }
 
       onClose()
@@ -150,7 +155,7 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
       setError('Error al generar documentos')
       setStep('options')
     }
-  }, [selectedTemplate, selectedLeads, format, quality, outputMode, onClose])
+  }, [selectedTemplate, selectedLeads, onClose])
 
   const handleCancel = () => {
     cancelledRef.current = true
@@ -296,79 +301,10 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
                 )}
               </div>
 
-              {/* Format & Quality */}
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">Formato</label>
-                  <div className="flex gap-1.5">
-                    <button
-                      onClick={() => setFormat('pdf')}
-                      className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                        format === 'pdf' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      <FileDown className="w-3.5 h-3.5" />
-                      PDF
-                    </button>
-                    <button
-                      onClick={() => { setFormat('png'); if (outputMode === 'pdf-multipage') setOutputMode('zip-individual') }}
-                      className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                        format === 'png' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      <Image className="w-3.5 h-3.5" />
-                      PNG
-                    </button>
-                  </div>
-                </div>
-                <div className="flex-1">
-                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">Calidad</label>
-                  <div className="flex gap-1.5">
-                    <button
-                      onClick={() => setQuality('normal')}
-                      className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                        quality === 'normal' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      Normal
-                    </button>
-                    <button
-                      onClick={() => setQuality('hd')}
-                      className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                        quality === 'hd' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      HD
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Output mode */}
-              <div>
-                <label className="text-xs font-medium text-slate-600 mb-1.5 block">Salida</label>
-                <div className="flex gap-1.5">
-                  <button
-                    onClick={() => setOutputMode('zip-individual')}
-                    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                      outputMode === 'zip-individual' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    <Package className="w-3.5 h-3.5" />
-                    ZIP (individual)
-                  </button>
-                  {format === 'pdf' && (
-                    <button
-                      onClick={() => setOutputMode('pdf-multipage')}
-                      className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                        outputMode === 'pdf-multipage' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      <FileDown className="w-3.5 h-3.5" />
-                      PDF multi-página
-                    </button>
-                  )}
-                </div>
+              {/* Format & Quality — fixed to PNG HD, ZIP output */}
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-600">
+                Los documentos se generarán como <span className="font-medium text-slate-800">PNG en alta calidad</span> y se entregarán
+                {' '}en un <span className="font-medium text-slate-800">archivo ZIP</span> (o descarga directa si solo seleccionaste uno).
               </div>
             </>
           )}

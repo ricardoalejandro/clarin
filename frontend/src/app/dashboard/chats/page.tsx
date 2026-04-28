@@ -2,11 +2,10 @@
 
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Search, Plus, X, Trash2, CheckSquare, Square, MessageCircle, ShieldBan } from 'lucide-react'
+import { Search, Plus, X, Trash2, CheckSquare, Square, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp } from 'lucide-react'
 import { formatTime } from '@/utils/format'
 import { subscribeWebSocket } from '@/lib/api'
 import DeviceSelector from '@/components/chat/DeviceSelector'
-import TagSelector from '@/components/chat/TagSelector'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ChatPanel from '@/components/chat/ChatPanel'
 import ContactPanel from '@/components/chat/ContactPanel'
@@ -16,12 +15,10 @@ import { getChatDisplayName, formatPhone } from '@/utils/chat'
 export default function ChatsPage() {
   const [chats, setChats] = useState<Chat[]>([])
   const [devices, setDevices] = useState<Device[]>([])
-  const [tags, setTags] = useState<{ id: string; name: string; color: string }[]>([])
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
 
   // Filters & UI State
   const [filterDevices, setFilterDevices] = useState<string[]>([])
-  const [filterTags, setFilterTags] = useState<string[]>([])
   const [filterUnread, setFilterUnread] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -30,6 +27,15 @@ export default function ChatsPage() {
   const [selectionMode, setSelectionMode] = useState(false)
   const [selectedChats, setSelectedChats] = useState<Set<string>>(new Set())
   const [deleting, setDeleting] = useState(false)
+
+  // Reaction filter
+  const [filterHasReaction, setFilterHasReaction] = useState(false)
+  const [reactionFromMe, setReactionFromMe] = useState<'any' | 'client' | 'me'>('client')
+  const [reactionEmojis, setReactionEmojis] = useState<string[]>([])
+  const [reactionRange, setReactionRange] = useState<'any' | '1d' | '7d' | '30d' | 'custom'>('30d')
+  const [reactionCustomFrom, setReactionCustomFrom] = useState('')
+  const [reactionCustomTo, setReactionCustomTo] = useState('')
+  const [showReactionAdvanced, setShowReactionAdvanced] = useState(false)
 
   // Infinite scroll state
   const CHATS_PAGE_SIZE = 50
@@ -91,9 +97,25 @@ export default function ChatsPage() {
     try {
       const params = new URLSearchParams()
       filterDevices.forEach(id => params.append('device_ids', id))
-      filterTags.forEach(id => params.append('tag_ids', id))
       if (filterUnread) params.append('unread_only', 'true')
       if (debouncedSearch) params.append('search', debouncedSearch)
+      if (filterHasReaction) {
+        params.append('has_reaction', 'true')
+        if (reactionFromMe !== 'any') params.append('reaction_from_me', reactionFromMe === 'me' ? 'true' : 'false')
+        reactionEmojis.forEach(e => params.append('reaction_emojis', e))
+        const now = new Date()
+        let since: Date | null = null
+        let until: Date | null = null
+        if (reactionRange === '1d') since = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+        else if (reactionRange === '7d') since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+        else if (reactionRange === '30d') since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+        else if (reactionRange === 'custom') {
+          if (reactionCustomFrom) since = new Date(reactionCustomFrom)
+          if (reactionCustomTo) until = new Date(reactionCustomTo + 'T23:59:59')
+        }
+        if (since) params.append('reaction_since', since.toISOString())
+        if (until) params.append('reaction_until', until.toISOString())
+      }
       params.append('limit', String(CHATS_PAGE_SIZE))
       params.append('offset', String(offset))
 
@@ -127,7 +149,7 @@ export default function ChatsPage() {
       setLoadingMore(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterDevices, filterTags, filterUnread, debouncedSearch])
+  }, [filterDevices, filterUnread, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
 
   const loadMoreChats = useCallback(() => {
     if (loadingMore || !hasMore) return
@@ -151,20 +173,10 @@ export default function ChatsPage() {
     } catch {}
   }, [])
 
-  const fetchTags = useCallback(async () => {
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch('/api/tags', { headers: { Authorization: `Bearer ${token}` } })
-      const data = await res.json()
-      if (data.success) setTags(data.tags || [])
-    } catch {}
-  }, [])
-
   useEffect(() => {
     fetchChats()
     fetchDevices()
-    fetchTags()
-  }, [fetchChats, fetchDevices, fetchTags])
+  }, [fetchChats, fetchDevices])
 
   // Debounce search
   useEffect(() => {
@@ -318,17 +330,17 @@ export default function ChatsPage() {
         className={`border-r border-slate-200 flex flex-col min-h-0 overflow-hidden shrink-0 ${selectedChat ? 'hidden md:flex' : 'flex w-full md:w-auto'}`}
         style={isMdScreen ? { width: leftPanelWidth } : undefined}
       >
-         <div className="p-3 border-b border-slate-100 space-y-2.5">
+         <div className="p-3 border-b border-slate-200/70 bg-white/95 backdrop-blur space-y-3">
             {/* Header / Selection Mode */}
             {selectionMode ? (
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        <button onClick={() => { setSelectionMode(false); setSelectedChats(new Set()) }} className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg"><X className="w-4 h-4" /></button>
+                <button onClick={() => { setSelectionMode(false); setSelectedChats(new Set()) }} className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"><X className="w-4 h-4" /></button>
                         <span className="text-xs font-medium text-slate-600">{selectedChats.size} seleccionados</span>
                     </div>
                     <div className="flex items-center gap-1.5">
-                        <button onClick={toggleSelectAll} className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg"><CheckSquare className="w-4 h-4" /></button>
-                        <button onClick={deleteSelectedChats} disabled={deleting || selectedChats.size === 0} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+                <button onClick={toggleSelectAll} className="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"><CheckSquare className="w-4 h-4" /></button>
+                <button onClick={deleteSelectedChats} disabled={deleting || selectedChats.size === 0} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"><Trash2 className="w-4 h-4" /></button>
                     </div>
                 </div>
             ) : (
@@ -339,7 +351,7 @@ export default function ChatsPage() {
                         onDeviceChange={setFilterDevices}
                     />
                     <div className="flex-1" />
-                    <button onClick={() => setShowNewChatModal(true)} className="p-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 shadow-sm transition-all hover:shadow flex items-center gap-2 text-xs font-medium">
+                    <button onClick={() => setShowNewChatModal(true)} className="p-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 shadow-sm shadow-emerald-600/20 transition-all duration-200 hover:shadow-md hover:shadow-emerald-600/20 active:scale-[0.98] flex items-center gap-2 text-xs font-medium">
                         <Plus className="w-4 h-4" />
                         <span className="hidden sm:inline">Nuevo Chat</span>
                     </button>
@@ -354,20 +366,15 @@ export default function ChatsPage() {
                 placeholder="Buscar chats..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all placeholder:text-slate-400"
+                className="w-full pl-9 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 focus:bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 outline-none transition-all placeholder:text-slate-400"
                 />
             </div>
 
-            {/* Tags + Unread filter */}
-            <div className="flex items-center gap-2">
-                <TagSelector
-                    tags={tags}
-                    selectedTagIds={filterTags}
-                    onTagChange={setFilterTags}
-                />
+              {/* Quick filters */}
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                     onClick={() => setFilterUnread(!filterUnread)}
-                    className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                  className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all duration-200 active:scale-[0.98] ${
                         filterUnread
                             ? 'bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm'
                             : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 hover:text-slate-700'
@@ -376,15 +383,150 @@ export default function ChatsPage() {
                     <MessageCircle className="w-3.5 h-3.5" />
                     No leídos
                 </button>
+                <button
+                    data-testid="filter-reaction-toggle"
+                    onClick={() => setFilterHasReaction(!filterHasReaction)}
+                  className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all duration-200 active:scale-[0.98] ${
+                        filterHasReaction
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm'
+                            : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 hover:text-slate-700'
+                    }`}
+                    title="Filtrar chats con reacciones"
+                >
+                  <Heart className={`w-3.5 h-3.5 ${filterHasReaction ? 'fill-emerald-500 text-emerald-500' : ''}`} />
+                    Con reacción
+                </button>
             </div>
+
+            {/* Reaction advanced panel */}
+            {filterHasReaction && (
+                <div data-testid="filter-reaction-advanced" className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-2.5 space-y-2 shadow-sm shadow-emerald-600/5">
+                    <button
+                        onClick={() => setShowReactionAdvanced(!showReactionAdvanced)}
+                    className="w-full flex items-center justify-between text-[11px] font-semibold uppercase tracking-wide text-emerald-700 hover:text-emerald-800 transition-colors"
+                    >
+                        <span className="flex items-center gap-1.5">
+                      <Heart className="w-3 h-3 fill-emerald-500 text-emerald-500" />
+                            Opciones de reacción
+                        </span>
+                        {showReactionAdvanced ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    </button>
+                    {showReactionAdvanced && (
+                        <div className="space-y-2.5 pt-1">
+                            <div>
+                                <label className="block text-[10px] font-medium text-slate-600 mb-1 uppercase tracking-wide">¿De quién?</label>
+                                <div className="flex gap-1">
+                                    {([
+                                        { v: 'client' as const, label: 'Cliente' },
+                                        { v: 'me' as const, label: 'Operador' },
+                                        { v: 'any' as const, label: 'Cualquiera' },
+                                    ]).map(opt => (
+                                        <button
+                                            key={opt.v}
+                                            data-testid={`reaction-from-${opt.v}`}
+                                            onClick={() => setReactionFromMe(opt.v)}
+                                            className={`flex-1 px-2 py-1 text-[11px] font-medium rounded-md border transition-all ${
+                                                reactionFromMe === opt.v
+                                                ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                                                : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300 hover:text-slate-800'
+                                            }`}
+                                        >{opt.label}</button>
+                                    ))}
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-medium text-slate-600 mb-1 uppercase tracking-wide">Emojis (opcional)</label>
+                                <div className="flex flex-wrap gap-1">
+                                    {['👍','❤️','😂','😮','😢','🙏','🔥'].map(e => {
+                                        const active = reactionEmojis.includes(e)
+                                        return (
+                                            <button
+                                                key={e}
+                                                data-testid={`reaction-emoji-${e}`}
+                                                onClick={() => setReactionEmojis(active ? reactionEmojis.filter(x => x !== e) : [...reactionEmojis, e])}
+                                                className={`w-7 h-7 flex items-center justify-center rounded-md border text-sm transition-all ${
+                                                  active ? 'bg-emerald-100 border-emerald-400 ring-2 ring-emerald-200' : 'bg-white border-slate-200 hover:border-emerald-300'
+                                                }`}
+                                            >{e}</button>
+                                        )
+                                    })}
+                                    {reactionEmojis.length > 0 && (
+                                        <button
+                                            data-testid="reaction-emoji-clear"
+                                            onClick={() => setReactionEmojis([])}
+                                            className="px-2 h-7 text-[10px] text-slate-500 hover:text-emerald-700 transition-colors"
+                                        >limpiar</button>
+                                    )}
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-medium text-slate-600 mb-1 uppercase tracking-wide">Cuándo</label>
+                                <div className="flex flex-wrap gap-1">
+                                    {([
+                                        { v: '1d' as const, label: 'Hoy' },
+                                        { v: '7d' as const, label: '7 días' },
+                                        { v: '30d' as const, label: '30 días' },
+                                        { v: 'any' as const, label: 'Siempre' },
+                                        { v: 'custom' as const, label: 'Rango' },
+                                    ]).map(opt => (
+                                        <button
+                                            key={opt.v}
+                                            data-testid={`reaction-range-${opt.v}`}
+                                            onClick={() => setReactionRange(opt.v)}
+                                            className={`px-2 py-1 text-[11px] font-medium rounded-md border transition-all ${
+                                                reactionRange === opt.v
+                                                ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                                                : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300 hover:text-slate-800'
+                                            }`}
+                                        >{opt.label}</button>
+                                    ))}
+                                </div>
+                                {reactionRange === 'custom' && (
+                                    <div className="mt-1.5 flex gap-1.5">
+                                        <input
+                                            type="date"
+                                            value={reactionCustomFrom}
+                                            onChange={e => setReactionCustomFrom(e.target.value)}
+                                            className="flex-1 min-w-0 px-2 py-1 text-[11px] bg-white border border-slate-200 rounded-md focus:ring-1 focus:ring-emerald-300 focus:border-emerald-400 outline-none"
+                                        />
+                                        <input
+                                            type="date"
+                                            value={reactionCustomTo}
+                                            onChange={e => setReactionCustomTo(e.target.value)}
+                                            className="flex-1 min-w-0 px-2 py-1 text-[11px] bg-white border border-slate-200 rounded-md focus:ring-1 focus:ring-emerald-300 focus:border-emerald-400 outline-none"
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
          </div>
 
          {/* Chat List Items */}
          <div ref={chatListRef} onScroll={handleChatListScroll} className="flex-1 overflow-y-auto">
             {loading ? (
-                <div className="flex justify-center p-8"><div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" /></div>
+            <div className="p-3 space-y-3">
+              {[0, 1, 2, 3, 4, 5].map(i => (
+                <div key={i} className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-3 animate-pulse">
+                  <div className="w-12 h-12 rounded-full bg-slate-100" />
+                  <div className="flex-1 min-w-0 space-y-2">
+                    <div className="h-3.5 w-2/3 rounded bg-slate-100" />
+                    <div className="h-3 w-full rounded bg-slate-100" />
+                    <div className="h-2.5 w-1/3 rounded bg-slate-100" />
+                  </div>
+                </div>
+              ))}
+            </div>
             ) : chats.length === 0 ? (
-                <div className="p-8 text-center text-slate-500 text-sm">No se encontraron chats</div>
+            <div className="flex flex-col items-center justify-center px-6 py-14 text-center">
+              <div className="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center mb-4">
+                <MessageCircle className="w-7 h-7 text-slate-400" />
+              </div>
+              <h3 className="text-sm font-semibold text-slate-700 mb-1">No se encontraron chats</h3>
+              <p className="text-xs leading-5 text-slate-500 max-w-[220px]">Prueba con otra búsqueda o desactiva algún filtro para ampliar los resultados.</p>
+            </div>
             ) : (
                 <div style={{ height: chatVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
                 {chatVirtualizer.getVirtualItems().map(virtualRow => {
@@ -401,7 +543,7 @@ export default function ChatsPage() {
                             if (selectionMode) toggleChatSelection(chat.id)
                             else setSelectedChat(chat)
                         }}
-                        className={`group px-3 py-3 flex items-start gap-3 cursor-pointer border-b border-fuchsia-50/50 hover:bg-slate-50 transition-all relative ${selectedChat?.id === chat.id ? 'bg-emerald-100 border-l-4 border-l-emerald-500 hover:bg-emerald-100' : ''}`}
+                        className={`group px-3 py-3 flex items-start gap-3 cursor-pointer border-b border-l-4 transition-colors duration-200 relative ${selectedChat?.id === chat.id ? 'bg-emerald-50/80 border-b-emerald-100 border-l-emerald-500 hover:bg-emerald-50' : 'border-b-slate-100 border-l-transparent hover:bg-slate-50/80'}`}
                     >
                         {selectionMode && (
                              <div className={`shrink-0 mt-2 ${selectedChats.has(chat.id) ? 'text-emerald-600' : 'text-slate-300'}`}>
@@ -411,13 +553,13 @@ export default function ChatsPage() {
 
                         <div className="relative shrink-0">
                              {chat.contact_avatar_url ? (
-                                <img src={chat.contact_avatar_url} alt="" className="w-12 h-12 rounded-full object-cover" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }} />
+                              <img src={chat.contact_avatar_url} alt="" className="w-12 h-12 rounded-full object-cover ring-1 ring-slate-200 shadow-sm" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }} />
                              ) : null}
-                             <div className={`w-12 h-12 bg-emerald-100 rounded-full flex items-center justify-center ${chat.contact_avatar_url ? 'hidden' : ''}`}>
+                            <div className={`w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center ring-1 ring-emerald-100 shadow-sm ${chat.contact_avatar_url ? 'hidden' : ''}`}>
                                 <span className="text-emerald-700 font-bold text-lg">{getChatDisplayName(chat).charAt(0).toUpperCase()}</span>
                              </div>
                              {chat.unread_count > 0 && (
-                                <div className="absolute -top-1 -right-1 bg-emerald-500 text-white text-[10px] font-bold h-5 min-w-[1.25rem] px-1 rounded-full flex items-center justify-center shadow-sm ring-2 ring-white">
+                              <div className="absolute -top-1 -right-1 bg-emerald-500 text-white text-[10px] font-bold h-5 min-w-5 px-1.5 rounded-full flex items-center justify-center shadow-sm ring-2 ring-white tabular-nums">
                                     {chat.unread_count}
                                 </div>
                              )}
@@ -432,15 +574,15 @@ export default function ChatsPage() {
                                     {formatTime(chat.last_message_at)}
                                 </span>
                             </div>
-                            <div className="flex items-center gap-1.5">
-                                <span className="text-xs text-slate-500 truncate block max-w-[180px]">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-xs text-slate-500 truncate block">
                                     {chat.last_message || 'Sin mensajes'}
                                 </span>
                             </div>
                             {/* Device & Phone Labels */}
                             <div className="flex items-center gap-2 mt-1.5">
                                  {chat.device_name && (
-                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-slate-100/80 text-slate-500 border border-slate-200/80 max-w-[120px] truncate">
                                         {chat.device_name}
                                     </span>
                                  )}

@@ -5,7 +5,7 @@
 
 import { Canvas, Rect, Shadow, Point, type FabricObject } from 'fabric'
 import { MM_TO_PX, ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, GRID_COLOR } from './constants'
-import { calculateSnap, type SnapGuide, type UserGuide } from './snap'
+import { calculateSnap, calculateDistances, type SnapGuide, type DistanceLabel, type UserGuide } from './snap'
 
 // Store page dimensions on the canvas instance
 declare module 'fabric' {
@@ -19,6 +19,60 @@ declare module 'fabric' {
 
 export const DEFAULT_PASTEBOARD_COLOR = '#61636b'
 
+// ─── Wheel helpers (reusable by external overlays like user guides) ──────────
+
+/**
+ * Apply Ctrl+Wheel zoom-to-cursor on a Fabric canvas.
+ * @param x horizontal cursor coord (either canvas-relative offsetX or clientX; see isOffset)
+ * @param y vertical cursor coord
+ * @param deltaY wheel deltaY
+ * @param isOffset when true, x/y are already relative to the canvas element; when false they are clientX/Y and will be translated via wrapperEl.getBoundingClientRect()
+ */
+export function applyWheelZoom(
+  canvas: Canvas,
+  x: number,
+  y: number,
+  deltaY: number,
+  onZoomChange?: (zoom: number) => void,
+  isOffset: boolean = false,
+): number {
+  let offX = x
+  let offY = y
+  if (!isOffset) {
+    const wrapper = (canvas as any).wrapperEl as HTMLElement | undefined
+    if (wrapper) {
+      const rect = wrapper.getBoundingClientRect()
+      offX = x - rect.left
+      offY = y - rect.top
+    }
+  }
+  let zoom = canvas.getZoom()
+  zoom *= 0.999 ** deltaY
+  zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom))
+  canvas.zoomToPoint(new Point(offX, offY), zoom)
+  onZoomChange?.(zoom)
+  return zoom
+}
+
+/**
+ * Apply plain-wheel pan on a Fabric canvas. shiftKey forces horizontal pan from deltaY.
+ */
+export function applyWheelPan(
+  canvas: Canvas,
+  deltaX: number,
+  deltaY: number,
+  shiftKey: boolean = false,
+): void {
+  const vpt = canvas.viewportTransform!
+  if (shiftKey) {
+    vpt[4] -= deltaY
+  } else {
+    vpt[4] -= deltaX
+    vpt[5] -= deltaY
+  }
+  canvas.requestRenderAll()
+}
+
 // ─── Canvas Setup ─────────────────────────────────────────────────────────────
 
 export interface CanvasSetupOptions {
@@ -31,6 +85,7 @@ export interface CanvasSetupOptions {
   onSelectionChange?: (objects: FabricObject[]) => void
   onObjectModified?: () => void
   onSnapGuides?: (guides: SnapGuide[]) => void
+  onDistanceLabels?: (labels: DistanceLabel[]) => void
   getUserGuides?: () => UserGuide[]
   onPan?: () => void
 }
@@ -71,10 +126,10 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
     hoverCursor: 'default',
     excludeFromExport: false,
     shadow: new Shadow({
-      color: 'rgba(0,0,0,0.15)',
-      blur: 12,
+      color: 'rgba(0,0,0,0.10)',
+      blur: 6,
       offsetX: 0,
-      offsetY: 2,
+      offsetY: 4,
     }),
   });
   (pageRect as any).__isPage = true
@@ -94,7 +149,11 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
   }
   canvas.on('selection:created', emitSelection)
   canvas.on('selection:updated', emitSelection)
-  canvas.on('selection:cleared', () => opts.onSelectionChange?.([]))
+  canvas.on('selection:cleared', () => {
+    opts.onSelectionChange?.([])
+    opts.onSnapGuides?.([])
+    opts.onDistanceLabels?.([])
+  })
 
   // ─── Object modified ────────────────────────────────────────────────
   canvas.on('object:modified', () => opts.onObjectModified?.())
@@ -107,10 +166,19 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
     if (result.x !== undefined) obj.set('left', result.x)
     if (result.y !== undefined) obj.set('top', result.y)
     opts.onSnapGuides?.(result.guides)
+    opts.onDistanceLabels?.(calculateDistances(canvas, obj))
   })
 
   canvas.on('object:modified', () => {
     opts.onSnapGuides?.([])
+    opts.onDistanceLabels?.([])
+  })
+
+  // Always clear snap guides when the mouse is released (covers drags that
+  // don't trigger object:modified, e.g. click-without-moving or ESC cancel).
+  canvas.on('mouse:up', () => {
+    opts.onSnapGuides?.([])
+    opts.onDistanceLabels?.([])
   })
 
   // ─── Wheel: Ctrl+Wheel → zoom to cursor, plain wheel → pan ────────
@@ -120,25 +188,9 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
     e.stopPropagation()
 
     if (e.ctrlKey || e.metaKey) {
-      // Zoom centered on cursor
-      const delta = e.deltaY
-      let zoom = canvas.getZoom()
-      zoom *= 0.999 ** delta
-      zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom))
-
-      const point = new Point(e.offsetX, e.offsetY)
-      canvas.zoomToPoint(point, zoom)
-      opts.onZoomChange?.(zoom)
+      applyWheelZoom(canvas, e.offsetX, e.offsetY, e.deltaY, opts.onZoomChange, /*isOffset*/ true)
     } else {
-      // Scroll-to-pan: deltaY = vertical, deltaX or Shift+deltaY = horizontal
-      const vpt = canvas.viewportTransform!
-      if (e.shiftKey) {
-        vpt[4] -= e.deltaY
-      } else {
-        vpt[4] -= e.deltaX
-        vpt[5] -= e.deltaY
-      }
-      canvas.requestRenderAll()
+      applyWheelPan(canvas, e.deltaX, e.deltaY, e.shiftKey)
       opts.onPan?.()
     }
   })

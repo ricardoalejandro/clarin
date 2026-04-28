@@ -24,45 +24,45 @@ import (
 )
 
 type Services struct {
-	Auth        *AuthService
-	Account     *AccountService
-	Device      *DeviceService
-	Chat        *ChatService
-	Contact     *ContactService
-	Lead        *LeadService
-	Pipeline    *PipelineService
-	Tag         *TagService
-	Campaign    *CampaignService
-	Event       *EventService
-	Interaction *InteractionService
-	QuickReply  *QuickReplyService
-	Program     *ProgramService
-	Role        *RoleService
-	Automation  *AutomationService
-	Survey      *SurveyService
-	Task        *TaskService
+	Auth             *AuthService
+	Account          *AccountService
+	Device           *DeviceService
+	Chat             *ChatService
+	Contact          *ContactService
+	Lead             *LeadService
+	Pipeline         *PipelineService
+	Tag              *TagService
+	Campaign         *CampaignService
+	Event            *EventService
+	Interaction      *InteractionService
+	QuickReply       *QuickReplyService
+	Program          *ProgramService
+	Role             *RoleService
+	Automation       *AutomationService
+	Survey           *SurveyService
+	Task             *TaskService
 	DocumentTemplate *DocumentTemplateService
 }
 
 func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub *ws.Hub) *Services {
 	return &Services{
-		Auth:        &AuthService{repos: repos},
-		Account:     &AccountService{repos: repos},
-		Device:      &DeviceService{repos: repos, pool: pool, hub: hub},
-		Chat:        &ChatService{repos: repos, pool: pool},
-		Contact:     &ContactService{repos: repos, pool: pool},
-		Lead:        &LeadService{repos: repos},
-		Pipeline:    &PipelineService{repos: repos},
-		Tag:         &TagService{repos: repos},
-		Campaign:    &CampaignService{repos: repos, pool: pool, hub: hub},
-		Event:       &EventService{repos: repos, hub: hub},
-		Interaction: &InteractionService{repos: repos, hub: hub},
-		QuickReply:  &QuickReplyService{repos: repos},
-		Program:     NewProgramService(repos),
-		Role:        &RoleService{repos: repos},
-		Automation:  NewAutomationService(repos, pool, hub, nil), // cache injected after Init
-		Survey:      NewSurveyService(repos),
-		Task:        NewTaskService(repos, hub),
+		Auth:             &AuthService{repos: repos},
+		Account:          &AccountService{repos: repos},
+		Device:           &DeviceService{repos: repos, pool: pool, hub: hub},
+		Chat:             &ChatService{repos: repos, pool: pool},
+		Contact:          &ContactService{repos: repos, pool: pool},
+		Lead:             &LeadService{repos: repos},
+		Pipeline:         &PipelineService{repos: repos},
+		Tag:              &TagService{repos: repos},
+		Campaign:         &CampaignService{repos: repos, pool: pool, hub: hub},
+		Event:            &EventService{repos: repos, hub: hub},
+		Interaction:      &InteractionService{repos: repos, hub: hub},
+		QuickReply:       &QuickReplyService{repos: repos},
+		Program:          NewProgramService(repos),
+		Role:             &RoleService{repos: repos},
+		Automation:       NewAutomationService(repos, pool, hub, nil), // cache injected after Init
+		Survey:           NewSurveyService(repos),
+		Task:             NewTaskService(repos, hub),
 		DocumentTemplate: NewDocumentTemplateService(repos),
 	}
 }
@@ -79,14 +79,14 @@ func (s *AuthService) SetCache(c *cache.Cache) {
 }
 
 const (
-	jwtAccessTTL            = 1 * time.Hour      // Access token lives 1 hour
-	refreshTokenTTL         = 7 * 24 * time.Hour  // Refresh token lives 7 days
-	loginLockoutTTL         = 15 * time.Minute    // Lockout after max failed attempts
-	maxLoginAttempts        = 5                   // Failed attempts before lockout
-	refreshTokenKeyPrefix   = "refresh:"          // Redis key prefix for refresh tokens
-	jwtBlacklistKeyPrefix   = "jwtblk:"           // Redis key prefix for JWT blacklist
-	loginFailuresKeyPrefix  = "loginfail:"        // Redis key prefix for login failures
-	userInvalidatedPrefix   = "userinv:"          // Redis key prefix for invalidated users
+	jwtAccessTTL           = 1 * time.Hour      // Access token lives 1 hour
+	refreshTokenTTL        = 7 * 24 * time.Hour // Refresh token lives 7 days
+	loginLockoutTTL        = 15 * time.Minute   // Lockout after max failed attempts
+	maxLoginAttempts       = 5                  // Failed attempts before lockout
+	refreshTokenKeyPrefix  = "refresh:"         // Redis key prefix for refresh tokens
+	jwtBlacklistKeyPrefix  = "jwtblk:"          // Redis key prefix for JWT blacklist
+	loginFailuresKeyPrefix = "loginfail:"       // Redis key prefix for login failures
+	userInvalidatedPrefix  = "userinv:"         // Redis key prefix for invalidated users
 )
 
 type JWTClaims struct {
@@ -649,6 +649,9 @@ func (s *DeviceService) GetByAccountID(ctx context.Context, accountID uuid.UUID)
 
 	// Add live status from pool
 	for _, device := range devices {
+		if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
+			continue
+		}
 		status := s.pool.GetDeviceStatus(device.ID)
 		device.Status = &status
 		qr := s.pool.GetQRCode(device.ID)
@@ -665,6 +668,9 @@ func (s *DeviceService) GetByID(ctx context.Context, deviceID uuid.UUID) (*domai
 	if err != nil || device == nil {
 		return nil, err
 	}
+	if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
+		return device, nil
+	}
 
 	status := s.pool.GetDeviceStatus(device.ID)
 	device.Status = &status
@@ -680,6 +686,20 @@ func (s *DeviceService) GetByID(ctx context.Context, deviceID uuid.UUID) (*domai
 type ChatService struct {
 	repos *repository.Repositories
 	pool  *whatsapp.DevicePool
+}
+
+func (s *ChatService) ensureWhatsAppWebOutbound(ctx context.Context, deviceID uuid.UUID) error {
+	device, err := s.repos.Device.GetByID(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	if device == nil {
+		return fmt.Errorf("device not found")
+	}
+	if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
+		return fmt.Errorf("canal API Oficial en modo configuracion: envio bloqueado hasta activar facturacion y reglas de plantillas")
+	}
+	return nil
 }
 
 func (s *ChatService) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Chat, error) {
@@ -755,30 +775,51 @@ func (s *ChatService) RequestHistorySync(ctx context.Context, accountID, deviceI
 }
 
 func (s *ChatService) SendMessage(ctx context.Context, deviceID uuid.UUID, to, body string) (*domain.Message, error) {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return nil, err
+	}
 	return s.pool.SendMessage(ctx, deviceID, to, body)
 }
 
 func (s *ChatService) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType string) (*domain.Message, error) {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return nil, err
+	}
 	return s.pool.SendMediaMessage(ctx, deviceID, to, caption, mediaURL, mediaType)
 }
 
 func (s *ChatService) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, to, body, quotedID, quotedBody, quotedSender string, quotedIsFromMe bool) (*domain.Message, error) {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return nil, err
+	}
 	return s.pool.SendReplyMessage(ctx, deviceID, to, body, quotedID, quotedBody, quotedSender, quotedIsFromMe)
 }
 
 func (s *ChatService) ForwardMessage(ctx context.Context, deviceID uuid.UUID, to string, originalMsg *domain.Message) (*domain.Message, error) {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return nil, err
+	}
 	return s.pool.ForwardMessage(ctx, deviceID, to, originalMsg)
 }
 
 func (s *ChatService) SendReaction(ctx context.Context, deviceID uuid.UUID, to, targetMessageID, emoji string, targetFromMe bool) error {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return err
+	}
 	return s.pool.SendReaction(ctx, deviceID, to, targetMessageID, emoji, targetFromMe)
 }
 
 func (s *ChatService) SendPoll(ctx context.Context, deviceID uuid.UUID, to, question string, options []string, maxSelections int) (*domain.Message, error) {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return nil, err
+	}
 	return s.pool.SendPoll(ctx, deviceID, to, question, options, maxSelections)
 }
 
 func (s *ChatService) SendContactMessage(ctx context.Context, deviceID uuid.UUID, to, contactName, contactPhone string) (*domain.Message, error) {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return nil, err
+	}
 	return s.pool.SendContactMessage(ctx, deviceID, to, contactName, contactPhone)
 }
 
@@ -807,10 +848,16 @@ func (s *ChatService) MarkAsRead(ctx context.Context, chatID uuid.UUID) error {
 }
 
 func (s *ChatService) SendChatPresence(ctx context.Context, deviceID uuid.UUID, to string, composing bool, media string) error {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return err
+	}
 	return s.pool.SendChatPresence(ctx, deviceID, to, composing, media)
 }
 
 func (s *ChatService) SendReadReceipt(ctx context.Context, deviceID uuid.UUID, chatJID, senderJID string, messageIDs []string) error {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return err
+	}
 	return s.pool.SendReadReceipt(ctx, deviceID, chatJID, senderJID, messageIDs)
 }
 
@@ -819,10 +866,16 @@ func (s *ChatService) IsOnWhatsApp(ctx context.Context, deviceID uuid.UUID, phon
 }
 
 func (s *ChatService) RevokeMessage(ctx context.Context, deviceID uuid.UUID, chatJID, senderJID, messageID string, isFromMe bool) error {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return err
+	}
 	return s.pool.RevokeMessage(ctx, deviceID, chatJID, senderJID, messageID, isFromMe)
 }
 
 func (s *ChatService) EditMessage(ctx context.Context, deviceID uuid.UUID, chatJID, messageID, newBody string) error {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return err
+	}
 	return s.pool.EditMessage(ctx, deviceID, chatJID, messageID, newBody)
 }
 
@@ -2289,6 +2342,7 @@ func (s *QuickReplyService) Update(ctx context.Context, qr *domain.QuickReply) e
 func (s *QuickReplyService) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repos.QuickReply.Delete(ctx, id)
 }
+
 // RoleService handles RBAC role management
 type RoleService struct {
 	repos *repository.Repositories

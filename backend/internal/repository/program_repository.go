@@ -19,26 +19,45 @@ db *pgxpool.Pool
 // --- Programs ---
 
 func (r *ProgramRepository) Create(ctx context.Context, p *domain.Program) error {
+if p.Type == "" {
+p.Type = "course"
+}
+if p.TagFormulaMode == "" {
+p.TagFormulaMode = "OR"
+}
+if p.TagFormulaType == "" {
+p.TagFormulaType = "simple"
+}
 err := r.db.QueryRow(ctx, `
-INSERT INTO programs (account_id, name, description, status, color, created_by, folder_id, schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+INSERT INTO programs (account_id, type, name, description, status, color, created_by, folder_id,
+schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time,
+pipeline_id, tag_formula, tag_formula_mode, tag_formula_type, event_date, event_end, location)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 RETURNING id, created_at, updated_at
-`, p.AccountID, p.Name, p.Description, p.Status, p.Color, p.CreatedBy, p.FolderID, p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
+`, p.AccountID, p.Type, p.Name, p.Description, p.Status, p.Color, p.CreatedBy, p.FolderID,
+p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime,
+p.PipelineID, p.TagFormula, p.TagFormulaMode, p.TagFormulaType, p.EventDate, p.EventEnd, p.Location,
+).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 return err
 }
 
 func (r *ProgramRepository) GetByID(ctx context.Context, accountID, id uuid.UUID) (*domain.Program, error) {
 p := &domain.Program{}
 err := r.db.QueryRow(ctx, `
-SELECT id, account_id, name, description, status, color, created_by, folder_id, created_at, updated_at,
-schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time,
-(SELECT COUNT(*) FROM program_participants WHERE program_id = programs.id) as participant_count,
-(SELECT COUNT(*) FROM program_sessions WHERE program_id = programs.id) as session_count
-FROM programs
-WHERE id = $1 AND account_id = $2
+SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at,
+p.schedule_start_date, p.schedule_end_date, p.schedule_days, p.schedule_start_time, p.schedule_end_time,
+p.pipeline_id, COALESCE(p.tag_formula, ''), COALESCE(p.tag_formula_mode, 'OR'), COALESCE(p.tag_formula_type, 'simple'),
+p.event_date, p.event_end, p.location, ep.name as pipeline_name,
+(SELECT COUNT(*) FROM program_participants WHERE program_id = p.id) as participant_count,
+(SELECT COUNT(*) FROM program_sessions WHERE program_id = p.id) as session_count
+FROM programs p
+LEFT JOIN event_pipelines ep ON ep.id = p.pipeline_id
+WHERE p.id = $1 AND p.account_id = $2
 `, id, accountID).Scan(
-&p.ID, &p.AccountID, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt,
+&p.ID, &p.AccountID, &p.Type, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt,
 &p.ScheduleStartDate, &p.ScheduleEndDate, &p.ScheduleDays, &p.ScheduleStartTime, &p.ScheduleEndTime,
+&p.PipelineID, &p.TagFormula, &p.TagFormulaMode, &p.TagFormulaType,
+&p.EventDate, &p.EventEnd, &p.Location, &p.PipelineName,
 &p.ParticipantCount, &p.SessionCount,
 )
 if err == pgx.ErrNoRows {
@@ -49,13 +68,16 @@ return p, err
 
 func (r *ProgramRepository) List(ctx context.Context, accountID uuid.UUID) ([]*domain.Program, error) {
 rows, err := r.db.Query(ctx, `
-SELECT id, account_id, name, description, status, color, created_by, folder_id, created_at, updated_at,
-schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time,
-(SELECT COUNT(*) FROM program_participants WHERE program_id = programs.id) as participant_count,
-(SELECT COUNT(*) FROM program_sessions WHERE program_id = programs.id) as session_count
-FROM programs
-WHERE account_id = $1
-ORDER BY created_at DESC
+SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at,
+p.schedule_start_date, p.schedule_end_date, p.schedule_days, p.schedule_start_time, p.schedule_end_time,
+p.pipeline_id, COALESCE(p.tag_formula, ''), COALESCE(p.tag_formula_mode, 'OR'), COALESCE(p.tag_formula_type, 'simple'),
+p.event_date, p.event_end, p.location, ep.name as pipeline_name,
+(SELECT COUNT(*) FROM program_participants WHERE program_id = p.id) as participant_count,
+(SELECT COUNT(*) FROM program_sessions WHERE program_id = p.id) as session_count
+FROM programs p
+LEFT JOIN event_pipelines ep ON ep.id = p.pipeline_id
+WHERE p.account_id = $1
+ORDER BY p.created_at DESC
 `, accountID)
 if err != nil {
 return nil, err
@@ -66,8 +88,10 @@ var programs []*domain.Program
 for rows.Next() {
 p := &domain.Program{}
 err := rows.Scan(
-&p.ID, &p.AccountID, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt,
+&p.ID, &p.AccountID, &p.Type, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt,
 &p.ScheduleStartDate, &p.ScheduleEndDate, &p.ScheduleDays, &p.ScheduleStartTime, &p.ScheduleEndTime,
+&p.PipelineID, &p.TagFormula, &p.TagFormulaMode, &p.TagFormulaType,
+&p.EventDate, &p.EventEnd, &p.Location, &p.PipelineName,
 &p.ParticipantCount, &p.SessionCount,
 )
 if err != nil {
@@ -83,9 +107,15 @@ _, err := r.db.Exec(ctx, `
 UPDATE programs
 SET name = $1, description = $2, status = $3, color = $4, folder_id = $5,
 schedule_start_date = $6, schedule_end_date = $7, schedule_days = $8, schedule_start_time = $9, schedule_end_time = $10,
+pipeline_id = $11, tag_formula = $12, tag_formula_mode = $13, tag_formula_type = $14,
+event_date = $15, event_end = $16, location = $17,
 updated_at = NOW()
-WHERE id = $11 AND account_id = $12
-`, p.Name, p.Description, p.Status, p.Color, p.FolderID, p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime, p.ID, p.AccountID)
+WHERE id = $18 AND account_id = $19
+`, p.Name, p.Description, p.Status, p.Color, p.FolderID,
+p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime,
+p.PipelineID, p.TagFormula, p.TagFormulaMode, p.TagFormulaType,
+p.EventDate, p.EventEnd, p.Location,
+p.ID, p.AccountID)
 return err
 }
 
@@ -98,22 +128,35 @@ return err
 
 func (r *ProgramRepository) AddParticipant(ctx context.Context, pp *domain.ProgramParticipant) error {
 err := r.db.QueryRow(ctx, `
-INSERT INTO program_participants (program_id, contact_id, lead_id, status)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (program_id, contact_id) DO UPDATE SET status = EXCLUDED.status, lead_id = COALESCE(EXCLUDED.lead_id, program_participants.lead_id)
+INSERT INTO program_participants (program_id, contact_id, lead_id, stage_id, status, auto_tag_sync)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (program_id, contact_id) DO UPDATE SET
+status = EXCLUDED.status,
+lead_id = COALESCE(EXCLUDED.lead_id, program_participants.lead_id),
+stage_id = COALESCE(EXCLUDED.stage_id, program_participants.stage_id),
+auto_tag_sync = EXCLUDED.auto_tag_sync
 RETURNING id, enrolled_at
-`, pp.ProgramID, pp.ContactID, pp.LeadID, pp.Status).Scan(&pp.ID, &pp.EnrolledAt)
+`, pp.ProgramID, pp.ContactID, pp.LeadID, pp.StageID, pp.Status, pp.AutoTagSync).Scan(&pp.ID, &pp.EnrolledAt)
+return err
+}
+
+func (r *ProgramRepository) UpdateParticipantStage(ctx context.Context, programID, participantID uuid.UUID, stageID *uuid.UUID) error {
+_, err := r.db.Exec(ctx, `
+UPDATE program_participants SET stage_id = $1 WHERE id = $2 AND program_id = $3
+`, stageID, participantID, programID)
 return err
 }
 
 func (r *ProgramRepository) ListParticipants(ctx context.Context, programID uuid.UUID) ([]*domain.ProgramParticipant, error) {
 rows, err := r.db.Query(ctx, `
-SELECT pp.id, pp.program_id, pp.contact_id, pp.lead_id, pp.status, pp.enrolled_at,
+SELECT pp.id, pp.program_id, pp.contact_id, pp.lead_id, pp.stage_id, pp.status, pp.enrolled_at, COALESCE(pp.auto_tag_sync, false),
 COALESCE(c.custom_name, c.name, c.push_name, c.phone, '') as display_name, c.phone,
-COALESCE(pp.lead_id, l.id) as resolved_lead_id
+COALESCE(pp.lead_id, l.id) as resolved_lead_id,
+s.name as stage_name, s.color as stage_color
 FROM program_participants pp
 JOIN contacts c ON c.id = pp.contact_id
 LEFT JOIN leads l ON l.contact_id = pp.contact_id AND l.account_id = (SELECT account_id FROM programs WHERE id = pp.program_id)
+LEFT JOIN event_pipeline_stages s ON s.id = pp.stage_id
 WHERE pp.program_id = $1
 ORDER BY COALESCE(c.custom_name, c.name, c.push_name, c.phone) ASC
 `, programID)
@@ -127,8 +170,9 @@ for rows.Next() {
 pp := &domain.ProgramParticipant{}
 var resolvedLeadID *uuid.UUID
 err := rows.Scan(
-&pp.ID, &pp.ProgramID, &pp.ContactID, &pp.LeadID, &pp.Status, &pp.EnrolledAt,
+&pp.ID, &pp.ProgramID, &pp.ContactID, &pp.LeadID, &pp.StageID, &pp.Status, &pp.EnrolledAt, &pp.AutoTagSync,
 &pp.ContactName, &pp.ContactPhone, &resolvedLeadID,
+&pp.StageName, &pp.StageColor,
 )
 if err != nil {
 return nil, err

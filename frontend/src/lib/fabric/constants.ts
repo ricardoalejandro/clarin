@@ -10,7 +10,7 @@ export const HISTORY_LIMIT = 50
 // ─── Zoom ─────────────────────────────────────────────────────────────────────
 
 export const ZOOM_MIN = 0.05   // 5%
-export const ZOOM_MAX = 10     // 1000%
+export const ZOOM_MAX = 50     // 5000%
 export const ZOOM_STEP = 0.1   // 10% per scroll tick
 export const ZOOM_BTN_STEP = 0.25 // 25% per button click
 
@@ -118,5 +118,6 @@ export const PAGE_SIZES: Record<string, { label: string; w: number; h: number }>
 export const CUSTOM_PROPS = [
   'isDynamic', 'fieldName', 'elementType', 'elementName',
   'verticalAlign', 'qrData', 'lineHeightRatio', 'letterSpacingValue',
+  'fieldFormat',
   '__isPage',
 ]

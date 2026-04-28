@@ -42,26 +42,32 @@ func strPtr(s string) *string {
 	return &s
 }
 
+const (
+	avatarExistingRefreshTTL = 7 * 24 * time.Hour
+	avatarMissingRefreshTTL  = 24 * time.Hour
+	avatarFetchTimeout       = 12 * time.Second
+)
+
 // DeviceHealthMetrics tracks health-related counters per device
 type DeviceHealthMetrics struct {
-	DisconnectCount   int64     `json:"disconnect_count"`
-	ReconnectCount    int64     `json:"reconnect_count"`
-	SendErrorCount    int64     `json:"send_error_count"`
-	SendSuccessCount  int64     `json:"send_success_count"`
-	LastConnected     time.Time `json:"last_connected"`
-	LastDisconnected  time.Time `json:"last_disconnected"`
-	LastSendError     time.Time `json:"last_send_error,omitempty"`
-	LastSendSuccess   time.Time `json:"last_send_success,omitempty"`
-	UptimeStart       time.Time `json:"uptime_start"`
+	DisconnectCount  int64     `json:"disconnect_count"`
+	ReconnectCount   int64     `json:"reconnect_count"`
+	SendErrorCount   int64     `json:"send_error_count"`
+	SendSuccessCount int64     `json:"send_success_count"`
+	LastConnected    time.Time `json:"last_connected"`
+	LastDisconnected time.Time `json:"last_disconnected"`
+	LastSendError    time.Time `json:"last_send_error,omitempty"`
+	LastSendSuccess  time.Time `json:"last_send_success,omitempty"`
+	UptimeStart      time.Time `json:"uptime_start"`
 }
 
 // DeviceHealthSummary is returned by the health endpoint
 type DeviceHealthSummary struct {
-	ID        uuid.UUID            `json:"id"`
-	JID       string               `json:"jid"`
-	Status    string               `json:"status"`
-	Connected bool                 `json:"connected"`
-	Metrics   DeviceHealthMetrics  `json:"metrics"`
+	ID        uuid.UUID           `json:"id"`
+	JID       string              `json:"jid"`
+	Status    string              `json:"status"`
+	Connected bool                `json:"connected"`
+	Metrics   DeviceHealthMetrics `json:"metrics"`
 }
 
 // DeviceInstance represents a single WhatsApp connection
@@ -76,8 +82,8 @@ type DeviceInstance struct {
 	Metrics         DeviceHealthMetrics
 	mu              sync.RWMutex
 	// reconnect control
-	reconnecting    bool
-	stopReconnect   chan struct{}
+	reconnecting  bool
+	stopReconnect chan struct{}
 }
 
 // DevicePool manages multiple WhatsApp connections
@@ -248,8 +254,8 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 	mediaTransport := &http.Transport{
 		DisableKeepAlives:     true,
 		ForceAttemptHTTP2:     false,
-		TLSNextProto:         make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		TLSHandshakeTimeout:  15 * time.Second,
+		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -978,20 +984,25 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 
 	// Create message
 	msg := &domain.Message{
-		AccountID:       instance.AccountID,
-		DeviceID:        &instance.ID,
-		ChatID:          chat.ID,
-		MessageID:       evt.Info.ID,
-		FromJID:         strPtr(senderJID),
-		FromName:        strPtr(senderName),
-		Body:            strPtr(body),
-		MessageType:     strPtr(msgType),
-		MediaURL:        mediaURL,
-		MediaMimetype:   mediaMimetype,
-		MediaFilename:   mediaFilename,
-		MediaSize:       mediaSize,
-		IsFromMe:        isFromMe,
-		Status:          strPtr(func() string { if isFromMe { return "sent" }; return "received" }()),
+		AccountID:     instance.AccountID,
+		DeviceID:      &instance.ID,
+		ChatID:        chat.ID,
+		MessageID:     evt.Info.ID,
+		FromJID:       strPtr(senderJID),
+		FromName:      strPtr(senderName),
+		Body:          strPtr(body),
+		MessageType:   strPtr(msgType),
+		MediaURL:      mediaURL,
+		MediaMimetype: mediaMimetype,
+		MediaFilename: mediaFilename,
+		MediaSize:     mediaSize,
+		IsFromMe:      isFromMe,
+		Status: strPtr(func() string {
+			if isFromMe {
+				return "sent"
+			}
+			return "received"
+		}()),
 		Timestamp:       evt.Info.Timestamp,
 		QuotedMessageID: quotedMessageID,
 		QuotedBody:      quotedBody,
@@ -1100,8 +1111,8 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		_ = p.repos.Contact.SyncToLead(ctx, contact)
 	}
 
-	// Fetch and store avatar if contact has no avatar yet
-	if contact != nil && contact.AvatarURL == nil && !isFromMe {
+	// Refresh avatar opportunistically for active contacts only, bounded by TTL.
+	if contact != nil && !isFromMe {
 		avatarJID := evt.Info.Chat.ToNonAD()
 		// If chat JID is @lid, resolve to @s.whatsapp.net for GetProfilePictureInfo
 		if avatarJID.Server == types.HiddenUserServer {
@@ -1109,7 +1120,14 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				avatarJID = pnJID
 			}
 		}
-		go p.fetchAndStoreAvatar(ctx, instance, contactJID, avatarJID)
+		if ttl := avatarRefreshTTL(contact); ttl > 0 {
+			claimed, err := p.repos.Contact.ClaimAvatarRefresh(ctx, instance.AccountID, contactJID, ttl)
+			if err != nil {
+				log.Printf("[Avatar] Failed to claim avatar refresh for %s: %v", contactJID, err)
+			} else if claimed {
+				go p.fetchAndStoreAvatar(instance, contactJID, avatarJID)
+			}
+		}
 	}
 
 	// Auto-create lead if not exists and is incoming message
@@ -1183,10 +1201,12 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 }
 
 // fetchAndStoreAvatar fetches a WhatsApp profile picture and stores it
-func (p *DevicePool) fetchAndStoreAvatar(ctx context.Context, instance *DeviceInstance, contactJID string, jid types.JID) {
+func (p *DevicePool) fetchAndStoreAvatar(instance *DeviceInstance, contactJID string, jid types.JID) {
 	if p.storage == nil || instance.Client == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), avatarFetchTimeout)
+	defer cancel()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -1214,8 +1234,9 @@ func (p *DevicePool) fetchAndStoreAvatar(ctx context.Context, instance *DeviceIn
 		return
 	}
 
-	// Upload to MinIO
-	filename := jid.ToNonAD().User + ".jpg"
+	// Upload to MinIO using a content hash so unchanged pictures keep the same URL.
+	hash := sha256.Sum256(data)
+	filename := fmt.Sprintf("%s_%x.jpg", jid.ToNonAD().User, hash[:8])
 	_, err = p.storage.UploadFile(ctx, instance.AccountID, "avatars", filename, data, "image/jpeg")
 	if err != nil {
 		log.Printf("[Avatar] Failed to store avatar for %s: %v", jid.String(), err)
@@ -1224,13 +1245,40 @@ func (p *DevicePool) fetchAndStoreAvatar(ctx context.Context, instance *DeviceIn
 
 	// Store proxy URL in contact
 	proxyURL := fmt.Sprintf("/api/media/file/%s/avatars/%s", instance.AccountID.String(), filename)
-	err = p.repos.Contact.UpdateAvatarURL(ctx, instance.AccountID, contactJID, proxyURL)
+	changed, err := p.repos.Contact.UpdateAvatarURL(ctx, instance.AccountID, contactJID, proxyURL)
 	if err != nil {
 		log.Printf("[Avatar] Failed to update contact avatar: %v", err)
 		return
 	}
+	if changed {
+		if p.cache != nil {
+			_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
+			_ = p.cache.DelPattern(context.Background(), "contacts:"+instance.AccountID.String()+":*")
+		}
+		if p.hub != nil {
+			p.hub.BroadcastToAccount(instance.AccountID, ws.EventContactUpdate, map[string]interface{}{
+				"action":     "avatar_updated",
+				"jid":        contactJID,
+				"avatar_url": proxyURL,
+			})
+			p.hub.BroadcastToAccount(instance.AccountID, ws.EventChatUpdate, map[string]interface{}{
+				"jid":        contactJID,
+				"avatar_url": proxyURL,
+			})
+		}
+	}
 
 	log.Printf("[Avatar] Stored avatar for %s", jid.String())
+}
+
+func avatarRefreshTTL(contact *domain.Contact) time.Duration {
+	if contact == nil || contact.IsGroup || strings.HasSuffix(contact.JID, "@g.us") || strings.HasSuffix(contact.JID, "@newsletter") || strings.HasSuffix(contact.JID, "@broadcast") {
+		return 0
+	}
+	if contact.AvatarURL == nil || strings.TrimSpace(*contact.AvatarURL) == "" {
+		return avatarMissingRefreshTTL
+	}
+	return avatarExistingRefreshTTL
 }
 
 // downloadAndStoreMedia downloads media from WhatsApp and stores it in MinIO
@@ -1826,16 +1874,21 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 	}
 
 	msg := &domain.Message{
-		AccountID:         instance.AccountID,
-		DeviceID:          &instance.ID,
-		ChatID:            chat.ID,
-		MessageID:         evt.Info.ID,
-		FromJID:           strPtr(senderJID),
-		FromName:          strPtr(evt.Info.PushName),
-		Body:              strPtr(body),
-		MessageType:       strPtr(domain.MessageTypePoll),
-		IsFromMe:          isFromMe,
-		Status:            strPtr(func() string { if isFromMe { return "sent" }; return "received" }()),
+		AccountID:   instance.AccountID,
+		DeviceID:    &instance.ID,
+		ChatID:      chat.ID,
+		MessageID:   evt.Info.ID,
+		FromJID:     strPtr(senderJID),
+		FromName:    strPtr(evt.Info.PushName),
+		Body:        strPtr(body),
+		MessageType: strPtr(domain.MessageTypePoll),
+		IsFromMe:    isFromMe,
+		Status: strPtr(func() string {
+			if isFromMe {
+				return "sent"
+			}
+			return "received"
+		}()),
 		Timestamp:         evt.Info.Timestamp,
 		PollQuestion:      strPtr(question),
 		PollMaxSelections: maxSelections,
@@ -2147,9 +2200,9 @@ func (p *DevicePool) IsOnWhatsApp(ctx context.Context, deviceID uuid.UUID, phone
 	var checkResults []domain.WhatsAppCheckResult
 	for _, r := range results {
 		checkResults = append(checkResults, domain.WhatsAppCheckResult{
-			Phone:       r.Query,
+			Phone:        r.Query,
 			IsOnWhatsApp: r.IsIn,
-			JID:         r.JID.String(),
+			JID:          r.JID.String(),
 		})
 	}
 

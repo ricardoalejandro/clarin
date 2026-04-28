@@ -9,17 +9,17 @@ import (
 
 // Account represents a tenant in the multi-tenant system
 type Account struct {
-	ID         uuid.UUID  `json:"id"`
-	Name       string     `json:"name"`
-	Slug       string     `json:"slug"`
-	Plan       string     `json:"plan"`
-	MaxDevices int        `json:"max_devices"`
-	IsActive   bool       `json:"is_active"`
-	MCPEnabled bool       `json:"mcp_enabled"`
-	KommoEnabled bool     `json:"kommo_enabled"`
+	ID                     uuid.UUID  `json:"id"`
+	Name                   string     `json:"name"`
+	Slug                   string     `json:"slug"`
+	Plan                   string     `json:"plan"`
+	MaxDevices             int        `json:"max_devices"`
+	IsActive               bool       `json:"is_active"`
+	MCPEnabled             bool       `json:"mcp_enabled"`
+	KommoEnabled           bool       `json:"kommo_enabled"`
 	DefaultIncomingStageID *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 
 	// Google Contacts integration
 	GoogleEmail          *string    `json:"google_email,omitempty"`
@@ -30,24 +30,24 @@ type Account struct {
 	GoogleSyncLimit      int        `json:"google_sync_limit"`
 
 	// Populated on demand
-	UserCount        int `json:"user_count,omitempty"`
-	DeviceCount      int `json:"device_count,omitempty"`
-	ChatCount        int `json:"chat_count,omitempty"`
-	GoogleSyncCount  int `json:"google_sync_count,omitempty"`
+	UserCount       int `json:"user_count,omitempty"`
+	DeviceCount     int `json:"device_count,omitempty"`
+	ChatCount       int `json:"chat_count,omitempty"`
+	GoogleSyncCount int `json:"google_sync_count,omitempty"`
 }
 
 // User represents a user in the system
 type User struct {
-	ID           uuid.UUID `json:"id"`
-	AccountID    uuid.UUID `json:"account_id"`
-	Username     string    `json:"username"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	DisplayName  string    `json:"display_name"`
-	Role         string    `json:"role"` // super_admin, admin, agent
-	IsAdmin      bool      `json:"is_admin"`
-	IsSuperAdmin bool      `json:"is_super_admin"`
-	IsActive     bool      `json:"is_active"`
+	ID               uuid.UUID `json:"id"`
+	AccountID        uuid.UUID `json:"account_id"`
+	Username         string    `json:"username"`
+	Email            string    `json:"email"`
+	PasswordHash     string    `json:"-"`
+	DisplayName      string    `json:"display_name"`
+	Role             string    `json:"role"` // super_admin, admin, agent
+	IsAdmin          bool      `json:"is_admin"`
+	IsSuperAdmin     bool      `json:"is_super_admin"`
+	IsActive         bool      `json:"is_active"`
 	GroqAPIKey       string    `json:"-"`
 	ErosModel        string    `json:"eros_model,omitempty"`
 	ErosRole         string    `json:"eros_role,omitempty"`
@@ -56,7 +56,8 @@ type User struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 
 	// Populated on demand
-	AccountName string `json:"account_name,omitempty"`
+	AccountName string        `json:"account_name,omitempty"`
+	Accounts    []UserAccount `json:"accounts,omitempty"`
 }
 
 // User role constants
@@ -68,14 +69,14 @@ const (
 
 // Permission module constants
 const (
-	PermChats      = "chats"
-	PermContacts   = "contacts"
-	PermPrograms   = "programs"
-	PermDevices    = "devices"
-	PermLeads      = "leads"
-	PermEvents     = "events"
-	PermBroadcasts = "broadcasts"
-	PermTags       = "tags"
+	PermChats        = "chats"
+	PermContacts     = "contacts"
+	PermPrograms     = "programs"
+	PermDevices      = "devices"
+	PermLeads        = "leads"
+	PermEvents       = "events"
+	PermBroadcasts   = "broadcasts"
+	PermTags         = "tags"
 	PermSettings     = "settings"
 	PermIntegrations = "integrations"
 	PermSurveys      = "surveys"
@@ -120,20 +121,85 @@ type UserAccount struct {
 	Permissions       []string `json:"permissions,omitempty"`
 }
 
+// Integration providers and scopes.
+const (
+	IntegrationProviderKommo     = "kommo"
+	IntegrationScopeGlobal       = "global"
+	IntegrationScopeMultiAccount = "multi_account"
+	IntegrationScopeAccount      = "account"
+
+	IntegrationStatusActive = "active"
+	IntegrationStatusPaused = "paused"
+	IntegrationStatusError  = "error"
+)
+
+// IntegrationInstance represents one configured external integration instance.
+// For Kommo, one instance maps to one Kommo license/subdomain and may serve many accounts.
+type IntegrationInstance struct {
+	ID            uuid.UUID       `json:"id"`
+	Provider      string          `json:"provider"`
+	Scope         string          `json:"scope"`
+	Name          string          `json:"name"`
+	Status        string          `json:"status"`
+	IsActive      bool            `json:"is_active"`
+	Subdomain     string          `json:"subdomain,omitempty"`
+	ClientID      string          `json:"client_id,omitempty"`
+	ClientSecret  string          `json:"-"`
+	AccessToken   string          `json:"-"`
+	RefreshToken  string          `json:"-"`
+	RedirectURI   string          `json:"redirect_uri,omitempty"`
+	WebhookSecret string          `json:"-"`
+	Config        json.RawMessage `json:"config,omitempty"`
+	LastSyncAt    *time.Time      `json:"last_sync_at,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+
+	Accounts []IntegrationInstanceAccount `json:"accounts,omitempty"`
+}
+
+// IntegrationInstanceAccount links a shared integration instance to a Clarin account.
+type IntegrationInstanceAccount struct {
+	ID                    uuid.UUID  `json:"id"`
+	IntegrationInstanceID uuid.UUID  `json:"integration_instance_id"`
+	AccountID             uuid.UUID  `json:"account_id"`
+	Enabled               bool       `json:"enabled"`
+	LastSyncedAt          *time.Time `json:"last_synced_at,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+
+	AccountName string `json:"account_name,omitempty"`
+	AccountSlug string `json:"account_slug,omitempty"`
+}
+
 // Device represents a WhatsApp connection
 type Device struct {
-	ID              uuid.UUID  `json:"id"`
-	AccountID       uuid.UUID  `json:"account_id"`
-	Name            *string    `json:"name,omitempty"`
-	Phone           *string    `json:"phone,omitempty"`
-	JID             *string    `json:"jid,omitempty"`
-	Status          *string    `json:"status,omitempty"` // disconnected, connecting, connected, logged_out
-	QRCode          *string    `json:"qr_code,omitempty"`
-	ReceiveMessages bool       `json:"receive_messages"`
-	LastSeenAt      *time.Time `json:"last_seen_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                  uuid.UUID       `json:"id"`
+	AccountID           uuid.UUID       `json:"account_id"`
+	Name                *string         `json:"name,omitempty"`
+	Phone               *string         `json:"phone,omitempty"`
+	JID                 *string         `json:"jid,omitempty"`
+	Status              *string         `json:"status,omitempty"` // disconnected, connecting, connected, logged_out
+	QRCode              *string         `json:"qr_code,omitempty"`
+	ReceiveMessages     bool            `json:"receive_messages"`
+	Provider            *string         `json:"provider,omitempty"`
+	WABAID              *string         `json:"waba_id,omitempty"`
+	PhoneNumberID       *string         `json:"phone_number_id,omitempty"`
+	APIDisplayPhone     *string         `json:"api_display_phone,omitempty"`
+	APIWebhookStatus    *string         `json:"api_webhook_status,omitempty"`
+	APIBillingStatus    *string         `json:"api_billing_status,omitempty"`
+	APISendingEnabled   bool            `json:"api_sending_enabled"`
+	APITemplatesEnabled bool            `json:"api_templates_enabled"`
+	Capabilities        json.RawMessage `json:"capabilities,omitempty"`
+	LastSeenAt          *time.Time      `json:"last_seen_at,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }
+
+// Device provider constants
+const (
+	DeviceProviderWhatsAppWeb      = "whatsapp_web"
+	DeviceProviderWhatsAppCloudAPI = "whatsapp_cloud_api"
+)
 
 // DeviceStatus constants
 const (
@@ -145,34 +211,35 @@ const (
 
 // Contact represents a WhatsApp contact
 type Contact struct {
-	ID         uuid.UUID  `json:"id"`
-	AccountID  uuid.UUID  `json:"account_id"`
-	DeviceID   *uuid.UUID `json:"device_id,omitempty"`
-	JID        string     `json:"jid"`
-	Phone      *string    `json:"phone,omitempty"`
-	Name       *string    `json:"name,omitempty"`
-	LastName   *string    `json:"last_name,omitempty"`
-	ShortName  *string    `json:"short_name,omitempty"`
-	CustomName *string    `json:"custom_name,omitempty"`
-	PushName   *string    `json:"push_name,omitempty"`
-	AvatarURL  *string    `json:"avatar_url,omitempty"`
-	Email      *string    `json:"email,omitempty"`
-	Company    *string    `json:"company,omitempty"`
-	Age        *int       `json:"age,omitempty"`
-	DNI        *string    `json:"dni,omitempty"`
-	BirthDate  *time.Time `json:"birth_date,omitempty"`
-	Address    *string    `json:"address,omitempty"`
-	Distrito   *string    `json:"distrito,omitempty"`
-	Ocupacion  *string    `json:"ocupacion,omitempty"`
-	Tags       []string   `json:"tags,omitempty"`
-	Notes      *string    `json:"notes,omitempty"`
-	Source     *string    `json:"source,omitempty"`
-	IsGroup    bool       `json:"is_group"`
-	KommoID      *int64     `json:"kommo_id,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	LastActivity *time.Time `json:"last_activity,omitempty"`
-	LeadCount    int        `json:"lead_count"`
+	ID              uuid.UUID  `json:"id"`
+	AccountID       uuid.UUID  `json:"account_id"`
+	DeviceID        *uuid.UUID `json:"device_id,omitempty"`
+	JID             string     `json:"jid"`
+	Phone           *string    `json:"phone,omitempty"`
+	Name            *string    `json:"name,omitempty"`
+	LastName        *string    `json:"last_name,omitempty"`
+	ShortName       *string    `json:"short_name,omitempty"`
+	CustomName      *string    `json:"custom_name,omitempty"`
+	PushName        *string    `json:"push_name,omitempty"`
+	AvatarURL       *string    `json:"avatar_url,omitempty"`
+	AvatarCheckedAt *time.Time `json:"avatar_checked_at,omitempty"`
+	Email           *string    `json:"email,omitempty"`
+	Company         *string    `json:"company,omitempty"`
+	Age             *int       `json:"age,omitempty"`
+	DNI             *string    `json:"dni,omitempty"`
+	BirthDate       *time.Time `json:"birth_date,omitempty"`
+	Address         *string    `json:"address,omitempty"`
+	Distrito        *string    `json:"distrito,omitempty"`
+	Ocupacion       *string    `json:"ocupacion,omitempty"`
+	Tags            []string   `json:"tags,omitempty"`
+	Notes           *string    `json:"notes,omitempty"`
+	Source          *string    `json:"source,omitempty"`
+	IsGroup         bool       `json:"is_group"`
+	KommoID         *int64     `json:"kommo_id,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	LastActivity    *time.Time `json:"last_activity,omitempty"`
+	LeadCount       int        `json:"lead_count"`
 
 	// Google Contacts sync
 	GoogleSync         bool       `json:"google_sync"`
@@ -181,9 +248,10 @@ type Contact struct {
 	GoogleSyncError    *string    `json:"google_sync_error,omitempty"`
 
 	// Relations (populated on demand)
-	DeviceNames    []ContactDeviceName `json:"device_names,omitempty"`
-	StructuredTags []*Tag              `json:"structured_tags,omitempty"`
-	ExtraPhones    []ContactPhone      `json:"extra_phones,omitempty"`
+	DeviceNames       []ContactDeviceName `json:"device_names,omitempty"`
+	StructuredTags    []*Tag              `json:"structured_tags,omitempty"`
+	ExtraPhones       []ContactPhone      `json:"extra_phones,omitempty"`
+	CustomFieldValues []*CustomFieldValue `json:"custom_field_values,omitempty"`
 }
 
 // ContactPhone represents an additional phone number for a contact
@@ -236,8 +304,9 @@ type ContactFilter struct {
 	TagIDs             []uuid.UUID
 	TagNames           []string
 	ExcludeTagNames    []string
-	TagMode            string // OR or AND
+	TagMode            string      // OR or AND
 	MatchingContactIDs []uuid.UUID // pre-computed from formula
+	CfFilterContactIDs []uuid.UUID // pre-computed from custom field filters
 	DateField          string
 	DateFrom           string
 	DateTo             string
@@ -249,19 +318,23 @@ type ContactFilter struct {
 
 // Chat represents a conversation
 type Chat struct {
-	ID            uuid.UUID  `json:"id"`
-	AccountID     uuid.UUID  `json:"account_id"`
-	DeviceID      *uuid.UUID `json:"device_id,omitempty"`
-	ContactID     *uuid.UUID `json:"contact_id,omitempty"`
-	JID           string     `json:"jid"`
-	Name          *string    `json:"name,omitempty"`
-	LastMessage   *string    `json:"last_message,omitempty"`
-	LastMessageAt *time.Time `json:"last_message_at,omitempty"`
-	UnreadCount   int        `json:"unread_count"`
-	IsArchived    bool       `json:"is_archived"`
-	IsPinned      bool       `json:"is_pinned"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID                             uuid.UUID  `json:"id"`
+	AccountID                      uuid.UUID  `json:"account_id"`
+	DeviceID                       *uuid.UUID `json:"device_id,omitempty"`
+	ContactID                      *uuid.UUID `json:"contact_id,omitempty"`
+	JID                            string     `json:"jid"`
+	Name                           *string    `json:"name,omitempty"`
+	LastMessage                    *string    `json:"last_message,omitempty"`
+	LastMessageAt                  *time.Time `json:"last_message_at,omitempty"`
+	UnreadCount                    int        `json:"unread_count"`
+	IsArchived                     bool       `json:"is_archived"`
+	IsPinned                       bool       `json:"is_pinned"`
+	LastInboundAt                  *time.Time `json:"last_inbound_at,omitempty"`
+	LastOutboundAt                 *time.Time `json:"last_outbound_at,omitempty"`
+	CustomerServiceWindowExpiresAt *time.Time `json:"customer_service_window_expires_at,omitempty"`
+	LastMessageProvider            *string    `json:"last_message_provider,omitempty"`
+	CreatedAt                      time.Time  `json:"created_at"`
+	UpdatedAt                      time.Time  `json:"updated_at"`
 
 	// Device info (populated on demand)
 	DeviceName   *string `json:"device_name,omitempty"`
@@ -291,6 +364,13 @@ type ChatFilter struct {
 	Search     string
 	Limit      int
 	Offset     int
+
+	// Reaction-based filtering
+	HasReaction    bool       // when true, only chats with at least one reaction matching the criteria below
+	ReactionFromMe *bool      // nil = either, true = operator's reactions, false = client's reactions
+	ReactionEmojis []string   // empty = any emoji, otherwise whitelist
+	ReactionSince  *time.Time // optional lower bound on reaction timestamp
+	ReactionUntil  *time.Time // optional upper bound on reaction timestamp
 }
 
 // ChatDetails contains full chat information with related data
@@ -321,6 +401,8 @@ type Message struct {
 	IsEdited      bool       `json:"is_edited"`
 	IsViewOnce    bool       `json:"is_view_once"`
 	Status        *string    `json:"status,omitempty"` // sent, delivered, read, failed
+	Provider      *string    `json:"provider,omitempty"`
+	TemplateName  *string    `json:"template_name,omitempty"`
 	Timestamp     time.Time  `json:"timestamp"`
 	CreatedAt     time.Time  `json:"created_at"`
 
@@ -342,9 +424,9 @@ type Message struct {
 	Reactions []*MessageReaction `json:"reactions,omitempty"`
 
 	// Poll data (populated when message_type = poll)
-	PollQuestion     *string       `json:"poll_question,omitempty"`
-	PollOptions      []*PollOption  `json:"poll_options,omitempty"`
-	PollVotes        []*PollVote    `json:"poll_votes,omitempty"`
+	PollQuestion      *string       `json:"poll_question,omitempty"`
+	PollOptions       []*PollOption `json:"poll_options,omitempty"`
+	PollVotes         []*PollVote   `json:"poll_votes,omitempty"`
 	PollMaxSelections int           `json:"poll_max_selections,omitempty"`
 }
 
@@ -393,49 +475,187 @@ type PollVote struct {
 	Timestamp     time.Time `json:"timestamp"`
 }
 
+// WhatsAppMessageTemplate represents an official WhatsApp Cloud API template.
+type WhatsAppMessageTemplate struct {
+	ID              uuid.UUID       `json:"id"`
+	AccountID       uuid.UUID       `json:"account_id"`
+	DeviceID        *uuid.UUID      `json:"device_id,omitempty"`
+	Name            string          `json:"name"`
+	Language        string          `json:"language"`
+	Category        string          `json:"category"`
+	Status          string          `json:"status"`
+	Components      json.RawMessage `json:"components"`
+	MetaTemplateID  *string         `json:"meta_template_id,omitempty"`
+	RejectionReason *string         `json:"rejection_reason,omitempty"`
+	LastSyncedAt    *time.Time      `json:"last_synced_at,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
+// WhatsAppWebhookEvent stores raw Cloud API webhooks for auditing and replay.
+type WhatsAppWebhookEvent struct {
+	ID            uuid.UUID       `json:"id"`
+	AccountID     *uuid.UUID      `json:"account_id,omitempty"`
+	DeviceID      *uuid.UUID      `json:"device_id,omitempty"`
+	PhoneNumberID string          `json:"phone_number_id"`
+	EventID       string          `json:"event_id"`
+	EventType     string          `json:"event_type"`
+	Payload       json.RawMessage `json:"payload"`
+	Processed     bool            `json:"processed"`
+	ErrorMessage  *string         `json:"error_message,omitempty"`
+	ReceivedAt    time.Time       `json:"received_at"`
+}
+
+// WhatsAppConversationWindow summarizes the 24-hour official API service window.
+type WhatsAppConversationWindow struct {
+	ChatID                         uuid.UUID  `json:"chat_id"`
+	AccountID                      uuid.UUID  `json:"account_id"`
+	DeviceID                       *uuid.UUID `json:"device_id,omitempty"`
+	JID                            string     `json:"jid"`
+	Name                           *string    `json:"name,omitempty"`
+	DeviceName                     *string    `json:"device_name,omitempty"`
+	Provider                       string     `json:"provider"`
+	LastInboundAt                  *time.Time `json:"last_inbound_at,omitempty"`
+	LastOutboundAt                 *time.Time `json:"last_outbound_at,omitempty"`
+	CustomerServiceWindowExpiresAt *time.Time `json:"customer_service_window_expires_at,omitempty"`
+	CanReply                       bool       `json:"can_reply"`
+}
+
+// BotFlow represents a lead/chat bot definition independent from legacy automations.
+type BotFlow struct {
+	ID               uuid.UUID              `json:"id"`
+	AccountID        uuid.UUID              `json:"account_id"`
+	Name             string                 `json:"name"`
+	Description      string                 `json:"description"`
+	Channel          string                 `json:"channel"`
+	TriggerType      string                 `json:"trigger_type"`
+	TriggerConfig    map[string]interface{} `json:"trigger_config"`
+	Graph            json.RawMessage        `json:"graph"`
+	IsActive         bool                   `json:"is_active"`
+	IsPublished      bool                   `json:"is_published"`
+	DraftVersion     int                    `json:"draft_version"`
+	PublishedVersion int                    `json:"published_version"`
+	ExecutionCount   int                    `json:"execution_count"`
+	LastTriggeredAt  *time.Time             `json:"last_triggered_at,omitempty"`
+	PublishedAt      *time.Time             `json:"published_at,omitempty"`
+	CreatedAt        time.Time              `json:"created_at"`
+	UpdatedAt        time.Time              `json:"updated_at"`
+}
+
+// BotFlowVersion stores immutable published bot versions.
+type BotFlowVersion struct {
+	ID        uuid.UUID       `json:"id"`
+	FlowID    uuid.UUID       `json:"flow_id"`
+	Version   int             `json:"version"`
+	Graph     json.RawMessage `json:"graph"`
+	CreatedBy *uuid.UUID      `json:"created_by,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+// BotSession tracks a conversation currently handled by a bot.
+type BotSession struct {
+	ID            uuid.UUID              `json:"id"`
+	AccountID     uuid.UUID              `json:"account_id"`
+	FlowID        uuid.UUID              `json:"flow_id"`
+	ChatID        *uuid.UUID             `json:"chat_id,omitempty"`
+	ContactID     *uuid.UUID             `json:"contact_id,omitempty"`
+	LeadID        *uuid.UUID             `json:"lead_id,omitempty"`
+	Status        string                 `json:"status"`
+	CurrentNodeID string                 `json:"current_node_id"`
+	ContextData   map[string]interface{} `json:"context_data"`
+	StartedAt     time.Time              `json:"started_at"`
+	UpdatedAt     time.Time              `json:"updated_at"`
+	EndedAt       *time.Time             `json:"ended_at,omitempty"`
+}
+
+// BotExecutionLog records a simulated or real bot step.
+type BotExecutionLog struct {
+	ID        uuid.UUID              `json:"id"`
+	AccountID uuid.UUID              `json:"account_id"`
+	FlowID    uuid.UUID              `json:"flow_id"`
+	SessionID *uuid.UUID             `json:"session_id,omitempty"`
+	NodeID    string                 `json:"node_id"`
+	NodeType  string                 `json:"node_type"`
+	Status    string                 `json:"status"`
+	Input     map[string]interface{} `json:"input"`
+	Output    map[string]interface{} `json:"output"`
+	Error     string                 `json:"error,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+}
+
+type BotSimulationStep struct {
+	NodeID   string                 `json:"node_id"`
+	NodeType string                 `json:"node_type"`
+	Label    string                 `json:"label"`
+	Status   string                 `json:"status"`
+	Output   map[string]interface{} `json:"output"`
+}
+
+type BotSimulationResult struct {
+	FlowID uuid.UUID           `json:"flow_id"`
+	Steps  []BotSimulationStep `json:"steps"`
+	Ended  bool                `json:"ended"`
+	Error  string              `json:"error,omitempty"`
+}
+
+const (
+	WhatsAppTemplateStatusDraft    = "draft"
+	WhatsAppTemplateStatusPending  = "pending"
+	WhatsAppTemplateStatusApproved = "approved"
+	WhatsAppTemplateStatusRejected = "rejected"
+
+	BotChannelWhatsApp        = "whatsapp"
+	BotTriggerMessageReceived = "message_received"
+	BotTriggerManual          = "manual"
+	BotSessionActive          = "active"
+	BotSessionCompleted       = "completed"
+	BotSessionPaused          = "paused"
+)
+
 // Lead represents a potential customer
 type Lead struct {
-	ID           uuid.UUID              `json:"id"`
-	AccountID    uuid.UUID              `json:"account_id"`
-	ContactID    *uuid.UUID             `json:"contact_id,omitempty"`
-	JID          string                 `json:"jid"`
-	Name         *string                `json:"name,omitempty"`
-	LastName     *string                `json:"last_name,omitempty"`
-	ShortName    *string                `json:"short_name,omitempty"`
-	Phone        *string                `json:"phone,omitempty"`
-	Email        *string                `json:"email,omitempty"`
-	Company      *string                `json:"company,omitempty"`
-	Age          *int                   `json:"age,omitempty"`
-	DNI          *string                `json:"dni,omitempty"`
-	BirthDate    *time.Time             `json:"birth_date,omitempty"`
-	Address      *string                `json:"address,omitempty"`
-	Distrito     *string                `json:"distrito,omitempty"`
-	Ocupacion    *string                `json:"ocupacion,omitempty"`
-	Status       *string                `json:"status,omitempty"` // legacy, kept for backward compat
-	PipelineID   *uuid.UUID             `json:"pipeline_id,omitempty"`
-	StageID      *uuid.UUID             `json:"stage_id,omitempty"`
-	Source       *string                `json:"source,omitempty"`
-	Notes        *string                `json:"notes,omitempty"`
-	Tags         []string               `json:"tags,omitempty"`
-	CustomFields map[string]interface{} `json:"custom_fields,omitempty"`
-	AssignedTo   *uuid.UUID             `json:"assigned_to,omitempty"`
-	KommoID      *int64                 `json:"kommo_id,omitempty"`
-	IsArchived    bool                   `json:"is_archived"`
-	ArchivedAt    *time.Time             `json:"archived_at,omitempty"`
-	ArchiveReason string                 `json:"archive_reason,omitempty"`
-	IsBlocked     bool                   `json:"is_blocked"`
+	ID             uuid.UUID              `json:"id"`
+	AccountID      uuid.UUID              `json:"account_id"`
+	ContactID      *uuid.UUID             `json:"contact_id,omitempty"`
+	JID            string                 `json:"jid"`
+	Name           *string                `json:"name,omitempty"`
+	LastName       *string                `json:"last_name,omitempty"`
+	ShortName      *string                `json:"short_name,omitempty"`
+	Phone          *string                `json:"phone,omitempty"`
+	Email          *string                `json:"email,omitempty"`
+	Company        *string                `json:"company,omitempty"`
+	Age            *int                   `json:"age,omitempty"`
+	DNI            *string                `json:"dni,omitempty"`
+	BirthDate      *time.Time             `json:"birth_date,omitempty"`
+	Address        *string                `json:"address,omitempty"`
+	Distrito       *string                `json:"distrito,omitempty"`
+	Ocupacion      *string                `json:"ocupacion,omitempty"`
+	Status         *string                `json:"status,omitempty"` // legacy, kept for backward compat
+	PipelineID     *uuid.UUID             `json:"pipeline_id,omitempty"`
+	StageID        *uuid.UUID             `json:"stage_id,omitempty"`
+	Source         *string                `json:"source,omitempty"`
+	Notes          *string                `json:"notes,omitempty"`
+	Tags           []string               `json:"tags,omitempty"`
+	CustomFields   map[string]interface{} `json:"custom_fields,omitempty"`
+	AssignedTo     *uuid.UUID             `json:"assigned_to,omitempty"`
+	KommoID        *int64                 `json:"kommo_id,omitempty"`
+	IsArchived     bool                   `json:"is_archived"`
+	ArchivedAt     *time.Time             `json:"archived_at,omitempty"`
+	ArchiveReason  string                 `json:"archive_reason,omitempty"`
+	IsBlocked      bool                   `json:"is_blocked"`
 	BlockedAt      *time.Time             `json:"blocked_at,omitempty"`
 	BlockReason    string                 `json:"block_reason,omitempty"`
 	KommoDeletedAt *time.Time             `json:"kommo_deleted_at,omitempty"`
-	CreatedAt    time.Time              `json:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at"`
+	CreatedAt      time.Time              `json:"created_at"`
+	UpdatedAt      time.Time              `json:"updated_at"`
 
 	// Relations (populated on demand)
-	Contact        *Contact `json:"contact,omitempty"`
-	StructuredTags []*Tag   `json:"structured_tags,omitempty"`
-	StageName      *string  `json:"stage_name,omitempty"`
-	StageColor     *string  `json:"stage_color,omitempty"`
-	StagePosition  *int     `json:"stage_position,omitempty"`
+	Contact           *Contact            `json:"contact,omitempty"`
+	StructuredTags    []*Tag              `json:"structured_tags,omitempty"`
+	CustomFieldValues []*CustomFieldValue `json:"custom_field_values,omitempty"`
+	StageName         *string             `json:"stage_name,omitempty"`
+	StageColor        *string             `json:"stage_color,omitempty"`
+	StagePosition     *int                `json:"stage_position,omitempty"`
 }
 
 // LeadStatus constants
@@ -516,7 +736,7 @@ type Campaign struct {
 	MessageTemplate string                 `json:"message_template"`
 	MediaURL        *string                `json:"media_url,omitempty"`
 	MediaType       *string                `json:"media_type,omitempty"` // text, image, video, document, audio
-	Status          string                 `json:"status"`              // draft, scheduled, running, paused, completed, failed
+	Status          string                 `json:"status"`               // draft, scheduled, running, paused, completed, failed
 	ScheduledAt     *time.Time             `json:"scheduled_at,omitempty"`
 	StartedAt       *time.Time             `json:"started_at,omitempty"`
 	CompletedAt     *time.Time             `json:"completed_at,omitempty"`
@@ -530,10 +750,10 @@ type Campaign struct {
 	UpdatedAt       time.Time              `json:"updated_at"`
 
 	// Populated on demand
-	DeviceName     *string               `json:"device_name,omitempty"`
-	CreatedByName  *string               `json:"created_by_name,omitempty"`
-	StartedByName  *string               `json:"started_by_name,omitempty"`
-	Attachments    []*CampaignAttachment `json:"attachments,omitempty"`
+	DeviceName    *string               `json:"device_name,omitempty"`
+	CreatedByName *string               `json:"created_by_name,omitempty"`
+	StartedByName *string               `json:"started_by_name,omitempty"`
+	Attachments   []*CampaignAttachment `json:"attachments,omitempty"`
 }
 
 // CampaignAttachment represents a media file attached to a campaign
@@ -577,14 +797,14 @@ const (
 
 // EventPipeline represents a pipeline for tracking event participant progression
 type EventPipeline struct {
-	ID          uuid.UUID              `json:"id"`
-	AccountID   uuid.UUID              `json:"account_id"`
-	Name        string                 `json:"name"`
-	Description *string                `json:"description,omitempty"`
-	IsDefault   bool                   `json:"is_default"`
-	Stages      []*EventPipelineStage  `json:"stages,omitempty"`
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
+	ID          uuid.UUID             `json:"id"`
+	AccountID   uuid.UUID             `json:"account_id"`
+	Name        string                `json:"name"`
+	Description *string               `json:"description,omitempty"`
+	IsDefault   bool                  `json:"is_default"`
+	Stages      []*EventPipelineStage `json:"stages,omitempty"`
+	CreatedAt   time.Time             `json:"created_at"`
+	UpdatedAt   time.Time             `json:"updated_at"`
 }
 
 // EventPipelineStage represents a stage in an event pipeline
@@ -600,23 +820,23 @@ type EventPipelineStage struct {
 
 // Event represents an activity/event to track contact interactions
 type Event struct {
-	ID              uuid.UUID  `json:"id"`
-	AccountID       uuid.UUID  `json:"account_id"`
-	FolderID        *uuid.UUID `json:"folder_id,omitempty"`
-	PipelineID      *uuid.UUID `json:"pipeline_id,omitempty"`
-	Name            string     `json:"name"`
-	Description     *string    `json:"description,omitempty"`
-	EventDate       *time.Time `json:"event_date,omitempty"`
-	EventEnd        *time.Time `json:"event_end,omitempty"`
-	Location        *string    `json:"location,omitempty"`
-	Status          string     `json:"status"` // draft, active, completed, cancelled
-	Color           string     `json:"color"`
-	TagFormulaMode  string     `json:"tag_formula_mode"`  // OR, AND (used in simple mode)
-	TagFormula      string     `json:"tag_formula"`       // text-based formula (advanced mode)
-	TagFormulaType  string     `json:"tag_formula_type"`  // simple, advanced
-	CreatedBy       *uuid.UUID `json:"created_by,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID             uuid.UUID  `json:"id"`
+	AccountID      uuid.UUID  `json:"account_id"`
+	FolderID       *uuid.UUID `json:"folder_id,omitempty"`
+	PipelineID     *uuid.UUID `json:"pipeline_id,omitempty"`
+	Name           string     `json:"name"`
+	Description    *string    `json:"description,omitempty"`
+	EventDate      *time.Time `json:"event_date,omitempty"`
+	EventEnd       *time.Time `json:"event_end,omitempty"`
+	Location       *string    `json:"location,omitempty"`
+	Status         string     `json:"status"` // draft, active, completed, cancelled
+	Color          string     `json:"color"`
+	TagFormulaMode string     `json:"tag_formula_mode"` // OR, AND (used in simple mode)
+	TagFormula     string     `json:"tag_formula"`      // text-based formula (advanced mode)
+	TagFormulaType string     `json:"tag_formula_type"` // simple, advanced
+	CreatedBy      *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 
 	// Populated on demand
 	ParticipantCounts map[string]int `json:"participant_counts,omitempty"`
@@ -715,7 +935,7 @@ type Interaction struct {
 	LeadID         *uuid.UUID `json:"lead_id,omitempty"`
 	EventID        *uuid.UUID `json:"event_id,omitempty"`
 	ParticipantID  *uuid.UUID `json:"participant_id,omitempty"`
-	Type           string     `json:"type"`      // call, whatsapp, note, email, meeting
+	Type           string     `json:"type"`                // call, whatsapp, note, email, meeting
 	Direction      *string    `json:"direction,omitempty"` // inbound, outbound
 	Outcome        *string    `json:"outcome,omitempty"`   // answered, no_answer, voicemail, busy, confirmed, declined, rescheduled, callback
 	Notes          *string    `json:"notes,omitempty"`
@@ -766,32 +986,32 @@ type TaskList struct {
 
 // Task represents a scheduled action (call, follow-up, meeting, reminder)
 type Task struct {
-	ID                uuid.UUID  `json:"id"`
-	AccountID         uuid.UUID  `json:"account_id"`
-	CreatedBy         uuid.UUID  `json:"created_by"`
-	AssignedTo        uuid.UUID  `json:"assigned_to"`
-	Title             string     `json:"title"`
-	Description       string     `json:"description,omitempty"`
-	Type              string     `json:"type"`     // call, whatsapp, meeting, reminder
-	DueAt             *time.Time `json:"due_at,omitempty"`
-	DueEndAt          *time.Time `json:"due_end_at,omitempty"`
-	Priority          string     `json:"priority"` // low, medium, high, urgent
-	Status            string     `json:"status"`   // pending, completed, overdue, cancelled
-	CompletedAt       *time.Time `json:"completed_at,omitempty"`
-	CompletedBy       *uuid.UUID `json:"completed_by,omitempty"`
-	LeadID            *uuid.UUID `json:"lead_id,omitempty"`
-	EventID           *uuid.UUID `json:"event_id,omitempty"`
-	ProgramID         *uuid.UUID `json:"program_id,omitempty"`
-	ContactID         *uuid.UUID `json:"contact_id,omitempty"`
-	ListID            *uuid.UUID `json:"list_id,omitempty"`
-	Starred           bool       `json:"starred"`
-	SortOrder         int        `json:"sort_order"`
-	RecurrenceRule    string     `json:"recurrence_rule,omitempty"`
+	ID                 uuid.UUID  `json:"id"`
+	AccountID          uuid.UUID  `json:"account_id"`
+	CreatedBy          uuid.UUID  `json:"created_by"`
+	AssignedTo         uuid.UUID  `json:"assigned_to"`
+	Title              string     `json:"title"`
+	Description        string     `json:"description,omitempty"`
+	Type               string     `json:"type"` // call, whatsapp, meeting, reminder
+	DueAt              *time.Time `json:"due_at,omitempty"`
+	DueEndAt           *time.Time `json:"due_end_at,omitempty"`
+	Priority           string     `json:"priority"` // low, medium, high, urgent
+	Status             string     `json:"status"`   // pending, completed, overdue, cancelled
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	CompletedBy        *uuid.UUID `json:"completed_by,omitempty"`
+	LeadID             *uuid.UUID `json:"lead_id,omitempty"`
+	EventID            *uuid.UUID `json:"event_id,omitempty"`
+	ProgramID          *uuid.UUID `json:"program_id,omitempty"`
+	ContactID          *uuid.UUID `json:"contact_id,omitempty"`
+	ListID             *uuid.UUID `json:"list_id,omitempty"`
+	Starred            bool       `json:"starred"`
+	SortOrder          int        `json:"sort_order"`
+	RecurrenceRule     string     `json:"recurrence_rule,omitempty"`
 	RecurrenceParentID *uuid.UUID `json:"recurrence_parent_id,omitempty"`
-	ReminderMinutes   *int       `json:"reminder_minutes,omitempty"`
-	Notes             string     `json:"notes,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	ReminderMinutes    *int       `json:"reminder_minutes,omitempty"`
+	Notes              string     `json:"notes,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 
 	// Populated on demand (JOINs)
 	AssignedToName string `json:"assigned_to_name,omitempty"`
@@ -878,17 +1098,17 @@ type InteractionFilter struct {
 
 // QuickReply represents a canned/predefined response
 type QuickReply struct {
-	ID            uuid.UUID             `json:"id"`
-	AccountID     uuid.UUID             `json:"account_id"`
-	Shortcut      string                `json:"shortcut"`
-	Title         string                `json:"title"`
-	Body          string                `json:"body"`
-	MediaURL      string                `json:"media_url"`
-	MediaType     string                `json:"media_type"`
-	MediaFilename string                `json:"media_filename"`
+	ID            uuid.UUID              `json:"id"`
+	AccountID     uuid.UUID              `json:"account_id"`
+	Shortcut      string                 `json:"shortcut"`
+	Title         string                 `json:"title"`
+	Body          string                 `json:"body"`
+	MediaURL      string                 `json:"media_url"`
+	MediaType     string                 `json:"media_type"`
+	MediaFilename string                 `json:"media_filename"`
 	Attachments   []QuickReplyAttachment `json:"attachments"`
-	CreatedAt     time.Time             `json:"created_at"`
-	UpdatedAt     time.Time             `json:"updated_at"`
+	CreatedAt     time.Time              `json:"created_at"`
+	UpdatedAt     time.Time              `json:"updated_at"`
 }
 
 // QuickReplyAttachment represents a media attachment for a quick reply (up to 5)
@@ -905,15 +1125,15 @@ type QuickReplyAttachment struct {
 // Default campaign settings (anti-ban)
 func DefaultCampaignSettings() map[string]interface{} {
 	return map[string]interface{}{
-		"min_delay_seconds":    8,
-		"max_delay_seconds":    15,
-		"batch_size":           25,
-		"batch_pause_minutes":  2,
-		"daily_limit":          1000,
-		"active_hours_start":   "07:00",
-		"active_hours_end":     "22:00",
-		"randomize_message":    true,
-		"simulate_typing":      true,
+		"min_delay_seconds":   8,
+		"max_delay_seconds":   15,
+		"batch_size":          25,
+		"batch_pause_minutes": 2,
+		"daily_limit":         1000,
+		"active_hours_start":  "07:00",
+		"active_hours_end":    "22:00",
+		"randomize_message":   true,
+		"simulate_typing":     true,
 	}
 }
 
@@ -940,6 +1160,7 @@ type Program struct {
 	ID          uuid.UUID  `json:"id"`
 	AccountID   uuid.UUID  `json:"account_id"`
 	FolderID    *uuid.UUID `json:"folder_id,omitempty"`
+	Type        string     `json:"type"` // course (default) | event
 	Name        string     `json:"name"`
 	Description *string    `json:"description,omitempty"`
 	Status      string     `json:"status"` // active, completed, archived
@@ -948,43 +1169,58 @@ type Program struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 
-	// Schedule fields for recurring sessions
+	// Schedule fields for recurring sessions (course type)
 	ScheduleStartDate *time.Time `json:"schedule_start_date,omitempty"`
 	ScheduleEndDate   *time.Time `json:"schedule_end_date,omitempty"`
-	ScheduleDays      []int      `json:"schedule_days,omitempty"`      // 0=Sun, 1=Mon, ..., 6=Sat
+	ScheduleDays      []int      `json:"schedule_days,omitempty"`       // 0=Sun, 1=Mon, ..., 6=Sat
 	ScheduleStartTime *string    `json:"schedule_start_time,omitempty"` // "HH:MM" format
 	ScheduleEndTime   *string    `json:"schedule_end_time,omitempty"`   // "HH:MM" format
 
+	// Event-type fields (only used when Type == "event")
+	PipelineID     *uuid.UUID `json:"pipeline_id,omitempty"`
+	TagFormula     string     `json:"tag_formula,omitempty"`
+	TagFormulaMode string     `json:"tag_formula_mode,omitempty"` // OR, AND
+	TagFormulaType string     `json:"tag_formula_type,omitempty"` // simple, advanced
+	EventDate      *time.Time `json:"event_date,omitempty"`
+	EventEnd       *time.Time `json:"event_end,omitempty"`
+	Location       *string    `json:"location,omitempty"`
+
 	// Populated on demand
-	ParticipantCount int `json:"participant_count"`
-	SessionCount     int `json:"session_count"`
+	ParticipantCount int            `json:"participant_count"`
+	SessionCount     int            `json:"session_count"`
+	PipelineName     *string        `json:"pipeline_name,omitempty"`
+	StageCounts      map[string]int `json:"stage_counts,omitempty"`
 }
 
 // ProgramParticipant represents a contact enrolled in a program
 type ProgramParticipant struct {
-	ID         uuid.UUID  `json:"id"`
-	ProgramID  uuid.UUID  `json:"program_id"`
-	ContactID  uuid.UUID  `json:"contact_id"`
-	LeadID     *uuid.UUID `json:"lead_id,omitempty"`
-	Status     string     `json:"status"` // active, dropped, completed
-	EnrolledAt time.Time  `json:"enrolled_at"`
+	ID          uuid.UUID  `json:"id"`
+	ProgramID   uuid.UUID  `json:"program_id"`
+	ContactID   uuid.UUID  `json:"contact_id"`
+	LeadID      *uuid.UUID `json:"lead_id,omitempty"`
+	StageID     *uuid.UUID `json:"stage_id,omitempty"`
+	Status      string     `json:"status"` // active, dropped, completed
+	EnrolledAt  time.Time  `json:"enrolled_at"`
+	AutoTagSync bool       `json:"auto_tag_sync"`
 
 	// Populated on demand
 	ContactName  string  `json:"contact_name,omitempty"`
 	ContactPhone *string `json:"contact_phone,omitempty"`
+	StageName    *string `json:"stage_name,omitempty"`
+	StageColor   *string `json:"stage_color,omitempty"`
 }
 
 // ProgramSession represents a single class or session within a program
 type ProgramSession struct {
-	ID        uuid.UUID  `json:"id"`
-	ProgramID uuid.UUID  `json:"program_id"`
-	Date      time.Time  `json:"date"`
-	Topic     *string    `json:"topic,omitempty"`
-	StartTime *string    `json:"start_time,omitempty"` // "HH:MM" format
-	EndTime   *string    `json:"end_time,omitempty"`   // "HH:MM" format
-	Location  *string    `json:"location,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	ID        uuid.UUID `json:"id"`
+	ProgramID uuid.UUID `json:"program_id"`
+	Date      time.Time `json:"date"`
+	Topic     *string   `json:"topic,omitempty"`
+	StartTime *string   `json:"start_time,omitempty"` // "HH:MM" format
+	EndTime   *string   `json:"end_time,omitempty"`   // "HH:MM" format
+	Location  *string   `json:"location,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// Populated on demand
 	AttendanceStats map[string]int `json:"attendance_stats,omitempty"`
@@ -1154,9 +1390,9 @@ type AutomationGraph struct {
 // AutomationNode represents a single node in the automation graph (ReactFlow format)
 type AutomationNode struct {
 	ID       string                 `json:"id"`
-	Type     string                 `json:"type"`      // trigger, action, condition, delay
-	Position map[string]float64     `json:"position"`  // {x, y}
-	Data     map[string]interface{} `json:"data"`      // node config: {nodeType, label, config}
+	Type     string                 `json:"type"`     // trigger, action, condition, delay
+	Position map[string]float64     `json:"position"` // {x, y}
+	Data     map[string]interface{} `json:"data"`     // node config: {nodeType, label, config}
 }
 
 // AutomationEdge represents a connection between nodes (ReactFlow format)
@@ -1242,22 +1478,22 @@ type SurveyBranding struct {
 
 // Survey represents a form/survey that can be shared via a public link
 type Survey struct {
-	ID                  uuid.UUID       `json:"id"`
-	AccountID           uuid.UUID       `json:"account_id"`
-	Name                string          `json:"name"`
-	Description         string          `json:"description"`
-	Slug                string          `json:"slug"`
-	Status              string          `json:"status"` // draft, active, closed
-	WelcomeTitle        string          `json:"welcome_title"`
-	WelcomeDescription  string          `json:"welcome_description"`
-	ThankYouTitle       string          `json:"thank_you_title"`
-	ThankYouMessage     string          `json:"thank_you_message"`
-	ThankYouRedirectURL string          `json:"thank_you_redirect_url"`
-	Branding            SurveyBranding  `json:"branding"`
-	IsTemplate          bool            `json:"is_template"`
-	CreatedBy           *uuid.UUID      `json:"created_by,omitempty"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	ID                  uuid.UUID      `json:"id"`
+	AccountID           uuid.UUID      `json:"account_id"`
+	Name                string         `json:"name"`
+	Description         string         `json:"description"`
+	Slug                string         `json:"slug"`
+	Status              string         `json:"status"` // draft, active, closed
+	WelcomeTitle        string         `json:"welcome_title"`
+	WelcomeDescription  string         `json:"welcome_description"`
+	ThankYouTitle       string         `json:"thank_you_title"`
+	ThankYouMessage     string         `json:"thank_you_message"`
+	ThankYouRedirectURL string         `json:"thank_you_redirect_url"`
+	Branding            SurveyBranding `json:"branding"`
+	IsTemplate          bool           `json:"is_template"`
+	CreatedBy           *uuid.UUID     `json:"created_by,omitempty"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
 	// Populated on demand
 	QuestionCount int `json:"question_count,omitempty"`
 	ResponseCount int `json:"response_count,omitempty"`
@@ -1265,36 +1501,36 @@ type Survey struct {
 
 // SurveyQuestionConfig holds type-specific configuration for a question
 type SurveyQuestionConfig struct {
-	Options     []string `json:"options,omitempty"`      // single_choice, multiple_choice
-	MaxRating   int      `json:"max_rating,omitempty"`   // rating (default 5)
-	LikertScale int      `json:"likert_scale,omitempty"` // likert scale points (default 5)
-	LikertMin   string   `json:"likert_min,omitempty"`   // likert min label
-	LikertMax   string   `json:"likert_max,omitempty"`   // likert max label
+	Options      []string `json:"options,omitempty"`       // single_choice, multiple_choice
+	MaxRating    int      `json:"max_rating,omitempty"`    // rating (default 5)
+	LikertScale  int      `json:"likert_scale,omitempty"`  // likert scale points (default 5)
+	LikertMin    string   `json:"likert_min,omitempty"`    // likert min label
+	LikertMax    string   `json:"likert_max,omitempty"`    // likert max label
 	AllowedTypes []string `json:"allowed_types,omitempty"` // file_upload mime types
-	MaxSizeMB   int      `json:"max_size_mb,omitempty"`  // file_upload max size
-	Placeholder string   `json:"placeholder,omitempty"`  // text input placeholder
+	MaxSizeMB    int      `json:"max_size_mb,omitempty"`   // file_upload max size
+	Placeholder  string   `json:"placeholder,omitempty"`   // text input placeholder
 }
 
 // SurveyLogicRule defines a conditional jump based on an answer value
 type SurveyLogicRule struct {
-	Value      string    `json:"value"`                  // answer value to match
-	Operator   string    `json:"operator,omitempty"`     // eq, neq, contains, gt, lt (default: eq)
-	JumpTo     uuid.UUID `json:"jump_to"`                // question ID to jump to
+	Value    string    `json:"value"`              // answer value to match
+	Operator string    `json:"operator,omitempty"` // eq, neq, contains, gt, lt (default: eq)
+	JumpTo   uuid.UUID `json:"jump_to"`            // question ID to jump to
 }
 
 // SurveyQuestion represents a single question in a survey
 type SurveyQuestion struct {
-	ID          uuid.UUID             `json:"id"`
-	SurveyID    uuid.UUID             `json:"survey_id"`
-	OrderIndex  int                   `json:"order_index"`
-	Type        string                `json:"type"` // short_text, long_text, single_choice, multiple_choice, rating, likert, date, email, phone, file_upload
-	Title       string                `json:"title"`
-	Description string                `json:"description"`
-	Required    bool                  `json:"required"`
-	Config      SurveyQuestionConfig  `json:"config"`
-	LogicRules  []SurveyLogicRule     `json:"logic_rules"`
-	CreatedAt   time.Time             `json:"created_at"`
-	UpdatedAt   time.Time             `json:"updated_at"`
+	ID          uuid.UUID            `json:"id"`
+	SurveyID    uuid.UUID            `json:"survey_id"`
+	OrderIndex  int                  `json:"order_index"`
+	Type        string               `json:"type"` // short_text, long_text, single_choice, multiple_choice, rating, likert, date, email, phone, file_upload
+	Title       string               `json:"title"`
+	Description string               `json:"description"`
+	Required    bool                 `json:"required"`
+	Config      SurveyQuestionConfig `json:"config"`
+	LogicRules  []SurveyLogicRule    `json:"logic_rules"`
+	CreatedAt   time.Time            `json:"created_at"`
+	UpdatedAt   time.Time            `json:"updated_at"`
 }
 
 // SurveyResponse represents a complete submission by one respondent
@@ -1326,37 +1562,37 @@ type SurveyAnswer struct {
 
 // SurveyAnalytics holds aggregated data for a survey's results
 type SurveyAnalytics struct {
-	TotalResponses    int                          `json:"total_responses"`
-	CompletionRate    float64                      `json:"completion_rate"`
-	AvgCompletionSec  float64                      `json:"avg_completion_seconds"`
-	QuestionStats     []SurveyQuestionStats        `json:"question_stats"`
+	TotalResponses   int                   `json:"total_responses"`
+	CompletionRate   float64               `json:"completion_rate"`
+	AvgCompletionSec float64               `json:"avg_completion_seconds"`
+	QuestionStats    []SurveyQuestionStats `json:"question_stats"`
 }
 
 // SurveyQuestionStats holds per-question aggregated stats
 type SurveyQuestionStats struct {
-	QuestionID   uuid.UUID          `json:"question_id"`
-	QuestionType string             `json:"question_type"`
-	Title        string             `json:"title"`
-	TotalAnswers int                `json:"total_answers"`
+	QuestionID   uuid.UUID `json:"question_id"`
+	QuestionType string    `json:"question_type"`
+	Title        string    `json:"title"`
+	TotalAnswers int       `json:"total_answers"`
 	// For choice-based questions
-	OptionCounts map[string]int     `json:"option_counts,omitempty"`
+	OptionCounts map[string]int `json:"option_counts,omitempty"`
 	// For numeric questions (rating, likert)
-	Average      *float64           `json:"average,omitempty"`
-	Distribution map[string]int     `json:"distribution,omitempty"`
+	Average      *float64       `json:"average,omitempty"`
+	Distribution map[string]int `json:"distribution,omitempty"`
 }
 
 // ─── Dynamics (Interactive Activities) ────────────────────────────────────────
 
 // DynamicConfig holds visual configuration for a dynamic activity
 type DynamicConfig struct {
-	Title            string  `json:"title"`
-	ScratchColor     string  `json:"scratch_color"`
-	ScratchThreshold int     `json:"scratch_threshold"`
-	ScratchSound     bool    `json:"scratch_sound"`
-	ShowConfetti     bool    `json:"show_confetti"`
-	VictorySound     bool    `json:"victory_sound"`
-	OverlayImageURL  string  `json:"overlay_image_url"`
-	BgColor          string  `json:"bg_color"`
+	Title            string `json:"title"`
+	ScratchColor     string `json:"scratch_color"`
+	ScratchThreshold int    `json:"scratch_threshold"`
+	ScratchSound     bool   `json:"scratch_sound"`
+	ShowConfetti     bool   `json:"show_confetti"`
+	VictorySound     bool   `json:"victory_sound"`
+	OverlayImageURL  string `json:"overlay_image_url"`
+	BgColor          string `json:"bg_color"`
 }
 
 // Dynamic represents an interactive activity (e.g. scratch card)
@@ -1402,28 +1638,48 @@ type DynamicOption struct {
 
 // DynamicLink represents a public link for a dynamic with its own WhatsApp config
 type DynamicLink struct {
-	ID                    uuid.UUID  `json:"id"`
-	DynamicID             uuid.UUID  `json:"dynamic_id"`
-	Slug                  string     `json:"slug"`
-	WhatsAppEnabled       bool       `json:"whatsapp_enabled"`
-	WhatsAppMessage       string     `json:"whatsapp_message"`
-	ExtraMessageText      string     `json:"extra_message_text"`
-	ExtraMessageMediaURL  string     `json:"extra_message_media_url"`
-	ExtraMessageMediaType string     `json:"extra_message_media_type"`
-	StartsAt              *time.Time `json:"starts_at"`
-	EndsAt                *time.Time `json:"ends_at"`
-	IsActive              bool       `json:"is_active"`
-	CreatedAt             time.Time  `json:"created_at"`
+	ID                    uuid.UUID                `json:"id"`
+	DynamicID             uuid.UUID                `json:"dynamic_id"`
+	Slug                  string                   `json:"slug"`
+	WhatsAppEnabled       bool                     `json:"whatsapp_enabled"`
+	WhatsAppMessage       string                   `json:"whatsapp_message"`
+	ExtraMessageText      string                   `json:"extra_message_text"`
+	ExtraMessageMediaURL  string                   `json:"extra_message_media_url"`
+	ExtraMessageMediaType string                   `json:"extra_message_media_type"`
+	StartsAt              *time.Time               `json:"starts_at"`
+	EndsAt                *time.Time               `json:"ends_at"`
+	IsActive              bool                     `json:"is_active"`
+	CreatedAt             time.Time                `json:"created_at"`
+	ExtraMedia            []*DynamicLinkExtraMedia `json:"extra_media,omitempty"`
+}
+
+// DynamicLinkExtraMedia represents an additional image/video that is sent
+// to the user after the main scratched-image message. Each item supports
+// an optional caption with WhatsApp formatting. Up to 10 per link.
+type DynamicLinkExtraMedia struct {
+	ID        uuid.UUID `json:"id"`
+	LinkID    uuid.UUID `json:"link_id"`
+	URL       string    `json:"url"`
+	MediaType string    `json:"media_type"`
+	Caption   string    `json:"caption"`
+	SortOrder int       `json:"sort_order"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // DynamicLinkRegistration represents a participant registration on a public link
 type DynamicLinkRegistration struct {
-	ID        uuid.UUID `json:"id"`
-	LinkID    uuid.UUID `json:"link_id"`
-	FullName  string    `json:"full_name"`
-	Phone     string    `json:"phone"`
-	Age       int       `json:"age"`
-	CreatedAt time.Time `json:"created_at"`
+	ID                     uuid.UUID  `json:"id"`
+	LinkID                 uuid.UUID  `json:"link_id"`
+	FullName               string     `json:"full_name"`
+	Phone                  string     `json:"phone"`
+	Age                    *int       `json:"age,omitempty"`
+	ContactID              *uuid.UUID `json:"contact_id,omitempty"`
+	LeadID                 *uuid.UUID `json:"lead_id,omitempty"`
+	WhatsAppStatus         string     `json:"whatsapp_status"`
+	WhatsAppError          string     `json:"whatsapp_error,omitempty"`
+	SessionToken           string     `json:"session_token,omitempty"`
+	SharedByRegistrationID *uuid.UUID `json:"shared_by_registration_id,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
 }
 
 // DynamicWhatsAppQueue represents a queued WhatsApp message for a dynamic
@@ -1462,3 +1718,36 @@ type DocumentTemplate struct {
 	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
+// CustomFieldDefinition represents the schema/configuration of a custom field at account level
+type CustomFieldDefinition struct {
+	ID           uuid.UUID       `json:"id"`
+	AccountID    uuid.UUID       `json:"account_id"`
+	Name         string          `json:"name"`
+	Slug         string          `json:"slug"`
+	FieldType    string          `json:"field_type"`
+	Config       json.RawMessage `json:"config"`
+	IsRequired   bool            `json:"is_required"`
+	DefaultValue *string         `json:"default_value"`
+	SortOrder    int             `json:"sort_order"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
+// CustomFieldValue represents a stored value of a custom field for a specific contact
+type CustomFieldValue struct {
+	ID          uuid.UUID       `json:"id"`
+	FieldID     uuid.UUID       `json:"field_id"`
+	ContactID   uuid.UUID       `json:"contact_id"`
+	ValueText   *string         `json:"value_text,omitempty"`
+	ValueNumber *float64        `json:"value_number,omitempty"`
+	ValueDate   *time.Time      `json:"value_date,omitempty"`
+	ValueBool   *bool           `json:"value_bool,omitempty"`
+	ValueJSON   json.RawMessage `json:"value_json,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+
+	// Populated on demand (from JOIN with definition)
+	FieldName string `json:"field_name,omitempty"`
+	FieldSlug string `json:"field_slug,omitempty"`
+	FieldType string `json:"field_type,omitempty"`
+}

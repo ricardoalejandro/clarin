@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
-  Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3
+  Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program, ProgramParticipant, ProgramSession, ProgramAttendance } from '@/types/program';
@@ -44,6 +44,9 @@ const contactToLead = (c: Contact) => ({
   age: c.age ?? null,
   dni: c.dni ?? null,
   birth_date: c.birth_date ?? null,
+  address: c.address ?? null,
+  distrito: c.distrito ?? null,
+  ocupacion: c.ocupacion ?? null,
   status: 'new',
   pipeline_id: null,
   stage_id: null,
@@ -72,7 +75,10 @@ export default function ProgramDetailPage() {
   const [program, setProgram] = useState<Program | null>(null);
   const [participants, setParticipants] = useState<ProgramParticipant[]>([]);
   const [sessions, setSessions] = useState<ProgramSession[]>([]);
-  const [activeTab, setActiveTab] = useState<'participants' | 'sessions' | 'stats'>('participants');
+  const [stages, setStages] = useState<Array<{ id: string; name: string; color: string; position: number }>>([]);
+  const [draggedParticipantID, setDraggedParticipantID] = useState<string | null>(null);
+  const [dragOverStageID, setDragOverStageID] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'participants' | 'sessions' | 'stats' | 'kanban'>('participants');
   const [loading, setLoading] = useState(true);
   const [devices, setDevices] = useState<Device[]>([]);
 
@@ -114,6 +120,50 @@ export default function ProgramDetailPage() {
   const [loadingLead, setLoadingLead] = useState(false);
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
   const [contactPanelMode, setContactPanelMode] = useState(false);
+  const [selectedParticipantID, setSelectedParticipantID] = useState<string | null>(null);
+
+  // Column visibility (persisted in localStorage)
+  const PARTICIPANT_COLUMNS: { id: string; label: string; always?: boolean }[] = [
+    { id: 'name', label: 'Nombre', always: true },
+    { id: 'phone', label: 'Teléfono' },
+    { id: 'status', label: 'Estado' },
+    { id: 'enrolled_at', label: 'Inscripción' },
+    { id: 'actions', label: 'Acciones' },
+  ];
+  const DEFAULT_VISIBLE_COLUMNS = ['name', 'phone', 'status', 'enrolled_at', 'actions'];
+  const COLUMN_STORAGE_KEY = 'programParticipantColumns:v1';
+  const [visibleColumns, setVisibleColumns] = useState<string[]>(DEFAULT_VISIBLE_COLUMNS);
+  const [showColumnPicker, setShowColumnPicker] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(COLUMN_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // Ensure 'name' always present, filter unknown ids
+          const valid = parsed.filter((c: any) => typeof c === 'string' && PARTICIPANT_COLUMNS.some(pc => pc.id === c));
+          if (!valid.includes('name')) valid.unshift('name');
+          setVisibleColumns(valid);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const toggleColumn = (id: string) => {
+    const col = PARTICIPANT_COLUMNS.find(c => c.id === id);
+    if (col?.always) return;
+    setVisibleColumns(prev => {
+      const next = prev.includes(id) ? prev.filter(c => c !== id) : [...prev, id];
+      // Persist in catalog order
+      const ordered = PARTICIPANT_COLUMNS.filter(c => next.includes(c.id)).map(c => c.id);
+      try { localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(ordered)); } catch { /* ignore */ }
+      return ordered;
+    });
+  };
 
   // WhatsApp inline chat
   const [showInlineChat, setShowInlineChat] = useState(false);
@@ -171,7 +221,7 @@ export default function ProgramDetailPage() {
       if (isAddParticipantOpen) { setIsAddParticipantOpen(false); return; }
       if (isEditModalOpen) { setIsEditModalOpen(false); return; }
       if (showCampaignModal) { setShowCampaignModal(false); return; }
-      if (selectedLead) { setSelectedLead(null); return; }
+      if (selectedLead) { setSelectedLead(null); setSelectedParticipantID(null); return; }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
@@ -189,6 +239,25 @@ export default function ProgramDetailPage() {
       if (progRes.success) setProgram(progRes.data || null);
       if (partsRes.success) setParticipants(partsRes.data || []);
       if (sessRes.success) setSessions(sessRes.data || []);
+      // Load stages if event type
+      const prog = progRes.success ? (progRes.data as Program | null) : null;
+      if (prog && prog.type === 'event' && prog.pipeline_id) {
+        try {
+          const pipeRes = await fetch(`/api/events/pipelines/${prog.pipeline_id}`, {
+            headers: { Authorization: `Bearer ${token()}` },
+          });
+          const pipeData = await pipeRes.json();
+          if (pipeData.success && pipeData.pipeline?.stages) {
+            setStages(pipeData.pipeline.stages.map((s: any) => ({
+              id: s.id,
+              name: s.name,
+              color: s.color,
+              position: s.position,
+            })));
+          }
+        } catch (e) { console.error('stages', e); }
+        setActiveTab(prev => (prev === 'sessions' || prev === 'stats') ? 'kanban' : prev);
+      }
     } catch (error) {
       console.error('Error fetching program data:', error);
     } finally {
@@ -327,41 +396,25 @@ export default function ProgramDetailPage() {
     }
   };
 
-  // Participant detail
+  // Participant detail — programs are contact-only by spec (001-program-contacts-only)
   const handleParticipantClick = async (participant: ProgramParticipant) => {
-    if (participant.lead_id) {
-      setContactPanelMode(false);
-      setLoadingLead(true);
-      try {
-        const res = await fetch(`/api/leads/${participant.lead_id}`, {
-          headers: { Authorization: `Bearer ${token()}` }
-        });
-        const data = await res.json();
-        if (data.success && data.lead) {
-          setSelectedLead(data.lead);
-        }
-      } catch (error) {
-        console.error('Error fetching lead:', error);
-      } finally {
-        setLoadingLead(false);
+    setSelectedParticipantID(participant.id);
+    if (!participant.contact_id) return;
+    setContactPanelMode(true);
+    setLoadingLead(true);
+    try {
+      const res = await fetch(`/api/contacts/${participant.contact_id}`, {
+        headers: { Authorization: `Bearer ${token()}` }
+      });
+      const data = await res.json();
+      if (data.success && data.contact) {
+        setSelectedContact(data.contact);
+        setSelectedLead(contactToLead(data.contact));
       }
-    } else if (participant.contact_id) {
-      setContactPanelMode(true);
-      setLoadingLead(true);
-      try {
-        const res = await fetch(`/api/contacts/${participant.contact_id}`, {
-          headers: { Authorization: `Bearer ${token()}` }
-        });
-        const data = await res.json();
-        if (data.success && data.contact) {
-          setSelectedContact(data.contact);
-          setSelectedLead(contactToLead(data.contact));
-        }
-      } catch (error) {
-        console.error('Error fetching contact:', error);
-      } finally {
-        setLoadingLead(false);
-      }
+    } catch (error) {
+      console.error('Error fetching contact:', error);
+    } finally {
+      setLoadingLead(false);
     }
   };
 
@@ -555,6 +608,46 @@ export default function ProgramDetailPage() {
       fetchProgramData();
     } catch (error) {
       console.error('Error saving attendance:', error);
+    }
+  };
+
+  // Kanban drag/drop handlers
+  const handleStageDragStart = (e: React.DragEvent, participantID: string) => {
+    setDraggedParticipantID(participantID);
+    try { e.dataTransfer.effectAllowed = 'move'; } catch {}
+  };
+  const handleStageDragOver = (e: React.DragEvent, stageID: string) => {
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = 'move'; } catch {}
+    if (dragOverStageID !== stageID) setDragOverStageID(stageID);
+  };
+  const handleStageDragLeave = () => setDragOverStageID(null);
+  const handleStageDrop = async (e: React.DragEvent, stageID: string | null) => {
+    e.preventDefault();
+    const pid = draggedParticipantID;
+    setDraggedParticipantID(null);
+    setDragOverStageID(null);
+    if (!pid) return;
+    const participant = participants.find(p => p.id === pid);
+    if (!participant) return;
+    if ((participant.stage_id || null) === (stageID || null)) return;
+    // Optimistic update
+    setParticipants(prev => prev.map(p =>
+      p.id === pid ? { ...p, stage_id: stageID || undefined, stage_name: stages.find(s => s.id === stageID)?.name, stage_color: stages.find(s => s.id === stageID)?.color } : p
+    ));
+    try {
+      const res = await api(`/api/programs/${programId}/participants/${pid}/stage`, {
+        method: 'PATCH',
+        body: JSON.stringify({ stage_id: stageID }),
+      });
+      if (!res.success) {
+        showToast((res as any).error || 'Error al mover participante', 'error');
+        fetchProgramData();
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('Error al mover participante', 'error');
+      fetchProgramData();
     }
   };
 
@@ -810,28 +903,44 @@ export default function ProgramDetailPage() {
           <Users className="w-4 h-4" />
           Participantes ({participants.length})
         </button>
-        <button
-          onClick={() => setActiveTab('sessions')}
-          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
-            activeTab === 'sessions'
-              ? 'bg-white text-slate-800 shadow-sm'
-              : 'text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <Calendar className="w-4 h-4" />
-          Sesiones ({sessions.length})
-        </button>
-        <button
-          onClick={() => setActiveTab('stats')}
-          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
-            activeTab === 'stats'
-              ? 'bg-white text-slate-800 shadow-sm'
-              : 'text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <BarChart3 className="w-4 h-4" />
-          Estadísticas
-        </button>
+        {program?.type === 'event' ? (
+          <button
+            onClick={() => setActiveTab('kanban')}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
+              activeTab === 'kanban'
+                ? 'bg-white text-slate-800 shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <LayoutGrid className="w-4 h-4" />
+            Kanban ({stages.length})
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={() => setActiveTab('sessions')}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
+                activeTab === 'sessions'
+                  ? 'bg-white text-slate-800 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <Calendar className="w-4 h-4" />
+              Sesiones ({sessions.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('stats')}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
+                activeTab === 'stats'
+                  ? 'bg-white text-slate-800 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              Estadísticas
+            </button>
+          </>
+        )}
       </div>
 
       {/* Content */}
@@ -840,13 +949,52 @@ export default function ProgramDetailPage() {
         <div className="h-full flex flex-col gap-3">
           <div className="flex justify-between items-center shrink-0">
             <h2 className="text-base font-semibold text-slate-800">Lista de Participantes</h2>
-            <button
-              onClick={() => setIsAddParticipantOpen(true)}
-              className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm"
-            >
-              <Plus className="w-4 h-4" />
-              Agregar
-            </button>
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <button
+                  onClick={() => setShowColumnPicker(v => !v)}
+                  className="flex items-center gap-2 px-3 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-all text-sm font-medium"
+                  title="Personalizar columnas"
+                >
+                  <Columns3 className="w-4 h-4" />
+                  <span className="hidden sm:inline">Columnas</span>
+                </button>
+                {showColumnPicker && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowColumnPicker(false)} />
+                    <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[200px]" onMouseDown={e => e.stopPropagation()}>
+                      <p className="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Columnas visibles</p>
+                      {PARTICIPANT_COLUMNS.map(col => {
+                        const isVisible = visibleColumns.includes(col.id);
+                        return (
+                          <label
+                            key={col.id}
+                            className={`flex items-center gap-2.5 px-3 py-2 text-sm transition-colors ${col.always ? 'text-slate-400 cursor-not-allowed' : 'text-slate-700 hover:bg-slate-50 cursor-pointer'}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isVisible}
+                              disabled={col.always}
+                              onChange={() => toggleColumn(col.id)}
+                              className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 focus:ring-offset-0"
+                            />
+                            <span className="flex-1">{col.label}</span>
+                            {col.always && <span className="text-[10px] text-slate-400">fijo</span>}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+              <button
+                onClick={() => setIsAddParticipantOpen(true)}
+                className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm"
+              >
+                <Plus className="w-4 h-4" />
+                Agregar
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 min-h-0 bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -855,66 +1003,203 @@ export default function ProgramDetailPage() {
                 <table className="w-full text-left text-sm">
                   <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0 z-10">
                     <tr>
-                      <th className="px-5 py-3 font-medium">Nombre</th>
-                      <th className="px-5 py-3 font-medium">Teléfono</th>
-                      <th className="px-5 py-3 font-medium">Estado</th>
-                      <th className="px-5 py-3 font-medium">Inscripción</th>
-                      <th className="px-5 py-3 font-medium text-right">Acciones</th>
+                      {PARTICIPANT_COLUMNS.filter(c => visibleColumns.includes(c.id)).map(col => (
+                        <th key={col.id} className={`px-5 py-3 font-medium ${col.id === 'actions' ? 'text-right' : ''}`}>{col.label}</th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {participants.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="px-5 py-12 text-center">
+                        <td colSpan={visibleColumns.length} className="px-5 py-12 text-center">
                           <Users className="w-10 h-10 text-slate-300 mx-auto mb-3" />
                           <p className="text-slate-500 font-medium">Sin participantes</p>
                           <p className="text-slate-400 text-xs mt-1">Agrega participantes para comenzar</p>
                         </td>
                       </tr>
                     ) : (
-                      participants.map((p) => (
-                        <tr key={p.id} className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => handleParticipantClick(p)}>
-                          <td className="px-5 py-3">
-                            <div className="flex items-center gap-2.5">
-                              <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-600 font-medium text-xs">
-                                {(p.contact_name || '?').charAt(0).toUpperCase()}
-                              </div>
-                              <span className="font-medium text-slate-800">{p.contact_name || 'Sin nombre'}</span>
-                              {loadingLead && <span className="text-xs text-slate-400">...</span>}
-                            </div>
-                          </td>
-                          <td className="px-5 py-3 text-slate-600 font-mono text-xs">
-                            {p.contact_phone || <span className="text-slate-400 italic">Sin teléfono</span>}
-                          </td>
-                          <td className="px-5 py-3">
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-                              p.status === 'active' ? 'bg-emerald-50 text-emerald-700' :
-                              p.status === 'completed' ? 'bg-blue-50 text-blue-700' :
-                              'bg-red-50 text-red-700'
-                            }`}>
-                              {p.status === 'active' ? 'Activo' : p.status === 'completed' ? 'Completado' : 'Retirado'}
-                            </span>
-                          </td>
-                          <td className="px-5 py-3 text-slate-500 text-xs">
-                            {format(new Date(p.enrolled_at), 'dd MMM yyyy', { locale: es })}
-                          </td>
-                          <td className="px-5 py-3 text-right">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleRemoveParticipant(p.id); }}
-                              className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all"
-                              title="Eliminar participante"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </td>
+                      participants.map((p) => {
+                        const isSelected = selectedParticipantID === p.id;
+                        return (
+                        <tr
+                          key={p.id}
+                          className={`transition-colors cursor-pointer ${isSelected ? 'bg-emerald-50 hover:bg-emerald-50' : 'hover:bg-slate-50'}`}
+                          onClick={() => handleParticipantClick(p)}
+                        >
+                          {PARTICIPANT_COLUMNS.filter(c => visibleColumns.includes(c.id)).map(col => {
+                            if (col.id === 'name') {
+                              return (
+                                <td key={col.id} className={`px-5 py-3 ${isSelected ? 'border-l-4 border-emerald-500 pl-4' : ''}`}>
+                                  <div className="flex items-center gap-2.5">
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-medium text-xs ${isSelected ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                      {(p.contact_name || '?').charAt(0).toUpperCase()}
+                                    </div>
+                                    <span className={`font-medium ${isSelected ? 'text-emerald-800' : 'text-slate-800'}`}>{p.contact_name || 'Sin nombre'}</span>
+                                    {isSelected && loadingLead && <span className="text-xs text-emerald-500">...</span>}
+                                  </div>
+                                </td>
+                              );
+                            }
+                            if (col.id === 'phone') {
+                              return (
+                                <td key={col.id} className="px-5 py-3 text-slate-600 font-mono text-xs">
+                                  {p.contact_phone || <span className="text-slate-400 italic">Sin teléfono</span>}
+                                </td>
+                              );
+                            }
+                            if (col.id === 'status') {
+                              return (
+                                <td key={col.id} className="px-5 py-3">
+                                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+                                    p.status === 'active' ? 'bg-emerald-50 text-emerald-700' :
+                                    p.status === 'completed' ? 'bg-blue-50 text-blue-700' :
+                                    'bg-red-50 text-red-700'
+                                  }`}>
+                                    {p.status === 'active' ? 'Activo' : p.status === 'completed' ? 'Completado' : 'Retirado'}
+                                  </span>
+                                </td>
+                              );
+                            }
+                            if (col.id === 'enrolled_at') {
+                              return (
+                                <td key={col.id} className="px-5 py-3 text-slate-500 text-xs">
+                                  {format(new Date(p.enrolled_at), 'dd MMM yyyy', { locale: es })}
+                                </td>
+                              );
+                            }
+                            if (col.id === 'actions') {
+                              return (
+                                <td key={col.id} className="px-5 py-3 text-right">
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleRemoveParticipant(p.id); }}
+                                    className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all"
+                                    title="Eliminar participante"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </td>
+                              );
+                            }
+                            return <td key={col.id} className="px-5 py-3" />;
+                          })}
                         </tr>
-                      ))
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
               </div>
             </div>
           </div>
+        </div>
+      ) : activeTab === 'kanban' ? (
+        <div className="h-full flex flex-col gap-3">
+          <div className="flex justify-between items-center shrink-0">
+            <h2 className="text-base font-semibold text-slate-800">Kanban de Participantes</h2>
+            <button
+              onClick={() => setIsAddParticipantOpen(true)}
+              className="flex items-center gap-2 px-3.5 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm"
+            >
+              <Plus className="w-4 h-4" /> Agregar
+            </button>
+          </div>
+          {stages.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center text-slate-500 text-sm">
+              <div className="text-center">
+                <AlertCircle className="w-8 h-8 mx-auto mb-2 text-amber-500" />
+                <p>Este evento no tiene etapas configuradas.</p>
+                <p className="text-xs mt-1">Edita el pipeline en Eventos → Pipelines.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden">
+              <div className="flex gap-3 h-full pb-2" style={{ minWidth: 'max-content' }}>
+                {/* Stage: sin etapa */}
+                {(() => {
+                  const unstaged = participants.filter(p => !p.stage_id);
+                  return (
+                    <div
+                      onDragOver={e => handleStageDragOver(e, '__unassigned__')}
+                      onDragLeave={handleStageDragLeave}
+                      onDrop={e => handleStageDrop(e, null)}
+                      className={`flex flex-col w-72 shrink-0 bg-slate-50 border-2 rounded-xl transition-colors ${
+                        dragOverStageID === '__unassigned__' ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200'
+                      }`}
+                    >
+                      <div className="p-3 border-b border-slate-200 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2.5 h-2.5 rounded-full bg-slate-400" />
+                          <span className="font-semibold text-slate-700 text-sm">Sin etapa</span>
+                        </div>
+                        <span className="text-xs text-slate-500 font-medium bg-white px-2 py-0.5 rounded-full">{unstaged.length}</span>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {unstaged.map(p => (
+                          <div
+                            key={p.id}
+                            draggable
+                            onDragStart={e => handleStageDragStart(e, p.id)}
+                            className={`bg-white border border-slate-200 rounded-lg p-2.5 shadow-sm hover:shadow-md hover:border-emerald-300 transition-all cursor-move ${
+                              draggedParticipantID === p.id ? 'opacity-40' : ''
+                            }`}
+                          >
+                            <div className="font-medium text-slate-800 text-sm truncate">{p.contact_name || 'Sin nombre'}</div>
+                            {p.contact_phone && (
+                              <div className="text-xs text-slate-500 flex items-center gap-1 mt-1">
+                                <Phone className="w-3 h-3" /> {p.contact_phone}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+                {/* Stages */}
+                {stages.sort((a, b) => a.position - b.position).map(stage => {
+                  const stageParts = participants.filter(p => p.stage_id === stage.id);
+                  return (
+                    <div
+                      key={stage.id}
+                      onDragOver={e => handleStageDragOver(e, stage.id)}
+                      onDragLeave={handleStageDragLeave}
+                      onDrop={e => handleStageDrop(e, stage.id)}
+                      className={`flex flex-col w-72 shrink-0 bg-slate-50 border-2 rounded-xl transition-colors ${
+                        dragOverStageID === stage.id ? 'border-emerald-400 bg-emerald-50' : 'border-slate-200'
+                      }`}
+                    >
+                      <div className="p-3 border-b border-slate-200 flex items-center justify-between">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: stage.color || '#64748b' }} />
+                          <span className="font-semibold text-slate-700 text-sm truncate">{stage.name}</span>
+                        </div>
+                        <span className="text-xs text-slate-500 font-medium bg-white px-2 py-0.5 rounded-full shrink-0 ml-2">{stageParts.length}</span>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {stageParts.map(p => (
+                          <div
+                            key={p.id}
+                            draggable
+                            onDragStart={e => handleStageDragStart(e, p.id)}
+                            className={`bg-white border border-slate-200 rounded-lg p-2.5 shadow-sm hover:shadow-md hover:border-emerald-300 transition-all cursor-move ${
+                              draggedParticipantID === p.id ? 'opacity-40' : ''
+                            }`}
+                          >
+                            <div className="font-medium text-slate-800 text-sm truncate">{p.contact_name || 'Sin nombre'}</div>
+                            {p.contact_phone && (
+                              <div className="text-xs text-slate-500 flex items-center gap-1 mt-1">
+                                <Phone className="w-3 h-3" /> {p.contact_phone}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       ) : activeTab === 'sessions' ? (
         <div className="h-full flex flex-col gap-3">
@@ -1850,11 +2135,11 @@ export default function ProgramDetailPage() {
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
-            onClick={() => { setSelectedLead(null); setSelectedContact(null); setContactPanelMode(false); setShowInlineChat(false); }}
+            onClick={() => { setSelectedLead(null); setSelectedContact(null); setContactPanelMode(false); setShowInlineChat(false); setSelectedParticipantID(null); }}
           />
-          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat && !contactPanelMode ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
-            {/* Chat Panel - Left Side (only in lead mode) */}
-            {showInlineChat && !contactPanelMode && inlineChatId && (
+          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
+            {/* Chat Panel - Left Side */}
+            {showInlineChat && inlineChatId && (
               <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
                 <ChatPanel
                   chatId={inlineChatId}
@@ -1865,9 +2150,9 @@ export default function ProgramDetailPage() {
                 />
               </div>
             )}
-            {/* Detail Panel - Right Side */}
-            <div className={`${showInlineChat && !contactPanelMode ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
-              {contactPanelMode && selectedContact ? (
+            {/* Detail Panel - Right Side (programs are contact-only by spec) */}
+            <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
+              {selectedContact && (
                 <LeadDetailPanel
                   contactMode
                   contactId={selectedContact.id}
@@ -1878,21 +2163,14 @@ export default function ProgramDetailPage() {
                   onContactUpdate={(updated: any) => {
                     setSelectedContact(updated);
                     setSelectedLead(contactToLead(updated));
-                    fetchProgramData();
+                    // Update participant list in-place without full page refresh
+                    setParticipants(prev => prev.map(p =>
+                      p.contact_id === updated.id
+                        ? { ...p, contact_name: updated.custom_name || updated.name || p.contact_name, contact_phone: updated.phone || p.contact_phone }
+                        : p
+                    ));
                   }}
-                  onClose={() => { setSelectedLead(null); setSelectedContact(null); setContactPanelMode(false); }}
-                  onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-                  onObservationChange={() => {}}
-                  hideDelete
-                />
-              ) : (
-                <LeadDetailPanel
-                  lead={selectedLead}
-                  onLeadChange={(updated) => {
-                    setSelectedLead(updated);
-                    fetchProgramData();
-                  }}
-                  onClose={() => { setSelectedLead(null); setShowInlineChat(false); }}
+                  onClose={() => { setSelectedLead(null); setSelectedContact(null); setContactPanelMode(false); setSelectedParticipantID(null); }}
                   onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
                   onObservationChange={() => {}}
                   hideDelete

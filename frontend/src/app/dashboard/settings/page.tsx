@@ -2,8 +2,13 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
-import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe } from 'lucide-react'
+import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe, Hash, Calendar, ToggleLeft, Mail, Phone, Link, DollarSign, Type, Tag, List, AlertCircle } from 'lucide-react'
 import { api, subscribeWebSocket } from '@/lib/api'
+import WhatsAppAPISettingsPanel from '@/components/WhatsAppAPISettingsPanel'
+import { CustomFieldDefinition, CustomFieldType, CustomFieldOption, CustomFieldConfig } from '@/types/custom-field'
+import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import {
   getNotificationSettings,
   saveNotificationSettings,
@@ -264,6 +269,704 @@ function APIKeysPanel() {
   )
 }
 
+// ─── Field Type Config ──────────────────────────────────────────────────────
+const FIELD_TYPE_OPTIONS: { value: CustomFieldType; label: string; icon: React.ElementType; description: string }[] = [
+  { value: 'text', label: 'Texto', icon: Type, description: 'Texto libre' },
+  { value: 'number', label: 'Número', icon: Hash, description: 'Valor numérico' },
+  { value: 'date', label: 'Fecha', icon: Calendar, description: 'Selector de fecha' },
+  { value: 'select', label: 'Selección', icon: List, description: 'Una opción de lista' },
+  { value: 'multi_select', label: 'Selección múltiple', icon: List, description: 'Varias opciones' },
+  { value: 'checkbox', label: 'Casilla', icon: ToggleLeft, description: 'Sí / No' },
+  { value: 'email', label: 'Email', icon: Mail, description: 'Correo electrónico' },
+  { value: 'phone', label: 'Teléfono', icon: Phone, description: 'Número de teléfono' },
+  { value: 'url', label: 'URL', icon: Link, description: 'Enlace web' },
+  { value: 'currency', label: 'Moneda', icon: DollarSign, description: 'Valor monetario' },
+]
+
+function getFieldTypeIcon(type: CustomFieldType) {
+  return FIELD_TYPE_OPTIONS.find(o => o.value === type)?.icon || Type
+}
+
+function getFieldTypeLabel(type: CustomFieldType) {
+  return FIELD_TYPE_OPTIONS.find(o => o.value === type)?.label || type
+}
+
+// ─── Sortable Field Item ────────────────────────────────────────────────────
+function SortableFieldItem({ field, onEdit, onDelete }: { field: CustomFieldDefinition; onEdit: (f: CustomFieldDefinition) => void; onDelete: (f: CustomFieldDefinition) => void }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: field.id })
+  const style = { transform: CSS.Transform.toString(transform), transition }
+  const Icon = getFieldTypeIcon(field.field_type)
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`flex items-center gap-3 px-4 py-3 bg-white border border-slate-200 rounded-xl group transition-all ${isDragging ? 'shadow-lg opacity-80 z-10' : 'hover:border-slate-300'}`}
+    >
+      <button {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing p-1 text-slate-300 hover:text-slate-500 touch-none">
+        <GripVertical className="w-4 h-4" />
+      </button>
+      <div className="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center shrink-0">
+        <Icon className="w-4 h-4 text-emerald-600" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-slate-900 truncate">{field.name}</span>
+          {field.is_required && (
+            <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded-md">Requerido</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 mt-0.5">
+          <span className="text-[11px] text-slate-400">{getFieldTypeLabel(field.field_type)}</span>
+          <span className="text-[10px] text-slate-300">·</span>
+          <code className="text-[10px] text-slate-400 font-mono">{field.slug}</code>
+          {field.field_type === 'select' && field.config?.options && (
+            <>
+              <span className="text-[10px] text-slate-300">·</span>
+              <span className="text-[10px] text-slate-400">{field.config.options.length} opciones</span>
+            </>
+          )}
+          {field.field_type === 'multi_select' && field.config?.options && (
+            <>
+              <span className="text-[10px] text-slate-300">·</span>
+              <span className="text-[10px] text-slate-400">{field.config.options.length} opciones</span>
+            </>
+          )}
+          {field.field_type === 'currency' && field.config?.symbol && (
+            <>
+              <span className="text-[10px] text-slate-300">·</span>
+              <span className="text-[10px] text-slate-400">{field.config.symbol}</span>
+            </>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button
+          onClick={() => onEdit(field)}
+          className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition"
+          title="Editar"
+        >
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={() => onDelete(field)}
+          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+          title="Eliminar"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Custom Fields Panel ────────────────────────────────────────────────────
+function CustomFieldsPanel() {
+  const [fields, setFields] = useState<CustomFieldDefinition[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [showModal, setShowModal] = useState(false)
+  const [editingField, setEditingField] = useState<CustomFieldDefinition | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<CustomFieldDefinition | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState('')
+
+  // Form state
+  const [formName, setFormName] = useState('')
+  const [formType, setFormType] = useState<CustomFieldType>('text')
+  const [formRequired, setFormRequired] = useState(false)
+  const [formDefault, setFormDefault] = useState('')
+  const [formOptions, setFormOptions] = useState<CustomFieldOption[]>([])
+  const [formSymbol, setFormSymbol] = useState('S/.')
+  const [formDecimals, setFormDecimals] = useState(2)
+  const [formMin, setFormMin] = useState<string>('')
+  const [formMax, setFormMax] = useState<string>('')
+  const [formMaxLength, setFormMaxLength] = useState<string>('')
+  const [formTextVariant, setFormTextVariant] = useState<'inline' | 'textarea' | 'rich'>('inline')
+  const [newOptionLabel, setNewOptionLabel] = useState('')
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  )
+
+  const fetchFields = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json()
+      if (data.success) setFields(data.fields || [])
+    } catch {}
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { fetchFields() }, [fetchFields])
+
+  // WebSocket listener for real-time updates
+  useEffect(() => {
+    const unsub = subscribeWebSocket((msg: any) => {
+      if (msg.type === 'custom_field_def_update') {
+        fetchFields()
+      }
+    })
+    return unsub
+  }, [fetchFields])
+
+  const resetForm = () => {
+    setFormName('')
+    setFormType('text')
+    setFormRequired(false)
+    setFormDefault('')
+    setFormOptions([])
+    setFormSymbol('S/.')
+    setFormDecimals(2)
+    setFormMin('')
+    setFormMax('')
+    setFormMaxLength('')
+    setFormTextVariant('inline')
+    setNewOptionLabel('')
+    setError('')
+  }
+
+  const openCreate = () => {
+    setEditingField(null)
+    resetForm()
+    setShowModal(true)
+  }
+
+  const openEdit = (field: CustomFieldDefinition) => {
+    setEditingField(field)
+    setFormName(field.name)
+    setFormType(field.field_type)
+    setFormRequired(field.is_required)
+    setFormDefault(field.default_value || '')
+    setFormOptions(field.config?.options || [])
+    setFormSymbol(field.config?.symbol || 'S/.')
+    setFormDecimals(field.config?.decimals ?? 2)
+    setFormMin(field.config?.min != null ? String(field.config.min) : '')
+    setFormMax(field.config?.max != null ? String(field.config.max) : '')
+    setFormMaxLength(field.config?.max_length != null ? String(field.config.max_length) : '')
+    setFormTextVariant(field.config?.text_variant || 'inline')
+    setNewOptionLabel('')
+    setError('')
+    setShowModal(true)
+  }
+
+  const buildConfig = (): CustomFieldConfig => {
+    const config: CustomFieldConfig = {}
+    const t = editingField ? editingField.field_type : formType
+    if (t === 'select' || t === 'multi_select') {
+      config.options = formOptions
+    }
+    if (t === 'currency') {
+      config.symbol = formSymbol
+      config.decimals = formDecimals
+    }
+    if (t === 'number' || t === 'currency') {
+      if (formMin !== '') config.min = Number(formMin)
+      if (formMax !== '') config.max = Number(formMax)
+    }
+    if (t === 'text') {
+      if (formMaxLength !== '') config.max_length = Number(formMaxLength)
+      if (formTextVariant !== 'inline') config.text_variant = formTextVariant
+    }
+    return config
+  }
+
+  const validate = (): string | null => {
+    if (!formName.trim()) return 'El nombre es obligatorio'
+    if (formName.trim().length > 255) return 'El nombre no puede exceder 255 caracteres'
+
+    const t = editingField ? editingField.field_type : formType
+    // Check duplicate name (case-insensitive)
+    const dup = fields.find(f => f.name.toLowerCase() === formName.trim().toLowerCase() && f.id !== editingField?.id)
+    if (dup) return 'Ya existe un campo con ese nombre'
+    // Check limit
+    if (!editingField && fields.length >= 50) return 'Máximo 50 campos personalizados por cuenta'
+    // Check options for select types
+    if ((t === 'select' || t === 'multi_select') && formOptions.length === 0) {
+      return 'Agrega al menos una opción'
+    }
+    return null
+  }
+
+  const handleSave = async () => {
+    const err = validate()
+    if (err) { setError(err); return }
+    setError('')
+    setSaving(true)
+    try {
+      const token = localStorage.getItem('token')
+      const body: any = {
+        name: formName.trim(),
+        is_required: formRequired,
+        default_value: formDefault.trim() || null,
+        config: buildConfig(),
+      }
+      if (!editingField) {
+        body.field_type = formType
+      }
+
+      const url = editingField ? `/api/custom-fields/${editingField.id}` : '/api/custom-fields'
+      const method = editingField ? 'PUT' : 'POST'
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setShowModal(false)
+        resetForm()
+        fetchFields()
+      } else {
+        setError(data.error || 'Error al guardar')
+      }
+    } catch {
+      setError('Error de conexión')
+    }
+    setSaving(false)
+  }
+
+  const handleDelete = async () => {
+    if (!deleteConfirm) return
+    setDeleting(true)
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch(`/api/custom-fields/${deleteConfirm.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (data.success) {
+        setDeleteConfirm(null)
+        fetchFields()
+      }
+    } catch {}
+    setDeleting(false)
+  }
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const oldIndex = fields.findIndex(f => f.id === active.id)
+    const newIndex = fields.findIndex(f => f.id === over.id)
+    if (oldIndex === -1 || newIndex === -1) return
+    const reordered = arrayMove(fields, oldIndex, newIndex)
+    setFields(reordered)
+    // Persist order
+    try {
+      const token = localStorage.getItem('token')
+      await fetch('/api/custom-fields/reorder', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ field_ids: reordered.map(f => f.id) }),
+      })
+    } catch {}
+  }
+
+  const addOption = () => {
+    const label = newOptionLabel.trim()
+    if (!label) return
+    const value = label.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '')
+    if (formOptions.some(o => o.value === value)) return
+    setFormOptions([...formOptions, { label, value }])
+    setNewOptionLabel('')
+  }
+
+  const removeOption = (idx: number) => {
+    setFormOptions(formOptions.filter((_, i) => i !== idx))
+  }
+
+  const moveOption = (idx: number, dir: -1 | 1) => {
+    const newIdx = idx + dir
+    if (newIdx < 0 || newIdx >= formOptions.length) return
+    const arr = [...formOptions];
+    [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]]
+    setFormOptions(arr)
+  }
+
+  const activeType = editingField ? editingField.field_type : formType
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-medium text-slate-900">Campos Personalizados</h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Define campos adicionales para almacenar información específica de tus contactos. Máximo 50 campos.
+          </p>
+        </div>
+        <button
+          onClick={openCreate}
+          disabled={fields.length >= 50}
+          className="inline-flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-1.5 rounded-xl hover:bg-emerald-700 text-xs font-medium shadow-sm disabled:opacity-50 transition"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          Nuevo Campo
+        </button>
+      </div>
+
+      {/* Field count */}
+      {fields.length > 0 && (
+        <div className="text-[11px] text-slate-400">
+          {fields.length} de 50 campos usados
+          <div className="mt-1 w-full h-1 bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${(fields.length / 50) * 100}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* Fields List */}
+      {loading ? (
+        <div className="space-y-2">
+          {[...Array(3)].map((_, i) => (
+            <div key={i} className="h-16 bg-slate-50 rounded-xl animate-pulse" />
+          ))}
+        </div>
+      ) : fields.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <div className="w-14 h-14 bg-slate-50 rounded-2xl flex items-center justify-center mb-3">
+            <Tag className="w-7 h-7 text-slate-300" />
+          </div>
+          <h4 className="text-sm font-medium text-slate-700 mb-1">Sin campos personalizados</h4>
+          <p className="text-xs text-slate-400 mb-4 max-w-xs">
+            Crea campos para almacenar información adicional como ciudad, nivel educativo, presupuesto, etc.
+          </p>
+          <button
+            onClick={openCreate}
+            className="inline-flex items-center gap-1.5 bg-emerald-600 text-white px-3 py-1.5 rounded-xl hover:bg-emerald-700 text-xs font-medium shadow-sm transition"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Crear primer campo
+          </button>
+        </div>
+      ) : (
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={fields.map(f => f.id)} strategy={verticalListSortingStrategy}>
+            <div className="space-y-2">
+              {fields.map(field => (
+                <SortableFieldItem key={field.id} field={field} onEdit={openEdit} onDelete={setDeleteConfirm} />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      )}
+
+      {/* Create/Edit Modal */}
+      {showModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => { setShowModal(false); resetForm() }}>
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-5 border-b border-slate-100">
+              <h3 className="text-base font-semibold text-slate-900">
+                {editingField ? 'Editar Campo' : 'Nuevo Campo Personalizado'}
+              </h3>
+              <button onClick={() => { setShowModal(false); resetForm() }} className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 space-y-4">
+              {error && (
+                <div className="flex items-center gap-2 px-3 py-2 bg-red-50 border border-red-100 rounded-xl text-xs text-red-700">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  {error}
+                </div>
+              )}
+
+              {/* Name */}
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Nombre del campo *</label>
+                <input
+                  type="text"
+                  value={formName}
+                  onChange={e => setFormName(e.target.value)}
+                  placeholder="Ej: Ciudad de Origen"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400"
+                  autoFocus
+                />
+              </div>
+
+              {/* Type (disabled when editing) */}
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Tipo de campo {editingField && <span className="text-slate-400 font-normal">(no modificable)</span>}
+                </label>
+                {editingField ? (
+                  <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl">
+                    {(() => { const Ic = getFieldTypeIcon(editingField.field_type); return <Ic className="w-4 h-4 text-emerald-600" /> })()}
+                    <span className="text-sm text-slate-700">{getFieldTypeLabel(editingField.field_type)}</span>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                    {FIELD_TYPE_OPTIONS.map(opt => {
+                      const Ic = opt.icon
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setFormType(opt.value)}
+                          className={`flex flex-col items-center gap-1 p-2 rounded-xl border text-xs transition ${
+                            formType === opt.value
+                              ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                              : 'border-slate-200 text-slate-500 hover:border-slate-300 hover:bg-slate-50'
+                          }`}
+                        >
+                          <Ic className="w-4 h-4" />
+                          <span className="font-medium truncate w-full text-center">{opt.label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Options for select/multi_select */}
+              {(activeType === 'select' || activeType === 'multi_select') && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">
+                    Opciones {formOptions.length > 0 && <span className="text-slate-400 font-normal">({formOptions.length})</span>}
+                  </label>
+                  {formOptions.length > 0 && (
+                    <div className="space-y-1 mb-2">
+                      {formOptions.map((opt, idx) => (
+                        <div key={idx} className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-100">
+                          <GripVertical className="w-3 h-3 text-slate-300" />
+                          <span className="text-sm text-slate-700 flex-1">{opt.label}</span>
+                          <code className="text-[10px] text-slate-400 font-mono">{opt.value}</code>
+                          <div className="flex items-center gap-0.5">
+                            {idx > 0 && (
+                              <button type="button" onClick={() => moveOption(idx, -1)} className="p-0.5 text-slate-400 hover:text-slate-600"><ChevronDown className="w-3 h-3 rotate-180" /></button>
+                            )}
+                            {idx < formOptions.length - 1 && (
+                              <button type="button" onClick={() => moveOption(idx, 1)} className="p-0.5 text-slate-400 hover:text-slate-600"><ChevronDown className="w-3 h-3" /></button>
+                            )}
+                            <button type="button" onClick={() => removeOption(idx)} className="p-0.5 text-slate-400 hover:text-red-500"><X className="w-3 h-3" /></button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newOptionLabel}
+                      onChange={e => setNewOptionLabel(e.target.value)}
+                      placeholder="Nueva opción"
+                      className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400"
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addOption() } }}
+                    />
+                    <button
+                      type="button"
+                      onClick={addOption}
+                      disabled={!newOptionLabel.trim()}
+                      className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-medium hover:bg-slate-200 disabled:opacity-50 transition"
+                    >
+                      Agregar
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Currency config */}
+              {activeType === 'currency' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Símbolo</label>
+                    <input
+                      type="text"
+                      value={formSymbol}
+                      onChange={e => setFormSymbol(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Decimales</label>
+                    <input
+                      type="number"
+                      value={formDecimals}
+                      onChange={e => setFormDecimals(Number(e.target.value))}
+                      min={0}
+                      max={4}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Number/Currency min/max */}
+              {(activeType === 'number' || activeType === 'currency') && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Mínimo <span className="text-slate-400 font-normal">(opcional)</span></label>
+                    <input
+                      type="number"
+                      value={formMin}
+                      onChange={e => setFormMin(e.target.value)}
+                      placeholder="Sin límite"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Máximo <span className="text-slate-400 font-normal">(opcional)</span></label>
+                    <input
+                      type="number"
+                      value={formMax}
+                      onChange={e => setFormMax(e.target.value)}
+                      placeholder="Sin límite"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Text variant + max_length */}
+              {activeType === 'text' && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1.5">Tipo de entrada</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { value: 'inline',   label: 'Línea simple', desc: 'Texto corto' },
+                        { value: 'textarea', label: 'Texto largo',  desc: 'Multi-línea' },
+                        { value: 'rich',     label: 'Enriquecido',  desc: 'Con formato' },
+                      ].map(opt => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setFormTextVariant(opt.value as 'inline' | 'textarea' | 'rich')}
+                          className={`px-2.5 py-2 rounded-xl border text-left transition ${
+                            formTextVariant === opt.value
+                              ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-500/20'
+                              : 'border-slate-200 hover:border-slate-300 bg-white'
+                          }`}
+                        >
+                          <div className={`text-xs font-semibold ${formTextVariant === opt.value ? 'text-emerald-700' : 'text-slate-700'}`}>{opt.label}</div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">{opt.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Longitud máxima <span className="text-slate-400 font-normal">(opcional)</span></label>
+                    <input
+                      type="number"
+                      value={formMaxLength}
+                      onChange={e => setFormMaxLength(e.target.value)}
+                      placeholder="Sin límite"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400 max-w-[200px]"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">Al definirlo, se muestra un contador de caracteres durante la captura.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Required toggle */}
+              <div className="flex items-center justify-between py-2">
+                <div>
+                  <span className="text-xs font-medium text-slate-600">Campo obligatorio</span>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Se mostrará un indicador visual si no tiene valor</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFormRequired(!formRequired)}
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${formRequired ? 'bg-emerald-600' : 'bg-slate-200'}`}
+                >
+                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform shadow-sm ${formRequired ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                </button>
+              </div>
+
+              {/* Default value */}
+              {activeType !== 'checkbox' && activeType !== 'multi_select' && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Valor por defecto <span className="text-slate-400 font-normal">(opcional)</span></label>
+                  {activeType === 'select' ? (
+                    <select
+                      value={formDefault}
+                      onChange={e => setFormDefault(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900"
+                    >
+                      <option value="">Sin valor por defecto</option>
+                      {formOptions.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type={activeType === 'number' || activeType === 'currency' ? 'number' : activeType === 'date' ? 'date' : 'text'}
+                      value={formDefault}
+                      onChange={e => setFormDefault(e.target.value)}
+                      placeholder="Ninguno"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400 max-w-sm"
+                    />
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex justify-end gap-2 px-5 py-4 border-t border-slate-100">
+              <button
+                onClick={() => { setShowModal(false); resetForm() }}
+                className="px-4 py-2 text-sm text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 transition shadow-sm"
+              >
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                {editingField ? 'Guardar Cambios' : 'Crear Campo'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setDeleteConfirm(null)}>
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
+            <div className="p-5 text-center">
+              <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-3">
+                <Trash2 className="w-6 h-6 text-red-500" />
+              </div>
+              <h4 className="text-base font-semibold text-slate-900 mb-1">Eliminar campo</h4>
+              <p className="text-sm text-slate-500 mb-1">
+                ¿Eliminar <strong>{deleteConfirm.name}</strong>?
+              </p>
+              <p className="text-xs text-red-500">
+                Se eliminarán todos los valores asociados a este campo en todos los contactos.
+              </p>
+            </div>
+            <div className="flex gap-2 px-5 py-4 border-t border-slate-100">
+              <button
+                onClick={() => setDeleteConfirm(null)}
+                className="flex-1 px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 px-4 py-2 bg-red-600 text-white rounded-xl text-sm font-medium hover:bg-red-700 disabled:opacity-50 transition"
+              >
+                {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                Eliminar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function SettingsPage() {
   const [kommoEnabled, setKommoEnabled] = useState(() => typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true')
   const [account, setAccount] = useState<Account | null>(null)
@@ -328,17 +1031,26 @@ export default function SettingsPage() {
   const [savingStage, setSavingStage] = useState(false)
 
   // Devices state
+  type DeviceProvider = 'whatsapp_web' | 'whatsapp_cloud_api'
   interface DeviceItem {
     id: string; name: string; phone: string; jid: string; status: string; qr_code: string; last_seen_at: string; receive_messages: boolean
+    provider?: DeviceProvider; waba_id?: string; phone_number_id?: string; api_display_phone?: string; api_webhook_status?: string; api_billing_status?: string; api_sending_enabled?: boolean; api_templates_enabled?: boolean; capabilities?: string[]
   }
   const [devDevices, setDevDevices] = useState<DeviceItem[]>([])
   const [devLoading, setDevLoading] = useState(true)
   const [devShowCreate, setDevShowCreate] = useState(false)
+  const [devCreateProvider, setDevCreateProvider] = useState<DeviceProvider>('whatsapp_web')
   const [devNewName, setDevNewName] = useState('')
+  const [devNewApiDisplayPhone, setDevNewApiDisplayPhone] = useState('')
+  const [devNewApiPhoneNumberID, setDevNewApiPhoneNumberID] = useState('')
+  const [devNewApiWabaID, setDevNewApiWabaID] = useState('')
   const [devCreating, setDevCreating] = useState(false)
   const [devSelected, setDevSelected] = useState<DeviceItem | null>(null)
   const [devEditing, setDevEditing] = useState<DeviceItem | null>(null)
   const [devEditName, setDevEditName] = useState('')
+  const [devEditApiDisplayPhone, setDevEditApiDisplayPhone] = useState('')
+  const [devEditApiPhoneNumberID, setDevEditApiPhoneNumberID] = useState('')
+  const [devEditApiWabaID, setDevEditApiWabaID] = useState('')
   const [devSaving, setDevSaving] = useState(false)
 
   // Google Contacts state
@@ -673,10 +1385,6 @@ export default function SettingsPage() {
     if (result.success && result.data?.monitor) setSyncMonitor(result.data.monitor)
   }, [])
 
-  useEffect(() => {
-    fetchKommoStatus()
-  }, [fetchKommoStatus])
-
   // --- Google Contacts ---
   const fetchGoogleStatus = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -742,18 +1450,6 @@ export default function SettingsPage() {
       setGoogleDisconnecting(false)
     }
   }
-
-  // Fetch pipelines and worker status when integrations tab is active
-  useEffect(() => {
-    if (activeTab === 'integrations' && kommoStatus?.connected) {
-      fetchKommoPipelines()
-      fetchKommoConnected()
-      fetchKommoWorkerStatus()
-      fetchSyncMonitor()
-      const interval = setInterval(() => { fetchKommoWorkerStatus(); fetchSyncMonitor() }, 10000)
-      return () => clearInterval(interval)
-    }
-  }, [activeTab, kommoStatus?.connected, fetchKommoPipelines, fetchKommoConnected, fetchKommoWorkerStatus, fetchSyncMonitor])
 
   const handleKommoConnectPipeline = async (kommoId: number) => {
     setKommoConnecting(kommoId)
@@ -891,24 +1587,6 @@ export default function SettingsPage() {
       setKommoSyncProgress('')
     }
   }
-
-  // Check if there's already a sync running when tab loads
-  useEffect(() => {
-    if (activeTab === 'integrations' && kommoStatus?.connected) {
-      const checkRunningSync = async () => {
-        const result = await api<{ status?: any }>('/api/kommo/sync/full-status')
-        if (result.success && result.data?.status?.running) {
-            setKommoSyncing(true)
-            setKommoSyncProgress(result.data.status.progress || 'Sincronizando...')
-            const interval = setInterval(async () => {
-              const stillRunning = await pollFullSyncStatus()
-              if (!stillRunning) clearInterval(interval)
-            }, 2000)
-        }
-      }
-      checkRunningSync()
-    }
-  }, [activeTab, kommoStatus?.connected, pollFullSyncStatus])
 
   const handleQRMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -1197,14 +1875,50 @@ export default function SettingsPage() {
     }
   }, [devDevices, devSelected])
 
+  const getDeviceProvider = (device?: DeviceItem | null): DeviceProvider => device?.provider || 'whatsapp_web'
+  const isApiDevice = (device?: DeviceItem | null) => getDeviceProvider(device) === 'whatsapp_cloud_api'
+
+  const resetDevCreateForm = () => {
+    setDevCreateProvider('whatsapp_web')
+    setDevNewName('')
+    setDevNewApiDisplayPhone('')
+    setDevNewApiPhoneNumberID('')
+    setDevNewApiWabaID('')
+  }
+
+  const openDevEdit = (device: DeviceItem) => {
+    setDevEditing(device)
+    setDevEditName(device.name || '')
+    setDevEditApiDisplayPhone(device.api_display_phone || device.phone || '')
+    setDevEditApiPhoneNumberID(device.phone_number_id || '')
+    setDevEditApiWabaID(device.waba_id || '')
+  }
+
   const handleDevCreate = async () => {
     if (!devNewName.trim()) return
     setDevCreating(true)
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/devices', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ name: devNewName }) })
+      const payload = devCreateProvider === 'whatsapp_cloud_api'
+        ? {
+            name: devNewName.trim(),
+            provider: devCreateProvider,
+            api_display_phone: devNewApiDisplayPhone.trim() || undefined,
+            phone_number_id: devNewApiPhoneNumberID.trim() || undefined,
+            waba_id: devNewApiWabaID.trim() || undefined,
+          }
+        : { name: devNewName.trim(), provider: devCreateProvider }
+      const res = await fetch('/api/devices', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) })
       const data = await res.json()
-      if (data.success) { setDevNewName(''); setDevShowCreate(false); fetchDevicesForSettings(); await handleDevConnect(data.device.id) }
+      if (data.success) {
+        resetDevCreateForm()
+        setDevShowCreate(false)
+        fetchDevicesForSettings()
+        if (devCreateProvider === 'whatsapp_web') await handleDevConnect(data.device.id)
+        else showMessage('success', 'Canal API Oficial creado en modo configuración')
+      } else {
+        showMessage('error', data.error || 'Error al crear dispositivo')
+      }
     } catch (err) { console.error('Failed to create device:', err) }
     finally { setDevCreating(false) }
   }
@@ -1249,7 +1963,17 @@ export default function SettingsPage() {
     setDevSaving(true)
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/devices/${devEditing.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ name: devEditName.trim() }) })
+      const payload = isApiDevice(devEditing)
+        ? {
+            name: devEditName.trim(),
+            api_display_phone: devEditApiDisplayPhone.trim(),
+            phone_number_id: devEditApiPhoneNumberID.trim(),
+            waba_id: devEditApiWabaID.trim(),
+            api_sending_enabled: false,
+            api_templates_enabled: false,
+          }
+        : { name: devEditName.trim() }
+      const res = await fetch(`/api/devices/${devEditing.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) })
       const data = await res.json()
       if (data.success) { setDevEditing(null); fetchDevicesForSettings() } else alert(data.error || 'Error al actualizar')
     } catch (err) { console.error('Failed to update device:', err) }
@@ -1281,6 +2005,23 @@ export default function SettingsPage() {
     }
   }
 
+  const getDevProviderBadge = (device: DeviceItem) => {
+    if (isApiDevice(device)) {
+      return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-sky-50 text-sky-700"><Globe className="w-3.5 h-3.5" /> API Oficial</span>
+    }
+    return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-700"><QrCode className="w-3.5 h-3.5" /> QR</span>
+  }
+
+  const getApiGuardBadges = (device: DeviceItem) => {
+    if (!isApiDevice(device)) return null
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-slate-100 text-slate-600"><Power className="w-3 h-3" /> Envio bloqueado</span>
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-amber-50 text-amber-700"><DollarSign className="w-3 h-3" /> Pago no configurado</span>
+      </div>
+    )
+  }
+
   const handleLogout = () => {
     localStorage.removeItem('token')
     window.location.href = '/'
@@ -1299,7 +2040,9 @@ export default function SettingsPage() {
     { id: 'account', label: 'Cuenta', icon: Building },
     ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('integrations') || user?.permissions?.includes('*')) ? [{ id: 'integrations', label: 'Integraciones', icon: Link2 }] : []),
     ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('devices') || user?.permissions?.includes('*')) ? [{ id: 'devices', label: 'Dispositivos', icon: Smartphone }] : []),
+    ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('integrations') || user?.permissions?.includes('*')) ? [{ id: 'whatsapp-api', label: 'WhatsApp API', icon: Globe }] : []),
     { id: 'quick-replies', label: 'Resp. Rápidas', icon: Zap },
+    ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('settings') || user?.permissions?.includes('*')) ? [{ id: 'custom-fields', label: 'Campos', icon: Tag }] : []),
     { id: 'notifications', label: 'Notificaciones', icon: Bell },
     ...((user?.is_super_admin || user?.is_admin) ? [{ id: 'api-keys', label: 'API / MCP', icon: Key }] : []),
     { id: 'security', label: 'Seguridad', icon: Shield },
@@ -1800,33 +2543,6 @@ export default function SettingsPage() {
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {/* Kommo Card */}
-                    <button
-                      onClick={() => setIntegrationView('kommo')}
-                      className="text-left border border-slate-200 rounded-xl p-5 hover:border-emerald-300 hover:shadow-md transition-all group bg-white"
-                    >
-                      <div className="flex items-center gap-3 mb-3">
-                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${kommoStatus?.connected ? 'bg-emerald-100' : 'bg-slate-100'}`}>
-                          <Link2 className={`w-5 h-5 ${kommoStatus?.connected ? 'text-emerald-600' : 'text-slate-400'}`} />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold text-slate-900 group-hover:text-emerald-700 transition">Kommo CRM</p>
-                          <p className="text-[10px] text-slate-500 truncate">Leads, etiquetas, embudos</p>
-                        </div>
-                        <div className={`w-2.5 h-2.5 rounded-full ${kommoStatus?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
-                      </div>
-                      <div className="flex items-center gap-2 text-[10px]">
-                        <span className={`px-2 py-0.5 rounded-full ${kommoEnabled ? (kommoStatus?.connected ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500') : 'bg-amber-50 text-amber-700'}`}>
-                          {kommoEnabled ? (kommoStatus?.connected ? 'Conectado' : 'No conectado') : 'Deshabilitado'}
-                        </span>
-                        {kommoEnabled && kommoConnected.filter(c => c.enabled).length > 0 && (
-                          <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700">
-                            {kommoConnected.filter(c => c.enabled).length} embudo{kommoConnected.filter(c => c.enabled).length !== 1 ? 's' : ''} activo{kommoConnected.filter(c => c.enabled).length !== 1 ? 's' : ''}
-                          </span>
-                        )}
-                      </div>
-                    </button>
-
                     {/* Google Contacts Card */}
                     <button
                       onClick={() => setIntegrationView('google')}
@@ -1857,8 +2573,8 @@ export default function SettingsPage() {
                 </>
               )}
 
-              {/* === KOMMO DETAIL VIEW === */}
-              {integrationView === 'kommo' && (
+              {/* Kommo is managed centrally from Admin > Integraciones. */}
+              {kommoStatus && integrationView === 'kommo' && (
                 <>
                   <button
                     onClick={() => setIntegrationView('list')}
@@ -2323,16 +3039,20 @@ export default function SettingsPage() {
                   {devDevices.map((device) => (
                     <div key={device.id} className="p-3.5 flex items-center justify-between hover:bg-slate-50/50 transition">
                       <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 bg-slate-100 rounded-lg flex items-center justify-center">
-                          <Smartphone className="w-4.5 h-4.5 text-slate-500" />
+                        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${isApiDevice(device) ? 'bg-sky-50' : 'bg-slate-100'}`}>
+                          {isApiDevice(device) ? <Globe className="w-4.5 h-4.5 text-sky-600" /> : <Smartphone className="w-4.5 h-4.5 text-slate-500" />}
                         </div>
-                        <div>
-                          <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                          <p className="text-xs text-slate-500">{device.phone || device.jid || 'Sin número'}</p>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium text-slate-900 truncate">{device.name || 'Dispositivo'}</p>
+                            {getDevProviderBadge(device)}
+                          </div>
+                          <p className="text-xs text-slate-500 truncate">{device.api_display_phone || device.phone || device.phone_number_id || device.jid || 'Sin numero'}</p>
+                          {getApiGuardBadges(device)}
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        {getDevStatusBadge(device.status)}
+                        {!isApiDevice(device) && getDevStatusBadge(device.status)}
                         <div className="flex items-center gap-1.5">
                           <span className="text-[10px] text-slate-400 hidden sm:inline">{device.receive_messages ? 'Recibe' : 'No recibe'}</span>
                           <button
@@ -2343,8 +3063,8 @@ export default function SettingsPage() {
                             <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${device.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} />
                           </button>
                         </div>
-                        <button onClick={() => { setDevEditing(device); setDevEditName(device.name || '') }} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition" title="Editar"><Edit className="w-3.5 h-3.5" /></button>
-                        {device.status === 'connected' ? (
+                        <button onClick={() => openDevEdit(device)} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition" title="Editar"><Edit className="w-3.5 h-3.5" /></button>
+                        {isApiDevice(device) ? null : device.status === 'connected' ? (
                           <>
                             <button onClick={() => handleDevReset(device.id)} className="p-1.5 text-slate-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition" title="Re-vincular (sincronizar historial completo)"><RefreshCw className="w-3.5 h-3.5" /></button>
                             <button onClick={() => handleDevDisconnect(device.id)} className="p-1.5 text-slate-400 hover:text-orange-600 hover:bg-orange-50 rounded-lg transition" title="Desconectar"><Power className="w-3.5 h-3.5" /></button>
@@ -2364,12 +3084,58 @@ export default function SettingsPage() {
               {/* Create device modal */}
               {devShowCreate && (
                 <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
-                  <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4 border border-slate-100">
-                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Nuevo Dispositivo</h2>
-                    <input type="text" value={devNewName} onChange={(e) => setDevNewName(e.target.value)} placeholder="Nombre del dispositivo" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent mb-4 text-sm text-slate-900 placeholder:text-slate-400" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') handleDevCreate() }} />
-                    <div className="flex gap-3">
-                      <button onClick={() => setDevShowCreate(false)} className="flex-1 px-4 py-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
-                      <button onClick={handleDevCreate} disabled={devCreating || !devNewName.trim()} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devCreating ? 'Creando...' : 'Crear y Conectar'}</button>
+                  <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-lg mx-4 border border-slate-100">
+                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Nuevo Canal WhatsApp</h2>
+                    <div className="grid grid-cols-2 gap-2 mb-4">
+                      <button
+                        type="button"
+                        onClick={() => setDevCreateProvider('whatsapp_web')}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition ${devCreateProvider === 'whatsapp_web' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                      >
+                        <QrCode className="w-4 h-4" /> QR WhatsApp Web
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDevCreateProvider('whatsapp_cloud_api')}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition ${devCreateProvider === 'whatsapp_cloud_api' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                      >
+                        <Globe className="w-4 h-4" /> API Oficial
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label>
+                        <input type="text" value={devNewName} onChange={(e) => setDevNewName(e.target.value)} placeholder="Nombre del canal" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" autoFocus onKeyDown={(e) => { if (e.key === 'Enter' && devCreateProvider === 'whatsapp_web') handleDevCreate() }} />
+                      </div>
+
+                      {devCreateProvider === 'whatsapp_cloud_api' && (
+                        <>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-slate-600 mb-1">Telefono visible</label>
+                              <input type="text" value={devNewApiDisplayPhone} onChange={(e) => setDevNewApiDisplayPhone(e.target.value)} placeholder="+51..." className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-slate-600 mb-1">Phone Number ID</label>
+                              <input type="text" value={devNewApiPhoneNumberID} onChange={(e) => setDevNewApiPhoneNumberID(e.target.value)} placeholder="Meta phone ID" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-slate-600 mb-1">WABA ID</label>
+                            <input type="text" value={devNewApiWabaID} onChange={(e) => setDevNewApiWabaID(e.target.value)} placeholder="WhatsApp Business Account ID" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" />
+                          </div>
+                          <div className="flex items-start gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                            <span>El canal queda guardado para configuracion. Envio API y plantillas permanecen bloqueados.</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="flex gap-3 mt-5">
+                      <button onClick={() => { setDevShowCreate(false); resetDevCreateForm() }} className="flex-1 px-4 py-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
+                      <button onClick={handleDevCreate} disabled={devCreating || !devNewName.trim()} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devCreating ? 'Creando...' : devCreateProvider === 'whatsapp_web' ? 'Crear y Conectar' : 'Crear Canal'}</button>
                     </div>
                   </div>
                 </div>
@@ -2392,11 +3158,37 @@ export default function SettingsPage() {
               {devEditing && (
                 <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
                   <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4 border border-slate-100">
-                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Editar Dispositivo</h2>
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-lg font-semibold text-slate-900">Editar Canal</h2>
+                      {getDevProviderBadge(devEditing)}
+                    </div>
                     <div className="space-y-4">
                       <div><label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label><input type="text" value={devEditName} onChange={(e) => setDevEditName(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') handleDevUpdate() }} /></div>
-                      <div><label className="block text-xs font-medium text-slate-600 mb-1">Teléfono</label><input type="text" value={devEditing.phone || 'Sin número'} disabled className="w-full px-3 py-2.5 border border-slate-100 rounded-xl bg-slate-50 text-sm text-slate-400" /><p className="text-[10px] text-slate-400 mt-1">Se asigna automáticamente al conectar</p></div>
-                      <div><label className="block text-xs font-medium text-slate-600 mb-1">Estado</label><div className="px-3 py-2">{getDevStatusBadge(devEditing.status)}</div></div>
+                      {isApiDevice(devEditing) ? (
+                        <>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div><label className="block text-xs font-medium text-slate-600 mb-1">Telefono visible</label><input type="text" value={devEditApiDisplayPhone} onChange={(e) => setDevEditApiDisplayPhone(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900" /></div>
+                            <div><label className="block text-xs font-medium text-slate-600 mb-1">Phone Number ID</label><input type="text" value={devEditApiPhoneNumberID} onChange={(e) => setDevEditApiPhoneNumberID(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900" /></div>
+                          </div>
+                          <div><label className="block text-xs font-medium text-slate-600 mb-1">WABA ID</label><input type="text" value={devEditApiWabaID} onChange={(e) => setDevEditApiWabaID(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900" /></div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2">
+                              <p className="text-slate-400">Webhook</p>
+                              <p className="font-medium text-slate-700">{devEditing.api_webhook_status || 'not_configured'}</p>
+                            </div>
+                            <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2">
+                              <p className="text-slate-400">Facturacion</p>
+                              <p className="font-medium text-slate-700">{devEditing.api_billing_status || 'not_configured'}</p>
+                            </div>
+                          </div>
+                          {getApiGuardBadges(devEditing)}
+                        </>
+                      ) : (
+                        <>
+                          <div><label className="block text-xs font-medium text-slate-600 mb-1">Teléfono</label><input type="text" value={devEditing.phone || 'Sin número'} disabled className="w-full px-3 py-2.5 border border-slate-100 rounded-xl bg-slate-50 text-sm text-slate-400" /><p className="text-[10px] text-slate-400 mt-1">Se asigna automáticamente al conectar</p></div>
+                          <div><label className="block text-xs font-medium text-slate-600 mb-1">Estado</label><div className="px-3 py-2">{getDevStatusBadge(devEditing.status)}</div></div>
+                        </>
+                      )}
                       <div className="flex items-center justify-between">
                         <div>
                           <label className="block text-xs font-medium text-slate-600">Recibir mensajes</label>
@@ -2419,6 +3211,8 @@ export default function SettingsPage() {
               )}
             </div>
           )}
+
+          {activeTab === 'whatsapp-api' && <WhatsAppAPISettingsPanel />}
 
           {/* Quick Replies Tab */}
           {activeTab === 'quick-replies' && (
@@ -2856,6 +3650,11 @@ export default function SettingsPage() {
           {/* API Keys / MCP Tab */}
           {activeTab === 'api-keys' && (
             <APIKeysPanel />
+          )}
+
+          {/* Custom Fields Tab */}
+          {activeTab === 'custom-fields' && (
+            <CustomFieldsPanel />
           )}
 
           {/* Security Tab */}

@@ -8,7 +8,7 @@ import {
   ChevronDown, CheckSquare, Square, XCircle, MoreVertical, MoreHorizontal,
   Users, Merge, Eye, X, Smartphone, AlertTriangle, MessageSquare, Send,
   Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter, Radio,
-  UserPlus, ClipboardPaste, Hash, Code, Download, CheckCircle2, ExternalLink, ArrowUpDown, ChevronUp, Cloud
+  UserPlus, ClipboardPaste, Hash, Code, Download, CheckCircle2, ExternalLink, ArrowUpDown, ChevronUp, Cloud, Settings
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -21,8 +21,10 @@ import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ChatPanel from '@/components/chat/ChatPanel'
 import FormulaEditor from '@/components/FormulaEditor'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
+import { subscribeWebSocket } from '@/lib/api'
 import type { Lead } from '@/types/contact'
 import type { Chat } from '@/types/chat'
+import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
 
 interface ContactDeviceName {
   id: string
@@ -257,6 +259,9 @@ export default function ContactsPage() {
       if (actionsMenuRef.current && !actionsMenuRef.current.contains(e.target as Node)) {
         setActionsMenuId(null)
       }
+      if (cfColumnPickerRef.current && !cfColumnPickerRef.current.contains(e.target as Node)) {
+        setShowCfColumnPicker(false)
+      }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
@@ -313,6 +318,13 @@ export default function ContactsPage() {
   const [googleConnected, setGoogleConnected] = useState(false)
   const [googleSyncing, setGoogleSyncing] = useState(false)
 
+  // Custom field columns
+  const [cfDefs, setCfDefs] = useState<CustomFieldDefinition[]>([])
+  const [cfVisibleIds, setCfVisibleIds] = useState<Set<string>>(new Set())
+  const [showCfColumnPicker, setShowCfColumnPicker] = useState(false)
+  const cfColumnPickerRef = useRef<HTMLDivElement>(null)
+  const [cfFilters, setCfFilters] = useState<CustomFieldFilter[]>([])
+
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
   // Virtualizer for contacts table
@@ -362,6 +374,12 @@ export default function ContactsPage() {
         params.set('sort_by', sortBy)
         params.set('sort_order', sortOrder)
       }
+      if (cfVisibleIds.size > 0) {
+        params.set('include_custom_fields', 'true')
+      }
+      if (cfFilters.length > 0) {
+        params.set('cf_filter', JSON.stringify(cfFilters))
+      }
 
       const res = await fetch(`/api/contacts?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -392,7 +410,7 @@ export default function ContactsPage() {
       setLoadingMore(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, searchTerm, filterDevice, appliedFormulaType, appliedFormulaText, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder])
+  }, [token, searchTerm, filterDevice, appliedFormulaType, appliedFormulaText, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder, cfVisibleIds, cfFilters])
 
   const loadMoreContacts = useCallback(() => {
     if (loadingMore || !hasMore) return
@@ -440,6 +458,27 @@ export default function ContactsPage() {
   useEffect(() => {
     fetchDevices()
     fetchAllTags()
+    // Fetch custom field definitions
+    if (token) {
+      fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json())
+        .then(d => {
+          if (d.success) {
+            const defs: CustomFieldDefinition[] = d.definitions || []
+            setCfDefs(defs)
+            // Restore visible columns from localStorage
+            try {
+              const saved = localStorage.getItem('cf_columns_contacts')
+              if (saved) {
+                const ids: string[] = JSON.parse(saved)
+                const validIds = ids.filter(id => defs.some(d => d.id === id))
+                setCfVisibleIds(new Set(validIds))
+              }
+            } catch {}
+          }
+        })
+        .catch(() => {})
+    }
     // Check for contacts with duplicate leads
     if (token) {
       fetch('/api/contacts/lead-duplicates', { headers: { Authorization: `Bearer ${token}` } })
@@ -453,6 +492,70 @@ export default function ContactsPage() {
         .catch(() => {})
     }
   }, [fetchDevices, fetchAllTags])
+
+  // Custom field column toggle
+  const toggleCfColumn = useCallback((fieldId: string) => {
+    setCfVisibleIds(prev => {
+      const next = new Set(prev)
+      if (next.has(fieldId)) next.delete(fieldId)
+      else next.add(fieldId)
+      localStorage.setItem('cf_columns_contacts', JSON.stringify(Array.from(next)))
+      return next
+    })
+  }, [])
+
+  // Format custom field value for table cell
+  const formatCfCell = useCallback((def: CustomFieldDefinition, contact: Contact) => {
+    const vals: CustomFieldValue[] = (contact as any).custom_field_values || []
+    const val = vals.find(v => v.field_id === def.id)
+    if (!val) return <span className="text-slate-300">—</span>
+    switch (def.field_type) {
+      case 'text': case 'email': case 'phone': case 'url':
+        return <span className="truncate">{val.value_text || '—'}</span>
+      case 'number':
+        return <span>{val.value_number != null ? val.value_number : '—'}</span>
+      case 'currency': {
+        if (val.value_number == null) return <span className="text-slate-300">—</span>
+        const sym = def.config?.symbol || '$'
+        const dec = def.config?.decimals ?? 2
+        return <span>{sym} {val.value_number.toLocaleString('es-PE', { minimumFractionDigits: dec, maximumFractionDigits: dec })}</span>
+      }
+      case 'date':
+        if (!val.value_date) return <span className="text-slate-300">—</span>
+        try { return <span>{new Date(val.value_date).toLocaleDateString('es-PE', { year: 'numeric', month: 'short', day: 'numeric' })}</span> }
+        catch { return <span>{val.value_date}</span> }
+      case 'checkbox':
+        return <span className={val.value_bool ? 'text-emerald-600' : 'text-slate-400'}>{val.value_bool ? 'Sí' : 'No'}</span>
+      case 'select': {
+        const opt = def.config?.options?.find(o => o.value === val.value_text)
+        return <span>{opt?.label || val.value_text || '—'}</span>
+      }
+      case 'multi_select': {
+        if (!val.value_json || val.value_json.length === 0) return <span className="text-slate-300">—</span>
+        return <div className="flex flex-wrap gap-0.5">{val.value_json.slice(0, 2).map(v => {
+          const o = def.config?.options?.find(opt => opt.value === v)
+          return <span key={v} className="px-1.5 py-0.5 bg-slate-100 text-slate-600 text-[10px] rounded-full">{o?.label || v}</span>
+        })}{val.value_json.length > 2 && <span className="text-[10px] text-slate-400">+{val.value_json.length - 2}</span>}</div>
+      }
+      default: return <span className="text-slate-300">—</span>
+    }
+  }, [])
+
+  // WebSocket listener for custom field definition updates
+  useEffect(() => {
+    const unsubscribe = subscribeWebSocket((data: unknown) => {
+      const msg = data as { event?: string }
+      if (msg.event === 'custom_field_def_update') {
+        if (token) {
+          fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` } })
+            .then(r => r.json())
+            .then(d => { if (d.success) setCfDefs(d.definitions || []) })
+            .catch(() => {})
+        }
+      }
+    })
+    return () => unsubscribe()
+  }, [token])
 
   // Debounced fetch: resets scroll to top on filter/search change
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -877,7 +980,7 @@ export default function ContactsPage() {
   const broadcastableContacts = contacts.filter(c => c.phone)
 
   // Active filter count
-  const activeFilterCount = filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0)
+  const activeFilterCount = filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + cfFilters.length
 
   // Filtered tags for tag browser
   const filteredTags = allTags.filter(t =>
@@ -1146,7 +1249,7 @@ export default function ContactsPage() {
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
                     <button
-                      onClick={() => { setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterDevice('') }}
+                      onClick={() => { setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterDevice(''); setCfFilters([]) }}
                       className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                     >
                       Limpiar todo
@@ -1244,6 +1347,132 @@ export default function ContactsPage() {
                   )}
                 </div>
                 </div>
+
+                {/* ══ Center Column — Custom Fields ══ */}
+                {cfDefs.length > 0 && (
+                <div className="w-full sm:w-[220px] shrink-0 border-b sm:border-b-0 sm:border-r border-slate-100 overflow-y-auto p-3 space-y-3 max-h-[30vh] sm:max-h-none">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-1 h-3.5 bg-violet-400 rounded-full" />
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Campos</p>
+                    </div>
+                    <button
+                      onClick={() => setCfFilters(prev => [...prev, { field_id: cfDefs[0].id, operator: 'eq' as const, value: '' }])}
+                      className="p-1 hover:bg-violet-50 rounded-lg transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-violet-500" />
+                    </button>
+                  </div>
+                  {cfFilters.length === 0 && (
+                    <p className="text-[10px] text-slate-400 text-center py-2">Sin filtros de campos</p>
+                  )}
+                  {cfFilters.map((cf, idx) => {
+                    const def = cfDefs.find(d => d.id === cf.field_id)
+                    const fieldType = def?.field_type || 'text'
+                    const ops: { value: string; label: string }[] = (() => {
+                      switch (fieldType) {
+                        case 'number': case 'currency':
+                          return [{ value: 'eq', label: '=' }, { value: 'neq', label: '≠' }, { value: 'gt', label: '>' }, { value: 'lt', label: '<' }, { value: 'gte', label: '≥' }, { value: 'lte', label: '≤' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                        case 'date':
+                          return [{ value: 'eq', label: '=' }, { value: 'gt', label: 'Después' }, { value: 'lt', label: 'Antes' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                        case 'checkbox':
+                          return [{ value: 'eq', label: '=' }]
+                        case 'select':
+                          return [{ value: 'eq', label: '=' }, { value: 'neq', label: '≠' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                        case 'multi_select':
+                          return [{ value: 'contains_any', label: 'Contiene' }, { value: 'contains_all', label: 'Contiene todos' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                        default:
+                          return [{ value: 'eq', label: '=' }, { value: 'neq', label: '≠' }, { value: 'contains', label: 'Contiene' }, { value: 'starts_with', label: 'Empieza' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                      }
+                    })()
+                    const needsValue = cf.operator !== 'is_empty' && cf.operator !== 'is_not_empty'
+                    return (
+                      <div key={idx} className="space-y-1 p-2 bg-slate-50 rounded-lg border border-slate-100">
+                        <div className="flex items-center gap-1">
+                          <select
+                            value={cf.field_id}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], field_id: e.target.value, value: '' }
+                              setCfFilters(next)
+                            }}
+                            className="flex-1 min-w-0 px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                          >
+                            {cfDefs.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                          </select>
+                          <button onClick={() => setCfFilters(prev => prev.filter((_, i) => i !== idx))} className="p-0.5 hover:bg-red-50 rounded">
+                            <X className="w-3 h-3 text-red-400" />
+                          </button>
+                        </div>
+                        <select
+                          value={cf.operator}
+                          onChange={(e) => {
+                            const next = [...cfFilters]
+                            next[idx] = { ...next[idx], operator: e.target.value as CustomFieldFilter['operator'], value: '' }
+                            setCfFilters(next)
+                          }}
+                          className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                        >
+                          {ops.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                        {needsValue && fieldType === 'checkbox' && (
+                          <select
+                            value={String(cf.value)}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], value: e.target.value === 'true' }
+                              setCfFilters(next)
+                            }}
+                            className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                          >
+                            <option value="true">Sí</option>
+                            <option value="false">No</option>
+                          </select>
+                        )}
+                        {needsValue && (fieldType === 'select' || fieldType === 'multi_select') && def?.config?.options && (
+                          <select
+                            value={String(cf.value)}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], value: e.target.value }
+                              setCfFilters(next)
+                            }}
+                            className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                          >
+                            <option value="">Seleccionar...</option>
+                            {def.config.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                          </select>
+                        )}
+                        {needsValue && fieldType === 'date' && (
+                          <input
+                            type="date"
+                            value={String(cf.value || '')}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], value: e.target.value }
+                              setCfFilters(next)
+                            }}
+                            className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                          />
+                        )}
+                        {needsValue && !['checkbox', 'select', 'multi_select', 'date'].includes(fieldType) && (
+                          <input
+                            type={fieldType === 'number' || fieldType === 'currency' ? 'number' : 'text'}
+                            value={String(cf.value || '')}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], value: fieldType === 'number' || fieldType === 'currency' ? (e.target.value ? Number(e.target.value) : '') : e.target.value }
+                              setCfFilters(next)
+                            }}
+                            placeholder="Valor..."
+                            className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 placeholder:text-slate-400 focus:ring-1 focus:ring-violet-400"
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+                )}
 
                 {/* ══ Right Column — Tags ══ */}
                 <div className="flex-1 min-w-0 overflow-y-auto p-3 space-y-4">
@@ -1622,13 +1851,46 @@ export default function ContactsPage() {
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell cursor-pointer select-none hover:text-slate-700" onClick={() => { if (sortBy === 'created_at') { setSortOrder(o => o === 'asc' ? 'desc' : 'asc') } else { setSortBy('created_at'); setSortOrder('desc') } }}>
                     <span className="inline-flex items-center gap-1">Creación {sortBy === 'created_at' ? <ChevronUp className={`w-3 h-3 transition-transform ${sortOrder === 'desc' ? 'rotate-180' : ''}`} /> : <ArrowUpDown className="w-3 h-3 opacity-40" />}</span>
                   </th>
-                  <th className="w-10 px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Acciones</th>
+                  {cfDefs.filter(d => cfVisibleIds.has(d.id)).sort((a, b) => a.sort_order - b.sort_order).map(def => (
+                    <th key={def.id} className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell max-w-[160px]">
+                      <span className="truncate block">{def.name}</span>
+                    </th>
+                  ))}
+                  <th className="w-10 px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider relative">
+                    <div ref={cfColumnPickerRef} className="inline-block">
+                      {cfDefs.length > 0 && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setShowCfColumnPicker(!showCfColumnPicker) }}
+                          className={`p-1 rounded hover:bg-slate-200 transition ${showCfColumnPicker || cfVisibleIds.size > 0 ? 'text-emerald-600' : 'text-slate-400'}`}
+                          title="Columnas personalizadas"
+                        >
+                          <Settings className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {showCfColumnPicker && (
+                        <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-2 max-h-64 overflow-y-auto">
+                          <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Campos personalizados</div>
+                          {cfDefs.sort((a, b) => a.sort_order - b.sort_order).map(def => (
+                            <label key={def.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-slate-50 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={cfVisibleIds.has(def.id)}
+                                onChange={() => toggleCfColumn(def.id)}
+                                className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                              />
+                              <span className="text-sm text-slate-700 truncate">{def.name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </th>
                 </tr>
               </thead>
               <tbody style={{ height: contacts.length > 0 ? contactsVirtualizer.getTotalSize() : undefined, position: 'relative', display: 'block' }}>
                 {contacts.length === 0 && !loading ? (
                   <tr style={{ display: 'table-row' }}>
-                    <td colSpan={selectionMode ? 8 : 7} className="text-center py-12 text-slate-500">
+                    <td colSpan={(selectionMode ? 8 : 7) + cfDefs.filter(d => cfVisibleIds.has(d.id)).length} className="text-center py-12 text-slate-500">
                       <Users className="w-12 h-12 mx-auto mb-3 text-slate-300" />
                       <p className="text-base font-medium">No hay contactos</p>
                       <p className="text-sm mt-1">Los contactos se sincronizan automáticamente desde tus dispositivos WhatsApp</p>
@@ -1738,6 +2000,11 @@ export default function ContactsPage() {
                         <span className="text-slate-300">-</span>
                       )}
                     </td>
+                    {cfDefs.filter(d => cfVisibleIds.has(d.id)).sort((a, b) => a.sort_order - b.sort_order).map(def => (
+                      <td key={def.id} className="px-4 py-3 text-xs text-slate-600 hidden lg:table-cell max-w-[160px]">
+                        {formatCfCell(def, contact)}
+                      </td>
+                    ))}
                     <td className="px-4 py-3 relative">
                       <div ref={actionsMenuId === contact.id ? actionsMenuRef : undefined}>
                         <button

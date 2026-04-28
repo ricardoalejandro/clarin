@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Plus, Search, BookOpen, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, MoreHorizontal, LayoutGrid, LayoutTemplate, List, AlertCircle } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program, ProgramFolder } from '@/types/program';
@@ -26,7 +26,17 @@ export default function ProgramsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [newProgram, setNewProgram] = useState({ name: '', description: '', color: '#10b981' });
+  const [newProgram, setNewProgram] = useState<{
+    name: string;
+    description: string;
+    color: string;
+    type: 'course' | 'event';
+    pipeline_id?: string;
+    event_date?: string;
+    event_end?: string;
+    location?: string;
+  }>({ name: '', description: '', color: '#10b981', type: 'course' });
+  const [pipelines, setPipelines] = useState<Array<{ id: string; name: string }>>([]);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [editingProgram, setEditingProgram] = useState<Program | null>(null);
   const [editForm, setEditForm] = useState({ name: '', description: '', color: '#10b981', status: 'active' });
@@ -43,6 +53,11 @@ export default function ProgramsPage() {
 
   // View mode
   const [viewMode, setViewMode] = useState<'grid' | 'list' | 'compact'>('grid');
+
+  // Drag & Drop state
+  const [dragOverFolderID, setDragOverFolderID] = useState<string | null>(null);
+  const [dragOverRoot, setDragOverRoot] = useState(false);
+  const dragProgramIDRef = useRef<string | null>(null);
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -66,7 +81,16 @@ export default function ProgramsPage() {
   useEffect(() => {
     fetchPrograms();
     fetchFolders();
+    fetchPipelines();
   }, []);
+
+  const fetchPipelines = async () => {
+    try {
+      const res = await fetch('/api/events/pipelines', { headers: { Authorization: `Bearer ${token()}` } });
+      const data = await res.json();
+      if (data.success) setPipelines((data.pipelines || []).map((p: any) => ({ id: p.id, name: p.name })));
+    } catch (e) { console.error(e); }
+  };
 
   // Close menus on outside click
   useEffect(() => {
@@ -108,18 +132,38 @@ export default function ProgramsPage() {
 
   const handleCreateProgram = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (newProgram.type === 'event' && !newProgram.pipeline_id) {
+      showToast('Selecciona un pipeline para el evento', 'error');
+      return;
+    }
     try {
+      const payload: any = {
+        name: newProgram.name,
+        description: newProgram.description,
+        color: newProgram.color,
+        type: newProgram.type,
+        folder_id: currentFolderID || undefined,
+      };
+      if (newProgram.type === 'event') {
+        payload.pipeline_id = newProgram.pipeline_id;
+        if (newProgram.event_date) payload.event_date = newProgram.event_date;
+        if (newProgram.event_end) payload.event_end = newProgram.event_end;
+        if (newProgram.location) payload.location = newProgram.location;
+      }
       const response = await api('/api/programs', {
         method: 'POST',
-        body: JSON.stringify({ ...newProgram, folder_id: currentFolderID || undefined })
+        body: JSON.stringify(payload),
       });
       if (response.success) {
         setIsCreateModalOpen(false);
-        setNewProgram({ name: '', description: '', color: '#10b981' });
+        setNewProgram({ name: '', description: '', color: '#10b981', type: 'course' });
         fetchPrograms();
+      } else {
+        showToast((response as any).error || 'Error al crear programa', 'error');
       }
     } catch (error) {
       console.error('Error creating program:', error);
+      showToast('Error al crear programa', 'error');
     }
   };
 
@@ -267,10 +311,7 @@ export default function ProgramsPage() {
     });
   };
 
-  const handleMoveToFolder = async (programId: string, folderId: string | null, e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setMenuID(null);
+  const moveProgramToFolder = async (programId: string, folderId: string | null) => {
     try {
       const res = await api(`/api/programs/${programId}/move-folder`, {
         method: 'PATCH',
@@ -278,7 +319,7 @@ export default function ProgramsPage() {
       });
       if (res.success) {
         showToast('Programa movido', 'success');
-        fetchPrograms();
+        await Promise.all([fetchPrograms(), fetchFolders()]);
       } else {
         showToast('Error al mover programa', 'error');
       }
@@ -286,6 +327,57 @@ export default function ProgramsPage() {
       console.error('Error moving program:', error);
       showToast('Error al mover programa', 'error');
     }
+  };
+
+  const handleMoveToFolder = async (programId: string, folderId: string | null, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenuID(null);
+    await moveProgramToFolder(programId, folderId);
+  };
+
+  // ─── Drag & Drop ──────────────────────────────────────────────────────────
+
+  const handleProgramDragStart = (e: React.DragEvent, programId: string) => {
+    dragProgramIDRef.current = programId;
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox requires data to start drag
+    try { e.dataTransfer.setData('text/plain', programId); } catch { /* noop */ }
+  };
+
+  const handleProgramDragEnd = () => {
+    dragProgramIDRef.current = null;
+    setDragOverFolderID(null);
+    setDragOverRoot(false);
+  };
+
+  const handleFolderDragOver = (e: React.DragEvent, folderID: string) => {
+    if (!dragProgramIDRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragOverFolderID !== folderID) setDragOverFolderID(folderID);
+  };
+
+  const handleFolderDrop = async (e: React.DragEvent, targetFolderID: string | null) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverFolderID(null);
+    setDragOverRoot(false);
+    const programId = dragProgramIDRef.current;
+    dragProgramIDRef.current = null;
+    if (!programId) return;
+    const prog = programs.find(p => p.id === programId);
+    if (prog && (prog.folder_id || null) === targetFolderID) return;
+    await moveProgramToFolder(programId, targetFolderID);
+  };
+
+  const handleRootDragOver = (e: React.DragEvent) => {
+    if (!dragProgramIDRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    if (!dragOverRoot) setDragOverRoot(true);
   };
 
   // Filter programs for current folder
@@ -310,7 +402,10 @@ export default function ProgramsPage() {
   const renderProgramCard = (program: Program) => {
     const status = STATUS_CONFIG[program.status] || STATUS_CONFIG.active;
     return (
-      <Link href={`/dashboard/programs/${program.id}`} key={program.id}>
+      <Link href={`/dashboard/programs/${program.id}`} key={program.id}
+        draggable
+        onDragStart={e => handleProgramDragStart(e, program.id)}
+        onDragEnd={handleProgramDragEnd}>
         <div className="group bg-white rounded-xl border border-slate-200 p-4 hover:shadow-md hover:border-slate-300 transition-all duration-200 cursor-pointer h-full flex flex-col relative">
           {/* Action buttons */}
           <div className={`absolute top-3 right-3 flex gap-1 transition-all ${menuID === program.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
@@ -365,9 +460,16 @@ export default function ProgramsPage() {
               <h3 className="font-semibold text-slate-800 truncate group-hover:text-emerald-700 transition-colors text-sm">
                 {program.name}
               </h3>
-              <div className={`inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded-full ${status.bg} ${status.text} mt-0.5`}>
-                {status.icon}
-                {status.label}
+              <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                <div className={`inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded-full ${status.bg} ${status.text}`}>
+                  {status.icon}
+                  {status.label}
+                </div>
+                {program.type === 'event' && (
+                  <div className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-700">
+                    <Calendar className="w-3 h-3" /> Evento
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -410,7 +512,10 @@ export default function ProgramsPage() {
   const renderProgramRow = (program: Program) => {
     const status = STATUS_CONFIG[program.status] || STATUS_CONFIG.active;
     return (
-      <Link href={`/dashboard/programs/${program.id}`} key={program.id}>
+      <Link href={`/dashboard/programs/${program.id}`} key={program.id}
+        draggable
+        onDragStart={e => handleProgramDragStart(e, program.id)}
+        onDragEnd={handleProgramDragEnd}>
         <div className="group flex items-center gap-4 bg-white border border-slate-200 rounded-xl px-4 py-3 hover:shadow-sm hover:border-slate-300 transition-all cursor-pointer">
           <div
             className="w-9 h-9 rounded-lg flex items-center justify-center text-white font-bold text-sm shrink-0"
@@ -447,7 +552,10 @@ export default function ProgramsPage() {
   const renderProgramCompact = (program: Program) => {
     const status = STATUS_CONFIG[program.status] || STATUS_CONFIG.active;
     return (
-      <Link href={`/dashboard/programs/${program.id}`} key={program.id}>
+      <Link href={`/dashboard/programs/${program.id}`} key={program.id}
+        draggable
+        onDragStart={e => handleProgramDragStart(e, program.id)}
+        onDragEnd={handleProgramDragEnd}>
         <div className="group flex items-center gap-3 px-3 py-2 hover:bg-slate-50 rounded-lg transition-all cursor-pointer border-b border-slate-100 last:border-b-0">
           <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: program.color || '#10b981' }} />
           <span className="font-medium text-slate-800 text-sm truncate flex-1 group-hover:text-emerald-700 transition-colors">{program.name}</span>
@@ -577,20 +685,30 @@ export default function ProgramsPage() {
       {folderPath.length > 0 && (
         <nav className="flex items-center gap-1 text-sm shrink-0">
           <button onClick={() => navigateToBreadcrumb(-1)}
-            className="flex items-center gap-1.5 px-2.5 py-1 text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors">
+            onDragOver={handleRootDragOver}
+            onDragLeave={() => setDragOverRoot(false)}
+            onDrop={e => handleFolderDrop(e, null)}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors ${dragOverRoot ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-400' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
             <Home className="w-3.5 h-3.5" />
             <span>Programas</span>
           </button>
-          {folderPath.map((folder, i) => (
+          {folderPath.map((folder, i) => {
+            const isLast = i === folderPath.length - 1;
+            const isDropTarget = !isLast && dragOverFolderID === folder.id;
+            return (
             <div key={folder.id} className="flex items-center gap-1">
               <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
               <button onClick={() => navigateToBreadcrumb(i)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors font-medium ${i === folderPath.length - 1 ? 'text-slate-900 bg-slate-100 cursor-default' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
+                onDragOver={isLast ? undefined : e => handleFolderDragOver(e, folder.id)}
+                onDragLeave={isLast ? undefined : () => setDragOverFolderID(prev => prev === folder.id ? null : prev)}
+                onDrop={isLast ? undefined : e => handleFolderDrop(e, folder.id)}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors font-medium ${isLast ? 'text-slate-900 bg-slate-100 cursor-default' : isDropTarget ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-400' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
                 <span className="text-base leading-none">{folder.icon}</span>
                 {folder.name}
               </button>
             </div>
-          ))}
+            );
+          })}
         </nav>
       )}
 
@@ -642,10 +760,15 @@ export default function ProgramsPage() {
             <div>
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Carpetas</p>
               <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-                {visibleFolders.map(folder => (
+                {visibleFolders.map(folder => {
+                  const isDropTarget = dragOverFolderID === folder.id;
+                  return (
                   <div key={folder.id}
                     onClick={() => navigateIntoFolder(folder)}
-                    className="relative group bg-white border-2 border-slate-200 rounded-xl p-4 cursor-pointer transition-all select-none hover:border-slate-300 hover:shadow-sm">
+                    onDragOver={e => handleFolderDragOver(e, folder.id)}
+                    onDragLeave={() => setDragOverFolderID(prev => prev === folder.id ? null : prev)}
+                    onDrop={e => handleFolderDrop(e, folder.id)}
+                    className={`relative group bg-white border-2 rounded-xl p-4 cursor-pointer transition-all select-none hover:shadow-sm ${isDropTarget ? 'border-emerald-500 bg-emerald-50 shadow-md scale-[1.02]' : 'border-slate-200 hover:border-slate-300'}`}>
                     <div className="absolute top-0 left-0 right-0 h-1 rounded-t-xl" style={{ backgroundColor: folder.color }} />
                     <div className="flex items-start justify-between mt-1">
                       <span className="text-3xl leading-none">{folder.icon}</span>
@@ -669,7 +792,8 @@ export default function ProgramsPage() {
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -720,6 +844,37 @@ export default function ProgramsPage() {
             <form onSubmit={handleCreateProgram}>
               <div className="space-y-4">
                 <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Tipo de programa</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setNewProgram({ ...newProgram, type: 'course' })}
+                      className={`p-4 rounded-xl border-2 text-left transition-all ${
+                        newProgram.type === 'course'
+                          ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-500/20'
+                          : 'border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      <GraduationCap className="w-5 h-5 text-emerald-600 mb-1.5" />
+                      <div className="font-semibold text-slate-800 text-sm">Curso</div>
+                      <div className="text-xs text-slate-500 mt-0.5">Sesiones y asistencia</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewProgram({ ...newProgram, type: 'event' })}
+                      className={`p-4 rounded-xl border-2 text-left transition-all ${
+                        newProgram.type === 'event'
+                          ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-500/20'
+                          : 'border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      <Calendar className="w-5 h-5 text-emerald-600 mb-1.5" />
+                      <div className="font-semibold text-slate-800 text-sm">Evento</div>
+                      <div className="text-xs text-slate-500 mt-0.5">Kanban con etapas</div>
+                    </button>
+                  </div>
+                </div>
+                <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Nombre</label>
                   <input
                     type="text"
@@ -740,6 +895,59 @@ export default function ProgramsPage() {
                     placeholder="Descripción del programa..."
                   />
                 </div>
+                {newProgram.type === 'event' && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1.5">Pipeline *</label>
+                      <select
+                        required
+                        value={newProgram.pipeline_id || ''}
+                        onChange={(e) => setNewProgram({ ...newProgram, pipeline_id: e.target.value })}
+                        className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all bg-white"
+                      >
+                        <option value="">Selecciona un pipeline...</option>
+                        {pipelines.map(p => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
+                      {pipelines.length === 0 && (
+                        <p className="text-xs text-amber-600 mt-1.5 flex items-center gap-1">
+                          <AlertCircle className="w-3.5 h-3.5" /> No hay pipelines. Crea uno en Eventos → Pipelines.
+                        </p>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha inicio</label>
+                        <input
+                          type="datetime-local"
+                          value={newProgram.event_date || ''}
+                          onChange={(e) => setNewProgram({ ...newProgram, event_date: e.target.value })}
+                          className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha fin</label>
+                        <input
+                          type="datetime-local"
+                          value={newProgram.event_end || ''}
+                          onChange={(e) => setNewProgram({ ...newProgram, event_end: e.target.value })}
+                          className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1.5">Ubicación</label>
+                      <input
+                        type="text"
+                        value={newProgram.location || ''}
+                        onChange={(e) => setNewProgram({ ...newProgram, location: e.target.value })}
+                        className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                        placeholder="Ej: Auditorio principal"
+                      />
+                    </div>
+                  </>
+                )}
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">Color</label>
                   <div className="flex gap-2.5">

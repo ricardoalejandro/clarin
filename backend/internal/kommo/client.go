@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -22,11 +24,29 @@ type Client struct {
 
 // NewClient creates a new Kommo API client.
 func NewClient(subdomain, accessToken string) *Client {
+	return NewClientWithProxy(subdomain, accessToken, "")
+}
+
+// NewClientWithProxy creates a new Kommo API client, optionally routing API
+// calls through a proxy such as socks5://host-gateway:40001.
+func NewClientWithProxy(subdomain, accessToken, proxyURL string) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if proxyURL != "" {
+		parsedProxyURL, err := url.Parse(proxyURL)
+		if err != nil {
+			log.Printf("[KOMMO] WARNING: invalid KOMMO_PROXY_URL %q: %v", proxyURL, err)
+		} else {
+			transport.Proxy = http.ProxyURL(parsedProxyURL)
+			log.Printf("[KOMMO] API requests will use proxy: %s", proxyURL)
+		}
+	}
+
 	return &Client{
 		baseURL: fmt.Sprintf("https://%s.kommo.com/api/v4", subdomain),
 		token:   accessToken,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 	}
 }
@@ -969,6 +989,59 @@ func (c *Client) UpdateContactName(kommoContactID int, name string) (int64, erro
 		return 0, fmt.Errorf("no contact in update response")
 	}
 	return resp.Embedded.Contacts[0].UpdatedAt, nil
+}
+
+// BatchUpdateResult is the outcome of a single item in a bulk PATCH response.
+type BatchUpdateResult struct {
+	ID        int   `json:"id"`
+	UpdatedAt int64 `json:"updated_at"`
+}
+
+// BatchUpdateLeads sends a single PATCH /leads with an arbitrary array of
+// lead update payloads. Caller is responsible for building payload maps with
+// the required `id` key plus any fields to update (name, status_id,
+// pipeline_id, custom_fields_values, _embedded.tags, etc.).
+//
+// The response contains one entry per updated lead with its id + updated_at.
+// Kommo accepts up to 250 items per request.
+func (c *Client) BatchUpdateLeads(items []map[string]interface{}) ([]BatchUpdateResult, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	data, err := c.doRequest("PATCH", "/leads", items)
+	if err != nil {
+		return nil, fmt.Errorf("batch update leads (%d items): %w", len(items), err)
+	}
+	var resp struct {
+		Embedded struct {
+			Leads []BatchUpdateResult `json:"leads"`
+		} `json:"_embedded"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse batch update leads response: %w", err)
+	}
+	return resp.Embedded.Leads, nil
+}
+
+// BatchUpdateContacts sends a single PATCH /contacts with an arbitrary array
+// of contact update payloads. Each payload must include `id`.
+func (c *Client) BatchUpdateContacts(items []map[string]interface{}) ([]BatchUpdateResult, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	data, err := c.doRequest("PATCH", "/contacts", items)
+	if err != nil {
+		return nil, fmt.Errorf("batch update contacts (%d items): %w", len(items), err)
+	}
+	var resp struct {
+		Embedded struct {
+			Contacts []BatchUpdateResult `json:"contacts"`
+		} `json:"_embedded"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse batch update contacts response: %w", err)
+	}
+	return resp.Embedded.Contacts, nil
 }
 
 // --- Webhook Management ---

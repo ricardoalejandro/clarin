@@ -51,6 +51,7 @@ const (
 	EventTaskUpdate              = "task_update"
 	EventTaskReminder            = "task_reminder"
 	EventTaskOverdue             = "task_overdue"
+	EventCustomFieldDefUpdate    = "custom_field_def_update"
 )
 
 // Message represents a WebSocket message

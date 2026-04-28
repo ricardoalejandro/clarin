@@ -134,17 +134,39 @@ func main() {
 	services.Automation.Start()
 	log.Printf("✅ Automation engine started (50 workers, 500/hr rate limit)")
 
-	// Initialize Kommo integration (optional)
-	var kommoSyncSvc *kommo.SyncService
+	// Initialize Kommo integrations (optional, multi-instance).
+	// Legacy env vars are migrated into a default integration instance so current
+	// accounts keep working while Admin can add more Kommo licenses.
 	if cfg.KommoSubdomain != "" && cfg.KommoAccessToken != "" {
-		kommoClient := kommo.NewClient(cfg.KommoSubdomain, cfg.KommoAccessToken)
-		kommoSyncSvc = kommo.NewSyncService(kommoClient, db, hub)
-		kommoSyncSvc.WebhookSecret = cfg.KommoWebhookSecret
-		kommoSyncSvc.PublicURL = cfg.PublicURL
-		// Wire event reconciliation callback — called after each Kommo sync cycle
-		kommoSyncSvc.OnLeadTagsChanged = services.Event.ReconcileAllAccountEvents
-		kommoSyncSvc.Start() // Start background sync worker + poller
-		log.Printf("✅ Kommo integration configured for %s.kommo.com", cfg.KommoSubdomain)
+		if _, err := repos.Integration.EnsureDefaultKommoInstance(ctx, repository.EnvKommoInstance{
+			Name:          "Kommo " + cfg.KommoSubdomain,
+			Subdomain:     cfg.KommoSubdomain,
+			ClientID:      cfg.KommoClientID,
+			ClientSecret:  cfg.KommoClientSecret,
+			AccessToken:   cfg.KommoAccessToken,
+			RedirectURI:   cfg.KommoRedirectURI,
+			WebhookSecret: cfg.KommoWebhookSecret,
+		}); err != nil {
+			log.Printf("Warning: Failed to migrate Kommo env integration: %v", err)
+		}
+	}
+	kommoManager := kommo.NewManager(db, hub, kommo.ManagerConfig{
+		PublicURL:           cfg.PublicURL,
+		ProxyURL:            cfg.KommoProxyURL,
+		OutboxEnabled:       cfg.KommoOutboxEnabled,
+		OutboxBatchSize:     cfg.KommoOutboxBatchSize,
+		OutboxFlushInterval: cfg.KommoOutboxFlushInterval,
+	})
+	kommoManager.OnLeadTagsChanged = services.Event.ReconcileAllAccountEvents
+	if err := kommoManager.Reload(ctx); err != nil {
+		log.Printf("Warning: Failed to start Kommo manager: %v", err)
+	}
+	kommoSyncSvc := kommoManager.Primary()
+	if kommoSyncSvc != nil {
+		log.Printf("✅ Kommo manager started (%d active instance(s))", kommoManager.RuntimeStatus()["running_instances"])
+		if cfg.KommoOutboxEnabled {
+			log.Printf("✅ Kommo outbox enabled (batch=%d, interval=%s)", cfg.KommoOutboxBatchSize, cfg.KommoOutboxFlushInterval)
+		}
 	}
 
 	// Initialize Google Contacts client (optional)
@@ -155,7 +177,7 @@ func main() {
 	}
 
 	// Initialize API server
-	server := api.NewServer(cfg, services, repos, hub, devicePool, store, kommoSyncSvc, redisCache, googleClient, Version)
+	server := api.NewServer(cfg, services, repos, hub, devicePool, store, kommoSyncSvc, kommoManager, redisCache, googleClient, Version)
 
 	// Initialize and start MCP server (Model Context Protocol) for ChatGPT/Claude/Copilot integration
 	mcpServer := clarinMCP.New(repos, services, cfg.JWTSecret)
@@ -529,9 +551,9 @@ func main() {
 		// Stop task worker
 		taskCancel()
 
-		// Stop Kommo sync worker
-		if kommoSyncSvc != nil {
-			kommoSyncSvc.Stop()
+		// Stop Kommo sync workers
+		if kommoManager != nil {
+			kommoManager.Stop()
 		}
 
 		// Close all WhatsApp connections

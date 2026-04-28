@@ -28,7 +28,6 @@ import (
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/formula"
 	googleclient "github.com/naperu/clarin/internal/google"
-	"golang.org/x/crypto/bcrypt"
 	"github.com/naperu/clarin/internal/kommo"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
@@ -38,6 +37,7 @@ import (
 	"github.com/naperu/clarin/pkg/cache"
 	"github.com/naperu/clarin/pkg/config"
 	"github.com/naperu/clarin/pkg/database"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // strPtr returns a pointer to a string
@@ -46,21 +46,22 @@ func strPtr(s string) *string {
 }
 
 type Server struct {
-	app      *fiber.App
-	cfg      *config.Config
-	services *service.Services
-	repos    *repository.Repositories
-	hub      *ws.Hub
-	pool     *whatsapp.DevicePool
-	storage  *storage.Storage
-	kommoSync *kommo.SyncService
-	cache    *cache.Cache
+	app          *fiber.App
+	cfg          *config.Config
+	services     *service.Services
+	repos        *repository.Repositories
+	hub          *ws.Hub
+	pool         *whatsapp.DevicePool
+	storage      *storage.Storage
+	kommoSync    *kommo.SyncService
+	kommoManager *kommo.Manager
+	cache        *cache.Cache
 	googleClient *googleclient.Client
-	version   string
-	changelog string
+	version      string
+	changelog    string
 }
 
-func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, c *cache.Cache, gc *googleclient.Client, version string) *Server {
+func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, kommoManager *kommo.Manager, c *cache.Cache, gc *googleclient.Client, version string) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:               "Clarin CRM",
 		BodyLimit:             32 * 1024 * 1024, // 32MB max upload
@@ -113,7 +114,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 				"error":   "too many requests, please slow down",
 			})
 		},
-		SkipFailedRequests: false,
+		SkipFailedRequests:     false,
 		SkipSuccessfulRequests: false,
 		Next: func(c *fiber.Ctx) bool {
 			// Skip rate limiting for media file endpoints and websocket
@@ -152,6 +153,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		pool:         pool,
 		storage:      store,
 		kommoSync:    kommoSyncSvc,
+		kommoManager: kommoManager,
 		cache:        c,
 		googleClient: gc,
 		version:      version,
@@ -180,6 +182,36 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	return server
 }
 
+func (s *Server) kommoForAccount(ctx context.Context, accountID uuid.UUID) *kommo.SyncService {
+	if s.kommoManager != nil {
+		if svc := s.kommoManager.ForAccount(ctx, accountID); svc != nil {
+			return svc
+		}
+	}
+	return s.kommoSync
+}
+
+func (s *Server) kommoForWebhook(secret string) *kommo.SyncService {
+	if s.kommoManager != nil {
+		if svc := s.kommoManager.ForWebhook(secret); svc != nil {
+			return svc
+		}
+	}
+	if s.kommoSync != nil && s.kommoSync.WebhookSecret != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(s.kommoSync.WebhookSecret)) == 1 {
+		return s.kommoSync
+	}
+	return nil
+}
+
+func (s *Server) defaultKommoSync() *kommo.SyncService {
+	if s.kommoManager != nil {
+		if svc := s.kommoManager.Primary(); svc != nil {
+			return svc
+		}
+	}
+	return s.kommoSync
+}
+
 func (s *Server) setupRoutes() {
 	// Health check — deep health probe checking all dependencies
 	s.app.Get("/health", s.handleHealthCheck)
@@ -203,10 +235,12 @@ func (s *Server) setupRoutes() {
 	api.Post("/public/surveys/:slug/upload", s.handleUploadSurveyFile)
 
 	// Public dynamic routes (no auth required)
-	api.Get("/public/dynamics/:slug", s.handleGetPublicDynamic)
+	// Order matters: specific paths before the catch-all :slug
+	api.Get("/public/dynamics/check-registration", s.handleCheckRegistration)
 	api.Post("/public/dynamics/send-whatsapp", s.handleSendDynamicWhatsApp)
 	api.Post("/public/dynamics/register", s.handleRegisterOnLink)
-	api.Get("/public/dynamics/check-registration", s.handleCheckRegistration)
+	api.Post("/public/dynamics/share", s.handleShareOnLink)
+	api.Get("/public/dynamics/:slug", s.handleGetPublicDynamic)
 
 	// Auth routes (no auth required)
 	auth := api.Group("/auth")
@@ -215,6 +249,10 @@ func (s *Server) setupRoutes() {
 
 	// Kommo webhook (public — called by Kommo, secret in URL for validation)
 	api.Post("/kommo/webhook/:secret", s.handleKommoWebhook)
+
+	// WhatsApp Cloud API webhook (public — verification token in env, device resolved by phone_number_id)
+	api.Get("/whatsapp/cloud/webhook", s.handleWhatsAppCloudVerify)
+	api.Post("/whatsapp/cloud/webhook", s.handleWhatsAppCloudWebhook)
 
 	// Protected routes
 	protected := api.Group("", s.authMiddleware)
@@ -362,6 +400,7 @@ func (s *Server) setupRoutes() {
 	programs.Get("/:id/participants", s.handleListParticipants)
 	programs.Post("/:id/participants", s.handleAddParticipant)
 	programs.Delete("/:id/participants/:participantId", s.handleRemoveParticipant)
+	programs.Patch("/:id/participants/:participantId/stage", s.handleUpdateProgramParticipantStage)
 
 	programs.Get("/:id/sessions", s.handleListSessions)
 	programs.Post("/:id/sessions", s.handleCreateSession)
@@ -407,6 +446,19 @@ func (s *Server) setupRoutes() {
 	contacts.Post("/:id/reset", s.handleResetContactFromDevice)
 	contacts.Post("/:id/sync-kommo", s.handleSyncContactFromKommo)
 	contacts.Delete("/:id", s.handleDeleteContact)
+
+	// Custom field value routes (under contacts, all authenticated users)
+	contacts.Get("/:id/custom-fields", s.handleGetCustomFieldValues)
+	contacts.Put("/:id/custom-fields", s.handleBatchUpsertCustomFieldValues)
+	contacts.Put("/:id/custom-fields/:fieldId", s.handleUpsertCustomFieldValue)
+
+	// Custom field definition routes (read: all authenticated, write: admin)
+	customFields := protected.Group("/custom-fields", s.requirePermission(domain.PermSettings))
+	customFields.Get("/", s.handleGetCustomFieldDefinitions)
+	customFields.Post("/", s.handleCreateCustomFieldDefinition)
+	customFields.Put("/reorder", s.handleReorderCustomFieldDefinitions)
+	customFields.Put("/:id", s.handleUpdateCustomFieldDefinition)
+	customFields.Delete("/:id", s.handleDeleteCustomFieldDefinition)
 
 	// Sync contacts route (under devices)
 	devices.Post("/:id/sync-contacts", s.handleSyncDeviceContacts)
@@ -520,21 +572,11 @@ func (s *Server) setupRoutes() {
 	quickReplies.Put("/:id", s.handleUpdateQuickReply)
 	quickReplies.Delete("/:id", s.handleDeleteQuickReply)
 
-	// Kommo integration routes
-	kommoGroup := protected.Group("/kommo", s.requirePermission(domain.PermIntegrations))
-	kommoGroup.Get("/status", s.handleKommoStatus)
-	kommoGroup.Post("/sync", s.handleKommoSync)
-	kommoGroup.Get("/pipelines", s.handleKommoGetPipelines)
-	kommoGroup.Get("/connected", s.handleKommoGetConnected)
-	kommoGroup.Post("/pipelines/:kommoId/connect", s.handleKommoConnectPipeline)
-	kommoGroup.Delete("/pipelines/:kommoId/connect", s.handleKommoDisconnectPipeline)
-	kommoGroup.Post("/pipelines/toggle-all", s.handleKommoToggleAllPipelines)
-	kommoGroup.Post("/toggle", s.handleKommoToggleEnabled)
-	kommoGroup.Get("/sync/status", s.handleKommoSyncStatus)
-	kommoGroup.Get("/sync/full-status", s.handleKommoFullSyncStatus)
-	kommoGroup.Get("/sync/events-poller", s.handleEventsPollerStatus)
-	kommoGroup.Post("/sync/events-poller/force", s.handleForceEventsPoll)
-	kommoGroup.Get("/sync/monitor", s.handleSyncMonitor)
+	// Legacy per-account Kommo configuration routes are disabled. Kommo is now
+	// administered centrally through /admin/integrations and assigned to account groups.
+	kommoGroup := protected.Group("/kommo")
+	kommoGroup.All("/", s.handleKommoLegacyDisabled)
+	kommoGroup.All("/*", s.handleKommoLegacyDisabled)
 
 	// Google Contacts integration routes
 	googleGroup := protected.Group("/google", s.requirePermission(domain.PermIntegrations))
@@ -551,6 +593,27 @@ func (s *Server) setupRoutes() {
 	googleContacts.Post("/batch/desync", s.handleGoogleBatchDesync)
 	googleContacts.Post("/batch/sync-from-leads", s.handleGoogleBatchSyncFromLeads)
 	googleContacts.Post("/batch/desync-from-leads", s.handleGoogleBatchDesyncFromLeads)
+
+	// WhatsApp Cloud API administration (configuration/audit only; outbound is guarded)
+	whatsappAPI := protected.Group("/whatsapp-api", s.requirePermission(domain.PermIntegrations))
+	whatsappAPI.Get("/overview", s.handleWhatsAppAPIOverview)
+	whatsappAPI.Get("/templates", s.handleListWhatsAppTemplates)
+	whatsappAPI.Post("/templates", s.handleCreateWhatsAppTemplate)
+	whatsappAPI.Put("/templates/:id", s.handleUpdateWhatsAppTemplate)
+	whatsappAPI.Delete("/templates/:id", s.handleDeleteWhatsAppTemplate)
+	whatsappAPI.Get("/webhook-events", s.handleListWhatsAppWebhookEvents)
+	whatsappAPI.Get("/windows", s.handleListWhatsAppWindows)
+
+	// Chat bots v1 — administrable and simulable, no automatic paid sends in this phase
+	bots := protected.Group("/bots", s.requirePermission(domain.PermLeads))
+	bots.Get("/", s.handleListBots)
+	bots.Post("/", s.handleCreateBot)
+	bots.Get("/:id", s.handleGetBot)
+	bots.Put("/:id", s.handleUpdateBot)
+	bots.Delete("/:id", s.handleDeleteBot)
+	bots.Post("/:id/publish", s.handlePublishBot)
+	bots.Post("/:id/simulate", s.handleSimulateBot)
+	bots.Get("/:id/logs", s.handleListBotLogs)
 
 	// Automation routes
 	automations := protected.Group("/automations", s.requirePermission(domain.PermLeads))
@@ -613,6 +676,12 @@ func (s *Server) setupRoutes() {
 	dynamics.Delete("/:id/links/:linkId", s.handleDeleteDynamicLink)
 	dynamics.Post("/:id/links/:linkId/extra-media", s.handleUploadLinkExtraMedia)
 	dynamics.Delete("/:id/links/:linkId/extra-media", s.handleDeleteLinkExtraMedia)
+	// Multi extra media (up to 10 per link)
+	dynamics.Get("/:id/links/:linkId/media", s.handleListLinkMedia)
+	dynamics.Post("/:id/links/:linkId/media", s.handleCreateLinkMedia)
+	dynamics.Post("/:id/links/:linkId/media/reorder", s.handleReorderLinkMedia)
+	dynamics.Patch("/:id/links/:linkId/media/:mediaId", s.handleUpdateLinkMediaCaption)
+	dynamics.Delete("/:id/links/:linkId/media/:mediaId", s.handleDeleteLinkMedia)
 	// Dynamic link registrations
 	dynamics.Get("/:id/links/:linkId/registrations", s.handleListLinkRegistrations)
 	dynamics.Get("/:id/links/:linkId/registrations/export", s.handleExportLinkRegistrations)
@@ -645,6 +714,8 @@ func (s *Server) setupRoutes() {
 	adminAccounts.Get("/:id", s.handleAdminGetAccount)
 	adminAccounts.Put("/:id", s.handleAdminUpdateAccount)
 	adminAccounts.Patch("/:id/toggle", s.handleAdminToggleAccount)
+	adminAccounts.Get("/:id/purge-preview", s.handleAdminAccountPurgePreview)
+	adminAccounts.Delete("/:id/purge", s.handleAdminPurgeAccount)
 	adminAccounts.Delete("/:id", s.handleAdminDeleteAccount)
 
 	// User management
@@ -667,6 +738,16 @@ func (s *Server) setupRoutes() {
 	adminRoles.Post("/", s.handleAdminCreateRole)
 	adminRoles.Put("/:id", s.handleAdminUpdateRole)
 	adminRoles.Delete("/:id", s.handleAdminDeleteRole)
+
+	// Integration management
+	adminIntegrations := admin.Group("/integrations")
+	adminIntegrations.Get("/", s.handleAdminListIntegrations)
+	adminIntegrations.Post("/", s.handleAdminCreateIntegration)
+	adminIntegrations.Put("/:id", s.handleAdminUpdateIntegration)
+	adminIntegrations.Delete("/:id", s.handleAdminDeleteIntegration)
+	adminIntegrations.Post("/:id/accounts", s.handleAdminAssignIntegrationAccount)
+	adminIntegrations.Delete("/:id/accounts/:account_id", s.handleAdminRemoveIntegrationAccount)
+	adminIntegrations.Post("/:id/reload", s.handleAdminReloadIntegrations)
 }
 
 // Auth middleware
@@ -1237,6 +1318,36 @@ func (s *Server) handleChangePassword(c *fiber.Ctx) error {
 
 // --- Device Handlers ---
 
+func cleanDeviceString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
+func cleanDeviceStringDefault(value *string, fallback string) *string {
+	cleaned := cleanDeviceString(value)
+	if cleaned != nil {
+		return cleaned
+	}
+	return &fallback
+}
+
+func getDeviceProvider(device *domain.Device) string {
+	if device == nil || device.Provider == nil || *device.Provider == "" {
+		return domain.DeviceProviderWhatsAppWeb
+	}
+	return *device.Provider
+}
+
+func isCloudAPIDevice(device *domain.Device) bool {
+	return getDeviceProvider(device) == domain.DeviceProviderWhatsAppCloudAPI
+}
+
 func (s *Server) handleGetDevices(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	devices, err := s.services.Device.GetByAccountID(c.Context(), accountID)
@@ -1248,18 +1359,67 @@ func (s *Server) handleGetDevices(c *fiber.Ctx) error {
 
 func (s *Server) handleCreateDevice(c *fiber.Ctx) error {
 	var req struct {
-		Name string `json:"name"`
+		Name                string  `json:"name"`
+		Provider            string  `json:"provider"`
+		WABAID              *string `json:"waba_id"`
+		PhoneNumberID       *string `json:"phone_number_id"`
+		APIDisplayPhone     *string `json:"api_display_phone"`
+		APIWebhookStatus    *string `json:"api_webhook_status"`
+		APIBillingStatus    *string `json:"api_billing_status"`
+		APISendingEnabled   bool    `json:"api_sending_enabled"`
+		APITemplatesEnabled bool    `json:"api_templates_enabled"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-
-	accountID := c.Locals("account_id").(uuid.UUID)
-	device, err := s.services.Device.Create(c.Context(), accountID, req.Name)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El nombre del dispositivo es obligatorio"})
 	}
 
+	provider := strings.TrimSpace(req.Provider)
+	if provider == "" {
+		provider = domain.DeviceProviderWhatsAppWeb
+	}
+
+	accountID := c.Locals("account_id").(uuid.UUID)
+	if provider == domain.DeviceProviderWhatsAppWeb {
+		device, err := s.services.Device.Create(c.Context(), accountID, req.Name)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		return c.Status(201).JSON(fiber.Map{"success": true, "device": device})
+	}
+
+	if provider != domain.DeviceProviderWhatsAppCloudAPI {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Proveedor de WhatsApp no soportado"})
+	}
+	if req.APISendingEnabled || req.APITemplatesEnabled {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El envío por WhatsApp API Oficial aún está bloqueado en esta fase"})
+	}
+
+	status := domain.DeviceStatusDisconnected
+	webhookStatus := "not_configured"
+	billingStatus := "not_configured"
+	displayPhone := cleanDeviceString(req.APIDisplayPhone)
+	device := &domain.Device{
+		AccountID:           accountID,
+		Name:                &req.Name,
+		Phone:               displayPhone,
+		Status:              &status,
+		Provider:            &provider,
+		WABAID:              cleanDeviceString(req.WABAID),
+		PhoneNumberID:       cleanDeviceString(req.PhoneNumberID),
+		APIDisplayPhone:     displayPhone,
+		APIWebhookStatus:    cleanDeviceStringDefault(req.APIWebhookStatus, webhookStatus),
+		APIBillingStatus:    cleanDeviceStringDefault(req.APIBillingStatus, billingStatus),
+		APISendingEnabled:   false,
+		APITemplatesEnabled: false,
+		Capabilities:        json.RawMessage(`["cloud_api_config"]`),
+	}
+	if err := s.repos.Device.Create(c.Context(), device); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "device": device})
 }
 
@@ -1287,8 +1447,12 @@ func (s *Server) handleConnectDevice(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+	dev, _ := s.services.Device.GetByID(c.Context(), deviceID)
+	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	}
+	if isCloudAPIDevice(dev) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Este canal usa WhatsApp API Oficial y no se conecta por QR"})
 	}
 
 	if err := s.services.Device.Connect(c.Context(), deviceID); err != nil {
@@ -1304,8 +1468,12 @@ func (s *Server) handleDisconnectDevice(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+	dev, _ := s.services.Device.GetByID(c.Context(), deviceID)
+	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	}
+	if isCloudAPIDevice(dev) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Este canal usa WhatsApp API Oficial y no usa desconexión QR"})
 	}
 
 	if err := s.services.Device.Disconnect(c.Context(), deviceID); err != nil {
@@ -1321,8 +1489,12 @@ func (s *Server) handleResetDevice(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+	dev, _ := s.services.Device.GetByID(c.Context(), deviceID)
+	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	}
+	if isCloudAPIDevice(dev) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Este canal usa WhatsApp API Oficial y no se re-vincula por QR"})
 	}
 
 	if err := s.services.Device.Reset(c.Context(), deviceID); err != nil {
@@ -1338,12 +1510,19 @@ func (s *Server) handleDeleteDevice(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+	dev, _ := s.services.Device.GetByID(c.Context(), deviceID)
+	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
-	if err := s.services.Device.Delete(c.Context(), deviceID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	var deleteErr error
+	if isCloudAPIDevice(dev) {
+		deleteErr = s.repos.Device.Delete(c.Context(), deviceID)
+	} else {
+		deleteErr = s.services.Device.Delete(c.Context(), deviceID)
+	}
+	if deleteErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": deleteErr.Error()})
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Device deleted"})
@@ -1355,18 +1534,63 @@ func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
+	dev, _ := s.services.Device.GetByID(c.Context(), deviceID)
+	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 	var req struct {
-		Name            *string `json:"name"`
-		ReceiveMessages *bool   `json:"receive_messages"`
+		Name                *string `json:"name"`
+		ReceiveMessages     *bool   `json:"receive_messages"`
+		WABAID              *string `json:"waba_id"`
+		PhoneNumberID       *string `json:"phone_number_id"`
+		APIDisplayPhone     *string `json:"api_display_phone"`
+		APIWebhookStatus    *string `json:"api_webhook_status"`
+		APIBillingStatus    *string `json:"api_billing_status"`
+		APISendingEnabled   *bool   `json:"api_sending_enabled"`
+		APITemplatesEnabled *bool   `json:"api_templates_enabled"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	if req.Name != nil && *req.Name != "" {
-		if err := s.repos.Device.UpdateName(c.Context(), deviceID, *req.Name); err != nil {
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "El nombre del dispositivo es obligatorio"})
+		}
+		if err := s.repos.Device.UpdateName(c.Context(), deviceID, name); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+	}
+	if isCloudAPIDevice(dev) {
+		if req.APISendingEnabled != nil && *req.APISendingEnabled {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "El envío por WhatsApp API Oficial aún está bloqueado en esta fase"})
+		}
+		if req.APITemplatesEnabled != nil && *req.APITemplatesEnabled {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Las plantillas de WhatsApp API Oficial aún están bloqueadas en esta fase"})
+		}
+		apiConfig := *dev
+		if req.WABAID != nil {
+			apiConfig.WABAID = cleanDeviceString(req.WABAID)
+		}
+		if req.PhoneNumberID != nil {
+			apiConfig.PhoneNumberID = cleanDeviceString(req.PhoneNumberID)
+		}
+		if req.APIDisplayPhone != nil {
+			apiConfig.APIDisplayPhone = cleanDeviceString(req.APIDisplayPhone)
+			apiConfig.Phone = apiConfig.APIDisplayPhone
+		}
+		if req.APIWebhookStatus != nil {
+			apiConfig.APIWebhookStatus = cleanDeviceStringDefault(req.APIWebhookStatus, "not_configured")
+		}
+		if req.APIBillingStatus != nil {
+			apiConfig.APIBillingStatus = cleanDeviceStringDefault(req.APIBillingStatus, "not_configured")
+		}
+		apiConfig.APISendingEnabled = false
+		apiConfig.APITemplatesEnabled = false
+		if len(apiConfig.Capabilities) == 0 {
+			apiConfig.Capabilities = json.RawMessage(`["cloud_api_config"]`)
+		}
+		if err := s.repos.Device.UpdateCloudAPIConfig(c.Context(), deviceID, &apiConfig); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
 	}
@@ -1375,7 +1599,7 @@ func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
 		// Update in-memory flag in device pool so it takes effect immediately
-		if s.pool != nil {
+		if s.pool != nil && !isCloudAPIDevice(dev) {
 			s.pool.SetReceiveMessages(deviceID, *req.ReceiveMessages)
 		}
 	}
@@ -1417,8 +1641,50 @@ func (s *Server) handleGetChats(c *fiber.Ctx) error {
 		}
 	}
 
+	// Parse reaction filter
+	filter.HasReaction = c.QueryBool("has_reaction", false)
+	if filter.HasReaction {
+		// reaction_from_me: "true"=operator, "false"=client, missing/"any"=both
+		switch strings.ToLower(c.Query("reaction_from_me", "")) {
+		case "true", "1", "me", "operator":
+			v := true
+			filter.ReactionFromMe = &v
+		case "false", "0", "client", "contact":
+			v := false
+			filter.ReactionFromMe = &v
+		}
+
+		// reaction_emojis: comma-separated or repeated param
+		emojisRaw := c.Context().QueryArgs().PeekMulti("reaction_emojis")
+		for _, raw := range emojisRaw {
+			for _, e := range strings.Split(string(raw), ",") {
+				if v := strings.TrimSpace(e); v != "" {
+					filter.ReactionEmojis = append(filter.ReactionEmojis, v)
+				}
+			}
+		}
+
+		// reaction_since / reaction_until: RFC3339 or unix seconds
+		if v := c.Query("reaction_since", ""); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				filter.ReactionSince = &t
+			} else if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+				t := time.Unix(secs, 0)
+				filter.ReactionSince = &t
+			}
+		}
+		if v := c.Query("reaction_until", ""); v != "" {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				filter.ReactionUntil = &t
+			} else if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+				t := time.Unix(secs, 0)
+				filter.ReactionUntil = &t
+			}
+		}
+	}
+
 	// Redis cache for default load (no search/filters) — 15s TTL
-	isDefaultLoad := filter.Search == "" && !filter.UnreadOnly && !filter.Archived && len(filter.DeviceIDs) == 0 && len(filter.TagIDs) == 0 && filter.Offset == 0
+	isDefaultLoad := filter.Search == "" && !filter.UnreadOnly && !filter.Archived && len(filter.DeviceIDs) == 0 && len(filter.TagIDs) == 0 && !filter.HasReaction && filter.Offset == 0
 	cacheKey := ""
 	if isDefaultLoad && s.cache != nil {
 		cacheKey = fmt.Sprintf("chats:%s:%d", accountID.String(), filter.Limit)
@@ -1769,8 +2035,8 @@ func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID  string `json:"device_id"`
-		To        string `json:"to"`  // target chat JID
-		ChatID    string `json:"chat_id"` // source chat UUID
+		To        string `json:"to"`         // target chat JID
+		ChatID    string `json:"chat_id"`    // source chat UUID
 		MessageID string `json:"message_id"` // WhatsApp message_id of the original message
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -2348,6 +2614,30 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 	// Assign tags to leads
 	for _, lead := range leads {
 		lead.StructuredTags = tagMap[lead.ID]
+	}
+
+	// Optionally load custom field values via contact_id
+	if c.QueryBool("include_custom_fields", false) && len(leads) > 0 {
+		contactIDSet := make(map[uuid.UUID]bool)
+		for _, lead := range leads {
+			if lead.ContactID != nil {
+				contactIDSet[*lead.ContactID] = true
+			}
+		}
+		if len(contactIDSet) > 0 {
+			contactIDs := make([]uuid.UUID, 0, len(contactIDSet))
+			for cid := range contactIDSet {
+				contactIDs = append(contactIDs, cid)
+			}
+			cfMap, cfErr := s.repos.CustomField.GetValuesByContacts(c.Context(), contactIDs)
+			if cfErr == nil {
+				for _, lead := range leads {
+					if lead.ContactID != nil {
+						lead.CustomFieldValues = cfMap[*lead.ContactID]
+					}
+				}
+			}
+		}
 	}
 
 	result := fiber.Map{"success": true, "leads": leads}
@@ -3308,8 +3598,11 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 
 	offset, _ := strconv.Atoi(c.Query("offset", "0"))
 	limit, _ := strconv.Atoi(c.Query("limit", "100"))
-	if limit <= 0 || limit > 500 {
+	if limit <= 0 {
 		limit = 100
+	}
+	if limit > 100000 {
+		limit = 100000
 	}
 	search := strings.TrimSpace(c.Query("search"))
 	tagNamesRaw := c.Query("tag_names")
@@ -3411,6 +3704,24 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 	addDateFilter(c, "l", leadDateFields, &whereClauses, &args, &argIdx)
 	addKommoSyncFilter(c.Query("kommo_sync", "all"), &whereClauses)
 
+	// Custom field filters for leads (via contact_id)
+	if cfFilterRaw := c.Query("cf_filter"); cfFilterRaw != "" {
+		var cfFilters []repository.CustomFieldFilterParam
+		if err := json.Unmarshal([]byte(cfFilterRaw), &cfFilters); err == nil && len(cfFilters) > 0 {
+			matchIDs, err := s.repos.CustomField.FindContactIDsByFilters(c.Context(), accountID, cfFilters)
+			if err == nil {
+				if len(matchIDs) == 0 {
+					return c.JSON(fiber.Map{
+						"success": true, "leads": []interface{}{}, "total": 0, "has_more": false,
+					})
+				}
+				whereClauses = append(whereClauses, fmt.Sprintf("l.contact_id = ANY($%d)", argIdx))
+				args = append(args, matchIDs)
+				argIdx++
+			}
+		}
+	}
+
 	whereSQL := strings.Join(whereClauses, " AND ")
 
 	// Count + fetch in parallel
@@ -3509,10 +3820,10 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"success":    true,
-		"leads":      leads,
-		"total":      total,
-		"has_more":   offset+len(leads) < total,
+		"success":  true,
+		"leads":    leads,
+		"total":    total,
+		"has_more": offset+len(leads) < total,
 	})
 }
 func (s *Server) broadcastLeadDelta(accountID uuid.UUID, action string, lead *domain.Lead) {
@@ -3709,8 +4020,8 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 	}
 
 	// Push new lead to Kommo (async, only if pipeline is Kommo-connected)
-	if s.kommoSync != nil {
-		go s.kommoSync.PushNewLead(accountID, lead.ID)
+	if kommoSync := s.kommoForAccount(c.Context(), accountID); kommoSync != nil {
+		go kommoSync.PushNewLead(accountID, lead.ID)
 	}
 
 	s.invalidateLeadsCache(accountID)
@@ -3766,14 +4077,15 @@ func (s *Server) handleSyncLeadFromKommo(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
 	}
 
-	if s.kommoSync == nil {
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo integration not configured"})
 	}
 	if lead, _ := s.services.Lead.GetByID(c.Context(), leadID); lead == nil || lead.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
 	}
 
-	if err := s.kommoSync.SyncSingleLead(c.Context(), accountID, leadID); err != nil {
+	if err := kommoSync.SyncSingleLead(c.Context(), accountID, leadID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -3843,28 +4155,60 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 
 	// Update fields if provided
 	if req.Name != nil {
-		if *req.Name == "" { lead.Name = nil } else { lead.Name = req.Name }
+		if *req.Name == "" {
+			lead.Name = nil
+		} else {
+			lead.Name = req.Name
+		}
 	}
 	if req.LastName != nil {
-		if *req.LastName == "" { lead.LastName = nil } else { lead.LastName = req.LastName }
+		if *req.LastName == "" {
+			lead.LastName = nil
+		} else {
+			lead.LastName = req.LastName
+		}
 	}
 	if req.ShortName != nil {
-		if *req.ShortName == "" { lead.ShortName = nil } else { lead.ShortName = req.ShortName }
+		if *req.ShortName == "" {
+			lead.ShortName = nil
+		} else {
+			lead.ShortName = req.ShortName
+		}
 	}
 	if req.Phone != nil {
-		if *req.Phone == "" { lead.Phone = nil } else { lead.Phone = req.Phone }
+		if *req.Phone == "" {
+			lead.Phone = nil
+		} else {
+			lead.Phone = req.Phone
+		}
 	}
 	if req.Email != nil {
-		if *req.Email == "" { lead.Email = nil } else { lead.Email = req.Email }
+		if *req.Email == "" {
+			lead.Email = nil
+		} else {
+			lead.Email = req.Email
+		}
 	}
 	if req.Company != nil {
-		if *req.Company == "" { lead.Company = nil } else { lead.Company = req.Company }
+		if *req.Company == "" {
+			lead.Company = nil
+		} else {
+			lead.Company = req.Company
+		}
 	}
 	if req.Age != nil {
-		if *req.Age == 0 { lead.Age = nil } else { lead.Age = req.Age }
+		if *req.Age == 0 {
+			lead.Age = nil
+		} else {
+			lead.Age = req.Age
+		}
 	}
 	if req.DNI != nil {
-		if *req.DNI == "" { lead.DNI = nil } else { lead.DNI = req.DNI }
+		if *req.DNI == "" {
+			lead.DNI = nil
+		} else {
+			lead.DNI = req.DNI
+		}
 	}
 	if req.BirthDate != nil {
 		if *req.BirthDate == "" {
@@ -3874,22 +4218,46 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 		}
 	}
 	if req.Address != nil {
-		if *req.Address == "" { lead.Address = nil } else { lead.Address = req.Address }
+		if *req.Address == "" {
+			lead.Address = nil
+		} else {
+			lead.Address = req.Address
+		}
 	}
 	if req.Distrito != nil {
-		if *req.Distrito == "" { lead.Distrito = nil } else { lead.Distrito = req.Distrito }
+		if *req.Distrito == "" {
+			lead.Distrito = nil
+		} else {
+			lead.Distrito = req.Distrito
+		}
 	}
 	if req.Ocupacion != nil {
-		if *req.Ocupacion == "" { lead.Ocupacion = nil } else { lead.Ocupacion = req.Ocupacion }
+		if *req.Ocupacion == "" {
+			lead.Ocupacion = nil
+		} else {
+			lead.Ocupacion = req.Ocupacion
+		}
 	}
 	if req.Status != nil {
-		if *req.Status == "" { lead.Status = nil } else { lead.Status = req.Status }
+		if *req.Status == "" {
+			lead.Status = nil
+		} else {
+			lead.Status = req.Status
+		}
 	}
 	if req.Source != nil {
-		if *req.Source == "" { lead.Source = nil } else { lead.Source = req.Source }
+		if *req.Source == "" {
+			lead.Source = nil
+		} else {
+			lead.Source = req.Source
+		}
 	}
 	if req.Notes != nil {
-		if *req.Notes == "" { lead.Notes = nil } else { lead.Notes = req.Notes }
+		if *req.Notes == "" {
+			lead.Notes = nil
+		} else {
+			lead.Notes = req.Notes
+		}
 	}
 	if req.Tags != nil {
 		lead.Tags = req.Tags
@@ -3945,24 +4313,24 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	}
 
 	// Kommo Sync
-	if s.kommoSync != nil {
+	if kommoSync := s.kommoForAccount(c.Context(), lead.AccountID); kommoSync != nil {
 		// If lead is not linked to Kommo yet, try to create it there (PushNewLead handles checks)
 		if lead.KommoID == nil || *lead.KommoID == 0 {
-			go s.kommoSync.PushNewLead(lead.AccountID, lead.ID)
+			go kommoSync.PushNewLead(lead.AccountID, lead.ID)
 		} else {
-			// Already linked, push updates
+			// Already linked, push updates (batched via outbox when enabled)
 			if req.Name != nil {
 				newName := ""
 				if lead.Name != nil {
 					newName = *lead.Name
 				}
 				if newName != oldName {
-					go s.kommoSync.PushLeadName(lead.AccountID, lead.ID)
+					kommoSync.EnqueuePushLeadName(lead.AccountID, lead.ID)
 				}
 			}
 			// Push pipeline/stage change
 			if req.PipelineID != nil || req.StageID != nil {
-				go s.kommoSync.PushPipelineStageChange(lead.AccountID, lead.ID)
+				kommoSync.EnqueuePushLeadStage(lead.AccountID, lead.ID)
 			}
 		}
 	}
@@ -4030,8 +4398,13 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 
 	accountID := c.Locals("account_id").(uuid.UUID)
 
-	// If delete_from_kommo=true, move lead to "Perdido" (status 143) in Kommo first
-	if c.Query("delete_from_kommo") == "true" && s.kommoSync != nil {
+	// If delete_from_kommo=true, enqueue a "Perdido" (status 143) move in Kommo.
+	// The outbox will flush it in batch; the local delete below runs immediately.
+	if c.Query("delete_from_kommo") == "true" {
+		kommoSync := s.kommoForAccount(c.Context(), accountID)
+		if kommoSync == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo integration not configured"})
+		}
 		var kommoLeadID *int64
 		var kommoPipelineID *int64
 		err := s.repos.DB().QueryRow(c.Context(), `
@@ -4046,13 +4419,8 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 		if kommoPipelineID == nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Pipeline no está vinculado a Kommo"})
 		}
-		// Move to "Perdido" (status 143) in Kommo
-		_, pushErr := s.kommoSync.GetClient().UpdateLeadStatus(int(*kommoLeadID), 143, int(*kommoPipelineID))
-		if pushErr != nil {
-			log.Printf("[DELETE+KOMMO] Failed to move lead %s (Kommo %d) to Perdido: %v", leadID, *kommoLeadID, pushErr)
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo mover a Perdido en Kommo: " + pushErr.Error()})
-		}
-		log.Printf("[DELETE+KOMMO] Lead %s (Kommo %d) moved to Perdido (143) in Kommo pipeline %d", leadID, *kommoLeadID, *kommoPipelineID)
+		kommoSync.EnqueuePushLeadStageForced(accountID, leadID, *kommoLeadID, 143, *kommoPipelineID)
+		log.Printf("[DELETE+KOMMO] Lead %s (Kommo %d) enqueued move to Perdido (143) in Kommo pipeline %d", leadID, *kommoLeadID, *kommoPipelineID)
 	}
 
 	// Transfer orphaned interactions to the lead's contact before deleting
@@ -4121,8 +4489,12 @@ func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No valid IDs provided"})
 	}
 
-	// If delete_from_kommo=true, move synced leads to "Perdido" in Kommo first
-	if deleteFromKommo && s.kommoSync != nil {
+	// If delete_from_kommo=true, enqueue "Perdido" moves for synced leads in Kommo
+	if deleteFromKommo {
+		kommoSync := s.kommoForAccount(c.Context(), accountID)
+		if kommoSync == nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo integration not configured"})
+		}
 		rows, err := s.repos.DB().Query(c.Context(), `
 			SELECT l.id, l.kommo_id, p.kommo_id
 			FROM leads l
@@ -4141,13 +4513,8 @@ func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 				if kommoLeadID == nil || kommoPipelineID == nil {
 					continue
 				}
-				// Move to "Perdido" (status 143) in Kommo
-				_, pushErr := s.kommoSync.GetClient().UpdateLeadStatus(int(*kommoLeadID), 143, int(*kommoPipelineID))
-				if pushErr != nil {
-					log.Printf("[DELETE+KOMMO BATCH] Failed to move lead %s (Kommo %d) to Perdido: %v", leadID, *kommoLeadID, pushErr)
-				} else {
-					log.Printf("[DELETE+KOMMO BATCH] Lead %s (Kommo %d) moved to Perdido (143) in Kommo pipeline %d", leadID, *kommoLeadID, *kommoPipelineID)
-				}
+				kommoSync.EnqueuePushLeadStageForced(accountID, leadID, *kommoLeadID, 143, *kommoPipelineID)
+				log.Printf("[DELETE+KOMMO BATCH] Lead %s (Kommo %d) enqueued move to Perdido (143) in Kommo pipeline %d", leadID, *kommoLeadID, *kommoPipelineID)
 			}
 		}
 	}
@@ -4508,10 +4875,10 @@ func (s *Server) handleUpdateLeadStage(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Push stage change to Kommo (async, non-blocking)
+	// Push stage change to Kommo (batched via outbox when enabled)
 	accountID := c.Locals("account_id").(uuid.UUID)
-	if s.kommoSync != nil {
-		go s.kommoSync.PushLeadStageChange(accountID, leadID, stageID)
+	if kommoSync := s.kommoForAccount(c.Context(), accountID); kommoSync != nil {
+		kommoSync.EnqueuePushLeadStage(accountID, leadID)
 	}
 
 	s.invalidateLeadsCache(accountID)
@@ -4867,7 +5234,7 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	birthDateCol := findCol(colMap, "fecha_nacimiento", "birth_date", "nacimiento", "cumpleanos", "cumpleaños")
 	stageCol := findCol(colMap, "estatus del lead", "stage", "etapa", "estado lead", "status")
 	_ = findCol(colMap, "embudo de ventas", "pipeline", "embudo") // reserved for future multi-pipeline import
-	_ = findCol(colMap, "edad", "age") // age managed via contacts
+	_ = findCol(colMap, "edad", "age")                            // age managed via contacts
 
 	// Get default pipeline for stage assignment
 	defaultPipeline, _ := s.services.Pipeline.GetDefaultPipeline(c.Context(), accountID)
@@ -5205,8 +5572,25 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 		filter.SortOrder = sortOrder
 	}
 
+	// Custom field filters
+	if cfFilterRaw := c.Query("cf_filter"); cfFilterRaw != "" {
+		var cfFilters []repository.CustomFieldFilterParam
+		if err := json.Unmarshal([]byte(cfFilterRaw), &cfFilters); err == nil && len(cfFilters) > 0 {
+			matchIDs, err := s.repos.CustomField.FindContactIDsByFilters(c.Context(), accountID, cfFilters)
+			if err == nil {
+				if len(matchIDs) == 0 {
+					return c.JSON(fiber.Map{
+						"success": true, "contacts": []interface{}{},
+						"total": 0, "limit": filter.Limit, "offset": filter.Offset,
+					})
+				}
+				filter.CfFilterContactIDs = matchIDs
+			}
+		}
+	}
+
 	// Redis cache for default load (no complex filters) — 30s TTL
-	isDefaultContactsLoad := filter.Search == "" && len(filter.Tags) == 0 && len(filter.TagIDs) == 0 && len(filter.TagNames) == 0 && len(filter.MatchingContactIDs) == 0 && filter.DeviceID == nil && filter.DateField == "" && !filter.HasPhone
+	isDefaultContactsLoad := filter.Search == "" && len(filter.Tags) == 0 && len(filter.TagIDs) == 0 && len(filter.TagNames) == 0 && len(filter.MatchingContactIDs) == 0 && len(filter.CfFilterContactIDs) == 0 && filter.DeviceID == nil && filter.DateField == "" && !filter.HasPhone
 	contactsCacheKey := ""
 	if isDefaultContactsLoad && s.cache != nil {
 		contactsCacheKey = fmt.Sprintf("contacts:%s:%d:%d", accountID.String(), filter.Limit, filter.Offset)
@@ -5231,6 +5615,16 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 		if err == nil {
 			for _, contact := range contacts {
 				contact.StructuredTags = tagMap[contact.ID]
+			}
+		}
+
+		// Optionally load custom field values
+		if c.QueryBool("include_custom_fields", false) {
+			cfMap, cfErr := s.repos.CustomField.GetValuesByContacts(c.Context(), contactIDs)
+			if cfErr == nil {
+				for _, contact := range contacts {
+					contact.CustomFieldValues = cfMap[contact.ID]
+				}
 			}
 		}
 	}
@@ -5281,14 +5675,15 @@ func (s *Server) handleSyncContactFromKommo(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid contact ID"})
 	}
 
-	if s.kommoSync == nil {
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo integration not configured"})
 	}
 	if contact, _ := s.services.Contact.GetByID(c.Context(), contactID); contact == nil || contact.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "contact not found"})
 	}
 
-	if err := s.kommoSync.SyncSingleContact(c.Context(), accountID, contactID); err != nil {
+	if err := kommoSync.SyncSingleContact(c.Context(), accountID, contactID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -5336,28 +5731,60 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 	}
 
 	if body.CustomName != nil {
-		if *body.CustomName == "" { contact.CustomName = nil } else { contact.CustomName = body.CustomName }
+		if *body.CustomName == "" {
+			contact.CustomName = nil
+		} else {
+			contact.CustomName = body.CustomName
+		}
 	}
 	if body.LastName != nil {
-		if *body.LastName == "" { contact.LastName = nil } else { contact.LastName = body.LastName }
+		if *body.LastName == "" {
+			contact.LastName = nil
+		} else {
+			contact.LastName = body.LastName
+		}
 	}
 	if body.ShortName != nil {
-		if *body.ShortName == "" { contact.ShortName = nil } else { contact.ShortName = body.ShortName }
+		if *body.ShortName == "" {
+			contact.ShortName = nil
+		} else {
+			contact.ShortName = body.ShortName
+		}
 	}
 	if body.Phone != nil {
-		if *body.Phone == "" { contact.Phone = nil } else { contact.Phone = body.Phone }
+		if *body.Phone == "" {
+			contact.Phone = nil
+		} else {
+			contact.Phone = body.Phone
+		}
 	}
 	if body.Email != nil {
-		if *body.Email == "" { contact.Email = nil } else { contact.Email = body.Email }
+		if *body.Email == "" {
+			contact.Email = nil
+		} else {
+			contact.Email = body.Email
+		}
 	}
 	if body.Company != nil {
-		if *body.Company == "" { contact.Company = nil } else { contact.Company = body.Company }
+		if *body.Company == "" {
+			contact.Company = nil
+		} else {
+			contact.Company = body.Company
+		}
 	}
 	if body.Age != nil {
-		if *body.Age == 0 { contact.Age = nil } else { contact.Age = body.Age }
+		if *body.Age == 0 {
+			contact.Age = nil
+		} else {
+			contact.Age = body.Age
+		}
 	}
 	if body.DNI != nil {
-		if *body.DNI == "" { contact.DNI = nil } else { contact.DNI = body.DNI }
+		if *body.DNI == "" {
+			contact.DNI = nil
+		} else {
+			contact.DNI = body.DNI
+		}
 	}
 	if body.BirthDate != nil {
 		if *body.BirthDate == "" {
@@ -5369,19 +5796,35 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		}
 	}
 	if body.Address != nil {
-		if *body.Address == "" { contact.Address = nil } else { contact.Address = body.Address }
+		if *body.Address == "" {
+			contact.Address = nil
+		} else {
+			contact.Address = body.Address
+		}
 	}
 	if body.Distrito != nil {
-		if *body.Distrito == "" { contact.Distrito = nil } else { contact.Distrito = body.Distrito }
+		if *body.Distrito == "" {
+			contact.Distrito = nil
+		} else {
+			contact.Distrito = body.Distrito
+		}
 	}
 	if body.Ocupacion != nil {
-		if *body.Ocupacion == "" { contact.Ocupacion = nil } else { contact.Ocupacion = body.Ocupacion }
+		if *body.Ocupacion == "" {
+			contact.Ocupacion = nil
+		} else {
+			contact.Ocupacion = body.Ocupacion
+		}
 	}
 	if body.Tags != nil {
 		contact.Tags = body.Tags
 	}
 	if body.Notes != nil {
-		if *body.Notes == "" { contact.Notes = nil } else { contact.Notes = body.Notes }
+		if *body.Notes == "" {
+			contact.Notes = nil
+		} else {
+			contact.Notes = body.Notes
+		}
 	}
 
 	if err := s.services.Contact.Update(c.Context(), contact); err != nil {
@@ -5416,6 +5859,16 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		}()
 	} else if s.googleClient != nil && !contact.GoogleSync {
 		log.Printf("[GOOGLE] Auto-sync skipped for contact %s: google_sync=false", contact.ID)
+	}
+
+	// Populate structured_tags so the frontend keeps tags in sync after an update.
+	if tags, err := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID); err == nil {
+		contact.StructuredTags = tags
+	}
+
+	// Populate structured_tags so the frontend keeps tags in sync after an update.
+	if tags, err := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID); err == nil {
+		contact.StructuredTags = tags
 	}
 
 	s.invalidateContactsCache(contact.AccountID)
@@ -5485,22 +5938,22 @@ func (s *Server) handleGetContactLeads(c *fiber.Ctx) error {
 	defer rows.Close()
 
 	type contactLead struct {
-		ID           uuid.UUID  `json:"id"`
-		AccountID    uuid.UUID  `json:"account_id"`
-		ContactID    *uuid.UUID `json:"contact_id"`
-		JID          *string    `json:"jid"`
-		Name         *string    `json:"name"`
-		LastName     *string    `json:"last_name"`
-		Phone        *string    `json:"phone"`
-		Email        *string    `json:"email"`
-		PipelineID   *uuid.UUID `json:"pipeline_id"`
-		StageID      *uuid.UUID `json:"stage_id"`
-		StageName    *string    `json:"stage_name"`
-		StageColor   *string    `json:"stage_color"`
-		PipelineName *string    `json:"pipeline_name"`
-		IsArchived   bool       `json:"is_archived"`
-		IsBlocked    bool       `json:"is_blocked"`
-		CreatedAt    time.Time  `json:"created_at"`
+		ID           uuid.UUID     `json:"id"`
+		AccountID    uuid.UUID     `json:"account_id"`
+		ContactID    *uuid.UUID    `json:"contact_id"`
+		JID          *string       `json:"jid"`
+		Name         *string       `json:"name"`
+		LastName     *string       `json:"last_name"`
+		Phone        *string       `json:"phone"`
+		Email        *string       `json:"email"`
+		PipelineID   *uuid.UUID    `json:"pipeline_id"`
+		StageID      *uuid.UUID    `json:"stage_id"`
+		StageName    *string       `json:"stage_name"`
+		StageColor   *string       `json:"stage_color"`
+		PipelineName *string       `json:"pipeline_name"`
+		IsArchived   bool          `json:"is_archived"`
+		IsBlocked    bool          `json:"is_blocked"`
+		CreatedAt    time.Time     `json:"created_at"`
 		Tags         []*domain.Tag `json:"tags"`
 	}
 
@@ -5980,12 +6433,12 @@ func (s *Server) handleAssignTag(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Push tag change to Kommo (async) — only for leads, NOT contacts
+	// Push tag change to Kommo (batched via outbox) — only for leads, NOT contacts
 	accountID := c.Locals("account_id").(uuid.UUID)
-	if s.kommoSync != nil {
+	if kommoSync := s.kommoForAccount(c.Context(), accountID); kommoSync != nil {
 		switch req.EntityType {
 		case "lead":
-			go s.kommoSync.PushLeadTagsChange(accountID, entityID)
+			kommoSync.EnqueuePushLeadTags(accountID, entityID)
 		}
 	}
 
@@ -6020,12 +6473,12 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Push tag change to Kommo (async) — only for leads, NOT contacts
+	// Push tag change to Kommo (batched via outbox) — only for leads, NOT contacts
 	accountID := c.Locals("account_id").(uuid.UUID)
-	if s.kommoSync != nil {
+	if kommoSync := s.kommoForAccount(c.Context(), accountID); kommoSync != nil {
 		switch req.EntityType {
 		case "lead":
-			go s.kommoSync.PushLeadTagsChange(accountID, entityID)
+			kommoSync.EnqueuePushLeadTags(accountID, entityID)
 		}
 	}
 
@@ -7218,12 +7671,12 @@ func (s *Server) handleSetEventTags(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		TagIDs         []string `json:"tag_ids"`           // backward compat (all include, no exclude)
-		FormulaMode    string   `json:"formula_mode"`      // "AND" or "OR" (default "OR")
+		TagIDs         []string `json:"tag_ids"`      // backward compat (all include, no exclude)
+		FormulaMode    string   `json:"formula_mode"` // "AND" or "OR" (default "OR")
 		IncludeTagIDs  []string `json:"include_tag_ids"`
 		ExcludeTagIDs  []string `json:"exclude_tag_ids"`
-		TagFormula     string   `json:"tag_formula"`       // text-based formula (advanced mode)
-		TagFormulaType string   `json:"tag_formula_type"`  // "simple" or "advanced"
+		TagFormula     string   `json:"tag_formula"`      // text-based formula (advanced mode)
+		TagFormulaType string   `json:"tag_formula_type"` // "simple" or "advanced"
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -7691,13 +8144,13 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	}
 
 	var (
-		stagesList       []stageInfo
-		counts           []stageCount
-		paginatedParts   []*domain.EventParticipant
-		tagMap           = make(map[uuid.UUID][]*domain.Tag)
-		unassignedCount  int
+		stagesList                                             []stageInfo
+		counts                                                 []stageCount
+		paginatedParts                                         []*domain.EventParticipant
+		tagMap                                                 = make(map[uuid.UUID][]*domain.Tag)
+		unassignedCount                                        int
 		stagesErr, countsErr, partsErr, tagsErr, unassignedErr error
-		wg               sync.WaitGroup
+		wg                                                     sync.WaitGroup
 	)
 
 	wg.Add(5)
@@ -7889,14 +8342,14 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 
 	// Build response stages
 	type stageDataResp struct {
-		ID         string                        `json:"id"`
-		PipelineID string                        `json:"pipeline_id"`
-		Name       string                        `json:"name"`
-		Color      string                        `json:"color"`
-		Position   int                           `json:"position"`
-		TotalCount int                           `json:"total_count"`
-		Participants []*domain.EventParticipant  `json:"participants"`
-		HasMore    bool                          `json:"has_more"`
+		ID           string                     `json:"id"`
+		PipelineID   string                     `json:"pipeline_id"`
+		Name         string                     `json:"name"`
+		Color        string                     `json:"color"`
+		Position     int                        `json:"position"`
+		TotalCount   int                        `json:"total_count"`
+		Participants []*domain.EventParticipant `json:"participants"`
+		HasMore      bool                       `json:"has_more"`
 	}
 
 	stages := make([]stageDataResp, 0, len(stagesList))
@@ -8522,25 +8975,53 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 		p.Name = *req.Name
 	}
 	if req.LastName != nil {
-		if *req.LastName == "" { p.LastName = nil } else { p.LastName = req.LastName }
+		if *req.LastName == "" {
+			p.LastName = nil
+		} else {
+			p.LastName = req.LastName
+		}
 	}
 	if req.ShortName != nil {
-		if *req.ShortName == "" { p.ShortName = nil } else { p.ShortName = req.ShortName }
+		if *req.ShortName == "" {
+			p.ShortName = nil
+		} else {
+			p.ShortName = req.ShortName
+		}
 	}
 	if req.Phone != nil {
-		if *req.Phone == "" { p.Phone = nil } else { p.Phone = req.Phone }
+		if *req.Phone == "" {
+			p.Phone = nil
+		} else {
+			p.Phone = req.Phone
+		}
 	}
 	if req.Email != nil {
-		if *req.Email == "" { p.Email = nil } else { p.Email = req.Email }
+		if *req.Email == "" {
+			p.Email = nil
+		} else {
+			p.Email = req.Email
+		}
 	}
 	if req.Age != nil {
-		if *req.Age == 0 { p.Age = nil } else { p.Age = req.Age }
+		if *req.Age == 0 {
+			p.Age = nil
+		} else {
+			p.Age = req.Age
+		}
 	}
 	if req.Company != nil {
-		if *req.Company == "" { p.Company = nil } else { p.Company = req.Company }
+		if *req.Company == "" {
+			p.Company = nil
+		} else {
+			p.Company = req.Company
+		}
 	}
 	if req.DNI != nil {
-		if *req.DNI == "" { p.DNI = nil } else { p.DNI = req.DNI }
+		if *req.DNI == "" {
+			p.DNI = nil
+		} else {
+			p.DNI = req.DNI
+		}
 	}
 	if req.BirthDate != nil {
 		if *req.BirthDate == "" {
@@ -8550,19 +9031,39 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 		}
 	}
 	if req.Address != nil {
-		if *req.Address == "" { p.Address = nil } else { p.Address = req.Address }
+		if *req.Address == "" {
+			p.Address = nil
+		} else {
+			p.Address = req.Address
+		}
 	}
 	if req.Distrito != nil {
-		if *req.Distrito == "" { p.Distrito = nil } else { p.Distrito = req.Distrito }
+		if *req.Distrito == "" {
+			p.Distrito = nil
+		} else {
+			p.Distrito = req.Distrito
+		}
 	}
 	if req.Ocupacion != nil {
-		if *req.Ocupacion == "" { p.Ocupacion = nil } else { p.Ocupacion = req.Ocupacion }
+		if *req.Ocupacion == "" {
+			p.Ocupacion = nil
+		} else {
+			p.Ocupacion = req.Ocupacion
+		}
 	}
 	if req.Notes != nil {
-		if *req.Notes == "" { p.Notes = nil } else { p.Notes = req.Notes }
+		if *req.Notes == "" {
+			p.Notes = nil
+		} else {
+			p.Notes = req.Notes
+		}
 	}
 	if req.NextAction != nil {
-		if *req.NextAction == "" { p.NextAction = nil } else { p.NextAction = req.NextAction }
+		if *req.NextAction == "" {
+			p.NextAction = nil
+		} else {
+			p.NextAction = req.NextAction
+		}
 	}
 	if req.NextActionDate != nil {
 		p.NextActionDate = req.NextActionDate
@@ -9559,9 +10060,9 @@ func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
 	}
 
 	return c.Status(201).JSON(fiber.Map{
-		"success":      true,
-		"event":        event,
-		"leads_found":  len(leads),
+		"success":            true,
+		"event":              event,
+		"leads_found":        len(leads),
 		"participants_added": added,
 	})
 }
@@ -10220,6 +10721,120 @@ func (s *Server) handleAdminDeleteAccount(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true})
 }
 
+func (s *Server) adminAccountPurgeSummary(ctx context.Context, accountID uuid.UUID) (fiber.Map, error) {
+	tables := []string{
+		"user_accounts", "users", "devices", "contacts", "chats", "messages", "leads", "pipelines", "tags",
+		"campaigns", "events", "programs", "documents", "quick_replies", "automation_flows", "google_contacts_sync",
+		"kommo_connected_pipelines", "kommo_push_outbox", "integration_instance_accounts",
+	}
+	counts := fiber.Map{}
+	for _, table := range tables {
+		var count int64
+		query := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE account_id = $1`, table)
+		if err := s.repos.DB().QueryRow(ctx, query, accountID).Scan(&count); err != nil {
+			counts[table] = nil
+			continue
+		}
+		counts[table] = count
+	}
+	var storageObjects int64
+	if s.storage != nil {
+		count, err := s.storage.CountPrefix(ctx, accountID.String()+"/")
+		if err != nil {
+			return nil, err
+		}
+		storageObjects = count
+	}
+	return fiber.Map{"tables": counts, "storage_objects": storageObjects}, nil
+}
+
+func (s *Server) handleAdminAccountPurgePreview(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+	account, err := s.services.Account.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if account == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Account not found"})
+	}
+	summary, err := s.adminAccountPurgeSummary(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "account": account, "summary": summary, "confirmation": account.Name})
+}
+
+func (s *Server) handleAdminPurgeAccount(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+	account, err := s.services.Account.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if account == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Account not found"})
+	}
+	var req struct {
+		Confirmation string `json:"confirmation"`
+		DeleteFiles  *bool  `json:"delete_files"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.Confirmation != account.Name {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Confirmation must match the account name"})
+	}
+	deleteFiles := true
+	if req.DeleteFiles != nil {
+		deleteFiles = *req.DeleteFiles
+	}
+
+	summary, err := s.adminAccountPurgeSummary(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	var deletedFiles int64
+	if deleteFiles && s.storage != nil {
+		deletedFiles, err = s.storage.DeletePrefix(c.Context(), id.String()+"/")
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+	}
+
+	tx, err := s.repos.DB().Begin(c.Context())
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	defer tx.Rollback(c.Context())
+
+	_, _ = tx.Exec(c.Context(), `
+		UPDATE users u
+		SET account_id = (
+			SELECT ua.account_id
+			FROM user_accounts ua
+			WHERE ua.user_id = u.id AND ua.account_id <> $1
+			ORDER BY ua.created_at ASC
+			LIMIT 1
+		)
+		WHERE u.account_id = $1
+		  AND EXISTS (SELECT 1 FROM user_accounts ua WHERE ua.user_id = u.id AND ua.account_id <> $1)
+	`, id)
+	if _, err := tx.Exec(c.Context(), `DELETE FROM accounts WHERE id = $1`, id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if err := tx.Commit(c.Context()); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	s.reloadKommoManager(c.Context())
+	return c.JSON(fiber.Map{"success": true, "purged": true, "deleted_files": deletedFiles, "summary": summary})
+}
+
 func (s *Server) handleAdminGetUsers(c *fiber.Ctx) error {
 	var accountID *uuid.UUID
 	if aid := c.Query("account_id"); aid != "" {
@@ -10237,60 +10852,113 @@ func (s *Server) handleAdminGetUsers(c *fiber.Ctx) error {
 	if users == nil {
 		users = []*domain.User{}
 	}
+	s.attachAdminUserAccounts(c.Context(), users)
 
 	return c.JSON(fiber.Map{"success": true, "users": users})
 }
 
 func (s *Server) handleAdminCreateUser(c *fiber.Ctx) error {
+	type accountAssignmentRequest struct {
+		AccountID string  `json:"account_id"`
+		Role      string  `json:"role"`
+		RoleID    *string `json:"role_id"`
+		IsDefault bool    `json:"is_default"`
+	}
 	var req struct {
-		AccountID   string `json:"account_id"`
-		Username    string `json:"username"`
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		DisplayName string `json:"display_name"`
-		Role        string `json:"role"`
+		AccountID   string                     `json:"account_id"`
+		Username    string                     `json:"username"`
+		Email       string                     `json:"email"`
+		Password    string                     `json:"password"`
+		DisplayName string                     `json:"display_name"`
+		Role        string                     `json:"role"`
+		RoleID      *string                    `json:"role_id"`
+		Accounts    []accountAssignmentRequest `json:"accounts"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
-	if req.Username == "" || req.Email == "" || req.Password == "" || req.AccountID == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "username, email, password, and account_id are required"})
+	req.Username = strings.TrimSpace(req.Username)
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Username == "" || req.Password == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "username and password are required"})
+	}
+	if req.Email == "" {
+		req.Email = fmt.Sprintf("%s@users.clarin.local", strings.ToLower(req.Username))
 	}
 
-	accountID, err := uuid.Parse(req.AccountID)
+	assignments := req.Accounts
+	if len(assignments) == 0 && req.AccountID != "" {
+		assignments = []accountAssignmentRequest{{AccountID: req.AccountID, Role: req.Role, RoleID: req.RoleID, IsDefault: true}}
+	}
+	if len(assignments) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "at least one account assignment is required"})
+	}
+
+	defaultIdx := 0
+	for i := range assignments {
+		if assignments[i].IsDefault {
+			defaultIdx = i
+			break
+		}
+	}
+	assignments[defaultIdx].IsDefault = true
+	accountID, err := uuid.Parse(assignments[defaultIdx].AccountID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
 	}
-
-	if req.Role == "" {
-		req.Role = domain.RoleAgent
+	primaryRole := assignments[defaultIdx].Role
+	if primaryRole == "" {
+		primaryRole = domain.RoleAgent
 	}
 
 	user := &domain.User{
-		AccountID:   accountID,
-		Username:    req.Username,
-		Email:       req.Email,
-		DisplayName: req.DisplayName,
-		Role:        req.Role,
-		IsAdmin:     req.Role == domain.RoleAdmin || req.Role == domain.RoleSuperAdmin,
+		AccountID:    accountID,
+		Username:     req.Username,
+		Email:        req.Email,
+		DisplayName:  req.DisplayName,
+		Role:         primaryRole,
+		IsAdmin:      primaryRole == domain.RoleAdmin || primaryRole == domain.RoleSuperAdmin,
+		IsSuperAdmin: primaryRole == domain.RoleSuperAdmin,
 	}
 
 	if err := s.services.Account.CreateUser(c.Context(), user, req.Password); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	return c.Status(201).JSON(fiber.Map{"success": true, "user": fiber.Map{
-		"id":           user.ID,
-		"account_id":   user.AccountID,
-		"username":     user.Username,
-		"email":        user.Email,
-		"display_name": user.DisplayName,
-		"role":         user.Role,
-		"is_admin":     user.IsAdmin,
-		"is_active":    user.IsActive,
-		"created_at":   user.CreatedAt,
-	}})
+	for i, assignment := range assignments {
+		assignmentAccountID, err := uuid.Parse(assignment.AccountID)
+		if err != nil {
+			continue
+		}
+		role := assignment.Role
+		if role == "" {
+			role = domain.RoleAgent
+		}
+		ua := &domain.UserAccount{
+			UserID:    user.ID,
+			AccountID: assignmentAccountID,
+			Role:      role,
+			IsDefault: assignment.IsDefault || i == defaultIdx,
+		}
+		if assignment.RoleID != nil && *assignment.RoleID != "" {
+			if parsed, err := uuid.Parse(*assignment.RoleID); err == nil {
+				ua.RoleID = &parsed
+			}
+		}
+		if err := s.services.Account.AssignUserAccount(c.Context(), ua); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+	}
+	assignmentsResp, _ := s.services.Account.GetUserAccountAssignments(c.Context(), user.ID)
+	if assignmentsResp != nil {
+		user.Accounts = make([]domain.UserAccount, 0, len(assignmentsResp))
+		for _, ua := range assignmentsResp {
+			user.Accounts = append(user.Accounts, *ua)
+		}
+	}
+
+	return c.Status(201).JSON(fiber.Map{"success": true, "user": user})
 }
 
 func (s *Server) handleAdminUpdateUser(c *fiber.Ctx) error {
@@ -10309,13 +10977,26 @@ func (s *Server) handleAdminUpdateUser(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
+	if strings.TrimSpace(req.Email) == "" && strings.TrimSpace(req.Username) != "" {
+		req.Email = fmt.Sprintf("%s@users.clarin.local", strings.ToLower(strings.TrimSpace(req.Username)))
+	}
+	if req.Role == "" {
+		existing, _ := s.services.Auth.GetUser(c.Context(), id)
+		if existing != nil {
+			req.Role = existing.Role
+		}
+	}
+	if req.Role == "" {
+		req.Role = domain.RoleAgent
+	}
 	user := &domain.User{
-		ID:          id,
-		Username:    req.Username,
-		Email:       req.Email,
-		DisplayName: req.DisplayName,
-		Role:        req.Role,
-		IsAdmin:     req.Role == domain.RoleAdmin || req.Role == domain.RoleSuperAdmin,
+		ID:           id,
+		Username:     strings.TrimSpace(req.Username),
+		Email:        strings.TrimSpace(req.Email),
+		DisplayName:  req.DisplayName,
+		Role:         req.Role,
+		IsAdmin:      req.Role == domain.RoleAdmin || req.Role == domain.RoleSuperAdmin,
+		IsSuperAdmin: req.Role == domain.RoleSuperAdmin,
 	}
 
 	if err := s.services.Account.UpdateUser(c.Context(), user); err != nil {
@@ -10323,6 +11004,30 @@ func (s *Server) handleAdminUpdateUser(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) attachAdminUserAccounts(ctx context.Context, users []*domain.User) {
+	for _, user := range users {
+		assignments, err := s.services.Account.GetUserAccountAssignments(ctx, user.ID)
+		if err != nil || assignments == nil {
+			continue
+		}
+		user.Accounts = make([]domain.UserAccount, 0, len(assignments))
+		names := make([]string, 0, len(assignments))
+		for _, ua := range assignments {
+			user.Accounts = append(user.Accounts, *ua)
+			label := ua.AccountName
+			if ua.RoleName != "" {
+				label += " · " + ua.RoleName
+			} else if ua.Role != "" {
+				label += " · " + ua.Role
+			}
+			names = append(names, label)
+		}
+		if len(names) > 0 {
+			user.AccountName = strings.Join(names, ", ")
+		}
+	}
 }
 
 func (s *Server) handleAdminToggleUser(c *fiber.Ctx) error {
@@ -10686,7 +11391,8 @@ func (s *Server) handleDeleteQuickReply(c *fiber.Ctx) error {
 // and syncs it to ALL accounts with Kommo integration enabled.
 func (s *Server) handleKommoWebhook(c *fiber.Ctx) error {
 	secret := c.Params("secret")
-	if s.kommoSync == nil || s.kommoSync.WebhookSecret == "" || subtle.ConstantTimeCompare([]byte(secret), []byte(s.kommoSync.WebhookSecret)) != 1 {
+	kommoSync := s.kommoForWebhook(secret)
+	if kommoSync == nil {
 		return c.SendStatus(fiber.StatusNotFound) // Return 404 to not reveal webhook exists
 	}
 
@@ -10744,7 +11450,7 @@ func (s *Server) handleKommoWebhook(c *fiber.Ctx) error {
 		defer cancel()
 
 		for kommoID := range kommoLeadIDs {
-			s.kommoSync.ProcessWebhookLead(ctx, kommoID)
+			kommoSync.ProcessWebhookLead(ctx, kommoID)
 		}
 
 		// Mark deleted leads across all accounts
@@ -10767,15 +11473,25 @@ func (s *Server) handleKommoWebhook(c *fiber.Ctx) error {
 
 // --- Kommo Handlers ---
 
+func (s *Server) handleKommoLegacyDisabled(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"success": false,
+		"error":   "La configuración de Kommo se administra desde Admin > Integraciones",
+	})
+}
+
 func (s *Server) handleKommoStatus(c *fiber.Ctx) error {
-	configured := s.cfg.KommoAccessToken != "" && s.cfg.KommoSubdomain != ""
+	kommoSync := s.defaultKommoSync()
+	configured := kommoSync != nil
 	result := fiber.Map{
 		"success":    true,
 		"configured": configured,
-		"subdomain":  s.cfg.KommoSubdomain,
 	}
-	if configured && s.kommoSync != nil {
-		client := kommo.NewClient(s.cfg.KommoSubdomain, s.cfg.KommoAccessToken)
+	if s.kommoManager != nil {
+		result["runtime"] = s.kommoManager.RuntimeStatus()
+	}
+	if configured {
+		client := kommoSync.GetClient()
 		acc, err := client.GetAccount()
 		if err != nil {
 			result["connected"] = false
@@ -10794,10 +11510,11 @@ func (s *Server) handleKommoStatus(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleKommoSync(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	accountID := c.Locals("account_id").(uuid.UUID)
 
 	// Check if Kommo is enabled for this account
 	var kommoEnabled bool
@@ -10806,7 +11523,7 @@ func (s *Server) handleKommoSync(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo está deshabilitado para esta cuenta"})
 	}
 
-	started := s.kommoSync.StartFullSyncAsync(accountID)
+	started := kommoSync.StartFullSyncAsync(accountID)
 	if !started {
 		return c.Status(409).JSON(fiber.Map{
 			"success": false,
@@ -10824,11 +11541,12 @@ func (s *Server) handleKommoSync(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleKommoFullSyncStatus(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	accountID := c.Locals("account_id").(uuid.UUID)
-	status := s.kommoSync.GetFullSyncStatus(accountID)
+	status := kommoSync.GetFullSyncStatus(accountID)
 	if status == nil {
 		return c.JSON(fiber.Map{"success": true, "status": nil})
 	}
@@ -10836,18 +11554,19 @@ func (s *Server) handleKommoFullSyncStatus(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleKommoGetPipelines(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	client := kommo.NewClient(s.cfg.KommoSubdomain, s.cfg.KommoAccessToken)
+	client := kommoSync.GetClient()
 	pipelines, err := client.GetPipelines()
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	// Also get connected pipelines to mark status
-	accountID := c.Locals("account_id").(uuid.UUID)
-	connected, _ := s.kommoSync.GetConnectedPipelines(c.Context(), accountID)
+	connected, _ := kommoSync.GetConnectedPipelines(c.Context(), accountID)
 	connectedMap := make(map[int64]bool)
 	for _, cp := range connected {
 		if cp.Enabled {
@@ -10856,19 +11575,19 @@ func (s *Server) handleKommoGetPipelines(c *fiber.Ctx) error {
 	}
 
 	type pipelineInfo struct {
-		ID       int    `json:"id"`
-		Name     string `json:"name"`
-		IsMain   bool   `json:"is_main"`
-		Stages   int    `json:"stages"`
-		Connected bool  `json:"connected"`
+		ID        int    `json:"id"`
+		Name      string `json:"name"`
+		IsMain    bool   `json:"is_main"`
+		Stages    int    `json:"stages"`
+		Connected bool   `json:"connected"`
 	}
 	var result []pipelineInfo
 	for _, p := range pipelines {
 		result = append(result, pipelineInfo{
-			ID:     p.ID,
-			Name:   p.Name,
-			IsMain: p.IsMain,
-			Stages: len(p.Statuses),
+			ID:        p.ID,
+			Name:      p.Name,
+			IsMain:    p.IsMain,
+			Stages:    len(p.Statuses),
 			Connected: connectedMap[int64(p.ID)],
 		})
 	}
@@ -10877,11 +11596,12 @@ func (s *Server) handleKommoGetPipelines(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleKommoGetConnected(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	accountID := c.Locals("account_id").(uuid.UUID)
-	connected, err := s.kommoSync.GetConnectedPipelines(c.Context(), accountID)
+	connected, err := kommoSync.GetConnectedPipelines(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -10892,15 +11612,16 @@ func (s *Server) handleKommoGetConnected(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleKommoConnectPipeline(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
-		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
-	}
 	kommoID, err := strconv.Atoi(c.Params("kommoId"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
-	cp, err := s.kommoSync.ConnectPipeline(c.Context(), accountID, kommoID)
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	cp, err := kommoSync.ConnectPipeline(c.Context(), accountID, kommoID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -10908,52 +11629,65 @@ func (s *Server) handleKommoConnectPipeline(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleKommoDisconnectPipeline(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
-		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
-	}
 	kommoID, err := strconv.Atoi(c.Params("kommoId"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
-	if err := s.kommoSync.DisconnectPipeline(c.Context(), accountID, kommoID); err != nil {
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
+	}
+	if err := kommoSync.DisconnectPipeline(c.Context(), accountID, kommoID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
 }
 
 func (s *Server) handleKommoSyncStatus(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	kommoSync := s.defaultKommoSync()
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	status := s.kommoSync.GetStatus()
-	return c.JSON(fiber.Map{"success": true, "status": status})
+	status := kommoSync.GetStatus()
+	result := fiber.Map{"success": true, "status": status}
+	if s.kommoManager != nil {
+		result["runtime"] = s.kommoManager.RuntimeStatus()
+	}
+	return c.JSON(result)
 }
 
 // handleEventsPollerStatus returns the current status of the Kommo Events API poller.
 func (s *Server) handleEventsPollerStatus(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	kommoSync := s.defaultKommoSync()
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	status := s.kommoSync.GetEventsPollerStatus()
+	status := kommoSync.GetEventsPollerStatus()
 	return c.JSON(fiber.Map{"success": true, "events_poller": status})
 }
 
 // handleForceEventsPoll triggers an immediate events poll cycle.
 func (s *Server) handleForceEventsPoll(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	kommoSync := s.defaultKommoSync()
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	events, leads := s.kommoSync.ForceEventsPoll()
+	events, leads := kommoSync.ForceEventsPoll()
 	return c.JSON(fiber.Map{"success": true, "events_found": events, "leads_synced": leads})
 }
 
 // handleSyncMonitor returns the sync monitor data (ring buffer + per-subsystem stats).
 func (s *Server) handleSyncMonitor(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
+		kommoSync = s.defaultKommoSync()
+	}
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	data := s.kommoSync.Monitor.GetData()
+	data := kommoSync.Monitor.GetData()
 	return c.JSON(fiber.Map{"success": true, "monitor": data})
 }
 
@@ -10980,10 +11714,11 @@ func (s *Server) handleKommoToggleEnabled(c *fiber.Ctx) error {
 
 // handleKommoToggleAllPipelines enables or disables ALL connected pipelines for the account.
 func (s *Server) handleKommoToggleAllPipelines(c *fiber.Ctx) error {
-	if s.kommoSync == nil {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	kommoSync := s.kommoForAccount(c.Context(), accountID)
+	if kommoSync == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Kommo not configured"})
 	}
-	accountID := c.Locals("account_id").(uuid.UUID)
 
 	var body struct {
 		Enabled bool `json:"enabled"`
@@ -10993,8 +11728,8 @@ func (s *Server) handleKommoToggleAllPipelines(c *fiber.Ctx) error {
 	}
 
 	result, err := s.repos.DB().Exec(c.Context(),
-		`UPDATE kommo_connected_pipelines SET enabled = $2 WHERE account_id = $1`,
-		accountID, body.Enabled)
+		`UPDATE kommo_connected_pipelines SET enabled = $2 WHERE account_id = $1 AND integration_instance_id IS NOT DISTINCT FROM $3`,
+		accountID, body.Enabled, kommoSync.InstanceID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -11093,6 +11828,259 @@ func (s *Server) handleAdminDeleteRole(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true})
 }
 
+type adminIntegrationRequest struct {
+	Provider      string      `json:"provider"`
+	Scope         string      `json:"scope"`
+	Name          string      `json:"name"`
+	Status        string      `json:"status"`
+	IsActive      *bool       `json:"is_active"`
+	Subdomain     string      `json:"subdomain"`
+	ClientID      string      `json:"client_id"`
+	ClientSecret  string      `json:"client_secret"`
+	AccessToken   string      `json:"access_token"`
+	RefreshToken  string      `json:"refresh_token"`
+	RedirectURI   string      `json:"redirect_uri"`
+	WebhookSecret string      `json:"webhook_secret"`
+	Config        []byte      `json:"config"`
+	Accounts      []uuid.UUID `json:"accounts"`
+}
+
+func integrationResponse(instance *domain.IntegrationInstance) fiber.Map {
+	if instance == nil {
+		return fiber.Map{}
+	}
+	return fiber.Map{
+		"id":                 instance.ID,
+		"provider":           instance.Provider,
+		"scope":              instance.Scope,
+		"name":               instance.Name,
+		"status":             instance.Status,
+		"is_active":          instance.IsActive,
+		"subdomain":          instance.Subdomain,
+		"client_id":          instance.ClientID,
+		"redirect_uri":       instance.RedirectURI,
+		"config":             instance.Config,
+		"last_sync_at":       instance.LastSyncAt,
+		"created_at":         instance.CreatedAt,
+		"updated_at":         instance.UpdatedAt,
+		"has_client_secret":  instance.ClientSecret != "",
+		"has_access_token":   instance.AccessToken != "",
+		"has_refresh_token":  instance.RefreshToken != "",
+		"has_webhook_secret": instance.WebhookSecret != "",
+		"accounts":           instance.Accounts,
+	}
+}
+
+func (s *Server) reloadKommoManager(ctx context.Context) {
+	if s.kommoManager == nil {
+		return
+	}
+	if err := s.kommoManager.Reload(ctx); err != nil {
+		log.Printf("[API] Failed to reload Kommo manager: %v", err)
+	}
+	s.kommoSync = s.kommoManager.Primary()
+}
+
+func (s *Server) handleAdminListIntegrations(c *fiber.Ctx) error {
+	instances, err := s.repos.Integration.List(c.Context(), c.Query("provider"))
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	items := make([]fiber.Map, 0, len(instances))
+	for _, instance := range instances {
+		items = append(items, integrationResponse(instance))
+	}
+	return c.JSON(fiber.Map{"success": true, "integrations": items})
+}
+
+func (s *Server) handleAdminCreateIntegration(c *fiber.Ctx) error {
+	var req adminIntegrationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if strings.TrimSpace(req.Provider) == "" {
+		req.Provider = domain.IntegrationProviderKommo
+	}
+	if strings.TrimSpace(req.Scope) == "" {
+		req.Scope = domain.IntegrationScopeMultiAccount
+	}
+	if strings.TrimSpace(req.Status) == "" {
+		req.Status = domain.IntegrationStatusActive
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	active := true
+	if req.IsActive != nil {
+		active = *req.IsActive
+	}
+	configData := req.Config
+	if len(configData) == 0 {
+		configData = []byte(`{}`)
+	}
+	instance := &domain.IntegrationInstance{
+		Provider:      strings.TrimSpace(req.Provider),
+		Scope:         strings.TrimSpace(req.Scope),
+		Name:          strings.TrimSpace(req.Name),
+		Status:        strings.TrimSpace(req.Status),
+		IsActive:      active,
+		Subdomain:     strings.TrimSpace(req.Subdomain),
+		ClientID:      strings.TrimSpace(req.ClientID),
+		ClientSecret:  strings.TrimSpace(req.ClientSecret),
+		AccessToken:   strings.TrimSpace(req.AccessToken),
+		RefreshToken:  strings.TrimSpace(req.RefreshToken),
+		RedirectURI:   strings.TrimSpace(req.RedirectURI),
+		WebhookSecret: strings.TrimSpace(req.WebhookSecret),
+		Config:        configData,
+	}
+	if err := s.repos.Integration.Create(c.Context(), instance); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	for _, accountID := range req.Accounts {
+		_ = s.repos.Integration.AssignAccount(c.Context(), instance.ID, accountID, true)
+		if instance.Provider == domain.IntegrationProviderKommo {
+			_, _ = s.repos.DB().Exec(c.Context(), `UPDATE accounts SET kommo_enabled = TRUE WHERE id = $1`, accountID)
+		}
+	}
+	s.reloadKommoManager(c.Context())
+	created, _ := s.repos.Integration.GetByID(c.Context(), instance.ID)
+	return c.Status(201).JSON(fiber.Map{"success": true, "integration": integrationResponse(created)})
+}
+
+func (s *Server) handleAdminUpdateIntegration(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
+	}
+	instance, err := s.repos.Integration.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if instance == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Integration not found"})
+	}
+	var req adminIntegrationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if strings.TrimSpace(req.Scope) != "" {
+		instance.Scope = strings.TrimSpace(req.Scope)
+	}
+	if strings.TrimSpace(req.Name) != "" {
+		instance.Name = strings.TrimSpace(req.Name)
+	}
+	if strings.TrimSpace(req.Status) != "" {
+		instance.Status = strings.TrimSpace(req.Status)
+	}
+	if req.IsActive != nil {
+		instance.IsActive = *req.IsActive
+	}
+	if strings.TrimSpace(req.Subdomain) != "" {
+		instance.Subdomain = strings.TrimSpace(req.Subdomain)
+	}
+	if strings.TrimSpace(req.ClientID) != "" {
+		instance.ClientID = strings.TrimSpace(req.ClientID)
+	}
+	if strings.TrimSpace(req.ClientSecret) != "" {
+		instance.ClientSecret = strings.TrimSpace(req.ClientSecret)
+	}
+	if strings.TrimSpace(req.AccessToken) != "" {
+		instance.AccessToken = strings.TrimSpace(req.AccessToken)
+	}
+	if strings.TrimSpace(req.RefreshToken) != "" {
+		instance.RefreshToken = strings.TrimSpace(req.RefreshToken)
+	}
+	if strings.TrimSpace(req.RedirectURI) != "" {
+		instance.RedirectURI = strings.TrimSpace(req.RedirectURI)
+	}
+	if strings.TrimSpace(req.WebhookSecret) != "" {
+		instance.WebhookSecret = strings.TrimSpace(req.WebhookSecret)
+	}
+	if len(req.Config) > 0 {
+		instance.Config = req.Config
+	}
+	if err := s.repos.Integration.Update(c.Context(), instance); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	s.reloadKommoManager(c.Context())
+	updated, _ := s.repos.Integration.GetByID(c.Context(), id)
+	return c.JSON(fiber.Map{"success": true, "integration": integrationResponse(updated)})
+}
+
+func (s *Server) handleAdminDeleteIntegration(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
+	}
+	if err := s.repos.Integration.Delete(c.Context(), id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	s.reloadKommoManager(c.Context())
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAdminAssignIntegrationAccount(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
+	}
+	var req struct {
+		AccountID uuid.UUID `json:"account_id"`
+		Enabled   *bool     `json:"enabled"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.AccountID == uuid.Nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	instance, err := s.repos.Integration.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if instance == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Integration not found"})
+	}
+	if err := s.repos.Integration.AssignAccount(c.Context(), id, req.AccountID, enabled); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if instance.Provider == domain.IntegrationProviderKommo {
+		_, _ = s.repos.DB().Exec(c.Context(), `UPDATE accounts SET kommo_enabled = $1 WHERE id = $2`, enabled, req.AccountID)
+	}
+	s.reloadKommoManager(c.Context())
+	updated, _ := s.repos.Integration.GetByID(c.Context(), id)
+	return c.JSON(fiber.Map{"success": true, "integration": integrationResponse(updated)})
+}
+
+func (s *Server) handleAdminRemoveIntegrationAccount(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
+	}
+	accountID, err := uuid.Parse(c.Params("account_id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account ID"})
+	}
+	instance, _ := s.repos.Integration.GetByID(c.Context(), id)
+	if err := s.repos.Integration.RemoveAccount(c.Context(), id, accountID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if instance != nil && instance.Provider == domain.IntegrationProviderKommo {
+		_, _ = s.repos.DB().Exec(c.Context(), `UPDATE accounts SET kommo_enabled = FALSE WHERE id = $1`, accountID)
+	}
+	s.reloadKommoManager(c.Context())
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleAdminReloadIntegrations(c *fiber.Ctx) error {
+	s.reloadKommoManager(c.Context())
+	if s.kommoManager == nil {
+		return c.JSON(fiber.Map{"success": true, "runtime": fiber.Map{"running_instances": 0}})
+	}
+	return c.JSON(fiber.Map{"success": true, "runtime": s.kommoManager.RuntimeStatus()})
+}
+
 // ─────────────────────────────────────────────────────────
 // Health Check Endpoints
 // ─────────────────────────────────────────────────────────
@@ -11181,4 +12169,3 @@ func (s *Server) handleDeviceHealth(c *fiber.Ctx) error {
 	summaries := s.pool.GetHealthSummary()
 	return c.JSON(fiber.Map{"success": true, "devices": summaries})
 }
-

@@ -15,80 +15,88 @@ import (
 )
 
 type Repositories struct {
-	db                *pgxpool.Pool
-	User              *UserRepository
-	UserAccount       *UserAccountRepository
-	Account           *AccountRepository
-	Device            *DeviceRepository
-	Chat              *ChatRepository
-	Message           *MessageRepository
-	Contact           *ContactRepository
-	ContactDeviceName *ContactDeviceNameRepository
-	Lead              *LeadRepository
-	Pipeline          *PipelineRepository
-	Tag               *TagRepository
-	Campaign          *CampaignRepository
-	Event             *EventRepository
-	EventFolder       *EventFolderRepository
-	EventPipeline     *EventPipelineRepository
-	Participant       *ParticipantRepository
-	Interaction       *InteractionRepository
-	SavedSticker      *SavedStickerRepository
-	Reaction          *ReactionRepository
-	Poll              *PollRepository
+	db                 *pgxpool.Pool
+	User               *UserRepository
+	UserAccount        *UserAccountRepository
+	Account            *AccountRepository
+	Device             *DeviceRepository
+	Chat               *ChatRepository
+	Message            *MessageRepository
+	Contact            *ContactRepository
+	ContactDeviceName  *ContactDeviceNameRepository
+	Lead               *LeadRepository
+	Pipeline           *PipelineRepository
+	Tag                *TagRepository
+	Campaign           *CampaignRepository
+	Event              *EventRepository
+	EventFolder        *EventFolderRepository
+	EventPipeline      *EventPipelineRepository
+	Participant        *ParticipantRepository
+	Interaction        *InteractionRepository
+	SavedSticker       *SavedStickerRepository
+	Reaction           *ReactionRepository
+	Poll               *PollRepository
 	CampaignAttachment *CampaignAttachmentRepository
 	QuickReply         *QuickReplyRepository
-	Program           *ProgramRepository
-	ProgramFolder     *ProgramFolderRepository
-	Role              *RoleRepository
-	Logbook           *LogbookRepository
-	APIKey            *APIKeyRepository
-	ErosConversation  *ErosConversationRepository
-	AIToken           *AITokenRepository
-	Automation        *AutomationRepository
-	Survey            *SurveyRepository
-	Dynamic           *DynamicRepository
-	Task              *TaskRepository
-	DocumentTemplate  *DocumentTemplateRepository
+	Program            *ProgramRepository
+	ProgramFolder      *ProgramFolderRepository
+	Role               *RoleRepository
+	Logbook            *LogbookRepository
+	APIKey             *APIKeyRepository
+	ErosConversation   *ErosConversationRepository
+	AIToken            *AITokenRepository
+	Automation         *AutomationRepository
+	Survey             *SurveyRepository
+	Dynamic            *DynamicRepository
+	Task               *TaskRepository
+	DocumentTemplate   *DocumentTemplateRepository
+	CustomField        *CustomFieldRepository
+	WhatsAppAPI        *WhatsAppAPIRepository
+	Bot                *BotRepository
+	Integration        *IntegrationRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
 	return &Repositories{
-		db:                db,
-		User:              &UserRepository{db: db},
-		UserAccount:       &UserAccountRepository{db: db},
-		Account:           &AccountRepository{db: db},
-		Device:            &DeviceRepository{db: db},
-		Chat:              &ChatRepository{db: db},
-		Message:           &MessageRepository{db: db},
-		Contact:           &ContactRepository{db: db},
-		ContactDeviceName: &ContactDeviceNameRepository{db: db},
-		Lead:              &LeadRepository{db: db},
-		Pipeline:          &PipelineRepository{db: db},
-		Tag:               &TagRepository{db: db},
-		Campaign:          &CampaignRepository{db: db},
-		Event:             &EventRepository{db: db},
-		EventFolder:       &EventFolderRepository{db: db},
-		EventPipeline:     &EventPipelineRepository{db: db},
-		Participant:       &ParticipantRepository{db: db},
-		Interaction:       &InteractionRepository{db: db},
-		SavedSticker:      &SavedStickerRepository{db: db},
-		Reaction:          &ReactionRepository{db: db},
-		Poll:              &PollRepository{db: db},
+		db:                 db,
+		User:               &UserRepository{db: db},
+		UserAccount:        &UserAccountRepository{db: db},
+		Account:            &AccountRepository{db: db},
+		Device:             &DeviceRepository{db: db},
+		Chat:               &ChatRepository{db: db},
+		Message:            &MessageRepository{db: db},
+		Contact:            &ContactRepository{db: db},
+		ContactDeviceName:  &ContactDeviceNameRepository{db: db},
+		Lead:               &LeadRepository{db: db},
+		Pipeline:           &PipelineRepository{db: db},
+		Tag:                &TagRepository{db: db},
+		Campaign:           &CampaignRepository{db: db},
+		Event:              &EventRepository{db: db},
+		EventFolder:        &EventFolderRepository{db: db},
+		EventPipeline:      &EventPipelineRepository{db: db},
+		Participant:        &ParticipantRepository{db: db},
+		Interaction:        &InteractionRepository{db: db},
+		SavedSticker:       &SavedStickerRepository{db: db},
+		Reaction:           &ReactionRepository{db: db},
+		Poll:               &PollRepository{db: db},
 		CampaignAttachment: &CampaignAttachmentRepository{db: db},
 		QuickReply:         &QuickReplyRepository{db: db},
-		Program:           &ProgramRepository{db: db},
-		ProgramFolder:     &ProgramFolderRepository{db: db},
-		Role:              &RoleRepository{db: db},
-		Logbook:           &LogbookRepository{db: db},
-		APIKey:            &APIKeyRepository{db: db},
-		ErosConversation:  &ErosConversationRepository{db: db},
-		AIToken:           &AITokenRepository{db: db},
-		Automation:        &AutomationRepository{db: db},
-		Survey:            &SurveyRepository{db: db},
-		Dynamic:           &DynamicRepository{db: db},
-		Task:              &TaskRepository{db: db},
-		DocumentTemplate:  &DocumentTemplateRepository{db: db},
+		Program:            &ProgramRepository{db: db},
+		ProgramFolder:      &ProgramFolderRepository{db: db},
+		Role:               &RoleRepository{db: db},
+		Logbook:            &LogbookRepository{db: db},
+		APIKey:             &APIKeyRepository{db: db},
+		ErosConversation:   &ErosConversationRepository{db: db},
+		AIToken:            &AITokenRepository{db: db},
+		Automation:         &AutomationRepository{db: db},
+		Survey:             &SurveyRepository{db: db},
+		Dynamic:            &DynamicRepository{db: db},
+		Task:               &TaskRepository{db: db},
+		DocumentTemplate:   &DocumentTemplateRepository{db: db},
+		CustomField:        &CustomFieldRepository{db: db},
+		WhatsAppAPI:        &WhatsAppAPIRepository{db: db},
+		Bot:                &BotRepository{db: db},
+		Integration:        &IntegrationRepository{db: db},
 	}
 }
 
@@ -136,9 +144,13 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Use
 
 func (r *UserRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.User, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, u.created_at, u.updated_at, a.name
-		FROM users u JOIN accounts a ON a.id = u.account_id
-		WHERE u.account_id = $1 ORDER BY u.created_at DESC
+		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin,
+		       COALESCE(ua.role, u.role), u.created_at, u.updated_at, a.name
+		FROM user_accounts ua
+		JOIN users u ON u.id = ua.user_id
+		JOIN accounts a ON a.id = ua.account_id
+		WHERE ua.account_id = $1
+		ORDER BY u.created_at DESC
 	`, accountID)
 	if err != nil {
 		return nil, err
@@ -306,12 +318,29 @@ func (r *UserAccountRepository) Exists(ctx context.Context, userID, accountID uu
 }
 
 func (r *UserAccountRepository) Assign(ctx context.Context, ua *domain.UserAccount) error {
-	return r.db.QueryRow(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if ua.IsDefault {
+		if _, err := tx.Exec(ctx, `UPDATE user_accounts SET is_default = FALSE WHERE user_id = $1`, ua.UserID); err != nil {
+			return err
+		}
+	}
+	err = tx.QueryRow(ctx, `
 		INSERT INTO user_accounts (user_id, account_id, role, role_id, is_default)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (user_id, account_id) DO UPDATE SET role = EXCLUDED.role, role_id = EXCLUDED.role_id
+		ON CONFLICT (user_id, account_id) DO UPDATE SET
+			role = EXCLUDED.role,
+			role_id = EXCLUDED.role_id,
+			is_default = CASE WHEN EXCLUDED.is_default THEN TRUE ELSE user_accounts.is_default END
 		RETURNING id, created_at
 	`, ua.UserID, ua.AccountID, ua.Role, ua.RoleID, ua.IsDefault).Scan(&ua.ID, &ua.CreatedAt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *UserAccountRepository) UpdateRoleID(ctx context.Context, userID, accountID uuid.UUID, roleID *uuid.UUID) error {
@@ -366,7 +395,7 @@ type AccountRepository struct {
 func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
-			(SELECT COUNT(*) FROM users WHERE account_id = a.id) as user_count,
+			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
 			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
 		FROM accounts a ORDER BY a.created_at DESC
@@ -392,7 +421,7 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
 		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
-			(SELECT COUNT(*) FROM users WHERE account_id = a.id) as user_count,
+			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
 			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count,
 			a.google_email, a.google_contact_group_id, a.google_connected_at, COALESCE(a.google_sync_limit, 20000)
@@ -437,24 +466,51 @@ type DeviceRepository struct {
 	db *pgxpool.Pool
 }
 
+func deviceCapabilities(device *domain.Device) string {
+	if device == nil || len(device.Capabilities) == 0 {
+		return "[]"
+	}
+	return string(device.Capabilities)
+}
+
 func (r *DeviceRepository) Create(ctx context.Context, device *domain.Device) error {
+	capabilities := deviceCapabilities(device)
 	return r.db.QueryRow(ctx, `
-		INSERT INTO devices (account_id, name, status)
-		VALUES ($1, $2, $3)
-		RETURNING id, created_at, updated_at
-	`, device.AccountID, device.Name, domain.DeviceStatusDisconnected).Scan(
-		&device.ID, &device.CreatedAt, &device.UpdatedAt,
+		INSERT INTO devices (
+			account_id, name, status, provider, phone, waba_id, phone_number_id, api_display_phone,
+			api_webhook_status, api_billing_status, api_sending_enabled, api_templates_enabled, capabilities
+		)
+		VALUES (
+			$1, $2, COALESCE($3::text, 'disconnected'), COALESCE(NULLIF($4::text, ''), 'whatsapp_web'), $5, $6, $7, $8,
+			COALESCE(NULLIF($9::text, ''), 'not_configured'), COALESCE(NULLIF($10::text, ''), 'not_configured'), $11, $12, $13::jsonb
+		)
+		RETURNING id, account_id, name, phone, jid, status, qr_code, receive_messages, provider, waba_id,
+			phone_number_id, api_display_phone, api_webhook_status, api_billing_status, api_sending_enabled,
+			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at
+	`, device.AccountID, device.Name, device.Status, device.Provider, device.Phone, device.WABAID, device.PhoneNumberID,
+		device.APIDisplayPhone, device.APIWebhookStatus, device.APIBillingStatus, device.APISendingEnabled,
+		device.APITemplatesEnabled, capabilities).Scan(
+		&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
+		&device.Status, &device.QRCode, &device.ReceiveMessages, &device.Provider, &device.WABAID,
+		&device.PhoneNumberID, &device.APIDisplayPhone, &device.APIWebhookStatus, &device.APIBillingStatus,
+		&device.APISendingEnabled, &device.APITemplatesEnabled, &device.Capabilities, &device.LastSeenAt,
+		&device.CreatedAt, &device.UpdatedAt,
 	)
 }
 
 func (r *DeviceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Device, error) {
 	device := &domain.Device{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, last_seen_at, created_at, updated_at
+		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, provider, waba_id,
+			phone_number_id, api_display_phone, api_webhook_status, api_billing_status, api_sending_enabled,
+			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at
 		FROM devices WHERE id = $1
 	`, id).Scan(
 		&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
-		&device.Status, &device.QRCode, &device.ReceiveMessages, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+		&device.Status, &device.QRCode, &device.ReceiveMessages, &device.Provider, &device.WABAID,
+		&device.PhoneNumberID, &device.APIDisplayPhone, &device.APIWebhookStatus, &device.APIBillingStatus,
+		&device.APISendingEnabled, &device.APITemplatesEnabled, &device.Capabilities, &device.LastSeenAt,
+		&device.CreatedAt, &device.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -464,7 +520,9 @@ func (r *DeviceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.D
 
 func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Device, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, last_seen_at, created_at, updated_at
+		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, provider, waba_id,
+			phone_number_id, api_display_phone, api_webhook_status, api_billing_status, api_sending_enabled,
+			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at
 		FROM devices WHERE account_id = $1 ORDER BY created_at DESC
 	`, accountID)
 	if err != nil {
@@ -477,7 +535,10 @@ func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UU
 		device := &domain.Device{}
 		if err := rows.Scan(
 			&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
-			&device.Status, &device.QRCode, &device.ReceiveMessages, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+			&device.Status, &device.QRCode, &device.ReceiveMessages, &device.Provider, &device.WABAID,
+			&device.PhoneNumberID, &device.APIDisplayPhone, &device.APIWebhookStatus, &device.APIBillingStatus,
+			&device.APISendingEnabled, &device.APITemplatesEnabled, &device.Capabilities, &device.LastSeenAt,
+			&device.CreatedAt, &device.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -488,7 +549,9 @@ func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UU
 
 func (r *DeviceRepository) GetAll(ctx context.Context) ([]*domain.Device, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, last_seen_at, created_at, updated_at
+		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, provider, waba_id,
+			phone_number_id, api_display_phone, api_webhook_status, api_billing_status, api_sending_enabled,
+			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at
 		FROM devices ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -501,7 +564,10 @@ func (r *DeviceRepository) GetAll(ctx context.Context) ([]*domain.Device, error)
 		device := &domain.Device{}
 		if err := rows.Scan(
 			&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
-			&device.Status, &device.QRCode, &device.ReceiveMessages, &device.LastSeenAt, &device.CreatedAt, &device.UpdatedAt,
+			&device.Status, &device.QRCode, &device.ReceiveMessages, &device.Provider, &device.WABAID,
+			&device.PhoneNumberID, &device.APIDisplayPhone, &device.APIWebhookStatus, &device.APIBillingStatus,
+			&device.APISendingEnabled, &device.APITemplatesEnabled, &device.Capabilities, &device.LastSeenAt,
+			&device.CreatedAt, &device.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -531,6 +597,27 @@ func (r *DeviceRepository) UpdateName(ctx context.Context, id uuid.UUID, name st
 
 func (r *DeviceRepository) UpdateReceiveMessages(ctx context.Context, id uuid.UUID, receive bool) error {
 	_, err := r.db.Exec(ctx, `UPDATE devices SET receive_messages = $1, updated_at = NOW() WHERE id = $2`, receive, id)
+	return err
+}
+
+func (r *DeviceRepository) UpdateCloudAPIConfig(ctx context.Context, id uuid.UUID, device *domain.Device) error {
+	capabilities := deviceCapabilities(device)
+	_, err := r.db.Exec(ctx, `
+		UPDATE devices SET
+			phone = $2,
+			waba_id = $3,
+			phone_number_id = $4,
+			api_display_phone = $5,
+			api_webhook_status = COALESCE(NULLIF($6::text, ''), 'not_configured'),
+			api_billing_status = COALESCE(NULLIF($7::text, ''), 'not_configured'),
+			api_sending_enabled = $8,
+			api_templates_enabled = $9,
+			capabilities = $10::jsonb,
+			updated_at = NOW()
+		WHERE id = $1
+	`, id, device.Phone, device.WABAID, device.PhoneNumberID, device.APIDisplayPhone,
+		device.APIWebhookStatus, device.APIBillingStatus, device.APISendingEnabled,
+		device.APITemplatesEnabled, capabilities)
 	return err
 }
 
@@ -694,6 +781,33 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		argNum++
 	}
 
+	// Reaction filter — only chats that have at least one reaction matching the criteria
+	if filter.HasReaction {
+		reactionClause := " AND EXISTS (SELECT 1 FROM message_reactions mr WHERE mr.chat_id = c.id AND mr.account_id = c.account_id"
+		if filter.ReactionFromMe != nil {
+			reactionClause += fmt.Sprintf(" AND mr.is_from_me = $%d", argNum)
+			args = append(args, *filter.ReactionFromMe)
+			argNum++
+		}
+		if len(filter.ReactionEmojis) > 0 {
+			reactionClause += fmt.Sprintf(" AND mr.emoji = ANY($%d)", argNum)
+			args = append(args, filter.ReactionEmojis)
+			argNum++
+		}
+		if filter.ReactionSince != nil {
+			reactionClause += fmt.Sprintf(" AND mr.timestamp >= $%d", argNum)
+			args = append(args, *filter.ReactionSince)
+			argNum++
+		}
+		if filter.ReactionUntil != nil {
+			reactionClause += fmt.Sprintf(" AND mr.timestamp <= $%d", argNum)
+			args = append(args, *filter.ReactionUntil)
+			argNum++
+		}
+		reactionClause += ")"
+		baseQuery += reactionClause
+	}
+
 	// Count total
 	var total int
 	countQuery := "SELECT COUNT(DISTINCT c.id) " + baseQuery
@@ -807,9 +921,9 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		                      quoted_message_id, quoted_body, quoted_sender,
 		                      poll_question, poll_max_selections,
 		                      is_revoked, is_view_once, latitude, longitude,
-		                      contact_name, contact_phone, contact_vcard)
+		                      contact_name, contact_phone, contact_vcard, provider, template_name)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-		        $22, $23, $24, $25, $26, $27, $28)
+		        $22, $23, $24, $25, $26, $27, $28, COALESCE(NULLIF($29::text, ''), 'whatsapp_web'), $30)
 		ON CONFLICT (chat_id, message_id) DO NOTHING
 		RETURNING id, created_at
 	`, msg.AccountID, msg.DeviceID, msg.ChatID, msg.MessageID, msg.FromJID, msg.FromName, msg.Body,
@@ -818,7 +932,7 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		msg.QuotedMessageID, msg.QuotedBody, msg.QuotedSender,
 		msg.PollQuestion, msg.PollMaxSelections,
 		msg.IsRevoked, msg.IsViewOnce, msg.Latitude, msg.Longitude,
-		msg.ContactName, msg.ContactPhone, msg.ContactVCard,
+		msg.ContactName, msg.ContactPhone, msg.ContactVCard, msg.Provider, msg.TemplateName,
 	).Scan(&msg.ID, &msg.CreatedAt)
 }
 
@@ -826,7 +940,7 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		       message_type, media_url, media_mimetype, media_filename, media_size,
-		       is_from_me, is_read, status, timestamp, created_at,
+		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender,
 		       COALESCE(is_revoked, false), COALESCE(is_view_once, false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
@@ -848,7 +962,7 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 			&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
 			&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
 			&msg.MediaFilename, &msg.MediaSize, &msg.IsFromMe, &msg.IsRead, &msg.Status,
-			&msg.Timestamp, &msg.CreatedAt,
+			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender,
 			&msg.IsRevoked, &msg.IsViewOnce,
 			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard,
@@ -866,7 +980,7 @@ func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		       message_type, media_url, media_mimetype, media_filename, media_size,
-		       is_from_me, is_read, status, timestamp, created_at,
+		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender,
 		       COALESCE(is_revoked, false), COALESCE(is_view_once, false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
@@ -876,7 +990,7 @@ func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID
 		&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
 		&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
 		&msg.MediaFilename, &msg.MediaSize, &msg.IsFromMe, &msg.IsRead, &msg.Status,
-		&msg.Timestamp, &msg.CreatedAt,
+		&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 		&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender,
 		&msg.IsRevoked, &msg.IsViewOnce,
 		&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard,
@@ -989,11 +1103,11 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 			push_name = COALESCE(NULLIF(EXCLUDED.push_name, ''), contacts.push_name),
 			phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
 			updated_at = NOW()
-		RETURNING id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
+		RETURNING id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, avatar_checked_at,
 		          email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at
 	`, accountID, deviceID, jid, phone, name, pushName, isGroup).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
-		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL, &contact.AvatarCheckedAt,
 		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 	)
@@ -1096,6 +1210,12 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 			argNum,
 		)
 		args = append(args, filter.ExcludeTagNames)
+		argNum++
+	}
+
+	if len(filter.CfFilterContactIDs) > 0 {
+		baseQuery += fmt.Sprintf(" AND id = ANY($%d)", argNum)
+		args = append(args, filter.CfFilterContactIDs)
 		argNum++
 	}
 
@@ -1202,6 +1322,12 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 			selectArgNum,
 		)
 		selectArgs = append(selectArgs, filter.ExcludeTagNames)
+		selectArgNum++
+	}
+
+	if len(filter.CfFilterContactIDs) > 0 {
+		selectQuery += fmt.Sprintf(" AND c.id = ANY($%d)", selectArgNum)
+		selectArgs = append(selectArgs, filter.CfFilterContactIDs)
 		selectArgNum++
 	}
 
@@ -1394,12 +1520,44 @@ func (r *ContactRepository) SyncToLead(ctx context.Context, contact *domain.Cont
 	return nil
 }
 
-func (r *ContactRepository) UpdateAvatarURL(ctx context.Context, accountID uuid.UUID, jid, avatarURL string) error {
-	_, err := r.db.Exec(ctx, `
-		UPDATE contacts SET avatar_url = $1, updated_at = NOW()
-		WHERE account_id = $2 AND jid = $3
-	`, avatarURL, accountID, jid)
-	return err
+func (r *ContactRepository) ClaimAvatarRefresh(ctx context.Context, accountID uuid.UUID, jid string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		ttl = 7 * 24 * time.Hour
+	}
+	var claimed bool
+	err := r.db.QueryRow(ctx, `
+		UPDATE contacts
+		SET avatar_checked_at = NOW()
+		WHERE account_id = $1
+		  AND jid = $2
+		  AND (avatar_checked_at IS NULL OR avatar_checked_at < NOW() - $3::interval)
+		RETURNING TRUE
+	`, accountID, jid, fmt.Sprintf("%d seconds", int(ttl.Seconds()))).Scan(&claimed)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	return claimed, err
+}
+
+func (r *ContactRepository) UpdateAvatarURL(ctx context.Context, accountID uuid.UUID, jid, avatarURL string) (bool, error) {
+	var changed bool
+	err := r.db.QueryRow(ctx, `
+		WITH previous AS (
+			SELECT avatar_url FROM contacts WHERE account_id = $2 AND jid = $3
+		), updated AS (
+			UPDATE contacts
+			SET avatar_url = $1,
+			    avatar_checked_at = NOW(),
+			    updated_at = CASE WHEN avatar_url IS DISTINCT FROM $1 THEN NOW() ELSE updated_at END
+			WHERE account_id = $2 AND jid = $3
+			RETURNING TRUE
+		)
+		SELECT COALESCE((SELECT avatar_url FROM previous) IS DISTINCT FROM $1, FALSE)
+	`, avatarURL, accountID, jid).Scan(&changed)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	return changed, err
 }
 
 func (r *ContactRepository) Delete(ctx context.Context, id uuid.UUID) error {
@@ -4523,6 +4681,7 @@ func (r *QuickReplyRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM quick_replies WHERE id = $1`, id)
 	return err
 }
+
 // RoleRepository handles RBAC role and permission management
 type RoleRepository struct {
 	db *pgxpool.Pool

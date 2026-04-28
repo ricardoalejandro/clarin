@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { X, FileText, Download, Loader2, Image, FileDown, Sparkles, ArrowLeft, Eye } from 'lucide-react'
+import { X, FileText, Download, Loader2, Sparkles, ArrowLeft, Eye } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { DocumentTemplate } from '@/types/document'
 import type { Lead } from '@/types/contact'
@@ -35,8 +35,6 @@ export default function GenerateDocumentModal({ lead, onClose }: Props) {
     return () => document.removeEventListener('keydown', h, true)
   }, [onClose])
   const [selectedTemplate, setSelectedTemplate] = useState<DocumentTemplate | null>(null)
-  const [format, setFormat] = useState<'png' | 'pdf'>('pdf')
-  const [quality, setQuality] = useState<'normal' | 'hd'>('normal')
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState('')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -83,15 +81,25 @@ export default function GenerateDocumentModal({ lead, onClose }: Props) {
       }
       const fullTemplate = fullRes.data.template
 
-      const opts: RenderOptions = {
-        format,
-        scale: quality === 'hd' ? 4 : 2,
+      // Enrich lead with custom field values if available
+      const enrichedLead = { ...lead }
+      if (lead.contact_id && (!lead.custom_field_values || lead.custom_field_values.length === 0)) {
+        try {
+          const cfRes = await api<{ values: any[] }>(`/api/contacts/${lead.contact_id}/custom-fields`)
+          if (cfRes.success && Array.isArray(cfRes.data?.values)) {
+            enrichedLead.custom_field_values = cfRes.data.values
+          }
+        } catch { /* non-critical */ }
       }
-      const blob = await generateForLead(fullTemplate, lead, opts)
+
+      const opts: RenderOptions = {
+        format: 'png',
+        scale: 4, // HD (~200 DPI)
+      }
+      const blob = await generateForLead(fullTemplate, enrichedLead, opts)
       const leadName = `${lead.name || ''} ${lead.last_name || ''}`.trim() || lead.phone || 'documento'
       const safeName = leadName.replace(/[^a-zA-Z0-9áéíóúñÁÉÍÓÚÑ\s_-]/g, '').replace(/\s+/g, '_')
-      const ext = format === 'png' ? 'png' : 'pdf'
-      const filename = `${safeName}_${selectedTemplate.name}.${ext}`
+      const filename = `${safeName}_${selectedTemplate.name}.png`
 
       // Revoke previous preview URL if any
       if (previewUrlRef.current) {
@@ -108,7 +116,7 @@ export default function GenerateDocumentModal({ lead, onClose }: Props) {
     } finally {
       setGenerating(false)
     }
-  }, [selectedTemplate, format, quality, lead])
+  }, [selectedTemplate, lead])
 
   const handleDownload = useCallback(() => {
     if (previewBlob && previewFilename) {
@@ -170,22 +178,13 @@ export default function GenerateDocumentModal({ lead, onClose }: Props) {
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           {previewUrl ? (
-            /* Preview view */
+            /* Preview view — always PNG */
             <div className="flex flex-col items-center">
-              {format === 'png' ? (
-                <img
-                  src={previewUrl}
-                  alt="Vista previa del documento"
-                  className="max-w-full rounded-lg border border-slate-200 shadow-sm"
-                />
-              ) : (
-                <iframe
-                  src={previewUrl}
-                  title="Vista previa del documento"
-                  className="w-full rounded-lg border border-slate-200 shadow-sm"
-                  style={{ height: '60vh' }}
-                />
-              )}
+              <img
+                src={previewUrl}
+                alt="Vista previa del documento"
+                className="max-w-full rounded-lg border border-slate-200 shadow-sm"
+              />
             </div>
           ) : loading ? (
             <div className="flex items-center justify-center py-12">
@@ -253,63 +252,6 @@ export default function GenerateDocumentModal({ lead, onClose }: Props) {
                 </div>
               )}
 
-              {/* Options */}
-              {selectedTemplate && (
-                <div className="flex gap-3">
-                  <div className="flex-1">
-                    <label className="text-xs font-medium text-slate-600 mb-1.5 block">Formato</label>
-                    <div className="flex gap-1.5">
-                      <button
-                        onClick={() => setFormat('pdf')}
-                        className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                          format === 'pdf'
-                            ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                            : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                        }`}
-                      >
-                        <FileDown className="w-3.5 h-3.5" />
-                        PDF
-                      </button>
-                      <button
-                        onClick={() => setFormat('png')}
-                        className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                          format === 'png'
-                            ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                            : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                        }`}
-                      >
-                        <Image className="w-3.5 h-3.5" />
-                        PNG
-                      </button>
-                    </div>
-                  </div>
-                  <div className="flex-1">
-                    <label className="text-xs font-medium text-slate-600 mb-1.5 block">Calidad</label>
-                    <div className="flex gap-1.5">
-                      <button
-                        onClick={() => setQuality('normal')}
-                        className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                          quality === 'normal'
-                            ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                            : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                        }`}
-                      >
-                        Normal
-                      </button>
-                      <button
-                        onClick={() => setQuality('hd')}
-                        className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition border ${
-                          quality === 'hd'
-                            ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                            : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                        }`}
-                      >
-                        HD
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
             </>
           )}
 

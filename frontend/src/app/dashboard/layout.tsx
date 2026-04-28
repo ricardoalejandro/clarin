@@ -31,7 +31,8 @@ import {
   FileText,
   CheckSquare,
   UserPlus,
-  Stamp
+  Stamp,
+  Bot
 } from 'lucide-react'
 
 interface User {
@@ -282,6 +283,7 @@ export default function DashboardLayout({
     '/dashboard/contacts': 'contacts',
     '/dashboard/programs': 'programs',
     '/dashboard/automations': 'leads',
+    '/dashboard/bots': 'leads',
     '/dashboard/devices': 'devices',
     '/dashboard/leads': 'leads',
     '/dashboard/events': 'events',
@@ -309,6 +311,7 @@ export default function DashboardLayout({
     { href: '/dashboard/contacts', icon: Contact, label: 'Contactos', desc: 'Directorio de contactos' },
     { href: '/dashboard/programs', icon: GraduationCap, label: 'Programas', desc: 'Programas educativos' },
     { href: '/dashboard/automations', icon: Zap, label: 'Automatizaciones', desc: 'Flujos automáticos' },
+    { href: '/dashboard/bots', icon: Bot, label: 'Bots', desc: 'Respuestas conversacionales' },
     { href: '/dashboard/leads', icon: UserPlus, label: 'Leads', desc: 'Prospectos y oportunidades' },
     { href: '/dashboard/events', icon: CalendarDays, label: 'Eventos', desc: 'Gestión de eventos' },
     { href: '/dashboard/broadcasts', icon: Megaphone, label: 'Difusión', desc: 'Mensajes masivos' },

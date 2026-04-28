@@ -160,11 +160,21 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Force dark text on all form elements for visibility */
+/* Force dark text on all form elements for visibility (light backgrounds) */
 input,
 textarea,
 select {
   color: #0f172a !important;
+}
+
+/* Allow light text inside dark-themed containers */
+.dark-input input,
+.dark-input textarea,
+.dark-input select,
+input.dark-input,
+textarea.dark-input,
+select.dark-input {
+  color: #f1f5f9 !important;
 }
 
 input::placeholder,

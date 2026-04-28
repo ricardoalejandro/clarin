@@ -1,5 +1,7 @@
 // Shared types for Contact, Lead, and related entities
 
+import { CustomFieldValue } from './custom-field'
+
 export interface StructuredTag {
   id: string
   account_id: string
@@ -77,6 +79,7 @@ export interface Lead {
   assigned_to: string
   created_at: string
   updated_at: string
+  custom_field_values?: CustomFieldValue[] | null
 }
 
 /** Contact = source of truth for personal data + tags */
@@ -110,4 +113,5 @@ export interface Contact {
   updated_at?: string
   last_activity?: string | null
   device_names?: { device_id: string; name: string }[]
+  custom_field_values?: CustomFieldValue[] | null
 }

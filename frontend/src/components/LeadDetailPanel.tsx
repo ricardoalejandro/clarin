@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Phone, Mail, User, Calendar, MessageCircle, Trash2, ChevronDown,
-  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff, MapPin, Briefcase, Map
+  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff, MapPin, Briefcase, Map, SlidersHorizontal, LayoutList
 } from 'lucide-react'
 import { formatDistanceToNow, format, parseISO } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -13,6 +13,8 @@ import TaskList from '@/components/TaskList'
 import TaskFormModal from '@/components/TaskFormModal'
 import GenerateDocumentModal from '@/components/GenerateDocumentModal'
 import ConfirmDeleteKommoModal from '@/components/ConfirmDeleteKommoModal'
+import CustomFieldInput from '@/components/CustomFieldInput'
+import type { CustomFieldDefinition, CustomFieldValue } from '@/types/custom-field'
 import type { Task, TaskList as TaskListType } from '@/types/task'
 import { TASK_TYPE_CONFIG } from '@/types/task'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
@@ -112,7 +114,23 @@ export default function LeadDetailPanel({
   const kommoEnabled = typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true'
   // Internal lead state — updates immediately on save, syncs with prop
   const [lead, setLead] = useState(leadProp)
-  useEffect(() => { setLead(leadProp) }, [leadProp])
+  useEffect(() => {
+    // Preserve relations that the parent may not refresh in-place (avoids visual wipe
+    // of tags / custom fields while the local state is still authoritative).
+    setLead(prev => ({
+      ...leadProp,
+      structured_tags: leadProp.structured_tags ?? prev.structured_tags,
+      custom_field_values: (leadProp as any).custom_field_values ?? (prev as any).custom_field_values,
+    }))
+
+    // Preserve relations that the parent may not refresh in-place (avoids visual wipe
+    // of tags / custom fields while the local state is still authoritative).
+    setLead(prev => ({
+      ...leadProp,
+      structured_tags: leadProp.structured_tags ?? prev.structured_tags,
+      custom_field_values: (leadProp as any).custom_field_values ?? (prev as any).custom_field_values,
+    }))
+  }, [leadProp])
 
   // Pipelines
   const [pipelines, setPipelines] = useState<Pipeline[]>([])
@@ -172,6 +190,14 @@ export default function LeadDetailPanel({
   const [showLeadStageDropdown, setShowLeadStageDropdown] = useState(false)
   const [expandedLeadPipelineId, setExpandedLeadPipelineId] = useState<string | null>(null)
   const leadStageDropdownRef = useRef<HTMLDivElement>(null)
+
+  // Custom fields
+  const [cfDefs, setCfDefs] = useState<CustomFieldDefinition[]>([])
+  const [cfValues, setCfValues] = useState<CustomFieldValue[]>([])
+  const [cfLoading, setCfLoading] = useState(false)
+
+  // Tabs
+  const [activeTab, setActiveTab] = useState<'general' | 'campos'>('general')
 
   // ─── Check Google Contacts connection + sync status ───────────────
   useEffect(() => {
@@ -247,12 +273,48 @@ export default function LeadDetailPanel({
       .catch(console.error)
   }, [eventMode, contactMode])
 
+  // ─── Fetch custom field definitions + values ───────────────
+  useEffect(() => {
+    const cid = contactMode ? contactId : lead.contact_id
+    if (!cid) { setCfDefs([]); setCfValues([]); return }
+    setCfLoading(true)
+    const token = localStorage.getItem('token')
+    const headers = { Authorization: `Bearer ${token}` }
+    Promise.all([
+      fetch('/api/custom-fields', { headers }).then(r => r.json()),
+      fetch(`/api/contacts/${cid}/custom-fields`, { headers }).then(r => r.json()),
+    ]).then(([defsData, valsData]) => {
+      if (defsData.success) setCfDefs(defsData.fields || [])
+      if (valsData.success) setCfValues(valsData.values || [])
+    }).catch(() => {}).finally(() => setCfLoading(false))
+  }, [leadProp.id, contactMode, contactId, lead.contact_id])
+
+  const handleSaveCustomField = useCallback(async (fieldId: string, payload: any) => {
+    const cid = contactMode ? contactId : lead.contact_id
+    if (!cid) return
+    const token = localStorage.getItem('token')
+    const res = await fetch(`/api/contacts/${cid}/custom-fields/${fieldId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    })
+    const data = await res.json()
+    if (data.success && data.value) {
+      setCfValues(prev => {
+        const idx = prev.findIndex(v => v.field_id === fieldId)
+        if (idx >= 0) { const n = [...prev]; n[idx] = data.value; return n }
+        return [...prev, data.value]
+      })
+    }
+  }, [contactMode, contactId, lead.contact_id])
+
   // ─── Fetch observations when lead changes ──────────────
   useEffect(() => {
     setNotesValue(lead.notes || '')
     setEditingField(null)
     setEditingNotes(false)
     setObsDisplayCount(5)
+    setActiveTab('general')
     fetchObservations(lead.id)
     fetchTaskLists()
     if (!contactMode) {
@@ -707,7 +769,42 @@ export default function LeadDetailPanel({
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+      {/* Tab Bar */}
+      <div className="flex border-b border-slate-200 shrink-0 bg-white px-2">
+        <button
+          onClick={() => setActiveTab('general')}
+          className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
+            activeTab === 'general'
+              ? 'text-emerald-600 border-b-2 border-emerald-600'
+              : 'text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <LayoutList className="w-3.5 h-3.5" />
+          General
+        </button>
+        <button
+          onClick={() => setActiveTab('campos')}
+          className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
+            activeTab === 'campos'
+              ? 'text-emerald-600 border-b-2 border-emerald-600'
+              : 'text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <SlidersHorizontal className="w-3.5 h-3.5" />
+          Campos
+          {cfDefs.length > 0 && (
+            <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
+              activeTab === 'campos'
+                ? 'bg-emerald-100 text-emerald-700'
+                : 'bg-slate-100 text-slate-500'
+            }`}>
+              {cfDefs.length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      <div className={`flex-1 overflow-y-auto p-6 space-y-6 ${activeTab !== 'general' ? 'hidden' : ''}`}>
         {/* Lead Avatar & Name */}
         <div className="text-center">
           {contactMode && avatarUrl ? (
@@ -1551,6 +1648,40 @@ export default function LeadDetailPanel({
           <div className="text-[10px] text-slate-400 space-y-0.5">
             <p>Creado: {new Date(lead.created_at).toLocaleDateString('es')}</p>
             <p>Actualizado: {formatDistanceToNow(new Date(lead.updated_at), { locale: es, addSuffix: true })}</p>
+          </div>
+        )}
+      </div>
+
+      {/* Custom Fields Tab */}
+      <div className={`flex-1 overflow-y-auto p-6 space-y-6 ${activeTab !== 'campos' ? 'hidden' : ''}`}>
+        {(contactMode ? contactId : lead.contact_id) ? (
+          cfLoading ? (
+            <div className="space-y-3">
+              {[...Array(4)].map((_, i) => <div key={i} className="h-8 bg-slate-50 rounded-lg animate-pulse" />)}
+            </div>
+          ) : cfDefs.length > 0 ? (
+            <div className="space-y-1">
+              {cfDefs.map(def => (
+                <CustomFieldInput
+                  key={def.id}
+                  definition={def}
+                  value={cfValues.find(v => v.field_id === def.id)}
+                  onSave={handleSaveCustomField}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <SlidersHorizontal className="w-8 h-8 text-slate-300 mb-3" />
+              <p className="text-sm font-medium text-slate-500">Sin campos personalizados</p>
+              <p className="text-xs text-slate-400 mt-1">Crea campos desde Configuración para comenzar</p>
+            </div>
+          )
+        ) : (
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <SlidersHorizontal className="w-8 h-8 text-slate-300 mb-3" />
+            <p className="text-sm font-medium text-slate-500">Contacto no vinculado</p>
+            <p className="text-xs text-slate-400 mt-1">Vincule un contacto para ver campos personalizados</p>
           </div>
         )}
       </div>

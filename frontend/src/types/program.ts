@@ -17,6 +17,17 @@ export interface Program {
   schedule_days?: number[]; // 0=Sun, 1=Mon, ..., 6=Sat
   schedule_start_time?: string; // "HH:MM"
   schedule_end_time?: string;   // "HH:MM"
+  // Program type & event-specific fields
+  type?: 'course' | 'event';
+  pipeline_id?: string;
+  pipeline_name?: string;
+  tag_formula?: string;
+  tag_formula_mode?: 'OR' | 'AND';
+  tag_formula_type?: 'simple' | 'advanced';
+  event_date?: string;
+  event_end?: string;
+  location?: string;
+  stage_counts?: Record<string, number>;
 }
 
 export interface ProgramFolder {
@@ -41,6 +52,10 @@ export interface ProgramParticipant {
   enrolled_at: string;
   contact_name?: string;
   contact_phone?: string;
+  stage_id?: string;
+  stage_name?: string;
+  stage_color?: string;
+  auto_tag_sync?: boolean;
 }
 
 export interface ProgramSession {

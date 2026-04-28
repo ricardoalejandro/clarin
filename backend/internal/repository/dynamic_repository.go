@@ -318,6 +318,12 @@ func (r *DynamicRepository) ListLinks(ctx context.Context, dynamicID uuid.UUID) 
 		}
 		links = append(links, l)
 	}
+	// Hydrate extra media for each link so edit forms and UI can display them.
+	for _, l := range links {
+		if media, mErr := r.ListExtraMedia(ctx, l.ID); mErr == nil {
+			l.ExtraMedia = media
+		}
+	}
 	return links, nil
 }
 
@@ -376,6 +382,9 @@ func (r *DynamicRepository) GetLinkBySlug(ctx context.Context, slug string) (*do
 		return nil, nil, err
 	}
 	_ = json.Unmarshal(configJSON, &d.Config)
+	if media, mErr := r.ListExtraMedia(ctx, link.ID); mErr == nil {
+		link.ExtraMedia = media
+	}
 	return link, d, nil
 }
 
@@ -404,6 +413,9 @@ func (r *DynamicRepository) GetLinkByID(ctx context.Context, linkID uuid.UUID) (
 		return nil, nil, err
 	}
 	_ = json.Unmarshal(configJSON, &d.Config)
+	if media, mErr := r.ListExtraMedia(ctx, link.ID); mErr == nil {
+		link.ExtraMedia = media
+	}
 	return link, d, nil
 }
 
@@ -526,11 +538,18 @@ func (r *DynamicRepository) BulkAssignOption(ctx context.Context, itemIDs []uuid
 
 func (r *DynamicRepository) CreateRegistration(ctx context.Context, reg *domain.DynamicLinkRegistration) error {
 	return r.db.QueryRow(ctx, `
-		INSERT INTO dynamic_link_registrations (link_id, full_name, phone, age)
-		VALUES ($1,$2,$3,$4)
+		INSERT INTO dynamic_link_registrations (link_id, full_name, phone, age, contact_id, lead_id, whatsapp_status, whatsapp_error, session_token, shared_by_registration_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		RETURNING id, created_at
-	`, reg.LinkID, reg.FullName, reg.Phone, reg.Age,
+	`, reg.LinkID, reg.FullName, reg.Phone, reg.Age, reg.ContactID, reg.LeadID, reg.WhatsAppStatus, reg.WhatsAppError, nullIfEmpty(reg.SessionToken), reg.SharedByRegistrationID,
 	).Scan(&reg.ID, &reg.CreatedAt)
+}
+
+func nullIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func (r *DynamicRepository) RegistrationExistsByPhone(ctx context.Context, linkID uuid.UUID, phone string) (bool, error) {
@@ -539,9 +558,50 @@ func (r *DynamicRepository) RegistrationExistsByPhone(ctx context.Context, linkI
 	return exists, err
 }
 
+func (r *DynamicRepository) GetRegistrationByPhone(ctx context.Context, linkID uuid.UUID, phone string) (*domain.DynamicLinkRegistration, error) {
+	reg := &domain.DynamicLinkRegistration{}
+	var sessionToken *string
+	err := r.db.QueryRow(ctx, `
+		SELECT id, link_id, full_name, phone, age, contact_id, lead_id, whatsapp_status, whatsapp_error, session_token, shared_by_registration_id, created_at
+		FROM dynamic_link_registrations
+		WHERE link_id=$1 AND phone=$2 AND shared_by_registration_id IS NULL
+	`, linkID, phone).Scan(&reg.ID, &reg.LinkID, &reg.FullName, &reg.Phone, &reg.Age, &reg.ContactID, &reg.LeadID, &reg.WhatsAppStatus, &reg.WhatsAppError, &sessionToken, &reg.SharedByRegistrationID, &reg.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if sessionToken != nil {
+		reg.SessionToken = *sessionToken
+	}
+	return reg, nil
+}
+
+func (r *DynamicRepository) GetRegistrationBySessionToken(ctx context.Context, token string) (*domain.DynamicLinkRegistration, error) {
+	reg := &domain.DynamicLinkRegistration{}
+	var sessionToken *string
+	err := r.db.QueryRow(ctx, `
+		SELECT id, link_id, full_name, phone, age, contact_id, lead_id, whatsapp_status, whatsapp_error, session_token, shared_by_registration_id, created_at
+		FROM dynamic_link_registrations
+		WHERE session_token=$1
+	`, token).Scan(&reg.ID, &reg.LinkID, &reg.FullName, &reg.Phone, &reg.Age, &reg.ContactID, &reg.LeadID, &reg.WhatsAppStatus, &reg.WhatsAppError, &sessionToken, &reg.SharedByRegistrationID, &reg.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if sessionToken != nil {
+		reg.SessionToken = *sessionToken
+	}
+	return reg, nil
+}
+
+func (r *DynamicRepository) UpdateRegistrationWhatsAppStatus(ctx context.Context, id uuid.UUID, status, errMsg string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE dynamic_link_registrations SET whatsapp_status=$1, whatsapp_error=$2 WHERE id=$3
+	`, status, errMsg, id)
+	return err
+}
+
 func (r *DynamicRepository) ListRegistrationsByLink(ctx context.Context, linkID uuid.UUID) ([]*domain.DynamicLinkRegistration, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, link_id, full_name, phone, age, created_at
+		SELECT id, link_id, full_name, phone, age, contact_id, lead_id, whatsapp_status, whatsapp_error, session_token, shared_by_registration_id, created_at
 		FROM dynamic_link_registrations
 		WHERE link_id = $1
 		ORDER BY created_at DESC
@@ -554,8 +614,12 @@ func (r *DynamicRepository) ListRegistrationsByLink(ctx context.Context, linkID 
 	var regs []*domain.DynamicLinkRegistration
 	for rows.Next() {
 		reg := &domain.DynamicLinkRegistration{}
-		if err := rows.Scan(&reg.ID, &reg.LinkID, &reg.FullName, &reg.Phone, &reg.Age, &reg.CreatedAt); err != nil {
+		var sessionToken *string
+		if err := rows.Scan(&reg.ID, &reg.LinkID, &reg.FullName, &reg.Phone, &reg.Age, &reg.ContactID, &reg.LeadID, &reg.WhatsAppStatus, &reg.WhatsAppError, &sessionToken, &reg.SharedByRegistrationID, &reg.CreatedAt); err != nil {
 			return nil, err
+		}
+		if sessionToken != nil {
+			reg.SessionToken = *sessionToken
 		}
 		regs = append(regs, reg)
 	}
@@ -571,4 +635,80 @@ func (r *DynamicRepository) CountRegistrationsByLink(ctx context.Context, linkID
 func (r *DynamicRepository) DeleteRegistration(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `DELETE FROM dynamic_link_registrations WHERE id=$1`, id)
 	return err
+}
+
+// ─── Dynamic Link Extra Media (multi-image with captions) ────────────────────
+
+func (r *DynamicRepository) ListExtraMedia(ctx context.Context, linkID uuid.UUID) ([]*domain.DynamicLinkExtraMedia, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, link_id, url, media_type, caption, sort_order, created_at
+		FROM dynamic_link_extra_media
+		WHERE link_id = $1
+		ORDER BY sort_order ASC, created_at ASC
+	`, linkID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*domain.DynamicLinkExtraMedia
+	for rows.Next() {
+		m := &domain.DynamicLinkExtraMedia{}
+		if err := rows.Scan(&m.ID, &m.LinkID, &m.URL, &m.MediaType, &m.Caption, &m.SortOrder, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, m)
+	}
+	return items, nil
+}
+
+func (r *DynamicRepository) CountExtraMedia(ctx context.Context, linkID uuid.UUID) (int, error) {
+	var n int
+	err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM dynamic_link_extra_media WHERE link_id=$1`, linkID).Scan(&n)
+	return n, err
+}
+
+func (r *DynamicRepository) CreateExtraMedia(ctx context.Context, m *domain.DynamicLinkExtraMedia) error {
+	return r.db.QueryRow(ctx, `
+		INSERT INTO dynamic_link_extra_media (link_id, url, media_type, caption, sort_order)
+		VALUES ($1,$2,$3,$4,$5)
+		RETURNING id, created_at
+	`, m.LinkID, m.URL, m.MediaType, m.Caption, m.SortOrder,
+	).Scan(&m.ID, &m.CreatedAt)
+}
+
+func (r *DynamicRepository) UpdateExtraMediaCaption(ctx context.Context, id, linkID uuid.UUID, caption string) error {
+	_, err := r.db.Exec(ctx, `UPDATE dynamic_link_extra_media SET caption=$1 WHERE id=$2 AND link_id=$3`, caption, id, linkID)
+	return err
+}
+
+func (r *DynamicRepository) GetExtraMediaByID(ctx context.Context, id, linkID uuid.UUID) (*domain.DynamicLinkExtraMedia, error) {
+	m := &domain.DynamicLinkExtraMedia{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, link_id, url, media_type, caption, sort_order, created_at
+		FROM dynamic_link_extra_media WHERE id=$1 AND link_id=$2
+	`, id, linkID).Scan(&m.ID, &m.LinkID, &m.URL, &m.MediaType, &m.Caption, &m.SortOrder, &m.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (r *DynamicRepository) DeleteExtraMedia(ctx context.Context, id, linkID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM dynamic_link_extra_media WHERE id=$1 AND link_id=$2`, id, linkID)
+	return err
+}
+
+// ReorderExtraMedia updates sort_order for each given id in sequence (0..N-1).
+func (r *DynamicRepository) ReorderExtraMedia(ctx context.Context, linkID uuid.UUID, ids []uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for i, id := range ids {
+		if _, err := tx.Exec(ctx, `UPDATE dynamic_link_extra_media SET sort_order=$1 WHERE id=$2 AND link_id=$3`, i, id, linkID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }

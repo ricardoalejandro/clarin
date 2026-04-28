@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -901,6 +902,196 @@ func (s *Server) handleDeleteLinkExtraMedia(c *fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
+// ─── Link Extra Media (multi, up to 10 per link) ─────────────────────────────
+
+const maxExtraMediaPerLink = 10
+
+// handleListLinkMedia returns the list of extras for a given link (admin).
+func (s *Server) handleListLinkMedia(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	dynamicID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid dynamic ID"})
+	}
+	linkID, err := uuid.Parse(c.Params("linkId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid link ID"})
+	}
+	if _, err := s.repos.Dynamic.GetByID(c.Context(), dynamicID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Dynamic not found"})
+	}
+	items, err := s.repos.Dynamic.ListExtraMedia(c.Context(), linkID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"media": items})
+}
+
+// handleCreateLinkMedia uploads one media file and appends it as a new extra.
+// Accepts multipart form fields: media (file), caption (string, optional).
+func (s *Server) handleCreateLinkMedia(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	dynamicID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid dynamic ID"})
+	}
+	linkID, err := uuid.Parse(c.Params("linkId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid link ID"})
+	}
+	if _, err := s.repos.Dynamic.GetByID(c.Context(), dynamicID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Dynamic not found"})
+	}
+
+	// Enforce max count
+	count, err := s.repos.Dynamic.CountExtraMedia(c.Context(), linkID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if count >= maxExtraMediaPerLink {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Máximo %d medios por link", maxExtraMediaPerLink)})
+	}
+
+	file, err := c.FormFile("media")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Archivo requerido"})
+	}
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	allowed := map[string]string{
+		".jpg": "image", ".jpeg": "image", ".png": "image", ".gif": "image", ".webp": "image",
+		".mp4": "video",
+	}
+	mediaType, ok := allowed[ext]
+	if !ok {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Formato no soportado (jpg, png, gif, webp, mp4)"})
+	}
+	if mediaType == "video" && file.Size > 3*1024*1024 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "El video no debe superar los 3MB"})
+	}
+
+	f, err := file.Open()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo abrir el archivo"})
+	}
+	defer f.Close()
+
+	folder := fmt.Sprintf("dynamics/%s/extra", dynamicID.String())
+	fileName := fmt.Sprintf("%s%s", uuid.New().String(), ext)
+	contentType := file.Header.Get("Content-Type")
+	if contentType == "" {
+		if mediaType == "video" {
+			contentType = "video/mp4"
+		} else {
+			contentType = "image/jpeg"
+		}
+	}
+	if _, err := s.storage.UploadReader(c.Context(), accountID, folder, fileName, f, file.Size, contentType); err != nil {
+		log.Printf("[DYNAMIC] Failed to upload media: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo subir el archivo"})
+	}
+	proxyURL := fmt.Sprintf("/api/media/file/%s/dynamics/%s/extra/%s", accountID.String(), dynamicID.String(), fileName)
+
+	m := &domain.DynamicLinkExtraMedia{
+		LinkID:    linkID,
+		URL:       proxyURL,
+		MediaType: mediaType,
+		Caption:   c.FormValue("caption"),
+		SortOrder: count,
+	}
+	if err := s.repos.Dynamic.CreateExtraMedia(c.Context(), m); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.Status(fiber.StatusCreated).JSON(m)
+}
+
+// handleUpdateLinkMediaCaption updates only the caption of an extra.
+func (s *Server) handleUpdateLinkMediaCaption(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	dynamicID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid dynamic ID"})
+	}
+	linkID, err := uuid.Parse(c.Params("linkId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid link ID"})
+	}
+	mediaID, err := uuid.Parse(c.Params("mediaId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid media ID"})
+	}
+	if _, err := s.repos.Dynamic.GetByID(c.Context(), dynamicID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Dynamic not found"})
+	}
+	var req struct {
+		Caption string `json:"caption"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request"})
+	}
+	if err := s.repos.Dynamic.UpdateExtraMediaCaption(c.Context(), mediaID, linkID, req.Caption); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// handleDeleteLinkMedia removes one extra from the link.
+func (s *Server) handleDeleteLinkMedia(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	dynamicID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid dynamic ID"})
+	}
+	linkID, err := uuid.Parse(c.Params("linkId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid link ID"})
+	}
+	mediaID, err := uuid.Parse(c.Params("mediaId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid media ID"})
+	}
+	if _, err := s.repos.Dynamic.GetByID(c.Context(), dynamicID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Dynamic not found"})
+	}
+	if err := s.repos.Dynamic.DeleteExtraMedia(c.Context(), mediaID, linkID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// handleReorderLinkMedia accepts { ids: [uuid,...] } and updates sort_order.
+func (s *Server) handleReorderLinkMedia(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	dynamicID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid dynamic ID"})
+	}
+	linkID, err := uuid.Parse(c.Params("linkId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid link ID"})
+	}
+	if _, err := s.repos.Dynamic.GetByID(c.Context(), dynamicID, accountID); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Dynamic not found"})
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request"})
+	}
+	ids := make([]uuid.UUID, 0, len(req.IDs))
+	for _, idStr := range req.IDs {
+		id, err := uuid.Parse(idStr)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
+		}
+		ids = append(ids, id)
+	}
+	if err := s.repos.Dynamic.ReorderExtraMedia(c.Context(), linkID, ids); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
 func (s *Server) handleCheckDynamicLinkSlug(c *fiber.Ctx) error {
 	var req struct {
 		Slug      string     `json:"slug"`
@@ -984,13 +1175,142 @@ func (s *Server) handleSendDynamicWhatsApp(c *fiber.Ctx) error {
 
 // ─── Registration Handlers ───────────────────────────────────────────────────
 
-// handleRegisterOnLink — public endpoint: register on a link + enqueue WhatsApp
+// sendRegistrationWhatsApp performs the synchronous WhatsApp delivery for a
+// registration. The main (scratched image) message is blocking — if it fails
+// the registration is marked failed. Extra media is sent sequentially and
+// errors on extras only log a warning without aborting the flow.
+//
+// Returns (status, errorMessage). status ∈ {"sent","failed","skipped"}.
+// captionAppend (optional) is appended to the main caption — used to inject a
+// personalized link when sharing so the recipient can land directly in the game.
+func (s *Server) sendRegistrationWhatsApp(ctx context.Context, link *domain.DynamicLink, d *domain.Dynamic, item *domain.DynamicItem, phone string, captionAppend string) (string, string) {
+	if !link.WhatsAppEnabled {
+		return "skipped", ""
+	}
+	if s.pool == nil {
+		return "failed", "WhatsApp no disponible"
+	}
+
+	deviceID, err := s.pool.GetFirstConnectedDeviceForAccount(d.AccountID)
+	if err != nil {
+		return "failed", "No hay dispositivo WhatsApp conectado"
+	}
+
+	to := phone + "@s.whatsapp.net"
+	caption := strings.TrimSpace(link.WhatsAppMessage)
+	if caption == "" {
+		caption = "¡Aquí tienes tu pensamiento del día! 🌟"
+	}
+	if captionAppend != "" {
+		caption = caption + "\n\n" + captionAppend
+	}
+
+	if item == nil || item.ImageURL == "" {
+		return "failed", "No hay imagen disponible"
+	}
+
+	if _, err := s.pool.SendMediaMessage(ctx, deviceID, to, caption, item.ImageURL, "image"); err != nil {
+		log.Printf("[DYNAMIC] ❌ Main WA send failed to %s: %v", phone, err)
+		return "failed", err.Error()
+	}
+	log.Printf("[DYNAMIC] ✅ Main WA sent to %s", phone)
+
+	// Legacy single-slot extra (kept for compatibility until UI fully removes it)
+	if link.ExtraMessageMediaURL != "" {
+		time.Sleep(700 * time.Millisecond)
+		if _, err := s.pool.SendMediaMessage(ctx, deviceID, to, link.ExtraMessageText, link.ExtraMessageMediaURL, link.ExtraMessageMediaType); err != nil {
+			log.Printf("[DYNAMIC] ⚠️ Legacy extra media send failed to %s: %v", phone, err)
+		}
+	} else if strings.TrimSpace(link.ExtraMessageText) != "" {
+		time.Sleep(700 * time.Millisecond)
+		if _, err := s.pool.SendMessage(ctx, deviceID, to, link.ExtraMessageText); err != nil {
+			log.Printf("[DYNAMIC] ⚠️ Legacy extra text send failed to %s: %v", phone, err)
+		}
+	}
+
+	// New multi-media extras (up to 10)
+	for _, m := range link.ExtraMedia {
+		if ctx.Err() != nil {
+			log.Printf("[DYNAMIC] ⚠️ Context done before sending all extras to %s", phone)
+			break
+		}
+		time.Sleep(700 * time.Millisecond)
+		if m.URL == "" {
+			if strings.TrimSpace(m.Caption) != "" {
+				if _, err := s.pool.SendMessage(ctx, deviceID, to, m.Caption); err != nil {
+					log.Printf("[DYNAMIC] ⚠️ Extra text send failed to %s: %v", phone, err)
+				}
+			}
+			continue
+		}
+		mediaType := m.MediaType
+		if mediaType == "" {
+			mediaType = "image"
+		}
+		if _, err := s.pool.SendMediaMessage(ctx, deviceID, to, m.Caption, m.URL, mediaType); err != nil {
+			log.Printf("[DYNAMIC] ⚠️ Extra media send failed to %s: %v", phone, err)
+		}
+	}
+
+	return "sent", ""
+}
+
+// ensureLeadForRegistration makes sure there is a Contact + Lead for the given
+// phone under accountID. It also merges the dynamic tag. Returns contactID, leadID.
+func (s *Server) ensureLeadForRegistration(ctx context.Context, accountID uuid.UUID, jid, phone, fullName, dynamicTag string) (*uuid.UUID, *uuid.UUID, error) {
+	contact, err := s.repos.Contact.GetOrCreate(ctx, accountID, nil, jid, phone, fullName, "", false)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Update contact name if empty
+	if contact != nil && (contact.CustomName == nil || *contact.CustomName == "") && fullName != "" {
+		contact.CustomName = &fullName
+		_ = s.repos.Contact.Update(ctx, contact)
+	}
+
+	// Try to find existing lead by JID
+	existingLead, _ := s.services.Lead.GetByJID(ctx, accountID, jid)
+	if existingLead != nil {
+		if dynamicTag != "" {
+			_ = s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, existingLead.ID, []string{dynamicTag})
+		}
+		return &contact.ID, &existingLead.ID, nil
+	}
+
+	// Create lead with default pipeline
+	lead := &domain.Lead{
+		AccountID: accountID,
+		JID:       jid,
+		Name:      strPtr(fullName),
+		Phone:     strPtr(phone),
+		Source:    strPtr("dinamica"),
+		Status:    strPtr(domain.LeadStatusNew),
+		ContactID: &contact.ID,
+	}
+	if dp, _ := s.services.Pipeline.GetDefaultPipeline(ctx, accountID); dp != nil {
+		lead.PipelineID = &dp.ID
+		if len(dp.Stages) > 0 {
+			lead.StageID = &dp.Stages[0].ID
+		}
+	}
+	if err := s.services.Lead.Create(ctx, lead); err != nil {
+		return &contact.ID, nil, err
+	}
+	if dynamicTag != "" {
+		_ = s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, lead.ID, []string{dynamicTag})
+	}
+	return &contact.ID, &lead.ID, nil
+}
+
+// handleRegisterOnLink — public endpoint: register on a link and synchronously
+// deliver the WhatsApp messages. Returns a session token that the client stores
+// in localStorage so the form is skipped on return visits.
 func (s *Server) handleRegisterOnLink(c *fiber.Ctx) error {
 	var req struct {
 		LinkID   string `json:"link_id"`
 		FullName string `json:"full_name"`
 		Phone    string `json:"phone"`
-		Age      int    `json:"age"`
 		ItemID   string `json:"item_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -1010,23 +1330,17 @@ func (s *Server) handleRegisterOnLink(c *fiber.Ctx) error {
 	if fullName == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "El nombre es obligatorio"})
 	}
-	if req.Age < 5 || req.Age > 120 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "La edad debe estar entre 5 y 120"})
-	}
 
-	// Normalize phone
 	phone := kommo.NormalizePhone(req.Phone)
 	if len(phone) < 11 || !strings.HasPrefix(phone, "51") {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Número de teléfono inválido"})
 	}
 
-	// Validate link
 	link, d, err := s.repos.Dynamic.GetLinkByID(c.Context(), linkID)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Link no encontrado"})
 	}
 
-	// Check schedule
 	now := time.Now()
 	if link.StartsAt != nil && now.Before(*link.StartsAt) {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Este evento aún no ha comenzado"})
@@ -1035,21 +1349,73 @@ func (s *Server) handleRegisterOnLink(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Este evento ya finalizó"})
 	}
 
-	// Check duplicate
-	exists, err := s.repos.Dynamic.RegistrationExistsByPhone(c.Context(), linkID, phone)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error al verificar registro"})
-	}
-	if exists {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Ya registraste tus datos con este número"})
+	// Validate item belongs to dynamic
+	item, err := s.repos.Dynamic.GetItemByID(c.Context(), itemID)
+	if err != nil || item.DynamicID != d.ID {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Ítem inválido"})
 	}
 
-	// Create registration
+	// If already registered on this link with this phone, return existing token
+	if existing, _ := s.repos.Dynamic.GetRegistrationByPhone(c.Context(), linkID, phone); existing != nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error":           "Ya registraste tus datos con este número",
+			"already":         true,
+			"session_token":   existing.SessionToken,
+			"whatsapp_status": existing.WhatsAppStatus,
+			"registration":    existing,
+		})
+	}
+
+	// If the phone was previously registered via a share (shared_by_registration_id IS NOT NULL)
+	// we skip the WhatsApp send — they already received the message — and just create a
+	// self-registration so they can enter the game directly on subsequent visits.
+	alreadySharedRecipient, _ := s.repos.Dynamic.RegistrationExistsByPhone(c.Context(), linkID, phone)
+
+	jid := phone + "@s.whatsapp.net"
+	dynamicTag := "dinamica:" + d.Slug
+
+	// Ensure contact + lead globals (idempotent)
+	contactID, leadID, err := s.ensureLeadForRegistration(c.Context(), d.AccountID, jid, phone, fullName, dynamicTag)
+	if err != nil {
+		log.Printf("[DYNAMIC] Error ensuring lead for registration: %v", err)
+	}
+
+	// Send WhatsApp synchronously with 30s cap — unless this phone already received the
+	// dynamic via a share, in which case we consider the message already delivered.
+	waStatus := "skipped"
+	waError := ""
+	if link.WhatsAppEnabled && !alreadySharedRecipient {
+		sendCtx, cancel := context.WithTimeout(c.Context(), 30*time.Second)
+		waStatus, waError = s.sendRegistrationWhatsApp(sendCtx, link, d, item, phone, "")
+		cancel()
+	} else if alreadySharedRecipient {
+		waStatus = "already_delivered"
+	}
+
+	// If WhatsApp was required but failed, return an error without persisting
+	// the registration — this lets the user retry the form.
+	if link.WhatsAppEnabled && !alreadySharedRecipient && waStatus != "sent" {
+		msg := waError
+		if msg == "" {
+			msg = "No pudimos entregar tu mensaje por WhatsApp. Intenta nuevamente."
+		}
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error":           msg,
+			"whatsapp_status": waStatus,
+		})
+	}
+
+	// Create registration row
+	sessionToken := uuid.New().String()
 	reg := &domain.DynamicLinkRegistration{
-		LinkID:   linkID,
-		FullName: fullName,
-		Phone:    phone,
-		Age:      req.Age,
+		LinkID:         linkID,
+		FullName:       fullName,
+		Phone:          phone,
+		ContactID:      contactID,
+		LeadID:         leadID,
+		WhatsAppStatus: waStatus,
+		WhatsAppError:  waError,
+		SessionToken:   sessionToken,
 	}
 	if err := s.repos.Dynamic.CreateRegistration(c.Context(), reg); err != nil {
 		if strings.Contains(err.Error(), "uq_link_phone") {
@@ -1058,33 +1424,6 @@ func (s *Server) handleRegisterOnLink(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error al registrar"})
 	}
 
-	// Enqueue WhatsApp if enabled
-	if link.WhatsAppEnabled {
-		item, err := s.repos.Dynamic.GetItemByID(c.Context(), itemID)
-		if err == nil && item.DynamicID == d.ID {
-			caption := link.WhatsAppMessage
-			if caption == "" {
-				caption = "¡Aquí tienes tu pensamiento del día! 🌟"
-			}
-			q := &domain.DynamicWhatsAppQueue{
-				DynamicID:      d.ID,
-				AccountID:      d.AccountID,
-				LinkID:         link.ID,
-				Phone:          phone,
-				ItemID:         item.ID,
-				ImageURL:       item.ImageURL,
-				Caption:        caption,
-				ExtraText:      link.ExtraMessageText,
-				ExtraMediaURL:  link.ExtraMessageMediaURL,
-				ExtraMediaType: link.ExtraMessageMediaType,
-			}
-			if err := s.repos.Dynamic.EnqueueWhatsApp(c.Context(), q); err != nil {
-				log.Printf("[DYNAMIC] Error enqueuing WhatsApp for registration %s: %v", reg.ID, err)
-			}
-		}
-	}
-
-	// Broadcast registration event
 	if s.hub != nil {
 		s.hub.BroadcastToAccount(d.AccountID, ws.EventDynamicRegistration, map[string]interface{}{
 			"action":       "created",
@@ -1093,24 +1432,175 @@ func (s *Server) handleRegisterOnLink(c *fiber.Ctx) error {
 		})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "registration": reg})
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"success":         true,
+		"registration":    reg,
+		"session_token":   sessionToken,
+		"whatsapp_status": waStatus,
+	})
 }
 
-// handleCheckRegistration — public: check if phone already registered on a link
+// handleShareOnLink — public endpoint: a registered user shares the dynamic
+// with another person. Sends the same WhatsApp payload (main message + extras)
+// to the recipient and persists a registration row linked to the sharer via
+// shared_by_registration_id.
+func (s *Server) handleShareOnLink(c *fiber.Ctx) error {
+	var req struct {
+		LinkID       string `json:"link_id"`
+		ItemID       string `json:"item_id"`
+		FullName     string `json:"full_name"`
+		Phone        string `json:"phone"`
+		SessionToken string `json:"session_token"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Datos inválidos"})
+	}
+
+	linkID, err := uuid.Parse(req.LinkID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Link inválido"})
+	}
+	itemID, err := uuid.Parse(req.ItemID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Ítem inválido"})
+	}
+
+	token := strings.TrimSpace(req.SessionToken)
+	if token == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Debes registrarte antes de compartir"})
+	}
+	sharerReg, err := s.repos.Dynamic.GetRegistrationBySessionToken(c.Context(), token)
+	if err != nil || sharerReg == nil || sharerReg.LinkID != linkID {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Sesión inválida, recarga la página"})
+	}
+
+	fullName := strings.TrimSpace(req.FullName)
+	if fullName == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "El nombre es obligatorio"})
+	}
+
+	phone := kommo.NormalizePhone(req.Phone)
+	if len(phone) < 11 || !strings.HasPrefix(phone, "51") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Número de teléfono inválido"})
+	}
+
+	link, d, err := s.repos.Dynamic.GetLinkByID(c.Context(), linkID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Link no encontrado"})
+	}
+
+	now := time.Now()
+	if link.StartsAt != nil && now.Before(*link.StartsAt) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Este evento aún no ha comenzado"})
+	}
+	if link.EndsAt != nil && now.After(*link.EndsAt) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Este evento ya finalizó"})
+	}
+
+	item, err := s.repos.Dynamic.GetItemByID(c.Context(), itemID)
+	if err != nil || item.DynamicID != d.ID {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Ítem inválido"})
+	}
+
+	jid := phone + "@s.whatsapp.net"
+	dynamicTag := "dinamica:" + d.Slug
+
+	contactID, leadID, err := s.ensureLeadForRegistration(c.Context(), d.AccountID, jid, phone, fullName, dynamicTag)
+	if err != nil {
+		log.Printf("[DYNAMIC] Error ensuring lead for shared registration: %v", err)
+	}
+
+	// Share requires WhatsApp to be meaningful. If the link hasn't got WA
+	// enabled, there's nothing to deliver — refuse.
+	if !link.WhatsAppEnabled {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Esta dinámica no tiene WhatsApp activo"})
+	}
+
+	// Generate the recipient's session_token UPFRONT so we can embed it in the
+	// shared link. The recipient will land in the game without seeing the
+	// registration form — the token authenticates them automatically.
+	recipientToken := uuid.New().String()
+	personalizedLink := ""
+	if base := strings.TrimRight(s.cfg.PublicURL, "/"); base != "" {
+		personalizedLink = fmt.Sprintf("👉 Juega tú también: %s/d/%s?t=%s", base, d.Slug, recipientToken)
+	}
+
+	sendCtx, cancel := context.WithTimeout(c.Context(), 30*time.Second)
+	waStatus, waError := s.sendRegistrationWhatsApp(sendCtx, link, d, item, phone, personalizedLink)
+	cancel()
+
+	if waStatus != "sent" {
+		msg := waError
+		if msg == "" {
+			msg = "No pudimos entregar el mensaje por WhatsApp. Intenta nuevamente."
+		}
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error":           msg,
+			"whatsapp_status": waStatus,
+		})
+	}
+
+	sharerID := sharerReg.ID
+	reg := &domain.DynamicLinkRegistration{
+		LinkID:                 linkID,
+		FullName:               fullName,
+		Phone:                  phone,
+		ContactID:              contactID,
+		LeadID:                 leadID,
+		WhatsAppStatus:         waStatus,
+		WhatsAppError:          waError,
+		SessionToken:           recipientToken,
+		SharedByRegistrationID: &sharerID,
+	}
+	if err := s.repos.Dynamic.CreateRegistration(c.Context(), reg); err != nil {
+		log.Printf("[DYNAMIC] Error persisting shared registration (WA already sent): %v", err)
+		// The WA was already delivered; don't fail the request.
+	}
+
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(d.AccountID, ws.EventDynamicRegistration, map[string]interface{}{
+			"action":       "shared",
+			"link_id":      link.ID,
+			"registration": reg,
+			"shared_by":    sharerReg.ID,
+		})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"success":         true,
+		"whatsapp_status": waStatus,
+		"recipient": fiber.Map{
+			"full_name": fullName,
+			"phone":     phone,
+		},
+	})
+}
+
+// handleCheckRegistration — public: verify if a session token matches an
+// existing registration on a link. Used by the frontend to skip the form on
+// return visits (token stored in localStorage).
 func (s *Server) handleCheckRegistration(c *fiber.Ctx) error {
 	linkID, err := uuid.Parse(c.Query("link_id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Link inválido"})
 	}
+	token := strings.TrimSpace(c.Query("session_token"))
+	if token != "" {
+		reg, err := s.repos.Dynamic.GetRegistrationBySessionToken(c.Context(), token)
+		if err == nil && reg != nil && reg.LinkID == linkID {
+			return c.JSON(fiber.Map{"registered": true, "registration": reg})
+		}
+		return c.JSON(fiber.Map{"registered": false})
+	}
+	// Fallback: phone-based check (kept for backwards compat)
 	phone := kommo.NormalizePhone(c.Query("phone"))
 	if phone == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Teléfono requerido"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Token o teléfono requerido"})
 	}
-	exists, err := s.repos.Dynamic.RegistrationExistsByPhone(c.Context(), linkID, phone)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Error al verificar"})
+	if reg, err := s.repos.Dynamic.GetRegistrationByPhone(c.Context(), linkID, phone); err == nil && reg != nil {
+		return c.JSON(fiber.Map{"registered": true, "registration": reg, "session_token": reg.SessionToken})
 	}
-	return c.JSON(fiber.Map{"registered": exists})
+	return c.JSON(fiber.Map{"registered": false})
 }
 
 // handleListLinkRegistrations — admin: list registrations for a link
@@ -1192,10 +1682,14 @@ func (s *Server) handleExportLinkRegistrations(c *fiber.Ctx) error {
 	w := csv.NewWriter(&buf)
 	w.Write([]string{"Nombre", "Teléfono", "Edad", "Fecha de registro"})
 	for _, r := range regs {
+		ageStr := ""
+		if r.Age != nil {
+			ageStr = fmt.Sprintf("%d", *r.Age)
+		}
 		w.Write([]string{
 			r.FullName,
 			r.Phone,
-			fmt.Sprintf("%d", r.Age),
+			ageStr,
 			r.CreatedAt.In(loc).Format("02/01/2006 15:04"),
 		})
 	}

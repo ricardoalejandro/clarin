@@ -28,6 +28,15 @@ return errors.New("program name is required")
 if p.Status == "" {
 p.Status = "active"
 }
+if p.Type == "" {
+p.Type = "course"
+}
+if p.Type != "course" && p.Type != "event" {
+return errors.New("program type must be 'course' or 'event'")
+}
+if p.Type == "event" && p.PipelineID == nil {
+return errors.New("event-type programs require a pipeline")
+}
 return s.repo.Program.Create(ctx, p)
 }
 
@@ -43,6 +52,9 @@ func (s *ProgramService) UpdateProgram(ctx context.Context, p *domain.Program) e
 if p.Name == "" {
 return errors.New("program name is required")
 }
+if p.Type == "event" && p.PipelineID == nil {
+return errors.New("event-type programs require a pipeline")
+}
 return s.repo.Program.Update(ctx, p)
 }
 
@@ -57,6 +69,10 @@ if pp.Status == "" {
 pp.Status = "active"
 }
 return s.repo.Program.AddParticipant(ctx, pp)
+}
+
+func (s *ProgramService) UpdateParticipantStage(ctx context.Context, programID, participantID uuid.UUID, stageID *uuid.UUID) error {
+return s.repo.Program.UpdateParticipantStage(ctx, programID, participantID, stageID)
 }
 
 func (s *ProgramService) ListParticipants(ctx context.Context, programID uuid.UUID) ([]*domain.ProgramParticipant, error) {

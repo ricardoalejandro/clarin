@@ -11,6 +11,19 @@ export interface SnapGuide {
   orientation: 'horizontal' | 'vertical'
 }
 
+export interface DistanceLabel {
+  /** Axis of the measurement: 'h' = horizontal gap (left↔right), 'v' = vertical gap (top↔bottom) */
+  axis: 'h' | 'v'
+  /** Start point (scene coords) */
+  x1: number
+  y1: number
+  /** End point (scene coords) */
+  x2: number
+  y2: number
+  /** Pixel distance (rounded) */
+  distance: number
+}
+
 interface SnapResult {
   x?: number
   y?: number
@@ -154,4 +167,88 @@ export function calculateSnap(
   if (bestGuideY) guides.push(bestGuideY)
 
   return { x: snapX, y: snapY, guides }
+}
+
+
+/**
+ * Calculate distance labels (Figma-style "12px" between adjacent objects).
+ * Returns up to 4 distance lines (left/right/top/bottom) from the moving
+ * object to the nearest object that overlaps along the perpendicular axis.
+ * All coordinates in scene space.
+ */
+export function calculateDistances(
+  canvas: Canvas,
+  movingObj: FabricObject,
+): DistanceLabel[] {
+  const zoom = canvas.getZoom()
+  const vpt = canvas.viewportTransform!
+
+  const toScene = (o: FabricObject) => {
+    const b = o.getBoundingRect()
+    return {
+      left: (b.left - vpt[4]) / zoom,
+      top: (b.top - vpt[5]) / zoom,
+      right: (b.left - vpt[4]) / zoom + b.width / zoom,
+      bottom: (b.top - vpt[5]) / zoom + b.height / zoom,
+    }
+  }
+
+  const m = toScene(movingObj)
+  const others = canvas.getObjects()
+    .filter(o => o !== movingObj && o.visible && !(o as any).__isPage && !(o as any).__isMarginOverlay)
+
+  const results: DistanceLabel[] = []
+
+  // LEFT: nearest object whose right edge < m.left AND overlaps in Y
+  let bestLeft: { gap: number; o: ReturnType<typeof toScene> } | null = null
+  // RIGHT: nearest object whose left edge > m.right AND overlaps in Y
+  let bestRight: { gap: number; o: ReturnType<typeof toScene> } | null = null
+  // TOP: nearest object whose bottom < m.top AND overlaps in X
+  let bestTop: { gap: number; o: ReturnType<typeof toScene> } | null = null
+  // BOTTOM: nearest object whose top > m.bottom AND overlaps in X
+  let bestBottom: { gap: number; o: ReturnType<typeof toScene> } | null = null
+
+  for (const other of others) {
+    const s = toScene(other)
+    const overlapsY = !(s.bottom < m.top || s.top > m.bottom)
+    const overlapsX = !(s.right < m.left || s.left > m.right)
+
+    if (overlapsY) {
+      if (s.right <= m.left) {
+        const gap = m.left - s.right
+        if (!bestLeft || gap < bestLeft.gap) bestLeft = { gap, o: s }
+      } else if (s.left >= m.right) {
+        const gap = s.left - m.right
+        if (!bestRight || gap < bestRight.gap) bestRight = { gap, o: s }
+      }
+    }
+    if (overlapsX) {
+      if (s.bottom <= m.top) {
+        const gap = m.top - s.bottom
+        if (!bestTop || gap < bestTop.gap) bestTop = { gap, o: s }
+      } else if (s.top >= m.bottom) {
+        const gap = s.top - m.bottom
+        if (!bestBottom || gap < bestBottom.gap) bestBottom = { gap, o: s }
+      }
+    }
+  }
+
+  if (bestLeft && bestLeft.gap > 0.5) {
+    const yMid = (Math.max(m.top, bestLeft.o.top) + Math.min(m.bottom, bestLeft.o.bottom)) / 2
+    results.push({ axis: 'h', x1: bestLeft.o.right, y1: yMid, x2: m.left, y2: yMid, distance: Math.round(bestLeft.gap) })
+  }
+  if (bestRight && bestRight.gap > 0.5) {
+    const yMid = (Math.max(m.top, bestRight.o.top) + Math.min(m.bottom, bestRight.o.bottom)) / 2
+    results.push({ axis: 'h', x1: m.right, y1: yMid, x2: bestRight.o.left, y2: yMid, distance: Math.round(bestRight.gap) })
+  }
+  if (bestTop && bestTop.gap > 0.5) {
+    const xMid = (Math.max(m.left, bestTop.o.left) + Math.min(m.right, bestTop.o.right)) / 2
+    results.push({ axis: 'v', x1: xMid, y1: bestTop.o.bottom, x2: xMid, y2: m.top, distance: Math.round(bestTop.gap) })
+  }
+  if (bestBottom && bestBottom.gap > 0.5) {
+    const xMid = (Math.max(m.left, bestBottom.o.left) + Math.min(m.right, bestBottom.o.right)) / 2
+    results.push({ axis: 'v', x1: xMid, y1: m.bottom, x2: xMid, y2: bestBottom.o.top, distance: Math.round(bestBottom.gap) })
+  }
+
+  return results
 }

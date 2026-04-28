@@ -5,7 +5,9 @@
  */
 
 import type { Lead } from '@/types/contact'
+import type { CustomFieldValue } from '@/types/custom-field'
 import type { DocumentTemplate } from '@/types/document'
+import { formatFieldValue, type FieldFormat } from '@/lib/dynamicFieldFormat'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -70,10 +72,115 @@ const FIELD_MAP: Record<string, (lead: Lead) => string> = {
   estado: (l) => l.status || '',
 }
 
+/**
+ * Fields that represent native types (not string). Used by resolveFieldTyped so
+ * the formatter can apply number/date presentations correctly.
+ */
+const FIELD_TYPES: Record<string, 'number' | 'date' | 'bool' | 'text'> = {
+  edad: 'number',
+  fecha_nacimiento: 'date',
+  fecha_actual: 'date',
+}
+
+export type ResolvedField =
+  | { type: 'number'; value: number }
+  | { type: 'date'; value: Date }
+  | { type: 'bool'; value: boolean }
+  | { type: 'text'; value: string }
+  | { type: 'empty'; value: '' }
+
+/**
+ * Resolve a field to its native typed value so the formatter can present it
+ * according to the configured `FieldFormat`. Falls back to text when the type
+ * can't be inferred.
+ */
+export function resolveFieldTyped(key: string, lead: Lead): ResolvedField {
+  const normalized = key.toLowerCase().replace(/\s+/g, '_').replace(/^\{\{|\}\}$/g, '')
+
+  // Native fields with explicit types
+  const typeHint = FIELD_TYPES[normalized]
+  if (typeHint === 'number' && lead.age != null) return { type: 'number', value: lead.age }
+  if (typeHint === 'date') {
+    if (normalized === 'fecha_actual') return { type: 'date', value: new Date() }
+    if (normalized === 'fecha_nacimiento' && lead.birth_date) {
+      const d = new Date(lead.birth_date)
+      if (!isNaN(d.getTime())) return { type: 'date', value: d }
+    }
+  }
+
+  // Other mapped fields → text
+  const resolver = FIELD_MAP[normalized]
+  if (resolver) {
+    const v = resolver(lead)
+    return v === '' ? { type: 'empty', value: '' } : { type: 'text', value: v }
+  }
+
+  // Custom field lookup by slug
+  const cfv = lead.custom_field_values
+  if (cfv && Array.isArray(cfv)) {
+    const match = cfv.find((v: CustomFieldValue) => v.field_slug?.toLowerCase() === normalized)
+    if (match) {
+      if (match.value_number != null) return { type: 'number', value: match.value_number }
+      if (match.value_date != null) {
+        const d = new Date(match.value_date)
+        if (!isNaN(d.getTime())) return { type: 'date', value: d }
+      }
+      if (match.value_bool != null) return { type: 'bool', value: match.value_bool }
+      if (match.value_text != null) {
+        const raw = match.value_text
+        if (/<\/?[a-z][^>]*>/i.test(raw)) {
+          if (typeof document !== 'undefined') {
+            const tmp = document.createElement('div')
+            tmp.innerHTML = raw
+            return { type: 'text', value: tmp.textContent || tmp.innerText || '' }
+          }
+          return { type: 'text', value: raw.replace(/<[^>]*>/g, '') }
+        }
+        return { type: 'text', value: raw }
+      }
+      if (match.value_json != null && Array.isArray(match.value_json)) {
+        return { type: 'text', value: match.value_json.join(', ') }
+      }
+    }
+  }
+
+  return { type: 'empty', value: '' }
+}
+
 function resolveField(key: string, lead: Lead): string {
   const normalized = key.toLowerCase().replace(/\s+/g, '_').replace(/^\{\{|\}\}$/g, '')
   const resolver = FIELD_MAP[normalized]
-  return resolver ? resolver(lead) : `[${key}]`
+  if (resolver) return resolver(lead)
+
+  // Fallback: look up custom field values by slug
+  const cfv = lead.custom_field_values
+  if (cfv && Array.isArray(cfv)) {
+    const match = cfv.find((v: CustomFieldValue) => v.field_slug?.toLowerCase() === normalized)
+    if (match) {
+      if (match.value_text != null) {
+        // If the stored text contains HTML tags (rich text variant), strip them for plain render.
+        const raw = match.value_text
+        if (/<\/?[a-z][^>]*>/i.test(raw)) {
+          if (typeof document !== 'undefined') {
+            const tmp = document.createElement('div')
+            tmp.innerHTML = raw
+            return tmp.textContent || tmp.innerText || ''
+          }
+          return raw.replace(/<[^>]*>/g, '')
+        }
+        return raw
+      }
+      if (match.value_number != null) return String(match.value_number)
+      if (match.value_date != null) {
+        try { return new Date(match.value_date).toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric' }) }
+        catch { return match.value_date }
+      }
+      if (match.value_bool != null) return match.value_bool ? 'Sí' : 'No'
+      if (match.value_json != null && Array.isArray(match.value_json)) return match.value_json.join(', ')
+    }
+  }
+
+  return ''
 }
 
 // ─── Legacy V2 helpers (for preview and backwards compat) ─────────────────────
@@ -119,8 +226,7 @@ export function substituteFields(elements: CanvasElement[], lead: Lead): CanvasE
     }
     if (copy.content && copy.content.includes('{{')) {
       copy.content = copy.content.replace(/\{\{(\w+)\}\}/g, (_, field: string) => {
-        const resolver = FIELD_MAP[field.toLowerCase()]
-        return resolver ? resolver(lead) : `{{${field}}}`
+        return resolveField(field, lead)
       })
     }
     return copy
@@ -141,7 +247,14 @@ async function substituteFabricFields(
   for (const obj of canvasObjects) {
     // Check for DynamicText or objects with isDynamic custom prop
     if (obj.isDynamic && obj.fieldName) {
-      const value = resolveField(obj.fieldName, lead)
+      const fmt: FieldFormat | undefined = obj.fieldFormat
+      let value: string
+      if (fmt && fmt.type !== 'general') {
+        const typed = resolveFieldTyped(obj.fieldName, lead)
+        value = formatFieldValue(typed.value, fmt)
+      } else {
+        value = resolveField(obj.fieldName, lead)
+      }
       obj.set('text', value)
       // Reset fill to black if it was the dynamic marker color
       if (obj.fill === '#059669') {
@@ -149,8 +262,7 @@ async function substituteFabricFields(
       }
     } else if (obj.text && typeof obj.text === 'string' && obj.text.includes('{{')) {
       const newText = obj.text.replace(/\{\{(\w+)\}\}/g, (_: string, field: string) => {
-        const resolver = FIELD_MAP[field.toLowerCase()]
-        return resolver ? resolver(lead) : `{{${field}}}`
+        return resolveField(field, lead)
       })
       obj.set('text', newText)
     }

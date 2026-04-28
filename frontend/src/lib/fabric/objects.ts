@@ -4,6 +4,7 @@
  */
 
 import { Textbox, classRegistry } from 'fabric'
+import type { FieldFormat } from '../dynamicFieldFormat'
 
 // ─── DynamicText ──────────────────────────────────────────────────────────────
 
@@ -15,6 +16,7 @@ interface DynamicTextCustomProps {
   verticalAlign?: string
   lineHeightRatio?: number
   letterSpacingValue?: number
+  fieldFormat?: FieldFormat
 }
 
 export class DynamicText extends Textbox {
@@ -27,6 +29,7 @@ export class DynamicText extends Textbox {
   declare verticalAlign: string
   declare lineHeightRatio: number
   declare letterSpacingValue: number
+  declare fieldFormat?: FieldFormat
 
   constructor(text: string, options?: Record<string, any>) {
     super(text, options as any)
@@ -38,43 +41,23 @@ export class DynamicText extends Textbox {
     this.verticalAlign = opts.verticalAlign ?? 'top'
     this.lineHeightRatio = opts.lineHeightRatio ?? 1.2
     this.letterSpacingValue = opts.letterSpacingValue ?? 0
+    this.fieldFormat = opts.fieldFormat
   }
 
-  // Render the dynamic badge above the object when it's dynamic
+  // In the editor, render dynamic fields with an emerald fill so they stand
+  // out as placeholders without adding any extra decorations. Original fill is
+  // preserved (restored after render), so export/preview uses the real color.
   render(ctx: CanvasRenderingContext2D): void {
+    const isEditor = !!(this.canvas as any)?.wrapperEl
+    const hide = !!(this.canvas as any)?.__hideDynamicMarkers
+    if (this.isDynamic && this.fieldName && isEditor && !hide) {
+      const origFill = this.fill
+      this.fill = '#059669' // emerald-600
+      super.render(ctx)
+      this.fill = origFill
+      return
+    }
     super.render(ctx)
-    if (!this.isDynamic || !this.fieldName || !this.canvas) return
-
-    // Only show badge on interactive canvas (skip StaticCanvas used for generation)
-    if (!(this.canvas as any).wrapperEl) return
-    const zoom = this.canvas.getZoom?.() ?? 1
-    if (zoom <= 0) return
-
-    ctx.save()
-    const center = this.getCenterPoint()
-    const badgeText = `{{${this.fieldName}}}`
-    const fontSize = Math.max(9, 11 / zoom)
-    ctx.font = `600 ${fontSize}px Inter, Arial, sans-serif`
-    const textWidth = ctx.measureText(badgeText).width
-    const padding = 4 / zoom
-    const badgeW = textWidth + padding * 2
-    const badgeH = fontSize + padding * 1.5
-    const badgeX = center.x - badgeW / 2
-    const badgeY = center.y - (this.getScaledHeight() / 2) - badgeH - 3 / zoom
-
-    // Badge background
-    ctx.fillStyle = '#059669'
-    ctx.beginPath()
-    const r = 3 / zoom
-    ctx.roundRect(badgeX, badgeY, badgeW, badgeH, r)
-    ctx.fill()
-
-    // Badge text
-    ctx.fillStyle = '#ffffff'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(badgeText, center.x, badgeY + badgeH / 2)
-    ctx.restore()
   }
 }
 

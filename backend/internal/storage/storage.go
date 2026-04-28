@@ -17,10 +17,10 @@ import (
 
 // Storage handles file storage operations
 type Storage struct {
-	client       *minio.Client
-	bucket       string
-	publicURL    string
-	internalURL  string // internal endpoint (for URL replacement)
+	client      *minio.Client
+	bucket      string
+	publicURL   string
+	internalURL string // internal endpoint (for URL replacement)
 }
 
 // Config holds MinIO configuration
@@ -195,6 +195,40 @@ func (s *Storage) DeleteFile(ctx context.Context, objectKey string) error {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
 	return nil
+}
+
+func (s *Storage) CountPrefix(ctx context.Context, prefix string) (int64, error) {
+	var count int64
+	for object := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if object.Err != nil {
+			return count, object.Err
+		}
+		count++
+	}
+	return count, nil
+}
+
+func (s *Storage) DeletePrefix(ctx context.Context, prefix string) (int64, error) {
+	objectsCh := make(chan minio.ObjectInfo)
+	go func() {
+		defer close(objectsCh)
+		for object := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+			if object.Err != nil {
+				objectsCh <- minio.ObjectInfo{Key: object.Key, Err: object.Err}
+				return
+			}
+			objectsCh <- object
+		}
+	}()
+
+	var deleted int64
+	for removeErr := range s.client.RemoveObjects(ctx, s.bucket, objectsCh, minio.RemoveObjectsOptions{}) {
+		if removeErr.Err != nil {
+			return deleted, removeErr.Err
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 // GetPublicURL returns the public URL for an object

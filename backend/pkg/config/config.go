@@ -3,7 +3,9 @@ package config
 import (
 	"log"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -30,6 +32,13 @@ type Config struct {
 	KommoAccessToken  string
 	KommoRedirectURI  string
 	KommoWebhookSecret string
+	KommoProxyURL      string
+	// Kommo Outbox (batched push worker)
+	// When enabled, pushes to Kommo are coalesced and flushed in bulk PATCHes
+	// (up to batch size) every flush interval. Required for multi-account scale.
+	KommoOutboxEnabled       bool
+	KommoOutboxBatchSize     int
+	KommoOutboxFlushInterval time.Duration
 	// PublicURL is the public URL of the Clarin backend (e.g., https://clarin.naperu.cloud)
 	// Used for webhook auto-registration with Kommo.
 	PublicURL string
@@ -71,6 +80,10 @@ func Load() *Config {
 		KommoAccessToken:  getEnv("KOMMO_ACCESS_TOKEN", ""),
 		KommoRedirectURI:  getEnv("KOMMO_REDIRECT_URI", ""),
 		KommoWebhookSecret: getEnv("KOMMO_WEBHOOK_SECRET", ""),
+		KommoProxyURL:      getEnv("KOMMO_PROXY_URL", getEnv("MEDIA_SOCKS5_PROXY", "")),
+		KommoOutboxEnabled:       getEnvBool("KOMMO_OUTBOX_ENABLED", true),
+		KommoOutboxBatchSize:     getEnvInt("KOMMO_OUTBOX_BATCH_SIZE", 250),
+		KommoOutboxFlushInterval: getEnvDuration("KOMMO_OUTBOX_FLUSH_INTERVAL", 2*time.Second),
 		PublicURL:           getEnv("PUBLIC_URL", ""),
 		GeminiAPIKey:      getEnv("GEMINI_API_KEY", ""),
 		GroqAPIKey:        getEnv("GROQ_API_KEY", ""),
@@ -85,6 +98,38 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return defaultValue
+	}
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultValue
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultValue
+	}
+	return n
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultValue
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return defaultValue
+	}
+	return d
 }
 
 func (c *Config) IsDevelopment() bool {

@@ -15,6 +15,7 @@ import {
   AlignStartVertical, AlignEndVertical, AlignCenterVertical,
   AlignStartHorizontal, AlignEndHorizontal, AlignCenterHorizontal,
   Ruler, FlipVertical2, Group, Ungroup, Triangle, Table2,
+  Paintbrush, ClipboardPaste,
 } from 'lucide-react'
 import { api, apiUpload } from '@/lib/api'
 import type { DocumentTemplate } from '@/types/document'
@@ -26,7 +27,9 @@ import type {
 } from 'fabric'
 
 import type { CanvasHistory as CanvasHistoryType } from '@/lib/fabric/history'
-import type { SnapGuide, ExportOptions } from '@/lib/fabric'
+import type { SnapGuide, DistanceLabel, ExportOptions } from '@/lib/fabric'
+import { formatFieldValue, DATE_PRESETS, DEFAULT_FIELD_FORMAT, type FieldFormat, type FieldFormatType, type TextTransform } from '@/lib/dynamicFieldFormat'
+import DynamicFieldsPicker from '@/components/DynamicFieldsPicker'
 
 // ─── Page Component ───────────────────────────────────────────────────────────
 
@@ -54,6 +57,7 @@ export default function DocumentEditorPage() {
   const [pageWidth, setPageWidth] = useState(210)
   const [pageHeight, setPageHeight] = useState(297)
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([])
+  const [distanceLabels, setDistanceLabels] = useState<DistanceLabel[]>([])
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
@@ -63,6 +67,8 @@ export default function DocumentEditorPage() {
   const [allObjects, setAllObjects] = useState<FabricObject[]>([])
   const [editingText, setEditingText] = useState(false)
   const editingTextRef = useRef(false)
+  const [editingTextObj, setEditingTextObj] = useState<FabricObject | null>(null)
+  const [editingSelVersion, setEditingSelVersion] = useState(0)
   const [fabricReady, setFabricReady] = useState(false)
   const [drawingTool, setDrawingTool] = useState<'rect' | 'ellipse' | 'triangle' | 'line' | null>(null)
   const [userGuides, setUserGuides] = useState<{ id: string; orientation: 'h' | 'v'; position: number }[]>([])
@@ -78,17 +84,25 @@ export default function DocumentEditorPage() {
   const clipboardRef = useRef<FabricObject[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const replaceImageInputRef = useRef<HTMLInputElement>(null)
   const bgFileInputRef = useRef<HTMLInputElement>(null)
   const tableButtonRef = useRef<HTMLButtonElement>(null)
+  const dynamicFieldsBtnRef = useRef<HTMLButtonElement>(null)
   const spaceHeldRef = useRef(false)
   const drawingRef = useRef<{ startX: number; startY: number; obj: FabricObject } | null>(null)
   const pendingDynamicRef = useRef<{ key: string; label: string; template: string } | null>(null)
   const userGuidesRef = useRef(userGuides)
   userGuidesRef.current = userGuides
 
+  // Copy/paste dynamic-field format (Excel-like "paintbrush")
+  const copiedFieldFormatRef = useRef<import('@/lib/dynamicFieldFormat').FieldFormat | null>(null)
+
   // Reference to dynamically imported fabric modules
   const fabricModRef = useRef<typeof import('@/lib/fabric') | null>(null)
   const fabricCoreRef = useRef<typeof import('fabric') | null>(null)
+
+  // ─── Custom fields (from account) ─────────────────────────────────────
+  const [customFields, setCustomFields] = useState<Array<{ id: string; name: string; slug: string }>>([])
 
   // ─── Derived ──────────────────────────────────────────────────────────
   const selectedObj = selectedObjects.length === 1 ? selectedObjects[0] : null
@@ -112,6 +126,54 @@ export default function DocumentEditorPage() {
       }
     })()
   }, [templateId])
+
+  // ─── Load custom field definitions for the account ───────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api<{ fields: Array<{ id: string; name: string; slug: string }> }>('/api/custom-fields/')
+        if (res.success && Array.isArray(res.data?.fields)) {
+          setCustomFields(res.data.fields)
+        }
+      } catch (err) {
+        console.error('Failed to load custom fields:', err)
+      }
+    })()
+  }, [])
+
+  // ─── Suppress native context menu inside canvas area (capture phase) ──
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const h = (e: Event) => { e.preventDefault(); e.stopPropagation() }
+    el.addEventListener('contextmenu', h, true)
+    return () => el.removeEventListener('contextmenu', h, true)
+  }, [])
+
+  // ─── Forward wheel events from user-guide overlays to the Fabric canvas ──
+  // The guide <div> overlays sit above the Fabric canvas and steal wheel events
+  // when the cursor happens to be on them (Ctrl+Wheel then zooms the BROWSER
+  // page instead of the canvas). We intercept those events in capture phase and
+  // proxy them to the canvas zoom/pan helpers.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const handler = (e: WheelEvent) => {
+      const target = e.target as HTMLElement | null
+      if (!target || !target.closest('[data-user-guide]')) return
+      const canvas = fabricRef.current
+      if (!canvas || !fabricModRef.current) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.ctrlKey || e.metaKey) {
+        fabricModRef.current.applyWheelZoom(canvas, e.clientX, e.clientY, e.deltaY, setZoom)
+      } else {
+        fabricModRef.current.applyWheelPan(canvas, e.deltaX, e.deltaY, e.shiftKey)
+      }
+    }
+    el.addEventListener('wheel', handler, { passive: false, capture: true })
+    return () => el.removeEventListener('wheel', handler, { capture: true } as any)
+  }, [])
 
   // ─── Initialize Fabric canvas ─────────────────────────────────────────
   useEffect(() => {
@@ -149,6 +211,7 @@ export default function DocumentEditorPage() {
           refreshObjectList()
         },
         onSnapGuides: (guides) => setSnapGuides(guides),
+        onDistanceLabels: (labels) => setDistanceLabels(labels),
         getUserGuides: () => userGuidesRef.current,
         onPan: forceRender,
       })
@@ -186,13 +249,21 @@ export default function DocumentEditorPage() {
       })
 
       // Text editing state
-      canvas.on('text:editing:entered', () => { editingTextRef.current = true; setEditingText(true) })
+      canvas.on('text:editing:entered', (e: any) => {
+        editingTextRef.current = true
+        setEditingText(true)
+        setEditingTextObj(e?.target ?? null)
+      })
       canvas.on('text:editing:exited', () => {
         editingTextRef.current = false
         setEditingText(false)
+        setEditingTextObj(null)
         historyRef.current?.save()
         updateHistoryState()
       })
+      // Track cursor/selection changes inside an IText for toolbar active state.
+      canvas.on('text:selection:changed', () => setEditingSelVersion(v => v + 1))
+      canvas.on('text:changed', () => setEditingSelVersion(v => v + 1))
 
       // Load template data
       try {
@@ -206,6 +277,21 @@ export default function DocumentEditorPage() {
           }
           fabricMod.ensurePageAtBottom(canvas)
           canvas.renderAll()
+
+          // Restore persisted editor settings (margins, grid, rulers, pasteboard)
+          const es = (template.canvas_json as any).editorSettings
+          if (es && typeof es === 'object') {
+            if (typeof es.showMargins === 'boolean') setShowMargins(es.showMargins)
+            if (typeof es.marginSize === 'number') setMarginSize(es.marginSize)
+            if (typeof es.showGrid === 'boolean') setShowGrid(es.showGrid)
+            if (typeof es.gridSize === 'number') setGridSize(es.gridSize)
+            if (typeof es.showRulers === 'boolean') setShowRulers(es.showRulers)
+            if (typeof es.pasteboardColor === 'string') {
+              setPasteboardColorState(es.pasteboardColor)
+              canvas.backgroundColor = es.pasteboardColor
+              canvas.requestRenderAll()
+            }
+          }
         }
       } catch (err) {
         console.error('[EDITOR] Failed to load template:', err)
@@ -562,6 +648,16 @@ export default function DocumentEditorPage() {
       const canvasJson = fabricMod.canvasToTemplateJson(canvas, background)
       const fieldsUsed = fabricMod.extractFieldsUsed(canvas)
 
+      // Persist editor settings inside canvas_json so they survive reloads
+      ;(canvasJson as any).editorSettings = {
+        showMargins,
+        marginSize,
+        showGrid,
+        gridSize,
+        showRulers,
+        pasteboardColor,
+      }
+
       await api(`/api/document-templates/${template.id}`, {
         method: 'PUT',
         body: JSON.stringify({
@@ -581,7 +677,7 @@ export default function DocumentEditorPage() {
       setSaving(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [template, templateName, background, pageWidth, pageHeight])
+  }, [template, templateName, background, pageWidth, pageHeight, showMargins, marginSize, showGrid, gridSize, showRulers, pasteboardColor])
 
   // ─── Export ───────────────────────────────────────────────────────────
   const handleExport = useCallback(async (format: 'png' | 'pdf' | 'jpeg') => {
@@ -863,6 +959,139 @@ export default function DocumentEditorPage() {
     setActiveTool('select')
   }, [pushHistory])
 
+  // ─── Smart image replacement (preserves position / scale / rotation) ─
+  // Uploads the file, then swaps the src of the provided FabricImage while
+  // keeping its display size/position intact. Scale is re-calibrated so the
+  // new image fills the same on-canvas bounding box as the old one.
+  const replaceImageOnObject = useCallback(async (targetImg: any, file: File) => {
+    const canvas = fabricRef.current
+    const fc = fabricCoreRef.current
+    if (!canvas || !fc || !targetImg) return
+    if (!(targetImg instanceof fc.FabricImage)) return
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('folder', 'document-images')
+    try {
+      const res = await apiUpload('/api/media/upload', formData)
+      if (!res.success || !res.data) return
+      const data = res.data as any
+      const imageUrl = data.proxy_url || data.public_url
+      if (!imageUrl) return
+      // Remember current displayed size to recalibrate scale after setSrc
+      const displayW = targetImg.getScaledWidth()
+      const displayH = targetImg.getScaledHeight()
+      await targetImg.setSrc(imageUrl, { crossOrigin: 'anonymous' })
+      // Reset any crop of the previous image
+      targetImg.set({
+        cropX: 0,
+        cropY: 0,
+        scaleX: displayW / (targetImg.width || 1),
+        scaleY: displayH / (targetImg.height || 1),
+      })
+      targetImg.setCoords()
+      canvas.renderAll()
+      pushHistory()
+    } catch (err) {
+      console.error('[EDITOR] Image replace failed:', err)
+    }
+  }, [pushHistory])
+
+  const handleReplaceImageInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !file.type.startsWith('image/')) { e.target.value = ''; return }
+    const canvas = fabricRef.current
+    const active = canvas?.getActiveObject() as any
+    if (!active) { e.target.value = ''; return }
+    replaceImageOnObject(active, file)
+    e.target.value = ''
+  }, [replaceImageOnObject])
+
+  // ─── Drag-drop image onto canvas (replaces if dropped on FabricImage) ─
+  const [dragOverTargetId, setDragOverTargetId] = useState<string | null>(null)
+
+  const getImageObjAtPointer = useCallback((clientX: number, clientY: number) => {
+    const canvas = fabricRef.current
+    const fc = fabricCoreRef.current
+    if (!canvas || !fc) return null
+    const container = containerRef.current
+    if (!container) return null
+    const rect = container.getBoundingClientRect()
+    const rulerOffset = 20 // matches rulers
+    const offsetX = showRulers ? rulerOffset : 0
+    const offsetY = showRulers ? rulerOffset : 0
+    const ptr = new fc.Point(clientX - rect.left - offsetX, clientY - rect.top - offsetY)
+    // Walk objects top-down to find the Image under pointer
+    const objs = canvas.getObjects()
+    for (let i = objs.length - 1; i >= 0; i--) {
+      const o = objs[i] as any
+      if (o.__isPage || !o.visible) continue
+      if (!(o instanceof fc.FabricImage)) continue
+      if (o.containsPoint(ptr)) return o
+    }
+    return null
+  }, [showRulers])
+
+  const handleCanvasDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes('Files')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    const target = getImageObjAtPointer(e.clientX, e.clientY)
+    const id = target ? ((target as any).__id ||= Math.random().toString(36).slice(2)) : null
+    if (id !== dragOverTargetId) setDragOverTargetId(id)
+  }, [getImageObjAtPointer, dragOverTargetId])
+
+  const handleCanvasDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    // Only clear when leaving the container entirely.
+    if (e.currentTarget === e.target) setDragOverTargetId(null)
+  }, [])
+
+  const handleCanvasDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
+    e.preventDefault()
+    setDragOverTargetId(null)
+    const file = e.dataTransfer.files[0]
+    if (!file.type.startsWith('image/')) return
+    const target = getImageObjAtPointer(e.clientX, e.clientY)
+    if (target) {
+      await replaceImageOnObject(target, file)
+      fabricRef.current?.setActiveObject(target)
+      fabricRef.current?.renderAll()
+    } else {
+      // No image under cursor: add as new image at cursor position
+      const fc = fabricCoreRef.current
+      const canvas = fabricRef.current
+      if (!canvas || !fc) return
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('folder', 'document-images')
+      try {
+        const res = await apiUpload('/api/media/upload', formData)
+        if (!res.success || !res.data) return
+        const data = res.data as any
+        const imageUrl = data.proxy_url || data.public_url
+        if (!imageUrl) return
+        const img = await fc.FabricImage.fromURL(imageUrl, { crossOrigin: 'anonymous' })
+        const pageW = (canvas as any).__pageWidth ?? canvas.getWidth()
+        const pageH = (canvas as any).__pageHeight ?? canvas.getHeight()
+        const maxW = pageW * 0.6
+        const maxH = pageH * 0.6
+        const sX = maxW / (img.width || 1)
+        const sY = maxH / (img.height || 1)
+        const scale = Math.min(sX, sY, 1)
+        // Center on page
+        const newW = (img.width || 1) * scale
+        const newH = (img.height || 1) * scale
+        img.set({ left: (pageW - newW) / 2, top: (pageH - newH) / 2, scaleX: scale, scaleY: scale })
+        canvas.add(img)
+        canvas.setActiveObject(img)
+        canvas.renderAll()
+        pushHistory()
+      } catch (err) {
+        console.error('[EDITOR] Drop image upload failed:', err)
+      }
+    }
+  }, [getImageObjAtPointer, replaceImageOnObject, pushHistory])
+
   const handleBgImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -1016,28 +1245,75 @@ export default function DocumentEditorPage() {
   }, [selectedObj, pushHistory])
 
   // ─── Alignment ────────────────────────────────────────────────────────
+  // 1 object  → align against page bounds (Canva-style).
+  // 2+ objects → align against the bounding box of the selection group.
   const handleAlign = useCallback((alignment: string) => {
     const canvas = fabricRef.current
     if (!canvas || !hasSelection) return
-    const docW = canvas.getWidth()
-    const docH = canvas.getHeight()
+    const zoom = canvas.getZoom()
+    const vpt = canvas.viewportTransform!
 
-    if (selectedObjects.length === 1) {
-      const obj = selectedObjects[0]
-      const bound = obj.getBoundingRect()
-      const z = canvas.getZoom()
-      const oW = bound.width / z
-      const oH = bound.height / z
-      switch (alignment) {
-        case 'left': obj.set('left', 0); break
-        case 'center-h': obj.set('left', (docW - oW) / 2); break
-        case 'right': obj.set('left', docW - oW); break
-        case 'top': obj.set('top', 0); break
-        case 'center-v': obj.set('top', (docH - oH) / 2); break
-        case 'bottom': obj.set('top', docH - oH); break
+    // Helper: get scene-coord bbox of an object accounting for viewport zoom.
+    const sceneBounds = (obj: FabricObject) => {
+      const b = obj.getBoundingRect()
+      return {
+        left: (b.left - vpt[4]) / zoom,
+        top: (b.top - vpt[5]) / zoom,
+        width: b.width / zoom,
+        height: b.height / zoom,
+      }
+    }
+
+    // Given a desired top-left for the bbox, compute the obj.left/top (accounting
+    // for the offset between obj.left and bbox.left for rotated/grouped objects).
+    const applyPos = (obj: FabricObject, newBboxLeft: number | null, newBboxTop: number | null) => {
+      const cur = sceneBounds(obj)
+      if (newBboxLeft !== null) {
+        const dx = newBboxLeft - cur.left
+        obj.set('left', (obj.left ?? 0) + dx)
+      }
+      if (newBboxTop !== null) {
+        const dy = newBboxTop - cur.top
+        obj.set('top', (obj.top ?? 0) + dy)
       }
       obj.setCoords()
     }
+
+    if (selectedObjects.length === 1) {
+      // Align single object to PAGE bounds (scene units = fabric units).
+      const pageW = (canvas as any).__pageWidth ?? canvas.getWidth()
+      const pageH = (canvas as any).__pageHeight ?? canvas.getHeight()
+      const obj = selectedObjects[0]
+      const b = sceneBounds(obj)
+      switch (alignment) {
+        case 'left':     applyPos(obj, 0, null); break
+        case 'center-h': applyPos(obj, (pageW - b.width) / 2, null); break
+        case 'right':    applyPos(obj, pageW - b.width, null); break
+        case 'top':      applyPos(obj, null, 0); break
+        case 'center-v': applyPos(obj, null, (pageH - b.height) / 2); break
+        case 'bottom':   applyPos(obj, null, pageH - b.height); break
+      }
+    } else {
+      // 2+ objects: align relative to the selection's bounding box.
+      const bounds = selectedObjects.map(o => ({ obj: o, b: sceneBounds(o) }))
+      const minLeft = Math.min(...bounds.map(x => x.b.left))
+      const maxRight = Math.max(...bounds.map(x => x.b.left + x.b.width))
+      const minTop = Math.min(...bounds.map(x => x.b.top))
+      const maxBottom = Math.max(...bounds.map(x => x.b.top + x.b.height))
+      const centerX = (minLeft + maxRight) / 2
+      const centerY = (minTop + maxBottom) / 2
+      for (const { obj, b } of bounds) {
+        switch (alignment) {
+          case 'left':     applyPos(obj, minLeft, null); break
+          case 'center-h': applyPos(obj, centerX - b.width / 2, null); break
+          case 'right':    applyPos(obj, maxRight - b.width, null); break
+          case 'top':      applyPos(obj, null, minTop); break
+          case 'center-v': applyPos(obj, null, centerY - b.height / 2); break
+          case 'bottom':   applyPos(obj, null, maxBottom - b.height); break
+        }
+      }
+    }
+
     canvas.renderAll()
     pushHistory()
   }, [hasSelection, selectedObjects, pushHistory])
@@ -1161,7 +1437,19 @@ export default function DocumentEditorPage() {
   // Constants for rendering (from module or defaults)
   const SYSTEM_FONTS = fabricModRef.current?.SYSTEM_FONTS ?? ['Arial', 'Helvetica', 'Times New Roman', 'Georgia', 'Verdana', 'Courier New']
   const GOOGLE_FONTS = fabricModRef.current?.GOOGLE_FONTS ?? ['Roboto', 'Open Sans', 'Montserrat', 'Poppins']
-  const DYNAMIC_FIELD_CATEGORIES = fabricModRef.current?.DYNAMIC_FIELD_CATEGORIES ?? []
+  const DYNAMIC_FIELD_CATEGORIES = (() => {
+    const base = (fabricModRef.current?.DYNAMIC_FIELD_CATEGORIES ?? []) as Array<{ label: string; fields: Array<{ key: string; label: string; template: string }> }>
+    if (customFields.length === 0) return base
+    const personalizados = {
+      label: 'Personalizados',
+      fields: customFields.map(f => ({
+        key: f.slug,
+        label: f.name,
+        template: `{{${f.slug}}}`,
+      })),
+    }
+    return [...base, personalizados]
+  })()
   const PAGE_SIZES = fabricModRef.current?.PAGE_SIZES ?? {}
   const GRID_SIZES = fabricModRef.current?.GRID_SIZES ?? [10, 20, 40, 50]
   const MM_TO_PX = fabricModRef.current?.MM_TO_PX ?? 2
@@ -1284,6 +1572,7 @@ export default function DocumentEditorPage() {
             <ImagePlus className="w-4 h-4" />
           </button>
           <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" className="hidden" onChange={handleImageUpload} />
+          <input ref={replaceImageInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" className="hidden" onChange={handleReplaceImageInput} />
 
           {/* Table */}
           <div className="relative">
@@ -1328,34 +1617,20 @@ export default function DocumentEditorPage() {
           {/* Dynamic fields */}
           <div className="relative">
             <button
+              ref={dynamicFieldsBtnRef}
               onClick={() => { setShowDynamicFields(!showDynamicFields); setShowTablePicker(false) }}
               title="Campos dinámicos"
               className={`p-2 rounded-lg transition ${showDynamicFields ? 'bg-emerald-900/40 text-emerald-400' : 'text-slate-400 hover:text-slate-200 hover:bg-white/10'}`}
             >
               <Layers className="w-4 h-4" />
             </button>
-            {showDynamicFields && (
-              <div className="absolute left-full ml-2 top-0 bg-[#252536] border border-[#3a3a4d] rounded-xl shadow-xl py-2 w-56 z-30 max-h-[60vh] overflow-y-auto">
-                {DYNAMIC_FIELD_CATEGORIES.map((cat: any) => (
-                  <div key={cat.label}>
-                    <p className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{cat.label}</p>
-                    {cat.fields.map((f: any) => (
-                      <button
-                        key={f.key}
-                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation() }}
-                        onClick={() => addDynamicField(f)}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-300 hover:bg-emerald-900/30 hover:text-emerald-400 transition"
-                      >
-                        <span className="w-5 h-5 bg-emerald-900/40 rounded text-[9px] font-bold text-emerald-400 flex items-center justify-center flex-shrink-0">
-                          {f.key.charAt(0).toUpperCase()}
-                        </span>
-                        {f.label}
-                      </button>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            )}
+            <DynamicFieldsPicker
+              open={showDynamicFields}
+              anchorRef={dynamicFieldsBtnRef}
+              categories={DYNAMIC_FIELD_CATEGORIES as any}
+              onSelect={(f) => { addDynamicField(f); setShowDynamicFields(false) }}
+              onClose={() => setShowDynamicFields(false)}
+            />
           </div>
 
           <hr className="w-6 border-[#3a3a4d] my-1" />
@@ -1376,18 +1651,23 @@ export default function DocumentEditorPage() {
           {/* Alignment — only when selection exists */}
           {hasSelection && (
             <>
-              {[
-                { align: 'left', icon: AlignStartVertical },
-                { align: 'center-h', icon: AlignCenterVertical },
-                { align: 'right', icon: AlignEndVertical },
-                { align: 'top', icon: AlignStartHorizontal },
-                { align: 'center-v', icon: AlignCenterHorizontal },
-                { align: 'bottom', icon: AlignEndHorizontal },
-              ].map(({ align, icon: Icon }) => (
-                <button key={align} onClick={() => handleAlign(align)} title={`Alinear ${align}`} className="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/10 transition">
-                  <Icon className="w-4 h-4" />
-                </button>
-              ))}
+              {(() => {
+                const toPage = selectedObjects.length === 1
+                const suffix = toPage ? ' en página' : ''
+                const items: { align: string; icon: any; label: string }[] = [
+                  { align: 'left',     icon: AlignStartVertical,    label: `Alinear a la izquierda${suffix}` },
+                  { align: 'center-h', icon: AlignCenterVertical,   label: `Centrar horizontalmente${suffix}` },
+                  { align: 'right',    icon: AlignEndVertical,      label: `Alinear a la derecha${suffix}` },
+                  { align: 'top',      icon: AlignStartHorizontal,  label: `Alinear arriba${suffix}` },
+                  { align: 'center-v', icon: AlignCenterHorizontal, label: `Centrar verticalmente${suffix}` },
+                  { align: 'bottom',   icon: AlignEndHorizontal,    label: `Alinear abajo${suffix}` },
+                ]
+                return items.map(({ align, icon: Icon, label }) => (
+                  <button key={align} onClick={() => handleAlign(align)} title={label} className="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/10 transition">
+                    <Icon className="w-4 h-4" />
+                  </button>
+                ))
+              })()}
               <hr className="w-6 border-[#3a3a4d] my-1" />
             </>
           )}
@@ -1427,7 +1707,16 @@ export default function DocumentEditorPage() {
         </div>
 
         {/* ─── Canvas Area ──────────────────────────────────────────── */}
-        <div ref={containerRef} className="flex-1 relative overflow-hidden" style={{ backgroundColor: pasteboardColor }} onClick={() => { setShowDynamicFields(false); setShowTablePicker(false) }} onContextMenu={(e) => e.preventDefault()}>
+        <div
+          ref={containerRef}
+          className="flex-1 relative overflow-hidden"
+          style={{ backgroundColor: pasteboardColor }}
+          onClick={() => { setShowDynamicFields(false); setShowTablePicker(false) }}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation() }}
+          onDragOver={handleCanvasDragOver}
+          onDragLeave={handleCanvasDragLeave}
+          onDrop={handleCanvasDrop}
+        >
           {/* Rulers — drag from them to create guides */}
           {showRulers && (
             <>
@@ -1541,29 +1830,257 @@ export default function DocumentEditorPage() {
               }} />
             )}
 
-            {/* Snap guides */}
-            {snapGuides.map((guide, i) => (
-              guide.orientation === 'vertical' ? (
+            {/* Drag-drop image replace: highlight over target */}
+            {dragOverTargetId && (() => {
+              const canvas = fabricRef.current
+              const vpt = canvas?.viewportTransform
+              if (!canvas) return null
+              const target = canvas.getObjects().find((o: any) => o.__id === dragOverTargetId) as any
+              if (!target) return null
+              const b = target.getBoundingRect()
+              return (
+                <div className="absolute pointer-events-none" style={{
+                  left: `${b.left}px`,
+                  top: `${b.top}px`,
+                  width: `${b.width}px`,
+                  height: `${b.height}px`,
+                  border: '2.5px dashed rgb(16, 185, 129)',
+                  background: 'rgba(16,185,129,0.12)',
+                  borderRadius: '4px',
+                  zIndex: 55,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}>
+                  <span className="text-xs font-semibold text-emerald-300 bg-emerald-900/80 px-2.5 py-1 rounded-md border border-emerald-500/50 shadow-lg">
+                    Reemplazar imagen
+                  </span>
+                </div>
+              )
+            })()}
+
+            {/* Snap guides (clamped to page bounds for visual clarity) */}
+            {snapGuides.map((guide, i) => {
+              const vpt = fabricRef.current?.viewportTransform
+              const pageLeftPx = vpt?.[4] ?? 0
+              const pageTopPx = vpt?.[5] ?? 0
+              const pageWScene = pageWidth * MM_TO_PX
+              const pageHScene = pageHeight * MM_TO_PX
+              const pageWPx = pageWScene * zoom
+              const pageHPx = pageHScene * zoom
+              // Skip guides that fall outside page rect — visual clarity
+              if (guide.orientation === 'vertical' && (guide.position < 0 || guide.position > pageWScene)) return null
+              if (guide.orientation === 'horizontal' && (guide.position < 0 || guide.position > pageHScene)) return null
+              return guide.orientation === 'vertical' ? (
                 <div key={i} className="absolute pointer-events-none" style={{
-                  left: `${guide.position * zoom + (fabricRef.current?.viewportTransform?.[4] ?? 0)}px`,
-                  top: 0, bottom: 0, width: '1px',
+                  left: `${guide.position * zoom + pageLeftPx}px`,
+                  top: `${pageTopPx}px`,
+                  height: `${pageHPx}px`,
+                  width: '1px',
                   borderLeft: `1px dashed ${GUIDE_COLOR}`,
                   zIndex: 50,
                 }} />
               ) : (
                 <div key={i} className="absolute pointer-events-none" style={{
-                  top: `${guide.position * zoom + (fabricRef.current?.viewportTransform?.[5] ?? 0)}px`,
-                  left: 0, right: 0, height: '1px',
+                  top: `${guide.position * zoom + pageTopPx}px`,
+                  left: `${pageLeftPx}px`,
+                  width: `${pageWPx}px`,
+                  height: '1px',
                   borderTop: `1px dashed ${GUIDE_COLOR}`,
                   zIndex: 50,
                 }} />
               )
-            ))}
+            })}
+
+            {/* Distance labels (Figma-style "12px" between adjacent objects) */}
+            {distanceLabels.map((d, i) => {
+              const vpt = fabricRef.current?.viewportTransform
+              const offL = vpt?.[4] ?? 0
+              const offT = vpt?.[5] ?? 0
+              // Convert scene → viewport px
+              const x1 = d.x1 * zoom + offL
+              const y1 = d.y1 * zoom + offT
+              const x2 = d.x2 * zoom + offL
+              const y2 = d.y2 * zoom + offT
+              const midX = (x1 + x2) / 2
+              const midY = (y1 + y2) / 2
+              const lineColor = 'rgb(239, 68, 68)' // red-500
+              return (
+                <div key={`d-${i}`} className="absolute pointer-events-none" style={{ zIndex: 52 }}>
+                  {/* Measurement line */}
+                  <div style={{
+                    position: 'absolute',
+                    left: `${Math.min(x1, x2)}px`,
+                    top: `${Math.min(y1, y2)}px`,
+                    width: d.axis === 'h' ? `${Math.abs(x2 - x1)}px` : '1px',
+                    height: d.axis === 'v' ? `${Math.abs(y2 - y1)}px` : '1px',
+                    background: lineColor,
+                  }} />
+                  {/* End caps (perpendicular 6px ticks) */}
+                  {d.axis === 'h' ? (
+                    <>
+                      <div style={{ position: 'absolute', left: `${x1}px`, top: `${y1 - 3}px`, width: '1px', height: '7px', background: lineColor }} />
+                      <div style={{ position: 'absolute', left: `${x2}px`, top: `${y2 - 3}px`, width: '1px', height: '7px', background: lineColor }} />
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ position: 'absolute', left: `${x1 - 3}px`, top: `${y1}px`, width: '7px', height: '1px', background: lineColor }} />
+                      <div style={{ position: 'absolute', left: `${x2 - 3}px`, top: `${y2}px`, width: '7px', height: '1px', background: lineColor }} />
+                    </>
+                  )}
+                  {/* Label bubble */}
+                  <div style={{
+                    position: 'absolute',
+                    left: `${midX}px`,
+                    top: `${midY}px`,
+                    transform: d.axis === 'h' ? 'translate(-50%, -140%)' : 'translate(10px, -50%)',
+                    background: lineColor,
+                    color: 'white',
+                    fontSize: '10px',
+                    fontWeight: 600,
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    whiteSpace: 'nowrap',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                  }}>
+                    {d.distance}px
+                  </div>
+                </div>
+              )
+            })}
+
+            {/* Rich-text floating toolbar */}
+            {editingText && editingTextObj && (() => {
+              const obj = editingTextObj as any
+              const canvas = fabricRef.current
+              const vpt = canvas?.viewportTransform
+              if (!canvas || !vpt) return null
+              const b = obj.getBoundingRect()
+              // Position above the textbox (or below if no space)
+              const toolbarH = 34
+              let top = b.top - toolbarH - 4
+              if (top < 4) top = b.top + b.height + 4
+              const left = b.left + b.width / 2
+              // Touch editingSelVersion to re-render on selection change
+              void editingSelVersion
+
+              const getSel = (): [number, number] => {
+                const s = obj.selectionStart ?? 0
+                const e = obj.selectionEnd ?? s
+                return s === e ? [Math.max(0, s - 1), s] : [s, e]
+              }
+
+              const styleActive = (key: string, match: any): boolean => {
+                const [s, e] = getSel()
+                if (s === e) return false
+                try {
+                  const styles = obj.getSelectionStyles(s, e, true) as any[]
+                  if (!styles || styles.length === 0) return false
+                  return styles.every((st: any) => (st?.[key] ?? obj[key]) === match)
+                } catch { return false }
+              }
+
+              const applyStyle = (partial: Record<string, any>) => {
+                const [s, e] = getSel()
+                if (s >= e) return
+                obj.setSelectionStyles(partial, s, e)
+                obj.initDimensions?.()
+                canvas.renderAll()
+                setEditingSelVersion(v => v + 1)
+              }
+
+              const toggleBold = () => {
+                const bold = styleActive('fontWeight', 'bold')
+                applyStyle({ fontWeight: bold ? 'normal' : 'bold' })
+              }
+              const toggleItalic = () => {
+                const it = styleActive('fontStyle', 'italic')
+                applyStyle({ fontStyle: it ? 'normal' : 'italic' })
+              }
+              const toggleUnderline = () => {
+                const un = styleActive('underline', true)
+                applyStyle({ underline: !un })
+              }
+              const setFill = (color: string) => applyStyle({ fill: color })
+              const bumpSize = (delta: number) => {
+                const [s, e] = getSel()
+                if (s >= e) return
+                const styles = obj.getSelectionStyles(s, e, true) as any[]
+                const cur = styles?.[0]?.fontSize ?? obj.fontSize ?? 16
+                applyStyle({ fontSize: Math.max(6, Math.min(400, Math.round(cur + delta))) })
+              }
+
+              const hasSel = getSel()[0] < getSel()[1]
+              const btn = "h-7 w-7 flex items-center justify-center rounded-md text-slate-200 hover:bg-white/10 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              const activeBtn = "bg-emerald-600 text-white hover:bg-emerald-500"
+
+              return (
+                <div
+                  className="absolute flex items-center gap-0.5 px-1.5 py-1 rounded-lg bg-[#1e1e2e]/95 backdrop-blur-sm border border-[#3a3a4d] shadow-2xl"
+                  style={{
+                    left: `${left}px`,
+                    top: `${top}px`,
+                    transform: 'translateX(-50%)',
+                    zIndex: 80,
+                  }}
+                  // Prevent clicks from stealing focus / exiting editing
+                  onMouseDown={(e) => e.preventDefault()}
+                >
+                  <button
+                    className={`${btn} ${styleActive('fontWeight', 'bold') ? activeBtn : ''}`}
+                    title="Negrita"
+                    disabled={!hasSel}
+                    onClick={toggleBold}
+                  ><Bold className="w-3.5 h-3.5" /></button>
+                  <button
+                    className={`${btn} ${styleActive('fontStyle', 'italic') ? activeBtn : ''}`}
+                    title="Cursiva"
+                    disabled={!hasSel}
+                    onClick={toggleItalic}
+                  ><Italic className="w-3.5 h-3.5" /></button>
+                  <button
+                    className={`${btn} ${styleActive('underline', true) ? activeBtn : ''}`}
+                    title="Subrayado"
+                    disabled={!hasSel}
+                    onClick={toggleUnderline}
+                  ><Underline className="w-3.5 h-3.5" /></button>
+                  <div className="w-px h-5 bg-[#3a3a4d] mx-1" />
+                  <button className={btn} title="Disminuir tamaño" disabled={!hasSel} onClick={() => bumpSize(-1)}>
+                    <span className="text-xs font-bold">A-</span>
+                  </button>
+                  <button className={btn} title="Aumentar tamaño" disabled={!hasSel} onClick={() => bumpSize(1)}>
+                    <span className="text-xs font-bold">A+</span>
+                  </button>
+                  <div className="w-px h-5 bg-[#3a3a4d] mx-1" />
+                  <label
+                    className={`h-7 w-7 flex items-center justify-center rounded-md cursor-pointer hover:bg-white/10 transition relative ${!hasSel ? 'opacity-40 cursor-not-allowed pointer-events-none' : ''}`}
+                    title="Color del texto"
+                    onMouseDown={(e) => { e.stopPropagation() }}
+                  >
+                    <input
+                      type="color"
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                      onChange={(e) => setFill(e.target.value)}
+                    />
+                    <div className="w-3.5 h-3.5 rounded-sm border border-white/30 pointer-events-none" style={{
+                      background: (() => {
+                        const [s, e] = getSel()
+                        if (s >= e) return obj.fill ?? '#ffffff'
+                        try {
+                          const st = obj.getSelectionStyles(s, e, true) as any[]
+                          return st?.[0]?.fill ?? obj.fill ?? '#ffffff'
+                        } catch { return obj.fill ?? '#ffffff' }
+                      })(),
+                    }} />
+                  </label>
+                </div>
+              )
+            })()}
 
             {/* User guides (persistent, from rulers) — draggable + right-click to delete */}
             {userGuides.map((guide) => (
               guide.orientation === 'v' ? (
-                <div key={guide.id} className="absolute cursor-col-resize" style={{
+                <div key={guide.id} data-user-guide="v" className="absolute cursor-col-resize" style={{
                   left: `${guide.position * zoom + (fabricRef.current?.viewportTransform?.[4] ?? 0) - 2}px`,
                   top: 0, bottom: 0, width: '5px',
                   borderLeft: '1px solid #06b6d4',
@@ -1606,7 +2123,7 @@ export default function DocumentEditorPage() {
                 }}
                 />
               ) : (
-                <div key={guide.id} className="absolute cursor-row-resize" style={{
+                <div key={guide.id} data-user-guide="h" className="absolute cursor-row-resize" style={{
                   top: `${guide.position * zoom + (fabricRef.current?.viewportTransform?.[5] ?? 0) - 2}px`,
                   left: 0, right: 0, height: '5px',
                   borderTop: '1px solid #06b6d4',
@@ -1711,18 +2228,23 @@ export default function DocumentEditorPage() {
                   isInstance={isInstance}
                   fabricRef={fabricRef}
                   fileInputRef={fileInputRef}
+                  replaceImageInputRef={replaceImageInputRef}
                   SYSTEM_FONTS={SYSTEM_FONTS}
                   GOOGLE_FONTS={GOOGLE_FONTS}
                   bringForward={bringForward}
                   sendBackward={sendBackward}
                   bringToFront={bringToFront}
                   sendToBack={sendToBack}
+                  copiedFieldFormatRef={copiedFieldFormatRef}
                 />
               ) : selectedObjects.length > 1 ? (
-                <div className="text-center py-6 text-slate-400">
-                  <p className="text-sm font-medium">{selectedObjects.length} objetos seleccionados</p>
-                  <p className="text-xs text-slate-500 mt-1">Usa las herramientas de alineación o agrupa</p>
-                </div>
+                <MultiSelectProperties
+                  selectedObjects={selectedObjects}
+                  fabricRef={fabricRef}
+                  pushHistory={pushHistory}
+                  isInstance={isInstance}
+                  copiedFieldFormatRef={copiedFieldFormatRef}
+                />
               ) : (
                 <DocumentProperties
                   pageWidth={pageWidth}
@@ -1839,8 +2361,9 @@ export default function DocumentEditorPage() {
 // ─── Properties Panel Sub-Component ─────────────────────────────────────────
 
 function PropertiesContent({
-  selectedObj, updateProp, pushHistory, isInstance, fabricRef, fileInputRef,
+  selectedObj, updateProp, pushHistory, isInstance, fabricRef, fileInputRef, replaceImageInputRef,
   SYSTEM_FONTS, GOOGLE_FONTS, bringForward, sendBackward, bringToFront, sendToBack,
+  copiedFieldFormatRef,
 }: {
   selectedObj: FabricObject
   updateProp: (prop: string, value: any) => void
@@ -1848,15 +2371,18 @@ function PropertiesContent({
   isInstance: (obj: any, type: string) => boolean
   fabricRef: React.MutableRefObject<FabricCanvasType | null>
   fileInputRef: React.RefObject<HTMLInputElement | null>
+  replaceImageInputRef: React.RefObject<HTMLInputElement | null>
   SYSTEM_FONTS: string[]
   GOOGLE_FONTS: string[]
   bringForward: () => void
   sendBackward: () => void
   bringToFront: () => void
   sendToBack: () => void
+  copiedFieldFormatRef: React.MutableRefObject<import('@/lib/dynamicFieldFormat').FieldFormat | null>
 }) {
   const obj = selectedObj as any
   const isText = isInstance(obj, 'DynamicText') || isInstance(obj, 'FabricText')
+  const isDynamicField = isInstance(obj, 'DynamicText') && obj.isDynamic && !!obj.fieldName
   const isRect = isInstance(obj, 'Rect')
   const isEllipse = isInstance(obj, 'Ellipse')
   const isTriangle = isInstance(obj, 'Triangle')
@@ -1968,7 +2494,67 @@ function PropertiesContent({
               <input type="number" min={0.5} max={5} step={0.1} value={obj.lineHeight || 1.2} onChange={e => updateProp('lineHeight', Number(e.target.value))}
                 className="w-full px-2 py-1 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none" />
             </div>
+
+            <div className="mt-1.5">
+              <span className="text-[10px] text-slate-500">Espaciado entre letras</span>
+              <div className="flex items-center gap-2">
+                <input
+                  type="range" min={-200} max={1000} step={10}
+                  value={obj.charSpacing || 0}
+                  onChange={e => updateProp('charSpacing', Number(e.target.value))}
+                  className="flex-1 h-1 accent-emerald-500"
+                />
+                <input
+                  type="number" min={-200} max={1000} step={10}
+                  value={obj.charSpacing || 0}
+                  onChange={e => updateProp('charSpacing', Number(e.target.value))}
+                  className="w-16 px-2 py-1 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="mt-2">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Contorno</span>
+              <div className="grid grid-cols-2 gap-1.5 mt-1">
+                <div>
+                  <span className="text-[10px] text-slate-500">Color</span>
+                  <input
+                    type="color"
+                    value={typeof obj.stroke === 'string' ? obj.stroke : '#000000'}
+                    onChange={e => updateProp('stroke', e.target.value)}
+                    className="w-full h-8 rounded cursor-pointer bg-[#2a2a3d] border border-[#3a3a4d]"
+                  />
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500">Grosor</span>
+                  <input
+                    type="number" min={0} max={20} step={0.5}
+                    value={obj.strokeWidth || 0}
+                    onChange={e => {
+                      const v = Number(e.target.value)
+                      updateProp('strokeWidth', v)
+                      // Ensure stroke behind fill for text (avoids thickening appearance)
+                      if (v > 0 && !obj.paintFirst) updateProp('paintFirst', 'stroke')
+                    }}
+                    className="w-full px-2 py-1 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
+          <hr className="border-[#2a2a3d]" />
+        </>
+      )}
+
+      {/* Dynamic-field format (Excel-like) */}
+      {isDynamicField && (
+        <>
+          <DynamicFormatSection
+            objs={[obj]}
+            fabricRef={fabricRef}
+            pushHistory={pushHistory}
+            copiedFieldFormatRef={copiedFieldFormatRef}
+          />
           <hr className="border-[#2a2a3d]" />
         </>
       )}
@@ -1990,7 +2576,7 @@ function PropertiesContent({
                 <span className="text-[10px] text-slate-500 w-10">Borde</span>
                 <input type="color" value={obj.stroke || '#000000'} onChange={e => updateProp('stroke', e.target.value)}
                   className="w-7 h-7 rounded cursor-pointer border border-[#3a3a4d]" />
-                <input type="number" min={0} max={20} value={obj.strokeWidth || 0} onChange={e => updateProp('strokeWidth', Number(e.target.value))}
+                <input type="number" min={0} max={20} step={0.25} value={obj.strokeWidth || 0} onChange={e => updateProp('strokeWidth', Number(e.target.value))}
                   className="w-16 px-2 py-1 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none" />
               </div>
               {isRect && (
@@ -2019,7 +2605,7 @@ function PropertiesContent({
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="text-[10px] text-slate-500 w-10">Grosor</span>
-                <input type="number" min={1} max={20} value={obj.strokeWidth || 2} onChange={e => updateProp('strokeWidth', Number(e.target.value))}
+                <input type="number" min={0.25} max={20} step={0.25} value={obj.strokeWidth || 2} onChange={e => updateProp('strokeWidth', Number(e.target.value))}
                   className="w-full px-2 py-1 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none" />
               </div>
             </div>
@@ -2033,9 +2619,16 @@ function PropertiesContent({
         <>
           <div>
             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Imagen</label>
-            <button onClick={() => fileInputRef.current?.click()} className="w-full mt-1 px-3 py-2 text-xs text-slate-300 border border-dashed border-[#3a3a4d] rounded-lg hover:bg-white/5 transition">
+            <button
+              onClick={() => replaceImageInputRef.current?.click()}
+              title="Reemplazar preservando posición y tamaño"
+              className="w-full mt-1 px-3 py-2 text-xs text-slate-300 border border-dashed border-[#3a3a4d] rounded-lg hover:bg-white/5 hover:border-emerald-500/50 transition"
+            >
               Reemplazar imagen
             </button>
+            <p className="text-[10px] text-slate-500 mt-1.5 leading-relaxed">
+              Tip: también puedes arrastrar una imagen sobre este objeto para reemplazarla.
+            </p>
           </div>
           <hr className="border-[#2a2a3d]" />
         </>
@@ -2340,3 +2933,537 @@ function LayersPanel({
     </div>
   )
 }
+
+
+// ─── Multi-Select Properties Panel ─────────────────────────────────────────
+// Shows shared props across N selected objects. Mixed values show "—".
+// Editing applies the new value to all objects in the selection.
+
+function MultiSelectProperties({
+  selectedObjects, fabricRef, pushHistory, isInstance, copiedFieldFormatRef,
+}: {
+  selectedObjects: FabricObject[]
+  fabricRef: React.MutableRefObject<FabricCanvasType | null>
+  pushHistory: () => void
+  isInstance: (obj: any, type: string) => boolean
+  copiedFieldFormatRef: React.MutableRefObject<import('@/lib/dynamicFieldFormat').FieldFormat | null>
+}) {
+  const count = selectedObjects.length
+  const allText = selectedObjects.every(o => isInstance(o, 'DynamicText') || isInstance(o, 'FabricText'))
+  const allDynamicField = selectedObjects.every(o => isInstance(o, 'DynamicText') && (o as any).isDynamic && (o as any).fieldName)
+  const allShape = selectedObjects.every(o => isInstance(o, 'Rect') || isInstance(o, 'Ellipse') || isInstance(o, 'Triangle'))
+  const allHaveFill = selectedObjects.every(o => (o as any).fill !== undefined)
+  const allHaveStroke = selectedObjects.every(o => 'stroke' in (o as any))
+
+  // Shared value helper: returns value if all equal, or null if mixed
+  const shared = <T,>(read: (o: any) => T): T | null => {
+    if (count === 0) return null
+    const first = read(selectedObjects[0])
+    for (let i = 1; i < count; i++) {
+      if (read(selectedObjects[i]) !== first) return null
+    }
+    return first
+  }
+
+  const writeAll = (prop: string, value: any) => {
+    const canvas = fabricRef.current
+    if (!canvas) return
+    selectedObjects.forEach(o => {
+      o.set(prop as keyof FabricObject, value)
+      o.setCoords()
+    })
+    canvas.renderAll()
+    pushHistory()
+  }
+
+  // Bounding box of selection (page coords)
+  const bbox = (() => {
+    if (count === 0) return { left: 0, top: 0, width: 0, height: 0 }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    selectedObjects.forEach(o => {
+      const b = (o as any).getBoundingRect() as { left: number; top: number; width: number; height: number }
+      const canvas = fabricRef.current
+      const vpt = canvas?.viewportTransform
+      const zoom = canvas?.getZoom?.() ?? 1
+      // Convert viewport → scene coords
+      const sx = vpt ? (b.left - vpt[4]) / zoom : b.left
+      const sy = vpt ? (b.top - vpt[5]) / zoom : b.top
+      const sw = b.width / zoom
+      const sh = b.height / zoom
+      minX = Math.min(minX, sx)
+      minY = Math.min(minY, sy)
+      maxX = Math.max(maxX, sx + sw)
+      maxY = Math.max(maxY, sy + sh)
+    })
+    return { left: minX, top: minY, width: maxX - minX, height: maxY - minY }
+  })()
+
+  const opacity = shared(o => o.opacity ?? 1)
+  const angle = shared(o => Math.round(o.angle ?? 0))
+  const fill = allHaveFill ? shared(o => String(o.fill ?? '')) : null
+  const stroke = allHaveStroke ? shared(o => String(o.stroke ?? '')) : null
+  const strokeWidth = allHaveStroke ? shared(o => o.strokeWidth ?? 0) : null
+  const fontSize = allText ? shared(o => o.fontSize ?? 16) : null
+  const fontFamily = allText ? shared(o => o.fontFamily ?? 'Arial') : null
+  const fontWeight = allText ? shared(o => o.fontWeight ?? 'normal') : null
+  const fontStyle = allText ? shared(o => o.fontStyle ?? 'normal') : null
+  const underline = allText ? shared(o => Boolean(o.underline)) : null
+  const textAlign = allText ? shared(o => o.textAlign ?? 'left') : null
+
+  const inputCls = "w-full px-2 py-1 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none"
+  const mixedPH = '—'
+
+  return (
+    <>
+      <div className="flex items-center gap-2 px-1">
+        <div className="w-7 h-7 rounded-md bg-emerald-600/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 text-[11px] font-bold">{count}</div>
+        <div>
+          <p className="text-xs font-semibold text-slate-100">Selección múltiple</p>
+          <p className="text-[10px] text-slate-500">{count} objetos</p>
+        </div>
+      </div>
+
+      <hr className="border-[#2a2a3d]" />
+
+      {/* Bounding box (read-only) */}
+      <div>
+        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Posición y tamaño (grupo)</label>
+        <div className="grid grid-cols-2 gap-1.5 mt-1">
+          <div>
+            <span className="text-[10px] text-slate-500">X</span>
+            <input type="number" readOnly value={Math.round(bbox.left)} className={inputCls + ' opacity-60 cursor-default'} />
+          </div>
+          <div>
+            <span className="text-[10px] text-slate-500">Y</span>
+            <input type="number" readOnly value={Math.round(bbox.top)} className={inputCls + ' opacity-60 cursor-default'} />
+          </div>
+          <div>
+            <span className="text-[10px] text-slate-500">Ancho</span>
+            <input type="number" readOnly value={Math.round(bbox.width)} className={inputCls + ' opacity-60 cursor-default'} />
+          </div>
+          <div>
+            <span className="text-[10px] text-slate-500">Alto</span>
+            <input type="number" readOnly value={Math.round(bbox.height)} className={inputCls + ' opacity-60 cursor-default'} />
+          </div>
+        </div>
+      </div>
+
+      <hr className="border-[#2a2a3d]" />
+
+      {/* Rotation + Opacity */}
+      <div>
+        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Apariencia</label>
+        <div className="grid grid-cols-2 gap-1.5 mt-1">
+          <div>
+            <span className="text-[10px] text-slate-500">Rotación (°)</span>
+            <input
+              type="number"
+              value={angle ?? ''}
+              placeholder={angle === null ? mixedPH : ''}
+              onChange={e => writeAll('angle', Number(e.target.value))}
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <span className="text-[10px] text-slate-500">Opacidad</span>
+            <input
+              type="number" min={0} max={1} step={0.05}
+              value={opacity ?? ''}
+              placeholder={opacity === null ? mixedPH : ''}
+              onChange={e => writeAll('opacity', Number(e.target.value))}
+              className={inputCls}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Fill (shared) */}
+      {allHaveFill && (
+        <>
+          <hr className="border-[#2a2a3d]" />
+          <div>
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Relleno</label>
+            <div className="flex items-center gap-2 mt-1">
+              <input
+                type="color"
+                value={typeof fill === 'string' && fill.startsWith('#') ? fill : '#000000'}
+                onChange={e => writeAll('fill', e.target.value)}
+                className="w-9 h-9 rounded bg-[#2a2a3d] cursor-pointer"
+              />
+              <input
+                type="text"
+                value={fill ?? ''}
+                placeholder={fill === null ? mixedPH : ''}
+                onChange={e => writeAll('fill', e.target.value)}
+                className={inputCls}
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Stroke (shared) */}
+      {allHaveStroke && allShape && (
+        <>
+          <hr className="border-[#2a2a3d]" />
+          <div>
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Borde</label>
+            <div className="grid grid-cols-2 gap-1.5 mt-1">
+              <input
+                type="color"
+                value={typeof stroke === 'string' && stroke.startsWith('#') ? stroke : '#000000'}
+                onChange={e => writeAll('stroke', e.target.value)}
+                className="w-full h-8 rounded bg-[#2a2a3d] cursor-pointer"
+              />
+              <input
+                type="number" min={0} max={50} step={0.25}
+                value={strokeWidth ?? ''}
+                placeholder={strokeWidth === null ? mixedPH : ''}
+                onChange={e => writeAll('strokeWidth', Number(e.target.value))}
+                className={inputCls}
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Text (shared) */}
+      {allText && (
+        <>
+          <hr className="border-[#2a2a3d]" />
+          <div>
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Texto</label>
+            <div className="grid grid-cols-2 gap-1.5 mt-1">
+              <div className="col-span-2">
+                <span className="text-[10px] text-slate-500">Familia</span>
+                <input
+                  type="text"
+                  value={fontFamily ?? ''}
+                  placeholder={fontFamily === null ? mixedPH : ''}
+                  onChange={e => writeAll('fontFamily', e.target.value)}
+                  className={inputCls}
+                />
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500">Tamaño</span>
+                <input
+                  type="number" min={6} max={500}
+                  value={fontSize ?? ''}
+                  placeholder={fontSize === null ? mixedPH : ''}
+                  onChange={e => writeAll('fontSize', Number(e.target.value))}
+                  className={inputCls}
+                />
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500">Color</span>
+                <input
+                  type="color"
+                  value={typeof fill === 'string' && fill.startsWith('#') ? fill : '#000000'}
+                  onChange={e => writeAll('fill', e.target.value)}
+                  className="w-full h-7 rounded bg-[#2a2a3d] cursor-pointer"
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-1 mt-2">
+              <button
+                onClick={() => writeAll('fontWeight', fontWeight === 'bold' ? 'normal' : 'bold')}
+                className={`flex-1 px-2 py-1 text-xs rounded border ${fontWeight === 'bold' ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-[#2a2a3d] border-[#3a3a4d] text-slate-300'}`}
+                title={fontWeight === null ? 'Negrita (mixto)' : 'Negrita'}
+              ><strong>B</strong></button>
+              <button
+                onClick={() => writeAll('fontStyle', fontStyle === 'italic' ? 'normal' : 'italic')}
+                className={`flex-1 px-2 py-1 text-xs rounded border ${fontStyle === 'italic' ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-[#2a2a3d] border-[#3a3a4d] text-slate-300'}`}
+                title={fontStyle === null ? 'Cursiva (mixto)' : 'Cursiva'}
+              ><em>I</em></button>
+              <button
+                onClick={() => writeAll('underline', !underline)}
+                className={`flex-1 px-2 py-1 text-xs rounded border ${underline === true ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-[#2a2a3d] border-[#3a3a4d] text-slate-300'}`}
+                title={underline === null ? 'Subrayado (mixto)' : 'Subrayado'}
+              ><u>U</u></button>
+            </div>
+            <div className="grid grid-cols-4 gap-1 mt-1.5">
+              {(['left', 'center', 'right', 'justify'] as const).map(a => (
+                <button
+                  key={a}
+                  onClick={() => writeAll('textAlign', a)}
+                  className={`px-2 py-1 text-[10px] rounded border ${textAlign === a ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-[#2a2a3d] border-[#3a3a4d] text-slate-300'}`}
+                >{a}</button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Dynamic-field format (shared) */}
+      {allDynamicField && (
+        <>
+          <hr className="border-[#2a2a3d]" />
+          <DynamicFormatSection
+            objs={selectedObjects as any[]}
+            fabricRef={fabricRef}
+            pushHistory={pushHistory}
+            copiedFieldFormatRef={copiedFieldFormatRef}
+          />
+        </>
+      )}
+
+      <hr className="border-[#2a2a3d]" />
+      <p className="text-[10px] text-slate-500 px-1">
+        Los valores marcados con <span className="font-mono text-slate-400">—</span> tienen valores distintos en los objetos seleccionados. Editar aplica a todos.
+      </p>
+    </>
+  )
+}
+
+// ─── Dynamic Field Format Section ──────────────────────────────────────────
+// Excel-like format configuration for dynamic fields. Supports:
+//  - single or multi-object edit
+//  - live preview
+//  - copy/paste format (paintbrush)
+
+function DynamicFormatSection({
+  objs, fabricRef, pushHistory, copiedFieldFormatRef,
+}: {
+  objs: any[]
+  fabricRef: React.MutableRefObject<FabricCanvasType | null>
+  pushHistory: () => void
+  copiedFieldFormatRef: React.MutableRefObject<FieldFormat | null>
+}) {
+  const firstFmt: FieldFormat = objs[0]?.fieldFormat ?? DEFAULT_FIELD_FORMAT
+  const allSameSerialized = objs.every(o => JSON.stringify(o.fieldFormat ?? DEFAULT_FIELD_FORMAT) === JSON.stringify(firstFmt))
+  const fmt: FieldFormat = allSameSerialized ? firstFmt : DEFAULT_FIELD_FORMAT
+  const mixed = !allSameSerialized
+
+  const [, force] = useReducer((x: number) => x + 1, 0)
+
+  const writeFormat = (updates: Partial<FieldFormat>) => {
+    const canvas = fabricRef.current
+    if (!canvas) return
+    objs.forEach(o => {
+      const current: FieldFormat = o.fieldFormat ?? DEFAULT_FIELD_FORMAT
+      const next: FieldFormat = { ...current, ...updates }
+      o.set('fieldFormat', next)
+      // Force re-render of preview text so the editor shows the formatted marker
+      // (actual value only shows during generation — editor keeps the {{slug}} marker)
+      o.setCoords()
+    })
+    canvas.renderAll()
+    pushHistory()
+    force()
+  }
+
+  const setType = (type: FieldFormatType) => {
+    // When switching types, reset incompatible fields to sensible defaults
+    const base: FieldFormat = { ...fmt, type }
+    if (type === 'number') {
+      base.decimals = fmt.decimals ?? 2
+      base.thousandsSep = fmt.thousandsSep ?? true
+    } else if (type === 'currency') {
+      base.decimals = fmt.decimals ?? 2
+      base.thousandsSep = fmt.thousandsSep ?? true
+      base.currency = fmt.currency ?? 'S/ '
+      base.currencyPos = fmt.currencyPos ?? 'before'
+    } else if (type === 'percent') {
+      base.decimals = fmt.decimals ?? 2
+    } else if (type === 'date' || type === 'datetime') {
+      base.datePreset = fmt.datePreset ?? (type === 'datetime' ? 'datetime_short' : 'date_long_es')
+    }
+    writeFormat(base)
+  }
+
+  // Sample values for live preview by type
+  const sampleFor = (t: FieldFormatType): number | Date | string | boolean | '' => {
+    switch (t) {
+      case 'number':
+      case 'currency':
+      case 'percent':
+        return 12345.678
+      case 'date':
+      case 'datetime':
+        return new Date()
+      case 'text':
+      case 'custom':
+        return 'Texto de ejemplo'
+      default:
+        return 12345.678
+    }
+  }
+  const preview = formatFieldValue(sampleFor(fmt.type), fmt)
+
+  const selCls = "w-full px-2 py-1 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none"
+  const inputCls = selCls
+
+  const canPaste = copiedFieldFormatRef.current != null
+
+  return (
+    <div>
+      <div className="flex items-center justify-between">
+        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+          Formato {mixed && <span className="text-amber-400 normal-case font-normal">(mixto)</span>}
+        </label>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => { copiedFieldFormatRef.current = { ...fmt }; force() }}
+            disabled={mixed}
+            title={mixed ? 'No se puede copiar un formato mixto' : 'Copiar formato'}
+            className="p-1 rounded bg-[#2a2a3d] border border-[#3a3a4d] text-slate-300 hover:text-emerald-400 hover:border-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Paintbrush className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (!copiedFieldFormatRef.current) return
+              writeFormat({ ...copiedFieldFormatRef.current })
+            }}
+            disabled={!canPaste}
+            title={canPaste ? 'Pegar formato' : 'Copia primero un formato'}
+            className="p-1 rounded bg-[#2a2a3d] border border-[#3a3a4d] text-slate-300 hover:text-emerald-400 hover:border-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ClipboardPaste className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-1.5 space-y-1.5">
+        <div>
+          <span className="text-[10px] text-slate-500">Tipo</span>
+          <select value={fmt.type} onChange={e => setType(e.target.value as FieldFormatType)} className={selCls}>
+            <option value="general">General</option>
+            <option value="number">Número</option>
+            <option value="currency">Moneda</option>
+            <option value="percent">Porcentaje</option>
+            <option value="date">Fecha</option>
+            <option value="datetime">Fecha y hora</option>
+            <option value="text">Texto</option>
+            <option value="custom">Personalizado</option>
+          </select>
+        </div>
+
+        {(fmt.type === 'number' || fmt.type === 'currency' || fmt.type === 'percent') && (
+          <>
+            <div className="grid grid-cols-2 gap-1.5">
+              <div>
+                <span className="text-[10px] text-slate-500">Decimales</span>
+                <input type="number" min={0} max={10} value={fmt.decimals ?? 2}
+                  onChange={e => writeFormat({ decimals: Math.max(0, Math.min(10, Number(e.target.value) || 0)) })}
+                  className={inputCls} />
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500">Separador miles</span>
+                <select value={(fmt.thousandsSep ?? true) ? 'yes' : 'no'}
+                  onChange={e => writeFormat({ thousandsSep: e.target.value === 'yes' })} className={selCls}>
+                  <option value="yes">Sí (1,234)</option>
+                  <option value="no">No (1234)</option>
+                </select>
+              </div>
+            </div>
+            {fmt.type === 'currency' && (
+              <div className="grid grid-cols-2 gap-1.5">
+                <div>
+                  <span className="text-[10px] text-slate-500">Símbolo</span>
+                  <input type="text" value={fmt.currency ?? 'S/ '}
+                    onChange={e => writeFormat({ currency: e.target.value })}
+                    className={inputCls} placeholder="S/ " />
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-500">Posición</span>
+                  <select value={fmt.currencyPos ?? 'before'}
+                    onChange={e => writeFormat({ currencyPos: e.target.value as 'before' | 'after' })} className={selCls}>
+                    <option value="before">Antes</option>
+                    <option value="after">Después</option>
+                  </select>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {(fmt.type === 'date' || fmt.type === 'datetime') && (() => {
+          const currentPreset = fmt.datePreset ?? (fmt.type === 'datetime' ? 'dd/MM/yyyy HH:mm' : 'dd/MM/yyyy')
+          const matchesPreset = DATE_PRESETS.some(p => p.value === currentPreset)
+          const selectValue = matchesPreset ? currentPreset : 'custom'
+          return (
+            <>
+              <div>
+                <span className="text-[10px] text-slate-500">Preset</span>
+                <select value={selectValue}
+                  onChange={e => {
+                    if (e.target.value === 'custom') {
+                      // Keep the current pattern; if it already matches a preset, start with same
+                      writeFormat({ datePreset: currentPreset })
+                    } else {
+                      writeFormat({ datePreset: e.target.value })
+                    }
+                  }}
+                  className={selCls}>
+                  {DATE_PRESETS.map(p => (
+                    <option key={p.value} value={p.value}>{p.label}</option>
+                  ))}
+                  <option value="custom">Personalizado…</option>
+                </select>
+              </div>
+              {!matchesPreset && (
+                <div>
+                  <span className="text-[10px] text-slate-500">Patrón</span>
+                  <input type="text" value={currentPreset}
+                    onChange={e => writeFormat({ datePreset: e.target.value })}
+                    className={inputCls} placeholder="dd/MM/yyyy HH:mm" />
+                  <span className="text-[9px] text-slate-500 block mt-0.5">dd, MM, MMMM, yyyy, HH, mm, ss, EEEE</span>
+                </div>
+              )}
+            </>
+          )
+        })()}
+
+        {(fmt.type === 'text' || fmt.type === 'custom' || fmt.type === 'number' || fmt.type === 'currency' || fmt.type === 'percent' || fmt.type === 'date' || fmt.type === 'datetime') && (
+          <div className="grid grid-cols-2 gap-1.5">
+            <div>
+              <span className="text-[10px] text-slate-500">Prefijo</span>
+              <input type="text" value={fmt.prefix ?? ''}
+                onChange={e => writeFormat({ prefix: e.target.value })}
+                className={inputCls} />
+            </div>
+            <div>
+              <span className="text-[10px] text-slate-500">Sufijo</span>
+              <input type="text" value={fmt.suffix ?? ''}
+                onChange={e => writeFormat({ suffix: e.target.value })}
+                className={inputCls} />
+            </div>
+          </div>
+        )}
+
+        {fmt.type === 'text' && (
+          <div>
+            <span className="text-[10px] text-slate-500">Transformar</span>
+            <select value={fmt.transform ?? 'none'}
+              onChange={e => writeFormat({ transform: e.target.value as TextTransform })} className={selCls}>
+              <option value="none">Sin cambio</option>
+              <option value="uppercase">MAYÚSCULAS</option>
+              <option value="lowercase">minúsculas</option>
+              <option value="capitalize">Capitalizar</option>
+            </select>
+          </div>
+        )}
+
+        {fmt.type === 'custom' && (
+          <div>
+            <span className="text-[10px] text-slate-500">Patrón personalizado</span>
+            <textarea rows={2} value={fmt.pattern ?? ''}
+              onChange={e => writeFormat({ pattern: e.target.value })}
+              className={inputCls + ' font-mono resize-y'}
+              placeholder="#,##0.00 &quot;soles&quot;" />
+            <span className="text-[9px] text-slate-500 block mt-0.5">Excel-like: 0, #, ,, . y secciones ; para positivos;negativos;cero</span>
+          </div>
+        )}
+
+        <div className="mt-2 p-2 rounded bg-[#14141c] border border-[#2a2a3d]">
+          <span className="text-[9px] text-slate-500 uppercase tracking-wider">Vista previa</span>
+          <div className="text-xs text-emerald-300 font-mono break-all mt-0.5">{preview || '(vacío)'}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+

@@ -20,6 +20,7 @@ import ConfirmDeleteKommoModal from '@/components/ConfirmDeleteKommoModal'
 import ConfirmBulkDeleteKommoModal, { KommoLeadToDelete } from '@/components/ConfirmBulkDeleteKommoModal'
 import { Chat } from '@/types/chat'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
+import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
 
 interface Device {
   id: string
@@ -446,6 +447,13 @@ export default function LeadsPage() {
   const [listHasMore, setListHasMore] = useState(false)
   const [listLoading, setListLoading] = useState(false)
 
+  // Custom field columns for list view
+  const [cfDefs, setCfDefs] = useState<CustomFieldDefinition[]>([])
+  const [cfVisibleIds, setCfVisibleIds] = useState<Set<string>>(new Set())
+  const [showCfColumnPicker, setShowCfColumnPicker] = useState(false)
+  const cfColumnPickerRef = useRef<HTMLDivElement>(null)
+  const [cfFilters, setCfFilters] = useState<CustomFieldFilter[]>([])
+
   // "Más" dropdown menu
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
@@ -629,6 +637,8 @@ export default function LeadsPage() {
         if (dateRange.to) params.set('date_to', dateRange.to)
       }
       if (filterKommoSync !== 'all') params.set('kommo_sync', filterKommoSync)
+      if (cfVisibleIds.size > 0) params.set('include_custom_fields', 'true')
+      if (cfFilters.length > 0) params.set('cf_filter', JSON.stringify(cfFilters))
       const res = await fetch(`/api/leads/list-paginated?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -650,7 +660,7 @@ export default function LeadsPage() {
     } finally {
       setListLoading(false)
     }
-  }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo, filterKommoSync])
+  }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo, filterKommoSync, cfVisibleIds, cfFilters])
 
   const loadMoreForStage = useCallback(async (stageId: string) => {
     if (loadingMoreStages.has(stageId)) return
@@ -767,6 +777,27 @@ export default function LeadsPage() {
     fetchDevices()
     // Check Google Contacts connection status
     fetch('/api/google/status').then(r => r.json()).then(d => setGoogleConnected(!!d.connected)).catch(() => {})
+    // Fetch custom field definitions
+    const token = localStorage.getItem('token')
+    if (token) {
+      fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json())
+        .then(d => {
+          if (d.success) {
+            const defs: CustomFieldDefinition[] = d.definitions || []
+            setCfDefs(defs)
+            try {
+              const saved = localStorage.getItem('cf_columns_leads')
+              if (saved) {
+                const ids: string[] = JSON.parse(saved)
+                const validIds = ids.filter(id => defs.some(def => def.id === id))
+                setCfVisibleIds(new Set(validIds))
+              }
+            } catch {}
+          }
+        })
+        .catch(() => {})
+    }
     // Load hidden stages from localStorage
     try {
       const saved = localStorage.getItem('hiddenStageIds')
@@ -932,9 +963,79 @@ export default function LeadsPage() {
           }
         }
       }
+      // Handle custom field definition updates
+      if (msg.event === 'custom_field_def_update') {
+        const tk = localStorage.getItem('token')
+        if (tk) {
+          fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${tk}` } })
+            .then(r => r.json())
+            .then(d => { if (d.success) setCfDefs(d.definitions || []) })
+            .catch(() => {})
+        }
+      }
     })
     return () => unsubscribe()
   }, [fetchLeadsPaginated, updateLeadInStages, removeLeadFromStages, detailLead, activePipeline, viewMode])
+
+  // Custom field column toggle
+  const toggleCfColumn = useCallback((fieldId: string) => {
+    setCfVisibleIds(prev => {
+      const next = new Set(prev)
+      if (next.has(fieldId)) next.delete(fieldId)
+      else next.add(fieldId)
+      localStorage.setItem('cf_columns_leads', JSON.stringify(Array.from(next)))
+      return next
+    })
+  }, [])
+
+  // Format custom field value for list table cell
+  const formatCfCell = useCallback((def: CustomFieldDefinition, lead: Lead) => {
+    const vals: CustomFieldValue[] = (lead as any).custom_field_values || []
+    const val = vals.find(v => v.field_id === def.id)
+    if (!val) return <span className="text-slate-300">—</span>
+    switch (def.field_type) {
+      case 'text': case 'email': case 'phone': case 'url':
+        return <span className="truncate">{val.value_text || '—'}</span>
+      case 'number':
+        return <span>{val.value_number != null ? val.value_number : '—'}</span>
+      case 'currency': {
+        if (val.value_number == null) return <span className="text-slate-300">—</span>
+        const sym = def.config?.symbol || '$'
+        const dec = def.config?.decimals ?? 2
+        return <span>{sym} {val.value_number.toLocaleString('es-PE', { minimumFractionDigits: dec, maximumFractionDigits: dec })}</span>
+      }
+      case 'date':
+        if (!val.value_date) return <span className="text-slate-300">—</span>
+        try { return <span>{new Date(val.value_date).toLocaleDateString('es-PE', { year: 'numeric', month: 'short', day: 'numeric' })}</span> }
+        catch { return <span>{val.value_date}</span> }
+      case 'checkbox':
+        return <span className={val.value_bool ? 'text-emerald-600' : 'text-slate-400'}>{val.value_bool ? 'Sí' : 'No'}</span>
+      case 'select': {
+        const opt = def.config?.options?.find(o => o.value === val.value_text)
+        return <span>{opt?.label || val.value_text || '—'}</span>
+      }
+      case 'multi_select': {
+        if (!val.value_json || val.value_json.length === 0) return <span className="text-slate-300">—</span>
+        return <div className="flex flex-wrap gap-0.5">{val.value_json.slice(0, 2).map(v => {
+          const o = def.config?.options?.find(opt => opt.value === v)
+          return <span key={v} className="px-1.5 py-0.5 bg-slate-100 text-slate-600 text-[10px] rounded-full">{o?.label || v}</span>
+        })}{val.value_json.length > 2 && <span className="text-[10px] text-slate-400">+{val.value_json.length - 2}</span>}</div>
+      }
+      default: return <span className="text-slate-300">—</span>
+    }
+  }, [])
+
+  // Close cfColumnPicker on outside click
+  useEffect(() => {
+    if (!showCfColumnPicker) return
+    const handler = (e: MouseEvent) => {
+      if (cfColumnPickerRef.current && !cfColumnPickerRef.current.contains(e.target as Node)) {
+        setShowCfColumnPicker(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showCfColumnPicker])
 
   // Debounce search term (500ms)
   useEffect(() => {
@@ -2041,7 +2142,7 @@ export default function LeadsPage() {
     return tag.name.toLowerCase().includes(term.toLowerCase())
   })
 
-  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + (filterKommoSync !== 'all' ? 1 : 0)
+  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + (filterKommoSync !== 'all' ? 1 : 0) + cfFilters.length
 
   // Export leads
   const handleExportLeads = async () => {
@@ -2049,10 +2150,11 @@ export default function LeadsPage() {
     const token = localStorage.getItem('token')
     try {
       const params = new URLSearchParams()
-      if (activePipeline) params.set('pipeline_id', activePipeline.id)
       if (exportScope === 'filtered') {
+        // Mirror EXACTLY the filters used by fetchListLeads so the export matches the visible list.
+        params.set('status_filter', statusFilter)
+        if (activePipeline && !debouncedSearchTerm) params.set('pipeline_id', activePipeline.id)
         if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
-        if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
         if (appliedFormulaType === 'advanced' && appliedFormulaText) {
           params.set('tag_formula', appliedFormulaText)
         } else {
@@ -2060,20 +2162,24 @@ export default function LeadsPage() {
           if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
           if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
         }
-        if (filterDatePreset) {
-          const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
-          if (resolved) {
-            params.set('date_field', filterDateField)
-            if (resolved.from) params.set('date_from', resolved.from)
-            if (resolved.to) params.set('date_to', resolved.to)
-          }
+        if (filterStageIds.size > 0) params.set('stage_ids', Array.from(filterStageIds).join(','))
+        filterDeviceIds.forEach(id => params.append('device_ids', id))
+        const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+        if (resolved) {
+          params.set('date_field', filterDateField)
+          if (resolved.from) params.set('date_from', resolved.from)
+          if (resolved.to) params.set('date_to', resolved.to)
         }
+        if (filterKommoSync !== 'all') params.set('kommo_sync', filterKommoSync)
+        if (cfFilters.length > 0) params.set('cf_filter', JSON.stringify(cfFilters))
+      } else {
+        if (activePipeline) params.set('pipeline_id', activePipeline.id)
       }
       params.set('view', 'list')
       params.set('limit', '50000')
       params.set('offset', '0')
 
-      const res = await fetch(`/api/leads?${params.toString()}`, {
+      const res = await fetch(`/api/leads/list-paginated?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
@@ -2362,7 +2468,7 @@ export default function LeadsPage() {
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
                     <button
-                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterKommoSync('all') }}
+                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterKommoSync('all'); setCfFilters([]) }}
                       className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                     >
                       Limpiar todo
@@ -2615,6 +2721,132 @@ export default function LeadsPage() {
                     </div>
                   )}
                 </div>
+
+                {/* ══ Center Column — Custom Fields ══ */}
+                {cfDefs.length > 0 && (
+                <div className="w-full sm:w-[220px] shrink-0 border-b sm:border-b-0 sm:border-r border-slate-100 overflow-y-auto p-3 space-y-3 max-h-[30vh] sm:max-h-none">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-1 h-3.5 bg-violet-400 rounded-full" />
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Campos</p>
+                    </div>
+                    <button
+                      onClick={() => setCfFilters(prev => [...prev, { field_id: cfDefs[0].id, operator: 'eq' as const, value: '' }])}
+                      className="p-1 hover:bg-violet-50 rounded-lg transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-violet-500" />
+                    </button>
+                  </div>
+                  {cfFilters.length === 0 && (
+                    <p className="text-[10px] text-slate-400 text-center py-2">Sin filtros de campos</p>
+                  )}
+                  {cfFilters.map((cf, idx) => {
+                    const def = cfDefs.find(d => d.id === cf.field_id)
+                    const fieldType = def?.field_type || 'text'
+                    const ops: { value: string; label: string }[] = (() => {
+                      switch (fieldType) {
+                        case 'number': case 'currency':
+                          return [{ value: 'eq', label: '=' }, { value: 'neq', label: '≠' }, { value: 'gt', label: '>' }, { value: 'lt', label: '<' }, { value: 'gte', label: '≥' }, { value: 'lte', label: '≤' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                        case 'date':
+                          return [{ value: 'eq', label: '=' }, { value: 'gt', label: 'Después' }, { value: 'lt', label: 'Antes' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                        case 'checkbox':
+                          return [{ value: 'eq', label: '=' }]
+                        case 'select':
+                          return [{ value: 'eq', label: '=' }, { value: 'neq', label: '≠' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                        case 'multi_select':
+                          return [{ value: 'contains_any', label: 'Contiene' }, { value: 'contains_all', label: 'Contiene todos' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                        default:
+                          return [{ value: 'eq', label: '=' }, { value: 'neq', label: '≠' }, { value: 'contains', label: 'Contiene' }, { value: 'starts_with', label: 'Empieza' }, { value: 'is_empty', label: 'Vacío' }, { value: 'is_not_empty', label: 'No vacío' }]
+                      }
+                    })()
+                    const needsValue = cf.operator !== 'is_empty' && cf.operator !== 'is_not_empty'
+                    return (
+                      <div key={idx} className="space-y-1 p-2 bg-slate-50 rounded-lg border border-slate-100">
+                        <div className="flex items-center gap-1">
+                          <select
+                            value={cf.field_id}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], field_id: e.target.value, value: '' }
+                              setCfFilters(next)
+                            }}
+                            className="flex-1 min-w-0 px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                          >
+                            {cfDefs.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                          </select>
+                          <button onClick={() => setCfFilters(prev => prev.filter((_, i) => i !== idx))} className="p-0.5 hover:bg-red-50 rounded">
+                            <X className="w-3 h-3 text-red-400" />
+                          </button>
+                        </div>
+                        <select
+                          value={cf.operator}
+                          onChange={(e) => {
+                            const next = [...cfFilters]
+                            next[idx] = { ...next[idx], operator: e.target.value as CustomFieldFilter['operator'], value: '' }
+                            setCfFilters(next)
+                          }}
+                          className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                        >
+                          {ops.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                        {needsValue && fieldType === 'checkbox' && (
+                          <select
+                            value={String(cf.value)}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], value: e.target.value === 'true' }
+                              setCfFilters(next)
+                            }}
+                            className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                          >
+                            <option value="true">Sí</option>
+                            <option value="false">No</option>
+                          </select>
+                        )}
+                        {needsValue && (fieldType === 'select' || fieldType === 'multi_select') && def?.config?.options && (
+                          <select
+                            value={String(cf.value)}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], value: e.target.value }
+                              setCfFilters(next)
+                            }}
+                            className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                          >
+                            <option value="">Seleccionar...</option>
+                            {def.config.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                          </select>
+                        )}
+                        {needsValue && fieldType === 'date' && (
+                          <input
+                            type="date"
+                            value={String(cf.value || '')}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], value: e.target.value }
+                              setCfFilters(next)
+                            }}
+                            className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 focus:ring-1 focus:ring-violet-400"
+                          />
+                        )}
+                        {needsValue && !['checkbox', 'select', 'multi_select', 'date'].includes(fieldType) && (
+                          <input
+                            type={fieldType === 'number' || fieldType === 'currency' ? 'number' : 'text'}
+                            value={String(cf.value || '')}
+                            onChange={(e) => {
+                              const next = [...cfFilters]
+                              next[idx] = { ...next[idx], value: fieldType === 'number' || fieldType === 'currency' ? (e.target.value ? Number(e.target.value) : '') : e.target.value }
+                              setCfFilters(next)
+                            }}
+                            placeholder="Valor..."
+                            className="w-full px-1.5 py-1 bg-white border border-slate-200 rounded text-[10px] text-slate-700 placeholder:text-slate-400 focus:ring-1 focus:ring-violet-400"
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+                )}
 
                 {/* ══ Right Column — Tag Browser ══ */}
                 <div className="flex-1 flex flex-col min-w-0 min-h-0 w-full sm:w-auto">
@@ -3204,8 +3436,39 @@ export default function LeadsPage() {
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[220px]">Lead</div>
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[110px]">Etapa</div>
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[180px]">Etiquetas</div>
+              {cfDefs.filter(d => cfVisibleIds.has(d.id)).sort((a, b) => a.sort_order - b.sort_order).map(def => (
+                <div key={def.id} className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[140px] truncate">{def.name}</div>
+              ))}
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex-1">Últimas observaciones</div>
-              {!selectionMode && <div className="px-3 py-2.5 w-[40px]"></div>}
+              {!selectionMode && (
+                <div className="px-3 py-2.5 w-[40px] relative" ref={cfColumnPickerRef}>
+                  {cfDefs.length > 0 && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setShowCfColumnPicker(!showCfColumnPicker) }}
+                      className={`p-1 rounded hover:bg-slate-100 transition ${showCfColumnPicker || cfVisibleIds.size > 0 ? 'text-emerald-600' : 'text-slate-400'}`}
+                      title="Columnas personalizadas"
+                    >
+                      <Settings className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {showCfColumnPicker && (
+                    <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-2 max-h-64 overflow-y-auto">
+                      <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Campos personalizados</div>
+                      {cfDefs.sort((a, b) => a.sort_order - b.sort_order).map(def => (
+                        <label key={def.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-slate-50 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={cfVisibleIds.has(def.id)}
+                            onChange={() => toggleCfColumn(def.id)}
+                            className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                          />
+                          <span className="text-sm text-slate-700 truncate">{def.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
           {/* Virtualized rows */}
@@ -3299,6 +3562,13 @@ export default function LeadsPage() {
                             <span className="text-[10px] text-slate-300">—</span>
                           )}
                         </div>
+
+                        {/* Custom field columns */}
+                        {cfDefs.filter(d => cfVisibleIds.has(d.id)).sort((a, b) => a.sort_order - b.sort_order).map(def => (
+                          <div key={def.id} className="px-3 py-2.5 w-[140px] text-[11px] text-slate-600 truncate">
+                            {formatCfCell(def, lead)}
+                          </div>
+                        ))}
 
                         {/* Observations preview */}
                         <div

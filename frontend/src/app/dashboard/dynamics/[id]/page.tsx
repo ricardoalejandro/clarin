@@ -3,15 +3,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api, createWebSocket } from '@/lib/api';
-import { Dynamic, DynamicItem, DynamicConfig, DynamicOption, DynamicLink, DynamicLinkRegistration, DEFAULT_CONFIG } from '@/types/dynamic';
+import { Dynamic, DynamicItem, DynamicConfig, DynamicOption, DynamicLink, DynamicLinkRegistration, DynamicLinkExtraMedia, DEFAULT_CONFIG } from '@/types/dynamic';
 import { compressImageStandard } from '@/utils/imageCompression';
-import { QRCodeSVG } from 'qrcode.react';
+import { QRCodeSVG, QRCodeCanvas } from 'qrcode.react';
+import WhatsAppTextInput from '@/components/WhatsAppTextInput';
 import {
   ArrowLeft, Save, Images, Settings2, Link2, Plus, Trash2, GripVertical,
   Upload, ExternalLink, Copy, Check, Eye, EyeOff, Palette, Volume2, VolumeX,
   PartyPopper, Sparkles, Image as ImageIcon, LayoutGrid, Grid3X3, Grid2X2, List,
   CheckSquare, Square, XCircle, Tag, MessageCircle, Pencil, X, Film, FileText,
-  Calendar, Download, Users, RefreshCw
+  Calendar, Download, Users, RefreshCw, ArrowUp, ArrowDown
 } from 'lucide-react';
 
 type Tab = 'content' | 'config' | 'links';
@@ -1328,14 +1329,17 @@ function OptionsSection({
 
 // ─── WhatsApp Preview Component ──────────────────────────────────────────────
 
-function WAPreview({ msg1Caption, msg2Text, msg2MediaUrl, msg2MediaType }: {
+interface ExtraPreview {
+  url: string;
+  media_type: string;
+  caption: string;
+}
+
+function WAPreview({ msg1Caption, extras }: {
   msg1Caption: string;
-  msg2Text: string;
-  msg2MediaUrl: string;
-  msg2MediaType: string;
+  extras: ExtraPreview[];
 }) {
-  const hasMsg2 = msg2Text || msg2MediaUrl;
-  if (!msg1Caption && !hasMsg2) return null;
+  if (!msg1Caption && extras.length === 0) return null;
 
   return (
     <div className="mt-3 p-3 bg-[#e5ddd5] rounded-xl space-y-2">
@@ -1352,24 +1356,218 @@ function WAPreview({ msg1Caption, msg2Text, msg2MediaUrl, msg2MediaType }: {
           <p className="px-2.5 pb-1 text-[9px] text-slate-400 text-right">12:00</p>
         </div>
       </div>
-      {/* Message 2: extra message */}
-      {hasMsg2 && (
-        <div className="flex justify-end">
+      {/* Extra messages: one bubble per extra media */}
+      {extras.map((ex, i) => (
+        <div key={i} className="flex justify-end">
           <div className="max-w-[75%] bg-[#dcf8c6] rounded-lg rounded-tr-none shadow-sm overflow-hidden">
-            {msg2MediaUrl && msg2MediaType === 'image' && (
-              <img src={msg2MediaUrl} alt="" className="w-full h-24 object-cover" />
+            {ex.url && ex.media_type === 'image' && (
+              <img src={ex.url} alt="" className="w-full h-24 object-cover" />
             )}
-            {msg2MediaUrl && msg2MediaType === 'video' && (
+            {ex.url && ex.media_type === 'video' && (
               <div className="w-full h-24 bg-slate-800 flex items-center justify-center">
                 <Film className="w-8 h-8 text-white/50" />
               </div>
             )}
-            {msg2Text && (
-              <p className="px-2.5 py-1.5 text-[11px] text-slate-700 whitespace-pre-wrap">{msg2Text}</p>
+            {ex.caption && (
+              <p className="px-2.5 py-1.5 text-[11px] text-slate-700 whitespace-pre-wrap">{ex.caption}</p>
             )}
             <p className="px-2.5 pb-1 text-[9px] text-slate-400 text-right">12:00</p>
           </div>
         </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Extra Media Editor ──────────────────────────────────────────────────────
+
+function ExtraMediaEditor({
+  dynamicId, linkId, initialExtras, onChange, toast,
+}: {
+  dynamicId: string;
+  linkId: string;
+  initialExtras: DynamicLinkExtraMedia[];
+  onChange: (extras: DynamicLinkExtraMedia[]) => void;
+  toast: { show: (text: string, type?: ToastType) => void };
+}) {
+  const MAX_EXTRAS = 10;
+  const [extras, setExtras] = useState<DynamicLinkExtraMedia[]>(initialExtras);
+  const [uploading, setUploading] = useState(false);
+  const captionDebounce = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(() => {
+    // Sync local state if parent replaces extras (e.g. after link reload)
+    setExtras(initialExtras);
+  }, [linkId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const push = (next: DynamicLinkExtraMedia[]) => {
+    setExtras(next);
+    onChange(next);
+  };
+
+  const handleUpload = async (file: File) => {
+    if (extras.length >= MAX_EXTRAS) {
+      toast.show(`Máximo ${MAX_EXTRAS} elementos`, 'error');
+      return;
+    }
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    const isVideo = ext === 'mp4';
+    const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext);
+    if (!isImage && !isVideo) {
+      toast.show('Solo imágenes (jpg, png, gif, webp) o videos (mp4)', 'error');
+      return;
+    }
+    if (isVideo && file.size > 3 * 1024 * 1024) {
+      toast.show('El video no debe superar los 3MB', 'error');
+      return;
+    }
+    setUploading(true);
+    try {
+      let uploadFile = file;
+      if (isImage) uploadFile = await compressImageStandard(file);
+      const token = localStorage.getItem('token');
+      const formData = new FormData();
+      formData.append('media', uploadFile);
+      const res = await fetch(`/api/dynamics/${dynamicId}/links/${linkId}/media`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      const data = await res.json();
+      if (res.ok && data.id) {
+        push([...extras, data as DynamicLinkExtraMedia]);
+        toast.show('Media agregado');
+      } else {
+        toast.show(data.error || 'Error al subir media', 'error');
+      }
+    } catch (e) {
+      console.error(e);
+      toast.show('Error al subir media', 'error');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleCaptionChange = (id: string, caption: string) => {
+    // Optimistic local update
+    const next = extras.map(ex => ex.id === id ? { ...ex, caption } : ex);
+    push(next);
+    // Debounce PATCH
+    if (captionDebounce.current[id]) clearTimeout(captionDebounce.current[id]);
+    captionDebounce.current[id] = setTimeout(async () => {
+      try {
+        await api(`/api/dynamics/${dynamicId}/links/${linkId}/media/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ caption }),
+        });
+      } catch (e) { console.error(e); }
+    }, 500);
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api(`/api/dynamics/${dynamicId}/links/${linkId}/media/${id}`, { method: 'DELETE' });
+      push(extras.filter(ex => ex.id !== id));
+      toast.show('Media eliminado');
+    } catch (e) { console.error(e); }
+  };
+
+  const handleMove = async (index: number, dir: -1 | 1) => {
+    const target = index + dir;
+    if (target < 0 || target >= extras.length) return;
+    const next = [...extras];
+    [next[index], next[target]] = [next[target], next[index]];
+    push(next);
+    try {
+      await api(`/api/dynamics/${dynamicId}/links/${linkId}/media/reorder`, {
+        method: 'POST',
+        body: JSON.stringify({ ids: next.map(ex => ex.id) }),
+      });
+    } catch (e) { console.error(e); }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <label className="block text-xs font-medium text-slate-600">Mensajes adicionales (opcional)</label>
+        <span className="text-[10px] text-slate-400">{extras.length}/{MAX_EXTRAS}</span>
+      </div>
+
+      {extras.length > 0 && (
+        <div className="space-y-2 mb-2">
+          {extras.map((ex, idx) => (
+            <div key={ex.id} className="flex items-start gap-2 p-2 bg-slate-50 border border-slate-200 rounded-lg">
+              <div className="flex flex-col gap-0.5 pt-1">
+                <button
+                  onClick={() => handleMove(idx, -1)}
+                  disabled={idx === 0}
+                  className="p-0.5 hover:bg-slate-200 rounded text-slate-400 disabled:opacity-30 disabled:cursor-not-allowed"
+                  title="Subir"
+                >
+                  <ArrowUp className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => handleMove(idx, 1)}
+                  disabled={idx === extras.length - 1}
+                  className="p-0.5 hover:bg-slate-200 rounded text-slate-400 disabled:opacity-30 disabled:cursor-not-allowed"
+                  title="Bajar"
+                >
+                  <ArrowDown className="w-3 h-3" />
+                </button>
+              </div>
+              {ex.media_type === 'image' ? (
+                <img src={ex.url} alt="" className="w-14 h-14 object-cover rounded-lg shrink-0" />
+              ) : (
+                <div className="w-14 h-14 bg-slate-800 rounded-lg flex items-center justify-center shrink-0">
+                  <Film className="w-5 h-5 text-white/50" />
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                <WhatsAppTextInput
+                  value={ex.caption}
+                  onChange={(v) => handleCaptionChange(ex.id, v)}
+                  placeholder="Texto del mensaje (opcional)"
+                  rows={2}
+                  className="w-full px-2 py-1.5 bg-white border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
+                />
+                <p className="text-[10px] text-slate-400 mt-0.5 capitalize">{ex.media_type}</p>
+              </div>
+              <button
+                onClick={() => handleDelete(ex.id)}
+                className="p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500 transition-colors shrink-0"
+                title="Eliminar"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {extras.length < MAX_EXTRAS && (
+        <label className={`flex items-center justify-center gap-2 p-3 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
+          uploading ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50'
+        }`}>
+          {uploading ? (
+            <div className="animate-spin rounded-full h-4 w-4 border-2 border-emerald-200 border-t-emerald-600" />
+          ) : (
+            <Plus className="w-4 h-4 text-slate-400" />
+          )}
+          <span className="text-xs text-slate-500">
+            {uploading ? 'Subiendo...' : 'Agregar imagen o video (mp4 máx 3MB)'}
+          </span>
+          <input
+            type="file"
+            accept="image/jpeg,image/png,image/gif,image/webp,video/mp4"
+            className="hidden"
+            disabled={uploading}
+            onChange={e => {
+              const f = e.target.files?.[0];
+              if (f) handleUpload(f);
+              e.target.value = '';
+            }}
+          />
+        </label>
       )}
     </div>
   );
@@ -1396,23 +1594,19 @@ function LinksTab({
   const [newSlug, setNewSlug] = useState('');
   const [newWAEnabled, setNewWAEnabled] = useState(false);
   const [newWAMessage, setNewWAMessage] = useState('¡Aquí tienes tu pensamiento del día! 🌟');
-  const [newExtraText, setNewExtraText] = useState('');
   const [newStartsAt, setNewStartsAt] = useState('');
   const [newEndsAt, setNewEndsAt] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editSlug, setEditSlug] = useState('');
   const [editWAEnabled, setEditWAEnabled] = useState(false);
   const [editWAMessage, setEditWAMessage] = useState('');
-  const [editExtraText, setEditExtraText] = useState('');
-  const [editExtraMediaUrl, setEditExtraMediaUrl] = useState('');
-  const [editExtraMediaType, setEditExtraMediaType] = useState('');
+  const [editExtras, setEditExtras] = useState<DynamicLinkExtraMedia[]>([]);
   const [editActive, setEditActive] = useState(true);
   const [editStartsAt, setEditStartsAt] = useState('');
   const [editEndsAt, setEditEndsAt] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showQRId, setShowQRId] = useState<string | null>(null);
   const [previewId, setPreviewId] = useState<string | null>(null);
-  const [uploadingMedia, setUploadingMedia] = useState(false);
   // Registrations
   const [regsLinkId, setRegsLinkId] = useState<string | null>(null);
   const [regs, setRegs] = useState<DynamicLinkRegistration[]>([]);
@@ -1485,7 +1679,6 @@ function LinksTab({
           slug: newSlug.trim(),
           whatsapp_enabled: newWAEnabled,
           whatsapp_message: newWAMessage,
-          extra_message_text: newExtraText,
           starts_at: newStartsAt ? new Date(newStartsAt).toISOString() : null,
           ends_at: newEndsAt ? new Date(newEndsAt).toISOString() : null,
         }),
@@ -1496,7 +1689,6 @@ function LinksTab({
         setNewSlug('');
         setNewWAEnabled(false);
         setNewWAMessage('¡Aquí tienes tu pensamiento del día! 🌟');
-        setNewExtraText('');
         setNewStartsAt('');
         setNewEndsAt('');
         toast.show('Link creado');
@@ -1506,13 +1698,12 @@ function LinksTab({
 
   const handleUpdate = async (link: DynamicLink) => {
     try {
-      const res = await api<DynamicLink>(`/api/dynamics/${dynamicId}/links/${link.id}`, {
+      await api<DynamicLink>(`/api/dynamics/${dynamicId}/links/${link.id}`, {
         method: 'PUT',
         body: JSON.stringify({
           slug: editSlug.trim(),
           whatsapp_enabled: editWAEnabled,
           whatsapp_message: editWAMessage,
-          extra_message_text: editExtraText,
           is_active: editActive,
           starts_at: editStartsAt ? new Date(editStartsAt).toISOString() : null,
           ends_at: editEndsAt ? new Date(editEndsAt).toISOString() : null,
@@ -1523,9 +1714,7 @@ function LinksTab({
         slug: editSlug.trim(),
         whatsapp_enabled: editWAEnabled,
         whatsapp_message: editWAMessage,
-        extra_message_text: editExtraText,
-        extra_message_media_url: editExtraMediaUrl,
-        extra_message_media_type: editExtraMediaType,
+        extra_media: editExtras,
         is_active: editActive,
         starts_at: editStartsAt ? new Date(editStartsAt).toISOString() : null,
         ends_at: editEndsAt ? new Date(editEndsAt).toISOString() : null,
@@ -1543,60 +1732,6 @@ function LinksTab({
     } catch (e) { console.error(e); }
   };
 
-  const handleUploadExtraMedia = async (linkId: string, file: File) => {
-    const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    const isVideo = ext === 'mp4';
-    const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext);
-    if (!isImage && !isVideo) {
-      toast.show('Solo imágenes (jpg, png, gif, webp) o videos (mp4)', 'error');
-      return;
-    }
-    if (isVideo && file.size > 3 * 1024 * 1024) {
-      toast.show('El video no debe superar los 3MB', 'error');
-      return;
-    }
-
-    setUploadingMedia(true);
-    try {
-      let uploadFile = file;
-      if (isImage) {
-        uploadFile = await compressImageStandard(file);
-      }
-      const token = localStorage.getItem('token');
-      const formData = new FormData();
-      formData.append('media', uploadFile);
-      const res = await fetch(`/api/dynamics/${dynamicId}/links/${linkId}/extra-media`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-      const data = await res.json();
-      if (res.ok && data.url) {
-        onLinksChange(links.map(l => l.id === linkId ? { ...l, extra_message_media_url: data.url, extra_message_media_type: data.media_type } : l));
-        setEditExtraMediaUrl(data.url);
-        setEditExtraMediaType(data.media_type);
-        toast.show('Media subido');
-      } else {
-        toast.show(data.error || 'Error al subir media', 'error');
-      }
-    } catch (e) {
-      console.error(e);
-      toast.show('Error al subir media', 'error');
-    } finally {
-      setUploadingMedia(false);
-    }
-  };
-
-  const handleDeleteExtraMedia = async (linkId: string) => {
-    try {
-      await api(`/api/dynamics/${dynamicId}/links/${linkId}/extra-media`, { method: 'DELETE' });
-      onLinksChange(links.map(l => l.id === linkId ? { ...l, extra_message_media_url: '', extra_message_media_type: '' } : l));
-      setEditExtraMediaUrl('');
-      setEditExtraMediaType('');
-      toast.show('Media eliminado');
-    } catch (e) { console.error(e); }
-  };
-
   const copyLink = (slug: string, linkId: string) => {
     navigator.clipboard.writeText(`${baseUrl}/d/${slug}`);
     setCopiedId(linkId);
@@ -1608,9 +1743,7 @@ function LinksTab({
     setEditSlug(link.slug);
     setEditWAEnabled(link.whatsapp_enabled);
     setEditWAMessage(link.whatsapp_message);
-    setEditExtraText(link.extra_message_text);
-    setEditExtraMediaUrl(link.extra_message_media_url);
-    setEditExtraMediaType(link.extra_message_media_type);
+    setEditExtras(link.extra_media || []);
     setEditActive(link.is_active);
     setEditStartsAt(toLocalInput(link.starts_at));
     setEditEndsAt(toLocalInput(link.ends_at));
@@ -1687,27 +1820,20 @@ function LinksTab({
           {newWAEnabled && (
             <>
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Mensaje 1 — Imagen raspada + texto</label>
-                <textarea
+                <label className="block text-xs font-medium text-slate-600 mb-1">Mensaje principal — Imagen raspada + texto</label>
+                <WhatsAppTextInput
                   value={newWAMessage}
-                  onChange={e => setNewWAMessage(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
-                  rows={2}
+                  onChange={setNewWAMessage}
                   placeholder="¡Aquí tienes tu pensamiento del día! 🌟"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Mensaje 2 — Adicional (opcional)</label>
-                <textarea
-                  value={newExtraText}
-                  onChange={e => setNewExtraText(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
                   rows={2}
-                  placeholder="Texto del segundo mensaje (opcional)"
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
                 />
-                <p className="text-[10px] text-slate-400 mt-1">Puedes agregar media (imagen/video) después de crear el link.</p>
               </div>
-              <WAPreview msg1Caption={newWAMessage} msg2Text={newExtraText} msg2MediaUrl="" msg2MediaType="" />
+              <div className="p-2.5 bg-white/60 border border-emerald-200 rounded-lg text-[11px] text-slate-500">
+                <FileText className="w-3.5 h-3.5 inline mr-1 text-emerald-600" />
+                Podrás agregar hasta 10 imágenes/videos adicionales con su propio texto después de crear el link.
+              </div>
+              <WAPreview msg1Caption={newWAMessage} extras={[]} />
             </>
           )}
           <div className="flex justify-end gap-2">
@@ -1771,78 +1897,25 @@ function LinksTab({
                 {editWAEnabled && (
                   <>
                     <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">Mensaje 1 — Imagen raspada + texto</label>
-                      <textarea
+                      <label className="block text-xs font-medium text-slate-600 mb-1">Mensaje principal — Imagen raspada + texto</label>
+                      <WhatsAppTextInput
                         value={editWAMessage}
-                        onChange={e => setEditWAMessage(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
+                        onChange={setEditWAMessage}
                         rows={2}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
                       />
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">Mensaje 2 — Adicional (opcional)</label>
-                      <textarea
-                        value={editExtraText}
-                        onChange={e => setEditExtraText(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-emerald-400 resize-none"
-                        rows={2}
-                        placeholder="Texto del segundo mensaje (opcional)"
-                      />
-                    </div>
-                    {/* Extra media upload */}
-                    <div>
-                      <label className="block text-xs font-medium text-slate-600 mb-1">Media del mensaje 2 (opcional)</label>
-                      {editExtraMediaUrl ? (
-                        <div className="flex items-center gap-3 p-2.5 bg-slate-50 border border-slate-200 rounded-lg">
-                          {editExtraMediaType === 'image' ? (
-                            <img src={editExtraMediaUrl} alt="" className="w-16 h-16 object-cover rounded-lg" />
-                          ) : (
-                            <div className="w-16 h-16 bg-slate-800 rounded-lg flex items-center justify-center">
-                              <Film className="w-6 h-6 text-white/50" />
-                            </div>
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs text-slate-600 font-medium capitalize">{editExtraMediaType}</p>
-                            <p className="text-[10px] text-slate-400 truncate">{editExtraMediaUrl}</p>
-                          </div>
-                          <button
-                            onClick={() => handleDeleteExtraMedia(link.id)}
-                            className="p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500 transition-colors"
-                            title="Eliminar media"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      ) : (
-                        <label className={`flex items-center justify-center gap-2 p-3 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
-                          uploadingMedia ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50'
-                        }`}>
-                          {uploadingMedia ? (
-                            <div className="animate-spin rounded-full h-4 w-4 border-2 border-emerald-200 border-t-emerald-600" />
-                          ) : (
-                            <Upload className="w-4 h-4 text-slate-400" />
-                          )}
-                          <span className="text-xs text-slate-500">{uploadingMedia ? 'Subiendo...' : 'Subir imagen o video (mp4 máx 3MB)'}</span>
-                          <input
-                            type="file"
-                            accept="image/jpeg,image/png,image/gif,image/webp,video/mp4"
-                            className="hidden"
-                            disabled={uploadingMedia}
-                            onChange={e => {
-                              const f = e.target.files?.[0];
-                              if (f) handleUploadExtraMedia(link.id, f);
-                              e.target.value = '';
-                            }}
-                          />
-                        </label>
-                      )}
-                    </div>
+                    <ExtraMediaEditor
+                      dynamicId={dynamicId}
+                      linkId={link.id}
+                      initialExtras={editExtras}
+                      onChange={setEditExtras}
+                      toast={toast}
+                    />
                     {/* Preview */}
                     <WAPreview
                       msg1Caption={editWAMessage}
-                      msg2Text={editExtraText}
-                      msg2MediaUrl={editExtraMediaUrl}
-                      msg2MediaType={editExtraMediaType}
+                      extras={editExtras.map(ex => ({ url: ex.url, media_type: ex.media_type, caption: ex.caption }))}
                     />
                   </>
                 )}
@@ -1868,9 +1941,9 @@ function LinksTab({
                           <MessageCircle className="w-3 h-3" /> WhatsApp
                         </span>
                       )}
-                      {link.whatsapp_enabled && (link.extra_message_text || link.extra_message_media_url) && (
+                      {link.whatsapp_enabled && (link.extra_media?.length || 0) > 0 && (
                         <span className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] font-medium rounded-full">
-                          <FileText className="w-3 h-3" /> 2 msgs
+                          <FileText className="w-3 h-3" /> {(link.extra_media?.length || 0) + 1} msgs
                         </span>
                       )}
                       {(link.starts_at || link.ends_at) && (
@@ -1942,9 +2015,7 @@ function LinksTab({
                 {previewId === link.id && (
                   <WAPreview
                     msg1Caption={link.whatsapp_message}
-                    msg2Text={link.extra_message_text}
-                    msg2MediaUrl={link.extra_message_media_url}
-                    msg2MediaType={link.extra_message_media_type}
+                    extras={(link.extra_media || []).map(ex => ({ url: ex.url, media_type: ex.media_type, caption: ex.caption }))}
                   />
                 )}
                 {/* Registrations panel */}
@@ -1978,7 +2049,9 @@ function LinksTab({
                             <div className="flex-1 min-w-0">
                               <p className="text-sm text-slate-700 font-medium truncate">{reg.full_name}</p>
                               <p className="text-[11px] text-slate-400">
-                                {reg.phone} · {reg.age} años · {new Date(reg.created_at).toLocaleString('es-PE', { timeZone: 'America/Lima', day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                {reg.phone}
+                                {reg.age != null && <> · {reg.age} años</>}
+                                {' · '}{new Date(reg.created_at).toLocaleString('es-PE', { timeZone: 'America/Lima', day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
                               </p>
                             </div>
                             <button
@@ -1998,15 +2071,258 @@ function LinksTab({
             )}
             {/* Per-link QR code */}
             {showQRId === link.id && (
-              <div className="flex flex-col items-center gap-3 mt-3 pt-3 border-t border-slate-100">
-                <div className="p-3 bg-white rounded-xl shadow-sm border border-slate-100">
-                  <QRCodeSVG value={`${baseUrl}/d/${link.slug}`} size={180} level="H" includeMargin />
-                </div>
-                <p className="text-[11px] text-slate-400 text-center">Escanea para abrir <span className="font-mono font-medium text-slate-500">/d/{link.slug}</span></p>
-              </div>
+              <QrCodePanel url={`${baseUrl}/d/${link.slug}`} slug={link.slug} />
             )}
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── QR Code Panel ───────────────────────────────────────────────────────────
+// Configurable QR with color, size, error-correction, dots/margin presets and
+// download as PNG or SVG.
+
+const QR_PRESETS: Array<{ id: string; label: string; fg: string; bg: string; bgGradient?: string }> = [
+  { id: 'classic', label: 'Clásico', fg: '#0f172a', bg: '#ffffff' },
+  { id: 'emerald', label: 'Esmeralda', fg: '#047857', bg: '#ecfdf5' },
+  { id: 'ocean', label: 'Océano', fg: '#0c4a6e', bg: '#e0f2fe' },
+  { id: 'sunset', label: 'Atardecer', fg: '#9a3412', bg: '#fff7ed' },
+  { id: 'rose', label: 'Rosa', fg: '#9f1239', bg: '#fff1f2' },
+  { id: 'violet', label: 'Violeta', fg: '#5b21b6', bg: '#f5f3ff' },
+  { id: 'mono', label: 'Invertido', fg: '#ffffff', bg: '#0f172a' },
+  { id: 'gold', label: 'Oro', fg: '#78350f', bg: '#fef3c7' },
+];
+
+function QrCodePanel({ url, slug }: { url: string; slug: string }) {
+  const [preset, setPreset] = useState<string>('classic');
+  const [fg, setFg] = useState<string>('#0f172a');
+  const [bg, setBg] = useState<string>('#ffffff');
+  const [size, setSize] = useState<number>(256);
+  const [level, setLevel] = useState<'L' | 'M' | 'Q' | 'H'>('H');
+  const [margin, setMargin] = useState<boolean>(true);
+  const [logoUrl, setLogoUrl] = useState<string>('');
+
+  const canvasWrapRef = useRef<HTMLDivElement>(null);
+  const svgWrapRef = useRef<HTMLDivElement>(null);
+
+  const applyPreset = useCallback((id: string) => {
+    const p = QR_PRESETS.find(x => x.id === id);
+    if (!p) return;
+    setPreset(id);
+    setFg(p.fg);
+    setBg(p.bg);
+  }, []);
+
+  const handleLogoChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setLogoUrl(String(reader.result || ''));
+    reader.readAsDataURL(file);
+  }, []);
+
+  const downloadPng = useCallback(() => {
+    const canvas = canvasWrapRef.current?.querySelector('canvas') as HTMLCanvasElement | null;
+    if (!canvas) return;
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = `qr-${slug}.png`;
+    a.click();
+  }, [slug]);
+
+  const downloadSvg = useCallback(() => {
+    const svg = svgWrapRef.current?.querySelector('svg');
+    if (!svg) return;
+    const serializer = new XMLSerializer();
+    const src = serializer.serializeToString(svg);
+    const blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>\n', src], { type: 'image/svg+xml;charset=utf-8' });
+    const urlObj = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = urlObj;
+    a.download = `qr-${slug}.svg`;
+    a.click();
+    URL.revokeObjectURL(urlObj);
+  }, [slug]);
+
+  const imageSettings = logoUrl
+    ? { src: logoUrl, height: Math.round(size * 0.2), width: Math.round(size * 0.2), excavate: true }
+    : undefined;
+
+  return (
+    <div className="mt-3 pt-3 border-t border-slate-100">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+        {/* Preview */}
+        <div className="flex flex-col items-center gap-2">
+          <div
+            ref={canvasWrapRef}
+            className="p-4 rounded-2xl shadow-sm border border-slate-100 transition-colors"
+            style={{ backgroundColor: bg }}
+          >
+            <QRCodeCanvas
+              value={url}
+              size={size}
+              level={level}
+              includeMargin={margin}
+              fgColor={fg}
+              bgColor={bg}
+              imageSettings={imageSettings}
+            />
+          </div>
+          {/* Hidden SVG twin for SVG download — same options */}
+          <div ref={svgWrapRef} className="hidden">
+            <QRCodeSVG
+              value={url}
+              size={size}
+              level={level}
+              includeMargin={margin}
+              fgColor={fg}
+              bgColor={bg}
+              imageSettings={imageSettings}
+            />
+          </div>
+          <p className="text-[11px] text-slate-400 text-center">
+            Escanea para abrir <span className="font-mono font-medium text-slate-500">/d/{slug}</span>
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={downloadPng}
+              className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5"
+              title="Descargar como imagen PNG"
+            >
+              <Download className="w-3.5 h-3.5" /> PNG
+            </button>
+            <button
+              onClick={downloadSvg}
+              className="px-3 py-2 bg-slate-700 hover:bg-slate-800 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5"
+              title="Descargar como vector SVG"
+            >
+              <Download className="w-3.5 h-3.5" /> SVG
+            </button>
+          </div>
+        </div>
+
+        {/* Options */}
+        <div className="space-y-3 text-xs">
+          <div>
+            <label className="block text-slate-600 font-medium mb-1.5">Estilo</label>
+            <div className="grid grid-cols-4 gap-1.5">
+              {QR_PRESETS.map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => applyPreset(p.id)}
+                  className={`flex flex-col items-center gap-1 p-1.5 rounded-lg border transition-all ${preset === p.id ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-500/20' : 'border-slate-200 hover:border-slate-300 bg-white'}`}
+                  title={p.label}
+                >
+                  <div
+                    className="w-7 h-7 rounded-md border border-slate-200 flex items-center justify-center"
+                    style={{ backgroundColor: p.bg }}
+                  >
+                    <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: p.fg }} />
+                  </div>
+                  <span className="text-[9px] text-slate-600 leading-tight">{p.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-slate-600 font-medium mb-1">Color QR</label>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="color"
+                  value={fg}
+                  onChange={e => { setFg(e.target.value); setPreset('custom'); }}
+                  className="w-8 h-8 rounded cursor-pointer border border-slate-200"
+                />
+                <input
+                  type="text"
+                  value={fg}
+                  onChange={e => { setFg(e.target.value); setPreset('custom'); }}
+                  className="flex-1 px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-md text-xs font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-slate-600 font-medium mb-1">Fondo</label>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="color"
+                  value={bg}
+                  onChange={e => { setBg(e.target.value); setPreset('custom'); }}
+                  className="w-8 h-8 rounded cursor-pointer border border-slate-200"
+                />
+                <input
+                  type="text"
+                  value={bg}
+                  onChange={e => { setBg(e.target.value); setPreset('custom'); }}
+                  className="flex-1 px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-md text-xs font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-slate-600 font-medium mb-1">Tamaño <span className="text-slate-400 font-normal">({size}px)</span></label>
+            <input
+              type="range" min={128} max={1024} step={16}
+              value={size}
+              onChange={e => setSize(Number(e.target.value))}
+              className="w-full accent-emerald-600"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-slate-600 font-medium mb-1">Corrección de error</label>
+              <select
+                value={level}
+                onChange={e => setLevel(e.target.value as 'L' | 'M' | 'Q' | 'H')}
+                className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-emerald-400"
+              >
+                <option value="L">L — Bajo (7%)</option>
+                <option value="M">M — Medio (15%)</option>
+                <option value="Q">Q — Cuartil (25%)</option>
+                <option value="H">H — Alto (30%)</option>
+              </select>
+            </div>
+            <div className="flex items-end gap-2">
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={margin}
+                  onChange={e => setMargin(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-emerald-600"
+                />
+                <span className="text-slate-700">Margen blanco</span>
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-slate-600 font-medium mb-1">Logo central (opcional)</label>
+            <div className="flex items-center gap-2">
+              <label className="flex-1 px-3 py-1.5 bg-slate-50 border border-slate-200 border-dashed rounded-md text-xs text-slate-500 cursor-pointer hover:bg-slate-100 text-center">
+                <input type="file" accept="image/*" className="hidden" onChange={handleLogoChange} />
+                {logoUrl ? 'Cambiar imagen…' : 'Subir logo…'}
+              </label>
+              {logoUrl && (
+                <button
+                  onClick={() => setLogoUrl('')}
+                  className="px-2 py-1.5 text-xs text-slate-500 hover:text-red-600 border border-slate-200 rounded-md"
+                  title="Quitar logo"
+                >
+                  Quitar
+                </button>
+              )}
+            </div>
+            {logoUrl && (
+              <p className="text-[10px] text-amber-600 mt-1">💡 Usa corrección <span className="font-mono">H</span> cuando agregas logo.</p>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

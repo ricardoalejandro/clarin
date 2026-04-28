@@ -60,6 +60,17 @@ export interface DynamicLink {
   starts_at: string | null;
   ends_at: string | null;
   created_at: string;
+  extra_media?: DynamicLinkExtraMedia[];
+}
+
+export interface DynamicLinkExtraMedia {
+  id: string;
+  link_id: string;
+  url: string;
+  media_type: string;
+  caption: string;
+  sort_order: number;
+  created_at: string;
 }
 
 export interface DynamicLinkRegistration {
@@ -67,7 +78,13 @@ export interface DynamicLinkRegistration {
   link_id: string;
   full_name: string;
   phone: string;
-  age: number;
+  age?: number | null;
+  contact_id?: string | null;
+  lead_id?: string | null;
+  whatsapp_status?: string;
+  whatsapp_error?: string;
+  session_token?: string;
+  shared_by_registration_id?: string | null;
   created_at: string;
 }
 
