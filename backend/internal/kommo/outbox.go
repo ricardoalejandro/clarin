@@ -2,6 +2,7 @@ package kommo
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -167,6 +168,15 @@ type claimedRow struct {
 	EntityID      uuid.UUID
 	KommoEntityID int64
 	Payload       []byte
+}
+
+type contactProfileData struct {
+	id        uuid.UUID
+	name      string
+	age       sql.NullInt64
+	dni       sql.NullString
+	birthDate sql.NullTime
+	ocupacion sql.NullString
 }
 
 func (o *Outbox) logBatch(operation, entityType, message, status string, claimed []claimedRow, requestCount int, startedAt time.Time, details map[string]interface{}) {
@@ -463,46 +473,35 @@ func (o *Outbox) flushLeadNames(ctx context.Context, claimed []claimedRow) {
 	o.logBatch("lead_name", "lead", fmt.Sprintf("Batch names → Kommo (%d leads)", len(items)), "pushed", claimed, 1, startedAt, nil)
 }
 
-// flushContactNames reads current contact names and sends one bulk PATCH /contacts.
+// flushContactNames reads the current contact profile and sends one bulk PATCH /contacts.
 func (o *Outbox) flushContactNames(ctx context.Context, claimed []claimedRow) {
 	contactIDs := make([]uuid.UUID, 0, len(claimed))
 	startedAt := time.Now()
 	for _, r := range claimed {
 		contactIDs = append(contactIDs, r.EntityID)
 	}
-	rows, err := o.db.Query(ctx, `
-		SELECT id, COALESCE(custom_name, name, '')
-		FROM contacts
-		WHERE id = ANY($1)
-	`, contactIDs)
+	profiles, err := loadContactProfiles(ctx, o.db, contactIDs)
 	if err != nil {
 		log.Printf("[OUTBOX] flushContactNames read error: %v", err)
 		o.failRowsBulk(ctx, claimed, err.Error())
 		return
 	}
-	nameByID := make(map[uuid.UUID]string, len(claimed))
-	for rows.Next() {
-		var id uuid.UUID
-		var name string
-		if err := rows.Scan(&id, &name); err == nil {
-			nameByID[id] = name
-		}
-	}
-	rows.Close()
 
 	var items []map[string]interface{}
 	var entries []claimedRow
 	for _, r := range claimed {
-		name, ok := nameByID[r.EntityID]
-		if !ok || name == "" {
+		profile, ok := profiles[r.EntityID]
+		if !ok {
+			o.completeRows(ctx, []uuid.UUID{r.ID})
+			continue
+		}
+		item := buildContactUpdateItem(r.KommoEntityID, profile)
+		if len(item) <= 1 {
 			o.completeRows(ctx, []uuid.UUID{r.ID})
 			continue
 		}
 		entries = append(entries, r)
-		items = append(items, map[string]interface{}{
-			"id":   r.KommoEntityID,
-			"name": name,
-		})
+		items = append(items, item)
 	}
 	if len(items) == 0 {
 		return
@@ -526,8 +525,74 @@ func (o *Outbox) flushContactNames(ctx context.Context, claimed []claimedRow) {
 		completed = append(completed, r.ID)
 	}
 	o.completeRows(ctx, completed)
-	log.Printf("[OUTBOX] flushContactNames pushed %d names in 1 PATCH", len(items))
-	o.logBatch("contact_name", "contact", fmt.Sprintf("Batch contact names → Kommo (%d)", len(items)), "pushed", claimed, 1, startedAt, nil)
+	log.Printf("[OUTBOX] flushContactNames pushed %d contact profiles in 1 PATCH", len(items))
+	o.logBatch("contact_name", "contact", fmt.Sprintf("Batch contact profiles → Kommo (%d)", len(items)), "pushed", claimed, 1, startedAt, nil)
+}
+
+func loadContactProfiles(ctx context.Context, db *pgxpool.Pool, contactIDs []uuid.UUID) (map[uuid.UUID]contactProfileData, error) {
+	rows, err := db.Query(ctx, `
+		SELECT id, COALESCE(custom_name, name, ''), age, dni, birth_date, ocupacion
+		FROM contacts
+		WHERE id = ANY($1)
+	`, contactIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	profiles := make(map[uuid.UUID]contactProfileData, len(contactIDs))
+	for rows.Next() {
+		var profile contactProfileData
+		if err := rows.Scan(&profile.id, &profile.name, &profile.age, &profile.dni, &profile.birthDate, &profile.ocupacion); err != nil {
+			return nil, err
+		}
+		profiles[profile.id] = profile
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return profiles, nil
+}
+
+func buildContactUpdateItem(kommoContactID int64, profile contactProfileData) map[string]interface{} {
+	item := map[string]interface{}{"id": kommoContactID}
+	if strings.TrimSpace(profile.name) != "" {
+		item["name"] = strings.TrimSpace(profile.name)
+	}
+	fields := buildContactCustomFields(profile)
+	if len(fields) > 0 {
+		item["custom_fields_values"] = fields
+	}
+	return item
+}
+
+func buildContactCustomFields(profile contactProfileData) []KommoCustomFieldWrite {
+	fields := make([]KommoCustomFieldWrite, 0, 4)
+	if profile.age.Valid && profile.age.Int64 > 0 {
+		fields = append(fields, KommoCustomFieldWrite{
+			FieldID: KommoContactFieldAge,
+			Values:  []KommoCustomFieldWriteVal{{Value: int(profile.age.Int64)}},
+		})
+	}
+	if profile.dni.Valid && strings.TrimSpace(profile.dni.String) != "" {
+		fields = append(fields, KommoCustomFieldWrite{
+			FieldID: KommoContactFieldDNI,
+			Values:  []KommoCustomFieldWriteVal{{Value: strings.TrimSpace(profile.dni.String)}},
+		})
+	}
+	if profile.birthDate.Valid && !profile.birthDate.Time.IsZero() {
+		fields = append(fields, KommoCustomFieldWrite{
+			FieldID: KommoContactFieldBirthDate,
+			Values:  []KommoCustomFieldWriteVal{{Value: profile.birthDate.Time.Unix()}},
+		})
+	}
+	if profile.ocupacion.Valid && strings.TrimSpace(profile.ocupacion.String) != "" {
+		fields = append(fields, KommoCustomFieldWrite{
+			FieldID: KommoContactFieldPosition,
+			Values:  []KommoCustomFieldWriteVal{{Value: strings.TrimSpace(profile.ocupacion.String)}},
+		})
+	}
+	return fields
 }
 
 // flushLeadStages pushes pipeline/stage changes. When forced=true, the payload

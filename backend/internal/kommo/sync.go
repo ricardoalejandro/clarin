@@ -3137,6 +3137,77 @@ func (s *SyncService) EnqueuePushLeadObservations(accountID, leadID uuid.UUID) {
 	}
 }
 
+func (s *SyncService) EnqueuePushContactProfile(accountID, contactID uuid.UUID) {
+	if s.Outbox == nil {
+		go s.PushContactProfile(accountID, contactID)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
+	var kommoContactID *int64
+	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM contacts WHERE id = $1 AND account_id = $2`, contactID, accountID).Scan(&kommoContactID)
+	if err != nil || kommoContactID == nil || *kommoContactID == 0 {
+		return
+	}
+	if err := s.Outbox.Enqueue(ctx, accountID, contactID, *kommoContactID, OpContactName, nil); err != nil {
+		log.Printf("[OUTBOX] EnqueuePushContactProfile contact=%s: %v", contactID, err)
+	}
+}
+
+func (s *SyncService) PushContactProfile(accountID, contactID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if !s.isKommoEnabled(ctx, accountID) {
+		return
+	}
+
+	var kommoContactID *int64
+	err := s.db.QueryRow(ctx, `SELECT kommo_id FROM contacts WHERE id = $1 AND account_id = $2`, contactID, accountID).Scan(&kommoContactID)
+	if err != nil || kommoContactID == nil || *kommoContactID == 0 {
+		return
+	}
+	profiles, err := loadContactProfiles(ctx, s.db, []uuid.UUID{contactID})
+	if err != nil {
+		log.Printf("[PUSH] Contact %s profile read failed: %v", contactID, err)
+		return
+	}
+	profile, ok := profiles[contactID]
+	if !ok {
+		return
+	}
+	item := buildContactUpdateItem(*kommoContactID, profile)
+	if len(item) <= 1 {
+		return
+	}
+	result, err := s.client.BatchUpdateContacts([]map[string]interface{}{item})
+	if err != nil {
+		log.Printf("[PUSH] Contact %s profile to Kommo failed: %v", contactID, err)
+		return
+	}
+	if len(result) > 0 && result[0].UpdatedAt > 0 {
+		_, _ = s.db.Exec(ctx, `UPDATE contacts SET kommo_last_pushed_at = $1 WHERE id = $2`, result[0].UpdatedAt, contactID)
+	}
+	log.Printf("[PUSH] Contact %s profile → Kommo contact %d", contactID, *kommoContactID)
+	localAccountID := accountID
+	s.Monitor.LogEvent(SyncMonitorEvent{
+		Source:        "push",
+		Message:       fmt.Sprintf("Contact profile → Kommo contact %d", *kommoContactID),
+		AccountID:     &localAccountID,
+		EntityType:    "contact",
+		EntityID:      &contactID,
+		KommoEntityID: *kommoContactID,
+		Operation:     "contact_profile",
+		Status:        "pushed",
+		Direction:     "outbound",
+		RequestCount:  1,
+		BatchSize:     1,
+	})
+}
+
 // EnqueuePushContactTags coalesces a contact tag push.
 func (s *SyncService) EnqueuePushContactTags(accountID, contactID uuid.UUID) {
 	if s.Outbox == nil {

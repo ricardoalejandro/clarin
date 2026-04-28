@@ -4323,6 +4323,7 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 			go kommoSync.PushNewLead(lead.AccountID, lead.ID)
 		} else {
 			// Already linked, push updates (batched via outbox when enabled)
+			queuedContactProfile := false
 			if req.Name != nil {
 				newName := ""
 				if lead.Name != nil {
@@ -4330,7 +4331,11 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 				}
 				if newName != oldName {
 					kommoSync.EnqueuePushLeadName(lead.AccountID, lead.ID)
+					queuedContactProfile = true
 				}
+			}
+			if !queuedContactProfile && lead.ContactID != nil && (req.Age != nil || req.DNI != nil || req.BirthDate != nil || req.Ocupacion != nil) {
+				kommoSync.EnqueuePushContactProfile(lead.AccountID, *lead.ContactID)
 			}
 			// Push pipeline/stage change
 			if req.PipelineID != nil || req.StageID != nil {
@@ -5845,6 +5850,19 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 
 	// Sync shared fields to linked lead
 	_ = s.services.Contact.SyncToLead(c.Context(), contact)
+
+	if body.CustomName != nil || body.LastName != nil || body.ShortName != nil || body.Age != nil || body.DNI != nil || body.BirthDate != nil || body.Ocupacion != nil {
+		if kommoSync := s.kommoForAccount(c.Context(), contact.AccountID); kommoSync != nil {
+			queuedViaLead := false
+			if lead, err := s.repos.Lead.GetByContactID(c.Context(), contact.ID); err == nil && lead != nil && lead.KommoID != nil && *lead.KommoID > 0 {
+				kommoSync.EnqueuePushLeadName(contact.AccountID, lead.ID)
+				queuedViaLead = true
+			}
+			if !queuedViaLead {
+				kommoSync.EnqueuePushContactProfile(contact.AccountID, contact.ID)
+			}
+		}
+	}
 
 	// Broadcast contact update via WebSocket
 	s.hub.BroadcastToAccount(contact.AccountID, ws.EventContactUpdate, map[string]interface{}{
