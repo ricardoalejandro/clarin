@@ -748,6 +748,10 @@ func (s *Server) setupRoutes() {
 	adminIntegrations.Post("/:id/accounts", s.handleAdminAssignIntegrationAccount)
 	adminIntegrations.Delete("/:id/accounts/:account_id", s.handleAdminRemoveIntegrationAccount)
 	adminIntegrations.Post("/:id/reload", s.handleAdminReloadIntegrations)
+	adminIntegrations.Get("/:id/monitor", s.handleAdminIntegrationMonitor)
+	adminIntegrations.Get("/:id/health", s.handleAdminIntegrationHealth)
+	adminIntegrations.Get("/:id/outbox", s.handleAdminIntegrationOutbox)
+	adminIntegrations.Post("/:id/poll", s.handleAdminForceIntegrationPoll)
 }
 
 // Auth middleware
@@ -12079,6 +12083,183 @@ func (s *Server) handleAdminReloadIntegrations(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"success": true, "runtime": fiber.Map{"running_instances": 0}})
 	}
 	return c.JSON(fiber.Map{"success": true, "runtime": s.kommoManager.RuntimeStatus()})
+}
+
+func (s *Server) handleAdminIntegrationMonitor(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
+	}
+	instance, err := s.repos.Integration.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if instance == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Integration not found"})
+	}
+
+	if svc := s.kommoSyncForInstance(id); svc != nil && svc.Monitor != nil {
+		return c.JSON(fiber.Map{"success": true, "monitor": svc.Monitor.GetData()})
+	}
+
+	monitor := kommo.NewSyncMonitorForInstance(s.repos.DB(), &id)
+	defer monitor.Stop()
+	return c.JSON(fiber.Map{"success": true, "monitor": monitor.GetData()})
+}
+
+func (s *Server) handleAdminIntegrationHealth(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
+	}
+	instance, err := s.repos.Integration.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if instance == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Integration not found"})
+	}
+
+	svc := s.kommoSyncForInstance(id)
+	outbox, err := s.integrationOutboxSummary(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	health := fiber.Map{
+		"integration":           integrationResponse(instance),
+		"runtime_running":       svc != nil,
+		"manager":               fiber.Map{"available": s.kommoManager != nil},
+		"webhook_configured":    instance.WebhookSecret != "",
+		"webhook_url":           redactedKommoWebhookURL(s.cfg.PublicURL, instance.WebhookSecret),
+		"public_url_configured": strings.TrimSpace(s.cfg.PublicURL) != "",
+		"assigned_accounts":     instance.Accounts,
+		"assigned_count":        len(instance.Accounts),
+		"outbox":                outbox["totals"],
+	}
+	if svc != nil {
+		health["worker"] = svc.GetStatus()
+		health["events_poller"] = svc.GetEventsPollerStatus()
+	}
+	if s.kommoManager != nil {
+		health["manager"] = s.kommoManager.RuntimeStatus()
+	}
+
+	return c.JSON(fiber.Map{"success": true, "health": health})
+}
+
+func (s *Server) handleAdminIntegrationOutbox(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
+	}
+	instance, err := s.repos.Integration.GetByID(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if instance == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Integration not found"})
+	}
+	outbox, err := s.integrationOutboxSummary(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "outbox": outbox})
+}
+
+func (s *Server) handleAdminForceIntegrationPoll(c *fiber.Ctx) error {
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
+	}
+	svc := s.kommoSyncForInstance(id)
+	if svc == nil {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Integration runtime is not active"})
+	}
+	events, leads := svc.ForceEventsPoll()
+	return c.JSON(fiber.Map{"success": true, "events": events, "leads": leads})
+}
+
+func (s *Server) kommoSyncForInstance(id uuid.UUID) *kommo.SyncService {
+	if s.kommoManager != nil {
+		if svc := s.kommoManager.ForInstance(id); svc != nil {
+			return svc
+		}
+	}
+	if s.kommoSync != nil && s.kommoSync.InstanceID != nil && *s.kommoSync.InstanceID == id {
+		return s.kommoSync
+	}
+	return nil
+}
+
+func redactedKommoWebhookURL(publicURL, secret string) string {
+	if strings.TrimSpace(secret) == "" {
+		return ""
+	}
+	redacted := "****"
+	if len(secret) > 4 {
+		redacted += secret[len(secret)-4:]
+	}
+	base := strings.TrimRight(strings.TrimSpace(publicURL), "/")
+	if base == "" {
+		return "/api/kommo/webhook/" + redacted
+	}
+	return base + "/api/kommo/webhook/" + redacted
+}
+
+func (s *Server) integrationOutboxSummary(ctx context.Context, instanceID uuid.UUID) (fiber.Map, error) {
+	rows, err := s.repos.DB().Query(ctx, `
+		SELECT k.operation,
+		       COALESCE(k.account_id::text, ''),
+		       COALESCE(a.name, ''),
+		       COUNT(*) AS total,
+		       COUNT(*) FILTER (WHERE k.processing_started_at IS NULL) AS pending,
+		       COUNT(*) FILTER (WHERE k.processing_started_at IS NOT NULL AND COALESCE(k.last_error, '') = '') AS processing,
+		       COUNT(*) FILTER (WHERE COALESCE(k.last_error, '') <> '') AS errored,
+		       COUNT(*) FILTER (WHERE k.attempts > 0) AS retried,
+		       COALESCE(MIN(k.enqueued_at)::text, ''),
+		       COALESCE(MAX(k.last_error), '')
+		FROM kommo_push_outbox k
+		LEFT JOIN accounts a ON a.id = k.account_id
+		WHERE k.integration_instance_id IS NOT DISTINCT FROM $1
+		GROUP BY k.operation, k.account_id, a.name
+		ORDER BY total DESC, k.operation ASC
+	`, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]fiber.Map, 0)
+	totals := fiber.Map{"total": int64(0), "pending": int64(0), "processing": int64(0), "errored": int64(0), "retried": int64(0)}
+	for rows.Next() {
+		var operation, accountID, accountName, oldest, lastError string
+		var total, pending, processing, errored, retried int64
+		if err := rows.Scan(&operation, &accountID, &accountName, &total, &pending, &processing, &errored, &retried, &oldest, &lastError); err != nil {
+			return nil, err
+		}
+		items = append(items, fiber.Map{
+			"operation":    operation,
+			"account_id":   accountID,
+			"account_name": accountName,
+			"total":        total,
+			"pending":      pending,
+			"processing":   processing,
+			"errored":      errored,
+			"retried":      retried,
+			"oldest_at":    oldest,
+			"last_error":   lastError,
+		})
+		totals["total"] = totals["total"].(int64) + total
+		totals["pending"] = totals["pending"].(int64) + pending
+		totals["processing"] = totals["processing"].(int64) + processing
+		totals["errored"] = totals["errored"].(int64) + errored
+		totals["retried"] = totals["retried"].(int64) + retried
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return fiber.Map{"items": items, "totals": totals}, nil
 }
 
 // ─────────────────────────────────────────────────────────

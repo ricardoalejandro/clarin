@@ -2,6 +2,7 @@ package kommo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
@@ -84,12 +85,42 @@ type SyncTask struct {
 // WorkerStatus reports the real-time status of the background sync worker.
 // SyncMonitorEntry represents a single log entry in the sync monitor.
 type SyncMonitorEntry struct {
-	ID                    int64      `json:"id"`
-	IntegrationInstanceID *uuid.UUID `json:"integration_instance_id,omitempty"`
-	Time                  time.Time  `json:"time"`
-	Source                string     `json:"source"` // "webhook", "events_poller", "push", "reconcile"
-	Message               string     `json:"message"`
-	Level                 string     `json:"level"` // "info", "error"
+	ID                    int64                  `json:"id"`
+	IntegrationInstanceID *uuid.UUID             `json:"integration_instance_id,omitempty"`
+	AccountID             string                 `json:"account_id,omitempty"`
+	AccountName           string                 `json:"account_name,omitempty"`
+	AccountSlug           string                 `json:"account_slug,omitempty"`
+	Time                  time.Time              `json:"time"`
+	Source                string                 `json:"source"` // "webhook", "events_poller", "push", "reconcile"
+	Message               string                 `json:"message"`
+	Level                 string                 `json:"level"` // "info", "error"
+	EntityType            string                 `json:"entity_type,omitempty"`
+	EntityID              string                 `json:"entity_id,omitempty"`
+	KommoEntityID         int64                  `json:"kommo_entity_id,omitempty"`
+	Operation             string                 `json:"operation,omitempty"`
+	Status                string                 `json:"status,omitempty"`
+	Direction             string                 `json:"direction,omitempty"`
+	DurationMS            int64                  `json:"duration_ms,omitempty"`
+	RequestCount          int                    `json:"request_count,omitempty"`
+	BatchSize             int                    `json:"batch_size,omitempty"`
+	Details               map[string]interface{} `json:"details,omitempty"`
+}
+
+type SyncMonitorEvent struct {
+	Source        string
+	Message       string
+	Level         string
+	AccountID     *uuid.UUID
+	EntityType    string
+	EntityID      *uuid.UUID
+	KommoEntityID int64
+	Operation     string
+	Status        string
+	Direction     string
+	DurationMS    int64
+	RequestCount  int
+	BatchSize     int
+	Details       map[string]interface{}
 }
 
 // SyncMonitor tracks real-time sync activity persisted in PostgreSQL (24h retention).
@@ -116,15 +147,46 @@ func (m *SyncMonitor) Stop() {
 
 // Log inserts a sync monitor entry into the database.
 func (m *SyncMonitor) Log(source, message, level string) {
+	m.LogEvent(SyncMonitorEvent{Source: source, Message: message, Level: level})
+}
+
+func (m *SyncMonitor) LogEvent(event SyncMonitorEvent) {
+	if event.Level == "" {
+		event.Level = "info"
+	}
+	if event.Status == "" {
+		if event.Level == "error" {
+			event.Status = "error"
+		} else {
+			event.Status = "ok"
+		}
+	}
+	details := []byte(`{}`)
+	if event.Details != nil {
+		if data, err := json.Marshal(event.Details); err == nil {
+			details = data
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := m.db.Exec(ctx,
-		`INSERT INTO sync_monitor_entries (integration_instance_id, source, message, level) VALUES ($1, $2, $3, $4)`,
-		m.instanceID, source, message, level,
+		`INSERT INTO sync_monitor_entries (
+			integration_instance_id, account_id, source, message, level, entity_type, entity_id,
+			kommo_entity_id, operation, status, direction, duration_ms, request_count, batch_size, details
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)`,
+		m.instanceID, event.AccountID, event.Source, event.Message, event.Level, event.EntityType, event.EntityID,
+		nullableInt64(event.KommoEntityID), event.Operation, event.Status, event.Direction, event.DurationMS, event.RequestCount, event.BatchSize, details,
 	)
 	if err != nil {
 		log.Printf("[SyncMonitor] Failed to insert entry: %v", err)
 	}
+}
+
+func nullableInt64(value int64) interface{} {
+	if value == 0 {
+		return nil
+	}
+	return value
 }
 
 // cleanupLoop deletes entries older than 24 hours every hour.
@@ -154,16 +216,21 @@ func (m *SyncMonitor) GetData() map[string]interface{} {
 	defer cancel()
 
 	// Fetch last 200 entries (newest first)
-	where := `created_at > NOW() - INTERVAL '24 hours'`
+	where := `sme.created_at > NOW() - INTERVAL '24 hours'`
 	args := []interface{}{}
 	if m.instanceID != nil {
-		where += ` AND integration_instance_id = $1`
+		where += ` AND sme.integration_instance_id = $1`
 		args = append(args, *m.instanceID)
 	}
 	rows, err := m.db.Query(ctx,
-		`SELECT id, integration_instance_id, source, message, level, created_at FROM sync_monitor_entries
+		`SELECT sme.id, sme.integration_instance_id, COALESCE(sme.account_id::text, ''), COALESCE(a.name, ''), COALESCE(a.slug, ''),
+		        sme.source, sme.message, sme.level, sme.created_at, sme.entity_type, COALESCE(sme.entity_id::text, ''),
+		        COALESCE(sme.kommo_entity_id, 0), sme.operation, sme.status, sme.direction, sme.duration_ms,
+		        sme.request_count, sme.batch_size, sme.details
+		 FROM sync_monitor_entries sme
+		 LEFT JOIN accounts a ON a.id = sme.account_id
 		 WHERE `+where+`
-		 ORDER BY created_at DESC LIMIT 200`, args...)
+		 ORDER BY sme.created_at DESC LIMIT 200`, args...)
 	if err != nil {
 		log.Printf("[SyncMonitor] GetData query error: %v", err)
 		return map[string]interface{}{"entries": []SyncMonitorEntry{}, "stats": map[string]interface{}{}}
@@ -173,8 +240,13 @@ func (m *SyncMonitor) GetData() map[string]interface{} {
 	var entries []SyncMonitorEntry
 	for rows.Next() {
 		var e SyncMonitorEntry
-		if err := rows.Scan(&e.ID, &e.IntegrationInstanceID, &e.Source, &e.Message, &e.Level, &e.Time); err != nil {
+		var detailsRaw []byte
+		if err := rows.Scan(&e.ID, &e.IntegrationInstanceID, &e.AccountID, &e.AccountName, &e.AccountSlug, &e.Source, &e.Message, &e.Level, &e.Time,
+			&e.EntityType, &e.EntityID, &e.KommoEntityID, &e.Operation, &e.Status, &e.Direction, &e.DurationMS, &e.RequestCount, &e.BatchSize, &detailsRaw); err != nil {
 			continue
+		}
+		if len(detailsRaw) > 0 && string(detailsRaw) != "{}" {
+			_ = json.Unmarshal(detailsRaw, &e.Details)
 		}
 		entries = append(entries, e)
 	}
@@ -323,6 +395,7 @@ func NewSyncServiceForInstance(client *Client, db *pgxpool.Pool, hub *ws.Hub, in
 type syncAccount struct {
 	ID   uuid.UUID
 	Name string
+	Slug string
 }
 
 func (s *SyncService) instanceArg() interface{} {
@@ -334,7 +407,7 @@ func (s *SyncService) instanceArg() interface{} {
 
 func (s *SyncService) assignedAccounts(ctx context.Context) ([]syncAccount, error) {
 	if s.InstanceID == nil {
-		rows, err := s.db.Query(ctx, `SELECT id, name FROM accounts WHERE kommo_enabled = TRUE`)
+		rows, err := s.db.Query(ctx, `SELECT id, name, COALESCE(slug, '') FROM accounts WHERE kommo_enabled = TRUE`)
 		if err != nil {
 			return nil, err
 		}
@@ -342,7 +415,7 @@ func (s *SyncService) assignedAccounts(ctx context.Context) ([]syncAccount, erro
 		accounts := []syncAccount{}
 		for rows.Next() {
 			var account syncAccount
-			if err := rows.Scan(&account.ID, &account.Name); err == nil {
+			if err := rows.Scan(&account.ID, &account.Name, &account.Slug); err == nil {
 				accounts = append(accounts, account)
 			}
 		}
@@ -350,7 +423,7 @@ func (s *SyncService) assignedAccounts(ctx context.Context) ([]syncAccount, erro
 	}
 
 	rows, err := s.db.Query(ctx, `
-		SELECT a.id, a.name
+		SELECT a.id, a.name, COALESCE(a.slug, '')
 		FROM integration_instance_accounts ia
 		JOIN accounts a ON a.id = ia.account_id
 		WHERE ia.integration_instance_id = $1 AND ia.enabled = TRUE AND COALESCE(a.is_active, TRUE) = TRUE
@@ -363,7 +436,7 @@ func (s *SyncService) assignedAccounts(ctx context.Context) ([]syncAccount, erro
 	accounts := []syncAccount{}
 	for rows.Next() {
 		var account syncAccount
-		if err := rows.Scan(&account.ID, &account.Name); err == nil {
+		if err := rows.Scan(&account.ID, &account.Name, &account.Slug); err == nil {
 			accounts = append(accounts, account)
 		}
 	}
@@ -545,11 +618,23 @@ func (s *SyncService) isKommoEnabled(ctx context.Context, accountID uuid.UUID) b
 // ProcessWebhookLead fetches a lead from Kommo and syncs it to ALL accounts
 // that have Kommo integration enabled (espejo model: all accounts see all Kommo data).
 func (s *SyncService) ProcessWebhookLead(ctx context.Context, kommoLeadID int) {
+	start := time.Now()
 	// Fetch the full lead from Kommo API
 	kl, err := s.client.GetLeadByID(kommoLeadID)
 	if err != nil {
 		log.Printf("[WEBHOOK] Failed to fetch lead %d from Kommo: %v", kommoLeadID, err)
-		s.Monitor.Log("webhook", fmt.Sprintf("Error fetching lead %d: %v", kommoLeadID, err), "error")
+		s.Monitor.LogEvent(SyncMonitorEvent{
+			Source:        "webhook",
+			Message:       fmt.Sprintf("Error fetching lead %d: %v", kommoLeadID, err),
+			Level:         "error",
+			EntityType:    "lead",
+			KommoEntityID: int64(kommoLeadID),
+			Operation:     "fetch_lead",
+			Direction:     "inbound",
+			DurationMS:    time.Since(start).Milliseconds(),
+			RequestCount:  1,
+			Details:       map[string]interface{}{"error": err.Error()},
+		})
 		return
 	}
 
@@ -560,6 +645,17 @@ func (s *SyncService) ProcessWebhookLead(ctx context.Context, kommoLeadID int) {
 		return
 	}
 	if len(accounts) == 0 {
+		s.Monitor.LogEvent(SyncMonitorEvent{
+			Source:        "webhook",
+			Message:       fmt.Sprintf("Lead %d recibido sin cuentas asignadas", kommoLeadID),
+			EntityType:    "lead",
+			KommoEntityID: int64(kommoLeadID),
+			Operation:     "sync_lead",
+			Status:        "skipped",
+			Direction:     "inbound",
+			DurationMS:    time.Since(start).Milliseconds(),
+			RequestCount:  1,
+		})
 		return
 	}
 
@@ -592,14 +688,42 @@ func (s *SyncService) ProcessWebhookLead(ctx context.Context, kommoLeadID int) {
 
 	// Sync to each account
 	changedAccounts := 0
+	affectedAccounts := make([]map[string]string, 0, len(accounts))
 	for _, account := range accounts {
 		changed, err := s.upsertLead(ctx, account.ID, *kl, nil)
 		if err != nil {
 			log.Printf("[WEBHOOK] Lead %d → account %s error: %v", kommoLeadID, account.ID, err)
+			s.Monitor.LogEvent(SyncMonitorEvent{
+				Source:        "webhook",
+				Message:       fmt.Sprintf("Lead %d → %s error: %v", kommoLeadID, account.Name, err),
+				Level:         "error",
+				AccountID:     &account.ID,
+				EntityType:    "lead",
+				KommoEntityID: int64(kommoLeadID),
+				Operation:     "sync_lead",
+				Direction:     "inbound",
+				DurationMS:    time.Since(start).Milliseconds(),
+				RequestCount:  1,
+				Details:       map[string]interface{}{"account_name": account.Name, "error": err.Error()},
+			})
 			continue
 		}
 		if changed {
 			changedAccounts++
+			affectedAccounts = append(affectedAccounts, map[string]string{"id": account.ID.String(), "name": account.Name, "slug": account.Slug})
+			s.Monitor.LogEvent(SyncMonitorEvent{
+				Source:        "webhook",
+				Message:       fmt.Sprintf("Lead %d actualizado en %s", kommoLeadID, account.Name),
+				AccountID:     &account.ID,
+				EntityType:    "lead",
+				KommoEntityID: int64(kommoLeadID),
+				Operation:     "sync_lead",
+				Status:        "updated",
+				Direction:     "inbound",
+				DurationMS:    time.Since(start).Milliseconds(),
+				RequestCount:  1,
+				Details:       map[string]interface{}{"account_name": account.Name},
+			})
 			if s.hub != nil {
 				s.hub.BroadcastToAccount(account.ID, ws.EventLeadUpdate, map[string]interface{}{"action": "updated"})
 			}
@@ -615,7 +739,19 @@ func (s *SyncService) ProcessWebhookLead(ctx context.Context, kommoLeadID int) {
 
 	if changedAccounts > 0 {
 		log.Printf("[WEBHOOK] Lead %d synced to %d/%d accounts", kommoLeadID, changedAccounts, len(accounts))
-		s.Monitor.Log("webhook", fmt.Sprintf("Lead %d sincronizado a %d/%d cuentas", kommoLeadID, changedAccounts, len(accounts)), "info")
+		s.Monitor.LogEvent(SyncMonitorEvent{
+			Source:        "webhook",
+			Message:       fmt.Sprintf("Lead %d sincronizado a %d/%d cuentas", kommoLeadID, changedAccounts, len(accounts)),
+			EntityType:    "lead",
+			KommoEntityID: int64(kommoLeadID),
+			Operation:     "sync_lead",
+			Status:        "updated",
+			Direction:     "inbound",
+			DurationMS:    time.Since(start).Milliseconds(),
+			RequestCount:  1,
+			BatchSize:     len(accounts),
+			Details:       map[string]interface{}{"changed_accounts": affectedAccounts, "assigned_accounts": len(accounts)},
+		})
 	}
 }
 
@@ -3155,6 +3291,7 @@ const eventTypesFilter = "entity_tag_added,entity_tag_deleted,lead_status_change
 
 // pollEvents fetches recent events from the Kommo Events API and syncs affected leads.
 func (s *SyncService) pollEvents() {
+	start := time.Now()
 	s.eventsPollerMu.Lock()
 	since := s.lastEventPoll - 5 // 5s overlap to avoid gaps
 	s.eventsPollerMu.Unlock()
@@ -3210,7 +3347,7 @@ func (s *SyncService) pollEvents() {
 	s.eventsPollerMu.Unlock()
 
 	if len(leadIDSet) == 0 {
-		s.Monitor.Log("events_poller", fmt.Sprintf("Poll completado: %d eventos, sin cambios de leads", totalEvents), "info")
+		s.Monitor.LogEvent(SyncMonitorEvent{Source: "events_poller", Message: fmt.Sprintf("Poll completado: %d eventos, sin cambios de leads", totalEvents), Operation: "poll_events", Status: "no_changes", Direction: "inbound", DurationMS: time.Since(start).Milliseconds(), RequestCount: 1, Details: map[string]interface{}{"events": totalEvents}})
 		return
 	}
 
@@ -3224,7 +3361,7 @@ func (s *SyncService) pollEvents() {
 	leadsMap, err := s.client.GetLeadsByIDs(leadIDs)
 	if err != nil {
 		log.Printf("[EventsPoller] Error batch fetching %d leads: %v", len(leadIDs), err)
-		s.Monitor.Log("events_poller", fmt.Sprintf("Error fetching %d leads: %v", len(leadIDs), err), "error")
+		s.Monitor.LogEvent(SyncMonitorEvent{Source: "events_poller", Message: fmt.Sprintf("Error fetching %d leads: %v", len(leadIDs), err), Level: "error", EntityType: "lead", Operation: "fetch_leads", Direction: "inbound", DurationMS: time.Since(start).Milliseconds(), RequestCount: 1, BatchSize: len(leadIDs), Details: map[string]interface{}{"error": err.Error(), "lead_ids": leadIDs}})
 		return
 	}
 
@@ -3253,6 +3390,8 @@ func (s *SyncService) pollEvents() {
 
 	// Sync each lead to all accounts (espejo total)
 	synced := 0
+	accountCounts := make(map[uuid.UUID]int)
+	accountNames := make(map[uuid.UUID]string)
 	for _, kl := range leadSlice {
 		var prefetched *KommoContact
 		if kl.Embedded != nil && len(kl.Embedded.Contacts) > 0 {
@@ -3262,12 +3401,14 @@ func (s *SyncService) pollEvents() {
 		}
 
 		for _, account := range accounts {
+			accountNames[account.ID] = account.Name
 			changed, err := s.upsertLead(ctx, account.ID, kl, prefetched)
 			if err != nil {
 				continue
 			}
 			if changed {
 				synced++
+				accountCounts[account.ID]++
 				if s.hub != nil {
 					s.hub.BroadcastToAccount(account.ID, ws.EventLeadUpdate, map[string]interface{}{"action": "updated"})
 				}
@@ -3280,7 +3421,14 @@ func (s *SyncService) pollEvents() {
 	s.lastEventPollLeads = synced
 	s.eventsPollerMu.Unlock()
 
-	s.Monitor.Log("events_poller", fmt.Sprintf("Poll completado: %d eventos, %d leads obtenidos, %d sincronizados", totalEvents, len(leadSlice), synced), "info")
+	affectedAccounts := make([]map[string]interface{}, 0, len(accountCounts))
+	for accountID, count := range accountCounts {
+		name := accountNames[accountID]
+		affectedAccounts = append(affectedAccounts, map[string]interface{}{"id": accountID.String(), "name": name, "leads_synced": count})
+		localAccountID := accountID
+		s.Monitor.LogEvent(SyncMonitorEvent{Source: "events_poller", Message: fmt.Sprintf("Pull actualizó %d lead(s) en %s", count, name), AccountID: &localAccountID, EntityType: "lead", Operation: "poll_sync", Status: "updated", Direction: "inbound", DurationMS: time.Since(start).Milliseconds(), RequestCount: 2, BatchSize: count, Details: map[string]interface{}{"account_name": name, "events": totalEvents}})
+	}
+	s.Monitor.LogEvent(SyncMonitorEvent{Source: "events_poller", Message: fmt.Sprintf("Poll completado: %d eventos, %d leads obtenidos, %d sincronizados", totalEvents, len(leadSlice), synced), EntityType: "lead", Operation: "poll_events", Status: "completed", Direction: "inbound", DurationMS: time.Since(start).Milliseconds(), RequestCount: 2, BatchSize: len(leadSlice), Details: map[string]interface{}{"events": totalEvents, "lead_ids": leadIDs, "affected_accounts": affectedAccounts}})
 
 	if synced > 0 {
 		log.Printf("[EventsPoller] Synced %d lead changes across %d accounts (%d events, %d leads fetched)", synced, len(accounts), totalEvents, len(leadSlice))
@@ -3357,6 +3505,7 @@ func (s *SyncService) reconcileLoop() {
 
 // runReconciliation reconciles all accounts with enabled pipelines.
 func (s *SyncService) runReconciliation() {
+	start := time.Now()
 	// Re-sync all Kommo pipelines to all accounts (espejo total)
 	s.syncAllKommoPipelines()
 
@@ -3373,6 +3522,7 @@ func (s *SyncService) runReconciliation() {
 	`, s.instanceArg())
 	if err != nil {
 		log.Printf("[Reconcile] Error querying accounts: %v", err)
+		s.Monitor.LogEvent(SyncMonitorEvent{Source: "reconcile", Message: fmt.Sprintf("Error consultando cuentas: %v", err), Level: "error", Operation: "query_accounts", Direction: "inbound", DurationMS: time.Since(start).Milliseconds(), Details: map[string]interface{}{"error": err.Error()}})
 		return
 	}
 	defer rows.Close()
@@ -3397,6 +3547,7 @@ func (s *SyncService) runReconciliation() {
 
 		s.reconcileAccount(ctx, accountID, false)
 	}
+	s.Monitor.LogEvent(SyncMonitorEvent{Source: "reconcile", Message: fmt.Sprintf("Ciclo de reconciliación completado: %d cuenta(s)", len(accountIDs)), Operation: "reconcile_cycle", Status: "completed", Direction: "inbound", DurationMS: time.Since(start).Milliseconds(), BatchSize: len(accountIDs)})
 }
 
 // reconcileAccount checks all leads in synced pipelines for a single account.
@@ -3406,6 +3557,7 @@ func (s *SyncService) reconcileAccount(ctx context.Context, accountID uuid.UUID,
 	pipelines, err := s.GetConnectedPipelines(ctx, accountID)
 	if err != nil {
 		log.Printf("[Reconcile] Account %s: error getting pipelines: %v", accountID, err)
+		s.Monitor.LogEvent(SyncMonitorEvent{Source: "reconcile", Message: fmt.Sprintf("Cuenta %s: error obteniendo pipelines: %v", accountID, err), Level: "error", AccountID: &accountID, Operation: "reconcile_account", Direction: "inbound", Details: map[string]interface{}{"error": err.Error()}})
 		return
 	}
 
@@ -3425,7 +3577,7 @@ func (s *SyncService) reconcileAccount(ctx context.Context, accountID uuid.UUID,
 
 	if totalFixed > 0 {
 		log.Printf("[Reconcile] Account %s: fixed %d desynchronized leads", accountID, totalFixed)
-		s.Monitor.Log("reconcile", fmt.Sprintf("Cuenta %s: corregidos %d leads desincronizados", accountID, totalFixed), "info")
+		s.Monitor.LogEvent(SyncMonitorEvent{Source: "reconcile", Message: fmt.Sprintf("Cuenta %s: corregidos %d leads desincronizados", accountID, totalFixed), AccountID: &accountID, EntityType: "lead", Operation: "reconcile_account", Status: "fixed", Direction: "inbound", BatchSize: totalFixed, Details: map[string]interface{}{"pipelines": len(pipelines), "fixed_leads": totalFixed}})
 		if s.hub != nil {
 			s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{"action": "reconciled"})
 		}

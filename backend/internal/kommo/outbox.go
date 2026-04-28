@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -166,6 +167,45 @@ type claimedRow struct {
 	EntityID      uuid.UUID
 	KommoEntityID int64
 	Payload       []byte
+}
+
+func (o *Outbox) logBatch(operation, entityType, message, status string, claimed []claimedRow, requestCount int, startedAt time.Time, details map[string]interface{}) {
+	if o.monitor == nil {
+		return
+	}
+	accounts := make([]string, 0, len(claimed))
+	seen := make(map[uuid.UUID]bool)
+	for _, row := range claimed {
+		if seen[row.AccountID] {
+			continue
+		}
+		seen[row.AccountID] = true
+		accounts = append(accounts, row.AccountID.String())
+	}
+	sort.Strings(accounts)
+	if details == nil {
+		details = map[string]interface{}{}
+	}
+	details["accounts"] = accounts
+	details["account_count"] = len(accounts)
+	var accountID *uuid.UUID
+	if len(accounts) == 1 && len(claimed) > 0 {
+		localAccountID := claimed[0].AccountID
+		accountID = &localAccountID
+	}
+	o.monitor.LogEvent(SyncMonitorEvent{
+		Source:       "push",
+		Message:      message,
+		AccountID:    accountID,
+		EntityType:   entityType,
+		Operation:    operation,
+		Status:       status,
+		Direction:    "outbound",
+		DurationMS:   time.Since(startedAt).Milliseconds(),
+		RequestCount: requestCount,
+		BatchSize:    len(claimed),
+		Details:      details,
+	})
 }
 
 // flushOnce claims up to batchSize rows for the given operation and processes them.
@@ -341,6 +381,7 @@ func (o *Outbox) failRowsBulk(ctx context.Context, rows []claimedRow, errMsg str
 // contact custom_name, contact name, lead name) and sends one bulk PATCH /leads.
 func (o *Outbox) flushLeadNames(ctx context.Context, claimed []claimedRow) {
 	// Map: outboxRowID → (kommoID, name). We preserve order of `claimed`.
+	startedAt := time.Now()
 	type entry struct {
 		row  claimedRow
 		name string
@@ -419,14 +460,13 @@ func (o *Outbox) flushLeadNames(ctx context.Context, claimed []claimedRow) {
 	}
 	o.completeRows(ctx, completed)
 	log.Printf("[OUTBOX] flushLeadNames pushed %d names in 1 PATCH", len(items))
-	if o.monitor != nil {
-		o.monitor.Log("push", fmt.Sprintf("Batch names → Kommo (%d leads)", len(items)), "info")
-	}
+	o.logBatch("lead_name", "lead", fmt.Sprintf("Batch names → Kommo (%d leads)", len(items)), "pushed", claimed, 1, startedAt, nil)
 }
 
 // flushContactNames reads current contact names and sends one bulk PATCH /contacts.
 func (o *Outbox) flushContactNames(ctx context.Context, claimed []claimedRow) {
 	contactIDs := make([]uuid.UUID, 0, len(claimed))
+	startedAt := time.Now()
 	for _, r := range claimed {
 		contactIDs = append(contactIDs, r.EntityID)
 	}
@@ -487,9 +527,7 @@ func (o *Outbox) flushContactNames(ctx context.Context, claimed []claimedRow) {
 	}
 	o.completeRows(ctx, completed)
 	log.Printf("[OUTBOX] flushContactNames pushed %d names in 1 PATCH", len(items))
-	if o.monitor != nil {
-		o.monitor.Log("push", fmt.Sprintf("Batch contact names → Kommo (%d)", len(items)), "info")
-	}
+	o.logBatch("contact_name", "contact", fmt.Sprintf("Batch contact names → Kommo (%d)", len(items)), "pushed", claimed, 1, startedAt, nil)
 }
 
 // flushLeadStages pushes pipeline/stage changes. When forced=true, the payload
@@ -501,6 +539,7 @@ func (o *Outbox) flushLeadStages(ctx context.Context, claimed []claimedRow, forc
 		statusID   int64
 		pipelineID int64
 	}
+	startedAt := time.Now()
 	var entries []entry
 
 	if forced {
@@ -592,9 +631,7 @@ func (o *Outbox) flushLeadStages(ctx context.Context, claimed []claimedRow, forc
 		label = "stage_forced"
 	}
 	log.Printf("[OUTBOX] flushLeadStages (%s) pushed %d items in 1 PATCH", label, len(items))
-	if o.monitor != nil {
-		o.monitor.Log("push", fmt.Sprintf("Batch %s → Kommo (%d leads)", label, len(items)), "info")
-	}
+	o.logBatch("lead_"+label, "lead", fmt.Sprintf("Batch %s → Kommo (%d leads)", label, len(items)), "pushed", claimed, 1, startedAt, map[string]interface{}{"forced": forced})
 }
 
 // flushLeadTags performs 3-way merge per lead and sends one bulk PATCH /leads.
@@ -608,6 +645,7 @@ func (o *Outbox) flushLeadStages(ctx context.Context, claimed []claimedRow, forc
 // (same behavior as the legacy PushLeadTagsChange).
 func (o *Outbox) flushLeadTags(ctx context.Context, claimed []claimedRow) {
 	// 1. Read baselines + clarin current tags in batch.
+	startedAt := time.Now()
 	leadIDs := make([]uuid.UUID, 0, len(claimed))
 	for _, r := range claimed {
 		leadIDs = append(leadIDs, r.EntityID)
@@ -783,9 +821,7 @@ func (o *Outbox) flushLeadTags(ctx context.Context, claimed []claimedRow) {
 	}
 	o.completeRows(ctx, completed)
 	log.Printf("[OUTBOX] flushLeadTags pushed %d leads in 1 PATCH (+ 1 batch GET)", len(items))
-	if o.monitor != nil {
-		o.monitor.Log("push", fmt.Sprintf("Batch tags → Kommo (%d leads, 3-way merge)", len(items)), "info")
-	}
+	o.logBatch("lead_tags", "lead", fmt.Sprintf("Batch tags → Kommo (%d leads, 3-way merge)", len(items)), "pushed", claimed, 2, startedAt, map[string]interface{}{"merge": "three_way"})
 }
 
 // flushContactTags sends current contact tags in one bulk PATCH /contacts.
@@ -793,6 +829,7 @@ func (o *Outbox) flushLeadTags(ctx context.Context, claimed []claimedRow) {
 // overwrites Kommo state with Clarin state directly).
 func (o *Outbox) flushContactTags(ctx context.Context, claimed []claimedRow) {
 	contactIDs := make([]uuid.UUID, 0, len(claimed))
+	startedAt := time.Now()
 	for _, r := range claimed {
 		contactIDs = append(contactIDs, r.EntityID)
 	}
@@ -853,9 +890,7 @@ func (o *Outbox) flushContactTags(ctx context.Context, claimed []claimedRow) {
 	}
 	o.completeRows(ctx, completed)
 	log.Printf("[OUTBOX] flushContactTags pushed %d contacts in 1 PATCH", len(items))
-	if o.monitor != nil {
-		o.monitor.Log("push", fmt.Sprintf("Batch contact tags → Kommo (%d)", len(items)), "info")
-	}
+	o.logBatch("contact_tags", "contact", fmt.Sprintf("Batch contact tags → Kommo (%d)", len(items)), "pushed", claimed, 1, startedAt, nil)
 }
 
 // flushLeadCustomFields pushes observation custom-fields (10 call slots + overflow)
@@ -866,6 +901,7 @@ func (o *Outbox) flushLeadCustomFields(ctx context.Context, claimed []claimedRow
 	// We re-use the exact payload structure that PushLeadObservations builds.
 	// To avoid duplicating the logic we read interactions per-lead here, then
 	// assemble the items array.
+	startedAt := time.Now()
 	type entry struct {
 		row    claimedRow
 		fields []KommoCustomFieldWrite
@@ -925,9 +961,7 @@ func (o *Outbox) flushLeadCustomFields(ctx context.Context, claimed []claimedRow
 	}
 	o.completeRows(ctx, completed)
 	log.Printf("[OUTBOX] flushLeadCustomFields pushed %d leads in 1 PATCH", len(items))
-	if o.monitor != nil {
-		o.monitor.Log("push", fmt.Sprintf("Batch observations → Kommo (%d leads)", len(items)), "info")
-	}
+	o.logBatch("lead_observations", "lead", fmt.Sprintf("Batch observations → Kommo (%d leads)", len(items)), "pushed", claimed, 1, startedAt, nil)
 }
 
 // interactionData mirrors the local struct used by PushLeadObservations.

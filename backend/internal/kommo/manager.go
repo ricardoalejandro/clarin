@@ -177,6 +177,15 @@ func (m *Manager) ForWebhook(secret string) *SyncService {
 	return m.secret[secret]
 }
 
+func (m *Manager) ForInstance(id uuid.UUID) *SyncService {
+	if m == nil || id == uuid.Nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.byID[id]
+}
+
 func (m *Manager) RuntimeStatus() map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
