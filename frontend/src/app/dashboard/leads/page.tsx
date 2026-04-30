@@ -519,25 +519,14 @@ export default function LeadsPage() {
   const fetchPipelines = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
-      const [pipelinesRes, connectedRes] = await Promise.all([
-        fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } }),
-        fetch('/api/kommo/connected', { headers: { Authorization: `Bearer ${token}` } }),
-      ])
+      const pipelinesRes = await fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } })
       const data = await pipelinesRes.json()
-      const connectedData = await connectedRes.json()
       if (data.success && data.pipelines && data.pipelines.length > 0) {
         setPipelines(data.pipelines)
-        // Default to the Kommo-connected pipeline, then is_default, then first
-        let defaultP = null
-        if (connectedData.success && connectedData.connected) {
-          const active = connectedData.connected.find((c: { enabled: boolean }) => c.enabled)
-          if (active?.pipeline_id) {
-            defaultP = data.pipelines.find((p: Pipeline) => p.id === active.pipeline_id)
-          }
-        }
-        if (!defaultP) {
-          defaultP = data.pipelines.find((p: Pipeline) => p.is_default) || data.pipelines[0]
-        }
+        const defaultP =
+          (kommoEnabled ? data.pipelines.find((p: Pipeline) => p.kommo_id) : null) ||
+          data.pipelines.find((p: Pipeline) => p.is_default) ||
+          data.pipelines[0]
         if (defaultP) setActivePipeline(defaultP)
       } else {
         setPipelines([])
@@ -547,7 +536,7 @@ export default function LeadsPage() {
     } finally {
       setPipelinesLoaded(true)
     }
-  }, [])
+  }, [kommoEnabled])
 
   const fetchLeadCounts = useCallback(async () => {
     const token = localStorage.getItem('token')

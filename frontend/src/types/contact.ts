@@ -24,6 +24,7 @@ export interface Pipeline {
   name: string
   description?: string | null
   is_default: boolean
+  kommo_id?: number | null
   stages: PipelineStage[] | null
 }
 
