@@ -169,6 +169,14 @@ func (s *Server) handleAdminSuspendSubscription(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	devices, deviceErr := s.services.Device.GetByAccountID(c.Context(), accountID)
+	if deviceErr == nil && s.pool != nil {
+		for _, device := range devices {
+			if device != nil {
+				_ = s.pool.DisconnectDevice(c.Context(), device.ID)
+			}
+		}
+	}
 	return c.JSON(fiber.Map{"success": true, "subscription": overview})
 }
 

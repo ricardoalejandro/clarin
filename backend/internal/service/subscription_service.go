@@ -11,7 +11,14 @@ import (
 	"github.com/naperu/clarin/internal/repository"
 )
 
-// SubscriptionService coordinates SaaS plan state without enforcing access yet.
+type SubscriptionAccessDecision struct {
+	Allowed  bool
+	Reason   string
+	Message  string
+	Overview *domain.SubscriptionOverview
+}
+
+// SubscriptionService coordinates SaaS plan state and enforcement rules.
 type SubscriptionService struct {
 	repos *repository.Repositories
 }
@@ -68,12 +75,119 @@ func (s *SubscriptionService) GetOverview(ctx context.Context, accountID uuid.UU
 		DaysLeft:     daysLeft,
 		IsTrial:      sub.Status == domain.SubscriptionStatusTrialing,
 		IsSuspended:  sub.Status == domain.SubscriptionStatusSuspended,
-		IsActive:     sub.Status == domain.SubscriptionStatusActive || sub.Status == domain.SubscriptionStatusTrialing || sub.Status == domain.SubscriptionStatusGrace,
+		IsActive:     subscriptionAllowsAccess(sub, time.Now()),
 	}
 	if plan != nil {
 		overview.Entitlements = entitlementValues(plan.Entitlements)
 	}
 	return overview, nil
+}
+
+func (s *SubscriptionService) CheckAccess(ctx context.Context, accountID uuid.UUID) (*SubscriptionAccessDecision, error) {
+	overview, err := s.GetOverview(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	decision := &SubscriptionAccessDecision{
+		Allowed:  true,
+		Reason:   "active",
+		Message:  "Suscripción activa",
+		Overview: overview,
+	}
+	if overview == nil || overview.Subscription == nil {
+		decision.Allowed = false
+		decision.Reason = "missing_subscription"
+		decision.Message = "La cuenta no tiene una suscripción configurada"
+		return decision, nil
+	}
+
+	subscription := overview.Subscription
+	now := time.Now()
+	switch subscription.Status {
+	case domain.SubscriptionStatusActive:
+		if subscription.CurrentPeriodEnd != nil && subscription.CurrentPeriodEnd.Before(now) {
+			decision.Allowed = false
+			decision.Reason = "subscription_expired"
+			decision.Message = "El periodo de suscripción terminó"
+		}
+	case domain.SubscriptionStatusTrialing:
+		if subscription.TrialEndsAt != nil && subscription.TrialEndsAt.Before(now) {
+			decision.Allowed = false
+			decision.Reason = "trial_expired"
+			decision.Message = "El periodo de prueba terminó"
+		}
+	case domain.SubscriptionStatusGrace:
+		if subscription.GraceEndsAt != nil && subscription.GraceEndsAt.Before(now) {
+			decision.Allowed = false
+			decision.Reason = "grace_expired"
+			decision.Message = "El periodo de gracia terminó"
+		}
+	case domain.SubscriptionStatusPastDue:
+		decision.Allowed = false
+		decision.Reason = "past_due"
+		decision.Message = "La suscripción tiene un pago pendiente"
+	case domain.SubscriptionStatusSuspended:
+		decision.Allowed = false
+		decision.Reason = "suspended"
+		decision.Message = "La suscripción está suspendida"
+	case domain.SubscriptionStatusCanceled:
+		decision.Allowed = false
+		decision.Reason = "canceled"
+		decision.Message = "La suscripción fue cancelada"
+	case domain.SubscriptionStatusIncomplete:
+		decision.Allowed = false
+		decision.Reason = "incomplete"
+		decision.Message = "La suscripción está incompleta"
+	default:
+		decision.Allowed = false
+		decision.Reason = "invalid_status"
+		decision.Message = "El estado de suscripción no es válido"
+	}
+	if overview != nil {
+		overview.IsActive = decision.Allowed
+	}
+	return decision, nil
+}
+
+func (s *SubscriptionService) HasFeature(ctx context.Context, accountID uuid.UUID, key string) (bool, error) {
+	overview, err := s.GetOverview(ctx, accountID)
+	if err != nil {
+		return false, err
+	}
+	if overview == nil || overview.Entitlements == nil {
+		return false, nil
+	}
+	value, ok := overview.Entitlements[key]
+	if !ok {
+		return false, nil
+	}
+	switch typedValue := value.(type) {
+	case bool:
+		return typedValue, nil
+	case string:
+		return typedValue == "true", nil
+	default:
+		return false, nil
+	}
+}
+
+func (s *SubscriptionService) EnforceLimit(ctx context.Context, accountID uuid.UUID, key string, increment int) error {
+	if increment < 0 {
+		increment = 0
+	}
+	overview, err := s.GetOverview(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	limit, ok := entitlementInt(overview.Entitlements, key)
+	if !ok || limit <= 0 {
+		return nil
+	}
+	current := usageForEntitlement(overview.Usage, key)
+	if current+increment > limit {
+		return fmt.Errorf("tu plan permite hasta %d %s; actualmente tienes %d", limit, entitlementLabel(key), current)
+	}
+	return nil
 }
 
 func (s *SubscriptionService) CreateForAccount(ctx context.Context, accountID uuid.UUID, planCode, status string, trialDays int) error {
@@ -235,6 +349,22 @@ func validSubscriptionStatus(status string) bool {
 	}
 }
 
+func subscriptionAllowsAccess(sub *domain.Subscription, now time.Time) bool {
+	if sub == nil {
+		return false
+	}
+	switch sub.Status {
+	case domain.SubscriptionStatusActive:
+		return sub.CurrentPeriodEnd == nil || !sub.CurrentPeriodEnd.Before(now)
+	case domain.SubscriptionStatusTrialing:
+		return sub.TrialEndsAt == nil || !sub.TrialEndsAt.Before(now)
+	case domain.SubscriptionStatusGrace:
+		return sub.GraceEndsAt == nil || !sub.GraceEndsAt.Before(now)
+	default:
+		return false
+	}
+}
+
 func subscriptionDeadline(sub *domain.Subscription) *time.Time {
 	if sub == nil {
 		return nil
@@ -269,6 +399,69 @@ func entitlementValues(raw map[string]json.RawMessage) map[string]any {
 		}
 	}
 	return values
+}
+
+func entitlementInt(values map[string]any, key string) (int, bool) {
+	if values == nil {
+		return 0, false
+	}
+	value, ok := values[key]
+	if !ok {
+		return 0, false
+	}
+	switch typedValue := value.(type) {
+	case float64:
+		return int(typedValue), true
+	case int:
+		return typedValue, true
+	case int64:
+		return int(typedValue), true
+	case json.Number:
+		parsed, err := typedValue.Int64()
+		if err == nil {
+			return int(parsed), true
+		}
+	case string:
+		var parsed int
+		if _, err := fmt.Sscanf(typedValue, "%d", &parsed); err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func usageForEntitlement(usage domain.SubscriptionUsage, key string) int {
+	switch key {
+	case "max_users":
+		return usage.Users
+	case "max_devices":
+		return usage.Devices
+	case "max_contacts":
+		return usage.Contacts
+	case "max_leads":
+		return usage.Leads
+	case "max_chats":
+		return usage.Chats
+	default:
+		return 0
+	}
+}
+
+func entitlementLabel(key string) string {
+	switch key {
+	case "max_users":
+		return "usuarios"
+	case "max_devices":
+		return "dispositivos"
+	case "max_contacts":
+		return "contactos"
+	case "max_leads":
+		return "leads"
+	case "max_chats":
+		return "chats"
+	default:
+		return "elementos"
+	}
 }
 
 func mergeSubscriptionMetadata(raw json.RawMessage, updates map[string]any) json.RawMessage {

@@ -221,6 +221,7 @@ func (s *Server) setupRoutes() {
 
 	// Version endpoint — public, returns version info and changelog
 	api.Get("/version", s.handleGetVersion)
+	api.Get("/public/plans", s.handleListPlans)
 
 	// Device health endpoint (protected) — detailed per-device metrics
 	// Registered after auth middleware setup below
@@ -245,6 +246,7 @@ func (s *Server) setupRoutes() {
 	// Auth routes (no auth required)
 	auth := api.Group("/auth")
 	auth.Post("/login", s.handleLogin)
+	auth.Post("/register", s.handleRegister)
 	auth.Post("/refresh", s.handleRefreshToken)
 
 	// Kommo webhook (public — called by Kommo, secret in URL for validation)
@@ -279,6 +281,8 @@ func (s *Server) setupRoutes() {
 	protected.Post("/settings/api-keys", s.handleCreateAPIKey)
 	protected.Get("/settings/api-keys", s.handleListAPIKeys)
 	protected.Delete("/settings/api-keys/:id", s.handleDeleteAPIKey)
+
+	protected.Use(s.subscriptionAccessMiddleware)
 
 	// Device routes
 	// GET /devices — list available devices for sending; accessible by any authenticated user
@@ -352,7 +356,7 @@ func (s *Server) setupRoutes() {
 	leads.Patch("/:id/status", s.handleUpdateLeadStatus)
 	leads.Patch("/:id/stage", s.handleUpdateLeadStage)
 	leads.Get("/:id/interactions", s.handleGetLeadInteractions)
-	leads.Post("/:id/sync-kommo", s.handleSyncLeadFromKommo)
+	leads.Post("/:id/sync-kommo", s.requirePlanFeature("kommo_sync"), s.handleSyncLeadFromKommo)
 	leads.Patch("/:id/archive", s.handleArchiveLead)
 	leads.Patch("/:id/block", s.handleBlockLead)
 
@@ -379,7 +383,7 @@ func (s *Server) setupRoutes() {
 	tags.Get("/entity/:type/:id", s.handleGetEntityTags)
 
 	// Campaign routes
-	campaigns := protected.Group("/campaigns", s.requirePermission(domain.PermBroadcasts))
+	campaigns := protected.Group("/campaigns", s.requirePermission(domain.PermBroadcasts), s.requirePlanFeature("broadcasts"))
 	campaigns.Get("/", s.handleGetCampaigns)
 	campaigns.Post("/", s.handleCreateCampaign)
 	campaigns.Get("/:id", s.handleGetCampaign)
@@ -446,7 +450,7 @@ func (s *Server) setupRoutes() {
 	contacts.Get("/:id/leads", s.handleGetContactLeads)
 	contacts.Put("/:id", s.handleUpdateContact)
 	contacts.Post("/:id/reset", s.handleResetContactFromDevice)
-	contacts.Post("/:id/sync-kommo", s.handleSyncContactFromKommo)
+	contacts.Post("/:id/sync-kommo", s.requirePlanFeature("kommo_sync"), s.handleSyncContactFromKommo)
 	contacts.Delete("/:id", s.handleDeleteContact)
 
 	// Custom field value routes (under contacts, all authenticated users)
@@ -511,7 +515,7 @@ func (s *Server) setupRoutes() {
 
 	// Event Google Contacts sync
 	events.Get("/:id/google-sync-status", s.handleEventGoogleSyncStatus)
-	events.Post("/:id/google-sync", s.handleEventGoogleSync)
+	events.Post("/:id/google-sync", s.requirePlanFeature("google_contacts"), s.handleEventGoogleSync)
 
 	// Event Logbook (Bitácora) routes
 	events.Get("/:id/logbooks", s.handleGetEventLogbooks)
@@ -588,7 +592,7 @@ func (s *Server) setupRoutes() {
 	// Google callback (public — called by Google redirect, state carries accountID)
 	api.Get("/google/callback", s.handleGoogleCallback)
 	// Google Contacts sync routes (requires contacts permission)
-	googleContacts := protected.Group("/google/contacts", s.requirePermission(domain.PermContacts))
+	googleContacts := protected.Group("/google/contacts", s.requirePermission(domain.PermContacts), s.requirePlanFeature("google_contacts"))
 	googleContacts.Post("/:id/sync", s.handleGoogleSyncContact)
 	googleContacts.Delete("/:id/sync", s.handleGoogleDesyncContact)
 	googleContacts.Post("/batch/sync", s.handleGoogleBatchSync)
@@ -618,7 +622,7 @@ func (s *Server) setupRoutes() {
 	bots.Get("/:id/logs", s.handleListBotLogs)
 
 	// Automation routes
-	automations := protected.Group("/automations", s.requirePermission(domain.PermLeads))
+	automations := protected.Group("/automations", s.requirePermission(domain.PermLeads), s.requirePlanFeature("automations"))
 	automations.Get("/", s.handleListAutomations)
 	automations.Post("/", s.handleCreateAutomation)
 	automations.Get("/:id", s.handleGetAutomation)
@@ -868,6 +872,15 @@ func (s *Server) wsUpgrade(c *fiber.Ctx) error {
 		if err != nil {
 			return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 		}
+		if !claims.IsSuperAdmin {
+			decision, accessErr := s.services.Subscription.CheckAccess(c.Context(), claims.AccountID)
+			if accessErr != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Subscription validation failed"})
+			}
+			if decision != nil && !decision.Allowed {
+				return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"error": decision.Message, "code": "subscription_required"})
+			}
+		}
 
 		c.Locals("claims", claims)
 		return c.Next()
@@ -1100,30 +1113,59 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 	var kommoEnabled bool
 	_ = s.repos.DB().QueryRow(c.Context(), `SELECT COALESCE(kommo_enabled, false) FROM accounts WHERE id = $1`, accountID).Scan(&kommoEnabled)
 
-	account, _ := s.services.Account.GetByID(c.Context(), accountID)
 	plan := ""
 	subscriptionStatus := ""
-	if account != nil {
-		plan = account.Plan
-		subscriptionStatus = account.SubscriptionStatus
+	subscriptionIsActive := true
+	subscriptionReason := ""
+	var subscriptionDaysLeft *int
+	var trialEndsAt *time.Time
+	var currentPeriodEnd *time.Time
+	var graceEndsAt *time.Time
+	decision, err := s.services.Subscription.CheckAccess(c.Context(), accountID)
+	if err != nil {
+		log.Printf("[API] Failed to load subscription for /me account %s: %v", accountID, err)
+		account, accountErr := s.services.Account.GetByID(c.Context(), accountID)
+		if accountErr == nil && account != nil {
+			plan = account.Plan
+			subscriptionStatus = account.SubscriptionStatus
+		}
+	} else if decision != nil && decision.Overview != nil {
+		subscriptionIsActive = decision.Allowed
+		subscriptionReason = decision.Reason
+		subscriptionDaysLeft = decision.Overview.DaysLeft
+		if decision.Overview.Subscription != nil {
+			subscriptionStatus = decision.Overview.Subscription.Status
+			trialEndsAt = decision.Overview.Subscription.TrialEndsAt
+			currentPeriodEnd = decision.Overview.Subscription.CurrentPeriodEnd
+			graceEndsAt = decision.Overview.Subscription.GraceEndsAt
+		}
+		if decision.Overview.Plan != nil {
+			plan = decision.Overview.Plan.Code
+		}
 	}
 
 	return c.JSON(fiber.Map{
 		"success": true,
 		"user": fiber.Map{
-			"id":                  user.ID,
-			"username":            user.Username,
-			"email":               user.Email,
-			"display_name":        user.DisplayName,
-			"is_admin":            isAdmin,
-			"is_super_admin":      user.IsSuperAdmin,
-			"role":                user.Role,
-			"account_id":          accountID,
-			"account_name":        activeAccountName,
-			"plan":                plan,
-			"subscription_status": subscriptionStatus,
-			"permissions":         permissions,
-			"kommo_enabled":       kommoEnabled,
+			"id":                     user.ID,
+			"username":               user.Username,
+			"email":                  user.Email,
+			"display_name":           user.DisplayName,
+			"is_admin":               isAdmin,
+			"is_super_admin":         user.IsSuperAdmin,
+			"role":                   user.Role,
+			"account_id":             accountID,
+			"account_name":           activeAccountName,
+			"plan":                   plan,
+			"subscription_status":    subscriptionStatus,
+			"subscription_active":    subscriptionIsActive,
+			"subscription_reason":    subscriptionReason,
+			"subscription_days_left": subscriptionDaysLeft,
+			"trial_ends_at":          trialEndsAt,
+			"current_period_end":     currentPeriodEnd,
+			"grace_ends_at":          graceEndsAt,
+			"permissions":            permissions,
+			"kommo_enabled":          kommoEnabled,
 		},
 		"accounts": accountsList,
 	})
@@ -1409,6 +1451,9 @@ func (s *Server) handleCreateDevice(c *fiber.Ctx) error {
 	}
 
 	accountID := c.Locals("account_id").(uuid.UUID)
+	if err := s.enforcePlanLimit(c.Context(), accountID, "max_devices", 1); err != nil {
+		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_devices"})
+	}
 	if provider == domain.DeviceProviderWhatsAppWeb {
 		device, err := s.services.Device.Create(c.Context(), accountID, req.Name)
 		if err != nil {
@@ -5144,6 +5189,9 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	if len(lines) < 2 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "CSV file must have at least a header and one data row"})
 	}
+	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", countNonEmptyCSVRows(lines)); err != nil {
+		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
+	}
 
 	// Detect separator: Kommo uses commas in header, semicolons in data.
 	// General approach: check which delimiter produces more columns consistently.
@@ -6092,6 +6140,10 @@ func (s *Server) handleSyncDeviceContacts(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid device id"})
 	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", 1); err != nil {
+		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
+	}
 
 	if err := s.services.Contact.SyncDevice(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -6118,6 +6170,9 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
+	}
+	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", 1); err != nil {
+		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
 	}
 
 	normalizedPhone := kommo.NormalizePhone(body.Phone)
@@ -6227,6 +6282,9 @@ func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
 	}
 	if len(body.Contacts) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "contacts array is empty"})
+	}
+	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", len(body.Contacts)); err != nil {
+		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
 	}
 
 	created := 0
@@ -10974,6 +11032,17 @@ func (s *Server) handleAdminCreateUser(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
 	}
+	checkedAccounts := make(map[uuid.UUID]bool)
+	for _, assignment := range assignments {
+		assignmentAccountID, parseErr := uuid.Parse(assignment.AccountID)
+		if parseErr != nil || checkedAccounts[assignmentAccountID] {
+			continue
+		}
+		checkedAccounts[assignmentAccountID] = true
+		if err := s.enforcePlanLimit(c.Context(), assignmentAccountID, "max_users", 1); err != nil {
+			return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_users"})
+		}
+	}
 	primaryRole := assignments[defaultIdx].Role
 	if primaryRole == "" {
 		primaryRole = domain.RoleAgent
@@ -11310,6 +11379,15 @@ func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
 
 	if req.Role == "" {
 		req.Role = domain.RoleAgent
+	}
+	exists, err := s.repos.UserAccount.Exists(c.Context(), userID, accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if !exists {
+		if err := s.enforcePlanLimit(c.Context(), accountID, "max_users", 1); err != nil {
+			return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_users"})
+		}
 	}
 
 	ua := &domain.UserAccount{

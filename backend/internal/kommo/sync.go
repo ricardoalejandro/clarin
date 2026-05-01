@@ -407,7 +407,20 @@ func (s *SyncService) instanceArg() interface{} {
 
 func (s *SyncService) assignedAccounts(ctx context.Context) ([]syncAccount, error) {
 	if s.InstanceID == nil {
-		rows, err := s.db.Query(ctx, `SELECT id, name, COALESCE(slug, '') FROM accounts WHERE kommo_enabled = TRUE`)
+		rows, err := s.db.Query(ctx, `
+			SELECT a.id, a.name, COALESCE(a.slug, '')
+			FROM accounts a
+			JOIN subscriptions sub ON sub.account_id = a.id
+			JOIN plan_entitlements entitlement ON entitlement.plan_code = sub.plan_code AND entitlement.key = 'kommo_sync'
+			WHERE a.kommo_enabled = TRUE
+			  AND COALESCE(a.is_active, TRUE) = TRUE
+			  AND entitlement.value_json = 'true'::jsonb
+			  AND (
+				sub.status = 'active' AND (sub.current_period_end IS NULL OR sub.current_period_end >= NOW())
+				OR sub.status = 'trialing' AND (sub.trial_ends_at IS NULL OR sub.trial_ends_at >= NOW())
+				OR sub.status = 'grace' AND (sub.grace_ends_at IS NULL OR sub.grace_ends_at >= NOW())
+			  )
+		`)
 		if err != nil {
 			return nil, err
 		}
@@ -426,7 +439,15 @@ func (s *SyncService) assignedAccounts(ctx context.Context) ([]syncAccount, erro
 		SELECT a.id, a.name, COALESCE(a.slug, '')
 		FROM integration_instance_accounts ia
 		JOIN accounts a ON a.id = ia.account_id
+		JOIN subscriptions sub ON sub.account_id = a.id
+		JOIN plan_entitlements entitlement ON entitlement.plan_code = sub.plan_code AND entitlement.key = 'kommo_sync'
 		WHERE ia.integration_instance_id = $1 AND ia.enabled = TRUE AND COALESCE(a.is_active, TRUE) = TRUE
+		  AND entitlement.value_json = 'true'::jsonb
+		  AND (
+			sub.status = 'active' AND (sub.current_period_end IS NULL OR sub.current_period_end >= NOW())
+			OR sub.status = 'trialing' AND (sub.trial_ends_at IS NULL OR sub.trial_ends_at >= NOW())
+			OR sub.status = 'grace' AND (sub.grace_ends_at IS NULL OR sub.grace_ends_at >= NOW())
+		  )
 		ORDER BY a.name ASC
 	`, *s.InstanceID)
 	if err != nil {
@@ -600,18 +621,47 @@ func (s *SyncService) Stop() {
 
 // isKommoEnabled checks if an account has Kommo integration enabled.
 func (s *SyncService) isKommoEnabled(ctx context.Context, accountID uuid.UUID) bool {
+	featureSQLAccount2 := `
+		EXISTS (
+			SELECT 1
+			FROM subscriptions sub
+			JOIN plan_entitlements entitlement ON entitlement.plan_code = sub.plan_code AND entitlement.key = 'kommo_sync'
+			WHERE sub.account_id = $2
+			  AND entitlement.value_json = 'true'::jsonb
+			  AND (
+				sub.status = 'active' AND (sub.current_period_end IS NULL OR sub.current_period_end >= NOW())
+				OR sub.status = 'trialing' AND (sub.trial_ends_at IS NULL OR sub.trial_ends_at >= NOW())
+				OR sub.status = 'grace' AND (sub.grace_ends_at IS NULL OR sub.grace_ends_at >= NOW())
+			  )
+		)
+	`
 	if s.InstanceID != nil {
 		var enabled bool
 		err := s.db.QueryRow(ctx, `
 			SELECT EXISTS(
 				SELECT 1 FROM integration_instance_accounts
 				WHERE integration_instance_id = $1 AND account_id = $2 AND enabled = TRUE
-			)
-		`, *s.InstanceID, accountID).Scan(&enabled)
+			) AND `+featureSQLAccount2,
+			*s.InstanceID, accountID).Scan(&enabled)
 		return err == nil && enabled
 	}
 	var enabled bool
-	err := s.db.QueryRow(ctx, `SELECT COALESCE(kommo_enabled, false) FROM accounts WHERE id = $1`, accountID).Scan(&enabled)
+	err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(a.kommo_enabled, false) AND EXISTS (
+			SELECT 1
+			FROM subscriptions sub
+			JOIN plan_entitlements entitlement ON entitlement.plan_code = sub.plan_code AND entitlement.key = 'kommo_sync'
+			WHERE sub.account_id = $1
+			  AND entitlement.value_json = 'true'::jsonb
+			  AND (
+				sub.status = 'active' AND (sub.current_period_end IS NULL OR sub.current_period_end >= NOW())
+				OR sub.status = 'trialing' AND (sub.trial_ends_at IS NULL OR sub.trial_ends_at >= NOW())
+				OR sub.status = 'grace' AND (sub.grace_ends_at IS NULL OR sub.grace_ends_at >= NOW())
+			  )
+		)
+		FROM accounts a
+		WHERE a.id = $1
+		`, accountID).Scan(&enabled)
 	return err == nil && enabled
 }
 

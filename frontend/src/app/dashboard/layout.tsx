@@ -32,7 +32,9 @@ import {
   CheckSquare,
   UserPlus,
   Stamp,
-  Bot
+  Bot,
+  AlertTriangle,
+  CreditCard
 } from 'lucide-react'
 
 interface User {
@@ -44,6 +46,11 @@ interface User {
   role: string
   account_id: string
   account_name: string
+  plan?: string
+  subscription_status?: string
+  subscription_active?: boolean
+  subscription_reason?: string
+  subscription_days_left?: number | null
   permissions?: string[]
   kommo_enabled?: boolean
 }
@@ -54,6 +61,19 @@ interface UserAccount {
   account_slug: string
   role: string
   is_default: boolean
+}
+
+function subscriptionLabel(status?: string) {
+  const labels: Record<string, string> = {
+    trialing: 'Prueba',
+    active: 'Activa',
+    past_due: 'Pago pendiente',
+    grace: 'Periodo de gracia',
+    suspended: 'Suspendida',
+    canceled: 'Cancelada',
+    incomplete: 'Incompleta',
+  }
+  return labels[status || ''] || status || 'Sin suscripción'
 }
 
 export default function DashboardLayout({
@@ -341,6 +361,46 @@ export default function DashboardLayout({
   }
 
   if (!user) return null
+
+  const subscriptionBlocked = user.subscription_active === false && !pathname?.startsWith('/dashboard/settings')
+
+  if (subscriptionBlocked) {
+    return (
+      <NotificationProvider accountId={user.account_id}>
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+          <div className="w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl shadow-black/30 p-6 sm:p-8 text-center">
+            <div className="w-14 h-14 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-center justify-center mx-auto mb-5">
+              <AlertTriangle className="w-7 h-7 text-amber-300" />
+            </div>
+            <h1 className="text-2xl font-bold text-white tracking-tight">Suscripción requiere atención</h1>
+            <p className="text-slate-400 text-sm mt-3 leading-relaxed">
+              Tu cuenta {user.account_name || 'actual'} está en estado {subscriptionLabel(user.subscription_status)}. Para proteger la operación, las funciones del CRM quedan pausadas hasta reactivar el plan.
+            </p>
+            <div className="mt-6 grid sm:grid-cols-2 gap-3 text-left">
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4">
+                <p className="text-xs text-slate-500 uppercase tracking-wider">Plan</p>
+                <p className="text-sm font-semibold text-slate-100 mt-1">{user.plan || 'Sin plan'}</p>
+              </div>
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4">
+                <p className="text-xs text-slate-500 uppercase tracking-wider">Estado</p>
+                <p className="text-sm font-semibold text-amber-300 mt-1">{subscriptionLabel(user.subscription_status)}</p>
+              </div>
+            </div>
+            <div className="mt-7 flex flex-col sm:flex-row gap-3 justify-center">
+              <Link href="/dashboard/settings" className="inline-flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 px-4 py-2.5 rounded-xl text-sm font-bold transition-all shadow-lg shadow-emerald-500/20">
+                <CreditCard className="w-4 h-4" />
+                Ver configuración
+              </Link>
+              <button onClick={handleLogout} className="inline-flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all border border-slate-700">
+                <LogOut className="w-4 h-4" />
+                Cerrar sesión
+              </button>
+            </div>
+          </div>
+        </div>
+      </NotificationProvider>
+    )
+  }
 
   return (
     <NotificationProvider accountId={user.account_id}>
