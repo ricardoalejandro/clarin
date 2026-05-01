@@ -26,6 +26,7 @@ import (
 type Services struct {
 	Auth             *AuthService
 	Account          *AccountService
+	Subscription     *SubscriptionService
 	Device           *DeviceService
 	Chat             *ChatService
 	Contact          *ContactService
@@ -48,6 +49,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 	return &Services{
 		Auth:             &AuthService{repos: repos},
 		Account:          &AccountService{repos: repos},
+		Subscription:     NewSubscriptionService(repos),
 		Device:           &DeviceService{repos: repos, pool: pool, hub: hub},
 		Chat:             &ChatService{repos: repos, pool: pool},
 		Contact:          &ContactService{repos: repos, pool: pool},

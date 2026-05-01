@@ -264,6 +264,8 @@ func (s *Server) setupRoutes() {
 	protected.Post("/auth/switch-account", s.handleSwitchAccount)
 
 	// Settings routes
+	protected.Get("/plans", s.handleListPlans)
+	protected.Get("/subscription", s.handleGetSubscription)
 	protected.Get("/settings", s.handleGetSettings)
 	protected.Put("/settings/profile", s.handleUpdateProfile)
 	protected.Put("/settings/account", s.handleUpdateAccount)
@@ -708,9 +710,15 @@ func (s *Server) setupRoutes() {
 	admin := protected.Group("/admin", s.superAdminMiddleware)
 
 	// Account management
+	admin.Get("/plans", s.handleListPlans)
 	adminAccounts := admin.Group("/accounts")
 	adminAccounts.Get("/", s.handleAdminGetAccounts)
 	adminAccounts.Post("/", s.handleAdminCreateAccount)
+	adminAccounts.Get("/:id/subscription", s.handleAdminGetAccountSubscription)
+	adminAccounts.Put("/:id/subscription", s.handleAdminUpdateAccountSubscription)
+	adminAccounts.Post("/:id/extend-trial", s.handleAdminExtendTrial)
+	adminAccounts.Post("/:id/suspend-subscription", s.handleAdminSuspendSubscription)
+	adminAccounts.Post("/:id/reactivate-subscription", s.handleAdminReactivateSubscription)
 	adminAccounts.Get("/:id", s.handleAdminGetAccount)
 	adminAccounts.Put("/:id", s.handleAdminUpdateAccount)
 	adminAccounts.Patch("/:id/toggle", s.handleAdminToggleAccount)
@@ -1092,20 +1100,30 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 	var kommoEnabled bool
 	_ = s.repos.DB().QueryRow(c.Context(), `SELECT COALESCE(kommo_enabled, false) FROM accounts WHERE id = $1`, accountID).Scan(&kommoEnabled)
 
+	account, _ := s.services.Account.GetByID(c.Context(), accountID)
+	plan := ""
+	subscriptionStatus := ""
+	if account != nil {
+		plan = account.Plan
+		subscriptionStatus = account.SubscriptionStatus
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"user": fiber.Map{
-			"id":             user.ID,
-			"username":       user.Username,
-			"email":          user.Email,
-			"display_name":   user.DisplayName,
-			"is_admin":       isAdmin,
-			"is_super_admin": user.IsSuperAdmin,
-			"role":           user.Role,
-			"account_id":     accountID,
-			"account_name":   activeAccountName,
-			"permissions":    permissions,
-			"kommo_enabled":  kommoEnabled,
+			"id":                  user.ID,
+			"username":            user.Username,
+			"email":               user.Email,
+			"display_name":        user.DisplayName,
+			"is_admin":            isAdmin,
+			"is_super_admin":      user.IsSuperAdmin,
+			"role":                user.Role,
+			"account_id":          accountID,
+			"account_name":        activeAccountName,
+			"plan":                plan,
+			"subscription_status": subscriptionStatus,
+			"permissions":         permissions,
+			"kommo_enabled":       kommoEnabled,
 		},
 		"accounts": accountsList,
 	})
@@ -1183,6 +1201,10 @@ func (s *Server) handleGetSettings(c *fiber.Ctx) error {
 			"name":                      account.Name,
 			"slug":                      account.Slug,
 			"plan":                      account.Plan,
+			"subscription_status":       account.SubscriptionStatus,
+			"trial_ends_at":             account.TrialEndsAt,
+			"current_period_end":        account.CurrentPeriodEnd,
+			"grace_ends_at":             account.GraceEndsAt,
 			"created_at":                account.CreatedAt,
 			"default_incoming_stage_id": account.DefaultIncomingStageID,
 		}
@@ -10641,6 +10663,9 @@ func (s *Server) handleAdminCreateAccount(c *fiber.Ctx) error {
 	if err := s.services.Account.Create(c.Context(), account); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	if err := s.services.Subscription.CreateForAccount(c.Context(), account.ID, account.Plan, domain.SubscriptionStatusActive, 0); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 
 	// Seed template surveys for the new account
 	if err := database.SeedTemplateSurveysForAccount(s.repos.DB(), account.ID.String()); err != nil {
@@ -10684,6 +10709,16 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if req.Plan == "" {
+		existing, err := s.services.Account.GetByID(c.Context(), id)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		if existing == nil {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Account not found"})
+		}
+		req.Plan = existing.Plan
+	}
 
 	account := &domain.Account{
 		ID:           id,
@@ -10697,6 +10732,16 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 
 	if err := s.services.Account.Update(c.Context(), account); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	subOverview, err := s.services.Subscription.GetOverview(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if subOverview != nil && subOverview.Subscription != nil {
+		subOverview.Subscription.PlanCode = req.Plan
+		if err := s.services.Subscription.Upsert(c.Context(), subOverview.Subscription); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
 	}
 
 	return c.JSON(fiber.Map{"success": true, "account": account})

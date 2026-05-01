@@ -19,6 +19,7 @@ type Repositories struct {
 	User               *UserRepository
 	UserAccount        *UserAccountRepository
 	Account            *AccountRepository
+	Subscription       *SubscriptionRepository
 	Device             *DeviceRepository
 	Chat               *ChatRepository
 	Message            *MessageRepository
@@ -62,6 +63,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		User:               &UserRepository{db: db},
 		UserAccount:        &UserAccountRepository{db: db},
 		Account:            &AccountRepository{db: db},
+		Subscription:       &SubscriptionRepository{db: db},
 		Device:             &DeviceRepository{db: db},
 		Chat:               &ChatRepository{db: db},
 		Message:            &MessageRepository{db: db},
@@ -394,11 +396,14 @@ type AccountRepository struct {
 
 func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
+			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
 			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
 			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count
-		FROM accounts a ORDER BY a.created_at DESC
+		FROM accounts a
+		LEFT JOIN subscriptions s ON s.account_id = a.id
+		ORDER BY a.created_at DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -409,6 +414,7 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 	for rows.Next() {
 		a := &domain.Account{}
 		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
+			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
 			return nil, err
 		}
@@ -420,13 +426,17 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Account, error) {
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
+			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
 			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
 			(SELECT COUNT(*) FROM chats WHERE account_id = a.id) as chat_count,
 			a.google_email, a.google_contact_group_id, a.google_connected_at, COALESCE(a.google_sync_limit, 20000)
-		FROM accounts a WHERE a.id = $1
+		FROM accounts a
+		LEFT JOIN subscriptions s ON s.account_id = a.id
+		WHERE a.id = $1
 	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
+		&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 		&a.UserCount, &a.DeviceCount, &a.ChatCount,
 		&a.GoogleEmail, &a.GoogleContactGroupID, &a.GoogleConnectedAt, &a.GoogleSyncLimit)
 	if err == pgx.ErrNoRows {

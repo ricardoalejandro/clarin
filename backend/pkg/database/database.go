@@ -1587,6 +1587,89 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_bot_execution_logs_flow ON bot_execution_logs(flow_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_bot_execution_logs_account ON bot_execution_logs(account_id, created_at DESC)`,
+
+		`CREATE TABLE IF NOT EXISTS plans (
+			code VARCHAR(50) PRIMARY KEY,
+			name VARCHAR(120) NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			trial_days INT NOT NULL DEFAULT 0,
+			is_public BOOLEAN NOT NULL DEFAULT TRUE,
+			sort_order INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS plan_entitlements (
+			plan_code VARCHAR(50) NOT NULL REFERENCES plans(code) ON DELETE CASCADE,
+			key VARCHAR(100) NOT NULL,
+			value_json JSONB NOT NULL DEFAULT 'null'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (plan_code, key)
+		)`,
+		`CREATE TABLE IF NOT EXISTS subscriptions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			plan_code VARCHAR(50) NOT NULL REFERENCES plans(code),
+			status VARCHAR(40) NOT NULL DEFAULT 'active',
+			trial_started_at TIMESTAMPTZ,
+			trial_ends_at TIMESTAMPTZ,
+			current_period_start TIMESTAMPTZ,
+			current_period_end TIMESTAMPTZ,
+			grace_ends_at TIMESTAMPTZ,
+			canceled_at TIMESTAMPTZ,
+			suspended_at TIMESTAMPTZ,
+			billing_provider VARCHAR(50) NOT NULL DEFAULT '',
+			provider_customer_id VARCHAR(255) NOT NULL DEFAULT '',
+			provider_subscription_id VARCHAR(255) NOT NULL DEFAULT '',
+			metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(account_id),
+			CHECK (status IN ('trialing', 'active', 'past_due', 'grace', 'suspended', 'canceled', 'incomplete'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_subscriptions_period_end ON subscriptions(current_period_end) WHERE current_period_end IS NOT NULL`,
+		`INSERT INTO plans (code, name, description, trial_days, is_public, sort_order)
+		VALUES
+			('free', 'Free', 'Plan gratuito interno para pruebas controladas.', 0, FALSE, 5),
+			('trial', 'Trial', 'Prueba comercial para cuentas nuevas.', 14, TRUE, 10),
+			('basic', 'Basic', 'Operación inicial con límites controlados.', 0, TRUE, 20),
+			('starter', 'Starter', 'Plan de entrada para equipos pequeños.', 14, TRUE, 30),
+			('pro', 'Pro', 'Plan para equipos en crecimiento.', 14, TRUE, 40),
+			('business', 'Business', 'Plan avanzado con más capacidad operativa.', 14, TRUE, 50),
+			('enterprise', 'Enterprise', 'Plan corporativo con límites amplios y soporte prioritario.', 0, TRUE, 60),
+			('internal', 'Internal', 'Plan administrativo para cuentas existentes o especiales.', 0, FALSE, 70)
+		ON CONFLICT (code) DO UPDATE SET
+			name = EXCLUDED.name,
+			description = EXCLUDED.description,
+			trial_days = EXCLUDED.trial_days,
+			is_public = EXCLUDED.is_public,
+			sort_order = EXCLUDED.sort_order,
+			updated_at = NOW()`,
+		`INSERT INTO plan_entitlements (plan_code, key, value_json)
+		VALUES
+			('free', 'max_users', '1'::jsonb), ('free', 'max_devices', '1'::jsonb), ('free', 'max_contacts', '500'::jsonb), ('free', 'kommo_sync', 'false'::jsonb), ('free', 'google_contacts', 'false'::jsonb),
+			('trial', 'max_users', '3'::jsonb), ('trial', 'max_devices', '2'::jsonb), ('trial', 'max_contacts', '2000'::jsonb), ('trial', 'kommo_sync', 'true'::jsonb), ('trial', 'google_contacts', 'true'::jsonb),
+			('basic', 'max_users', '3'::jsonb), ('basic', 'max_devices', '2'::jsonb), ('basic', 'max_contacts', '5000'::jsonb), ('basic', 'kommo_sync', 'true'::jsonb), ('basic', 'google_contacts', 'true'::jsonb),
+			('starter', 'max_users', '5'::jsonb), ('starter', 'max_devices', '3'::jsonb), ('starter', 'max_contacts', '10000'::jsonb), ('starter', 'kommo_sync', 'true'::jsonb), ('starter', 'google_contacts', 'true'::jsonb),
+			('pro', 'max_users', '12'::jsonb), ('pro', 'max_devices', '8'::jsonb), ('pro', 'max_contacts', '50000'::jsonb), ('pro', 'kommo_sync', 'true'::jsonb), ('pro', 'google_contacts', 'true'::jsonb), ('pro', 'broadcasts', 'true'::jsonb),
+			('business', 'max_users', '30'::jsonb), ('business', 'max_devices', '20'::jsonb), ('business', 'max_contacts', '150000'::jsonb), ('business', 'kommo_sync', 'true'::jsonb), ('business', 'google_contacts', 'true'::jsonb), ('business', 'broadcasts', 'true'::jsonb), ('business', 'automations', 'true'::jsonb),
+			('enterprise', 'max_users', '250'::jsonb), ('enterprise', 'max_devices', '100'::jsonb), ('enterprise', 'max_contacts', '1000000'::jsonb), ('enterprise', 'kommo_sync', 'true'::jsonb), ('enterprise', 'google_contacts', 'true'::jsonb), ('enterprise', 'broadcasts', 'true'::jsonb), ('enterprise', 'automations', 'true'::jsonb), ('enterprise', 'priority_support', 'true'::jsonb),
+			('internal', 'max_users', '1000'::jsonb), ('internal', 'max_devices', '1000'::jsonb), ('internal', 'max_contacts', '10000000'::jsonb), ('internal', 'kommo_sync', 'true'::jsonb), ('internal', 'google_contacts', 'true'::jsonb), ('internal', 'broadcasts', 'true'::jsonb), ('internal', 'automations', 'true'::jsonb)
+		ON CONFLICT (plan_code, key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = NOW()`,
+		`INSERT INTO subscriptions (account_id, plan_code, status, current_period_start, current_period_end, metadata)
+		SELECT
+			a.id,
+			CASE
+				WHEN COALESCE(NULLIF(a.plan, ''), 'enterprise') IN ('free', 'trial', 'basic', 'starter', 'pro', 'business', 'enterprise', 'internal') THEN COALESCE(NULLIF(a.plan, ''), 'enterprise')
+				ELSE 'enterprise'
+			END,
+			'active',
+			COALESCE(a.created_at, NOW()),
+			NOW() + INTERVAL '100 years',
+			jsonb_build_object('source', 'legacy_backfill', 'preserve_existing_integrations', true)
+		FROM accounts a
+		ON CONFLICT (account_id) DO NOTHING`,
 	}
 
 	for _, migration := range migrations {

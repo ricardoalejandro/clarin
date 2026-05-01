@@ -34,6 +34,86 @@ type Account struct {
 	DeviceCount     int `json:"device_count,omitempty"`
 	ChatCount       int `json:"chat_count,omitempty"`
 	GoogleSyncCount int `json:"google_sync_count,omitempty"`
+
+	// Subscription snapshot populated from subscriptions when available.
+	SubscriptionStatus string     `json:"subscription_status,omitempty"`
+	TrialEndsAt        *time.Time `json:"trial_ends_at,omitempty"`
+	CurrentPeriodEnd   *time.Time `json:"current_period_end,omitempty"`
+	GraceEndsAt        *time.Time `json:"grace_ends_at,omitempty"`
+}
+
+const (
+	SubscriptionStatusTrialing   = "trialing"
+	SubscriptionStatusActive     = "active"
+	SubscriptionStatusPastDue    = "past_due"
+	SubscriptionStatusGrace      = "grace"
+	SubscriptionStatusSuspended  = "suspended"
+	SubscriptionStatusCanceled   = "canceled"
+	SubscriptionStatusIncomplete = "incomplete"
+)
+
+// Plan defines the commercial package available to an account.
+type Plan struct {
+	Code         string                     `json:"code"`
+	Name         string                     `json:"name"`
+	Description  string                     `json:"description"`
+	TrialDays    int                        `json:"trial_days"`
+	IsPublic     bool                       `json:"is_public"`
+	SortOrder    int                        `json:"sort_order"`
+	Entitlements map[string]json.RawMessage `json:"entitlements,omitempty"`
+	CreatedAt    time.Time                  `json:"created_at"`
+	UpdatedAt    time.Time                  `json:"updated_at"`
+}
+
+// PlanEntitlement stores a typed JSON value for a plan limit or feature flag.
+type PlanEntitlement struct {
+	PlanCode  string          `json:"plan_code"`
+	Key       string          `json:"key"`
+	ValueJSON json.RawMessage `json:"value_json"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+// Subscription tracks the lifecycle of one account's SaaS access.
+type Subscription struct {
+	ID                     uuid.UUID       `json:"id"`
+	AccountID              uuid.UUID       `json:"account_id"`
+	PlanCode               string          `json:"plan_code"`
+	Status                 string          `json:"status"`
+	TrialStartedAt         *time.Time      `json:"trial_started_at,omitempty"`
+	TrialEndsAt            *time.Time      `json:"trial_ends_at,omitempty"`
+	CurrentPeriodStart     *time.Time      `json:"current_period_start,omitempty"`
+	CurrentPeriodEnd       *time.Time      `json:"current_period_end,omitempty"`
+	GraceEndsAt            *time.Time      `json:"grace_ends_at,omitempty"`
+	CanceledAt             *time.Time      `json:"canceled_at,omitempty"`
+	SuspendedAt            *time.Time      `json:"suspended_at,omitempty"`
+	BillingProvider        string          `json:"billing_provider,omitempty"`
+	ProviderCustomerID     string          `json:"provider_customer_id,omitempty"`
+	ProviderSubscriptionID string          `json:"provider_subscription_id,omitempty"`
+	Metadata               json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt              time.Time       `json:"created_at"`
+	UpdatedAt              time.Time       `json:"updated_at"`
+}
+
+// SubscriptionUsage is an operational snapshot used for billing/admin screens.
+type SubscriptionUsage struct {
+	Users    int `json:"users"`
+	Devices  int `json:"devices"`
+	Contacts int `json:"contacts"`
+	Leads    int `json:"leads"`
+	Chats    int `json:"chats"`
+}
+
+// SubscriptionOverview combines commercial state with current account usage.
+type SubscriptionOverview struct {
+	Subscription *Subscription     `json:"subscription"`
+	Plan         *Plan             `json:"plan"`
+	Usage        SubscriptionUsage `json:"usage"`
+	DaysLeft     *int              `json:"days_left,omitempty"`
+	Entitlements map[string]any    `json:"entitlements,omitempty"`
+	IsActive     bool              `json:"is_active"`
+	IsTrial      bool              `json:"is_trial"`
+	IsSuspended  bool              `json:"is_suspended"`
 }
 
 // User represents a user in the system

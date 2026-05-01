@@ -17,10 +17,24 @@ interface Account {
   is_active: boolean
   mcp_enabled: boolean
   kommo_enabled?: boolean
+  subscription_status?: string
+  trial_ends_at?: string | null
+  current_period_end?: string | null
+  grace_ends_at?: string | null
   user_count: number
   device_count: number
   chat_count: number
   created_at: string
+}
+
+interface Plan {
+  code: string
+  name: string
+  description: string
+  trial_days: number
+  is_public: boolean
+  sort_order: number
+  entitlements?: Record<string, unknown>
 }
 
 interface User {
@@ -170,6 +184,7 @@ export default function AdminPage() {
   const [tab, setTab] = useState<Tab>('accounts')
   const [accounts, setAccounts] = useState<Account[]>([])
   const [users, setUsers] = useState<User[]>([])
+  const [plans, setPlans] = useState<Plan[]>([])
   const [integrations, setIntegrations] = useState<IntegrationInstance[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -220,7 +235,8 @@ export default function AdminPage() {
 
   // Account form
   const [accountForm, setAccountForm] = useState({
-    name: '', slug: '', plan: 'basic', max_devices: 5, mcp_enabled: false
+    name: '', slug: '', plan: 'basic', max_devices: 5, mcp_enabled: false,
+    subscription_status: 'active', trial_ends_at: '', current_period_end: ''
   })
 
   // User form
@@ -259,6 +275,16 @@ export default function AdminPage() {
     }
   }
 
+  async function fetchPlans() {
+    try {
+      const res = await fetch('/api/admin/plans', { headers })
+      const data = await res.json()
+      if (data.success) setPlans(data.plans || [])
+    } catch (e) {
+      console.error('Failed to fetch plans:', e)
+    }
+  }
+
   async function fetchRoles() {
     try {
       const res = await fetch('/api/admin/roles', { headers })
@@ -281,7 +307,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     setLoading(true)
-    Promise.all([fetchAccounts(), fetchUsers(), fetchRoles(), fetchIntegrations()]).finally(() => setLoading(false))
+    Promise.all([fetchAccounts(), fetchUsers(), fetchPlans(), fetchRoles(), fetchIntegrations()]).finally(() => setLoading(false))
   }, [])
 
   useEffect(() => {
@@ -308,13 +334,22 @@ export default function AdminPage() {
   // Account CRUD
   function openCreateAccount() {
     setEditingAccount(null)
-    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, mcp_enabled: false })
+    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, mcp_enabled: false, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
     setShowAccountModal(true)
   }
 
   function openEditAccount(a: Account) {
     setEditingAccount(a)
-    setAccountForm({ name: a.name, slug: a.slug, plan: a.plan, max_devices: a.max_devices, mcp_enabled: a.mcp_enabled })
+    setAccountForm({
+      name: a.name,
+      slug: a.slug,
+      plan: a.plan,
+      max_devices: a.max_devices,
+      mcp_enabled: a.mcp_enabled,
+      subscription_status: a.subscription_status || 'active',
+      trial_ends_at: dateInputValue(a.trial_ends_at),
+      current_period_end: dateInputValue(a.current_period_end),
+    })
     setShowAccountModal(true)
   }
 
@@ -324,9 +359,35 @@ export default function AdminPage() {
       ? `/api/admin/accounts/${editingAccount.id}`
       : '/api/admin/accounts'
 
-    const res = await fetch(url, { method, headers, body: JSON.stringify(accountForm) })
+    const accountPayload = {
+      name: accountForm.name,
+      slug: accountForm.slug,
+      plan: accountForm.plan,
+      max_devices: accountForm.max_devices,
+      mcp_enabled: accountForm.mcp_enabled,
+    }
+
+    const res = await fetch(url, { method, headers, body: JSON.stringify(accountPayload) })
     const data = await res.json()
     if (data.success) {
+      const accountId = editingAccount?.id || data.account?.id
+      if (accountId) {
+        const subRes = await fetch(`/api/admin/accounts/${accountId}/subscription`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({
+            plan_code: accountForm.plan,
+            status: accountForm.subscription_status,
+            trial_ends_at: accountForm.trial_ends_at,
+            current_period_end: accountForm.current_period_end,
+          }),
+        })
+        const subData = await subRes.json()
+        if (!subData.success) {
+          alert(subData.error || 'La cuenta se guardó, pero no se pudo actualizar la suscripción')
+          return
+        }
+      }
       setShowAccountModal(false)
       fetchAccounts()
     } else {
@@ -737,9 +798,63 @@ export default function AdminPage() {
   }
 
   const planColors: Record<string, string> = {
+    free: 'bg-slate-100 text-slate-600',
+    trial: 'bg-amber-100 text-amber-700',
     basic: 'bg-gray-100 text-gray-700',
+    starter: 'bg-emerald-100 text-emerald-700',
     pro: 'bg-blue-100 text-blue-700',
+    business: 'bg-cyan-100 text-cyan-700',
     enterprise: 'bg-purple-100 text-purple-700',
+    internal: 'bg-slate-800 text-white',
+  }
+
+  const subscriptionColors: Record<string, string> = {
+    trialing: 'bg-amber-100 text-amber-700',
+    active: 'bg-emerald-100 text-emerald-700',
+    past_due: 'bg-orange-100 text-orange-700',
+    grace: 'bg-yellow-100 text-yellow-700',
+    suspended: 'bg-red-100 text-red-700',
+    canceled: 'bg-slate-100 text-slate-500',
+    incomplete: 'bg-gray-100 text-gray-600',
+  }
+
+  const subscriptionLabels: Record<string, string> = {
+    trialing: 'Prueba',
+    active: 'Activa',
+    past_due: 'Pendiente',
+    grace: 'Gracia',
+    suspended: 'Suspendida',
+    canceled: 'Cancelada',
+    incomplete: 'Incompleta',
+  }
+
+  const fallbackPlans: Plan[] = [
+    { code: 'basic', name: 'Basic', description: '', trial_days: 0, is_public: true, sort_order: 20 },
+    { code: 'pro', name: 'Pro', description: '', trial_days: 14, is_public: true, sort_order: 40 },
+    { code: 'enterprise', name: 'Enterprise', description: '', trial_days: 0, is_public: true, sort_order: 60 },
+  ]
+
+  const planOptions = plans.length > 0 ? plans : fallbackPlans
+
+  function dateInputValue(value?: string | null) {
+    if (!value) return ''
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return ''
+    return parsed.toISOString().slice(0, 10)
+  }
+
+  function daysUntil(value?: string | null) {
+    if (!value) return null
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return null
+    const diff = parsed.getTime() - Date.now()
+    return Math.max(0, Math.ceil(diff / 86400000))
+  }
+
+  function subscriptionDateFor(account: Account) {
+    if (account.subscription_status === 'trialing') return account.trial_ends_at
+    if (account.subscription_status === 'grace') return account.grace_ends_at
+    return account.current_period_end
   }
 
   const roleLabels: Record<string, string> = {
@@ -950,6 +1065,7 @@ export default function AdminPage() {
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-500">Cuenta</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-500">Plan</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-500">Suscripción</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Usuarios</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Dispositivos</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Chats</th>
@@ -960,7 +1076,7 @@ export default function AdminPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filteredAccounts.length === 0 ? (
-                <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">No se encontraron cuentas</td></tr>
+                <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">No se encontraron cuentas</td></tr>
               ) : filteredAccounts.map(a => (
                 <tr key={a.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3">
@@ -971,6 +1087,18 @@ export default function AdminPage() {
                     <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${planColors[a.plan] || 'bg-gray-100 text-gray-700'}`}>
                       {a.plan}
                     </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-col gap-1">
+                      <span className={`inline-flex w-fit px-2 py-0.5 rounded-full text-xs font-medium ${subscriptionColors[a.subscription_status || 'active'] || 'bg-gray-100 text-gray-700'}`}>
+                        {subscriptionLabels[a.subscription_status || 'active'] || a.subscription_status || 'Activa'}
+                      </span>
+                      {subscriptionDateFor(a) && (
+                        <span className="text-[11px] text-gray-400">
+                          {daysUntil(subscriptionDateFor(a))} días restantes
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-center text-gray-600">{a.user_count}</td>
                   <td className="px-4 py-3 text-center text-gray-600">{a.device_count}/{a.max_devices}</td>
@@ -1461,7 +1589,7 @@ export default function AdminPage() {
       {/* Account Modal */}
       {showAccountModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl">
             <div className="p-6 border-b border-gray-200">
               <h2 className="text-lg font-semibold text-gray-900">
                 {editingAccount ? 'Editar Cuenta' : 'Nueva Cuenta'}
@@ -1496,9 +1624,9 @@ export default function AdminPage() {
                     onChange={e => setAccountForm(f => ({ ...f, plan: e.target.value }))}
                     className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
                   >
-                    <option value="basic">Basic</option>
-                    <option value="pro">Pro</option>
-                    <option value="enterprise">Enterprise</option>
+                    {planOptions.map(plan => (
+                      <option key={plan.code} value={plan.code}>{plan.name}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -1509,6 +1637,41 @@ export default function AdminPage() {
                     onChange={e => setAccountForm(f => ({ ...f, max_devices: parseInt(e.target.value) || 1 }))}
                     className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
                     min={1}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Estado</label>
+                  <select
+                    value={accountForm.subscription_status}
+                    onChange={e => setAccountForm(f => ({ ...f, subscription_status: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  >
+                    <option value="active">Activa</option>
+                    <option value="trialing">Prueba</option>
+                    <option value="grace">Gracia</option>
+                    <option value="past_due">Pendiente</option>
+                    <option value="suspended">Suspendida</option>
+                    <option value="canceled">Cancelada</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Prueba hasta</label>
+                  <input
+                    type="date"
+                    value={accountForm.trial_ends_at}
+                    onChange={e => setAccountForm(f => ({ ...f, trial_ends_at: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Periodo hasta</label>
+                  <input
+                    type="date"
+                    value={accountForm.current_period_end}
+                    onChange={e => setAccountForm(f => ({ ...f, current_period_end: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
                   />
                 </div>
               </div>

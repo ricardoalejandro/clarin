@@ -24,7 +24,45 @@ interface Account {
   name: string
   slug: string
   plan: string
+  subscription_status?: string
+  trial_ends_at?: string | null
+  current_period_end?: string | null
+  grace_ends_at?: string | null
   created_at: string
+}
+
+const subscriptionLabels: Record<string, string> = {
+  trialing: 'Prueba',
+  active: 'Activa',
+  past_due: 'Pago pendiente',
+  grace: 'Periodo de gracia',
+  suspended: 'Suspendida',
+  canceled: 'Cancelada',
+  incomplete: 'Incompleta',
+}
+
+const subscriptionColors: Record<string, string> = {
+  trialing: 'bg-amber-100 text-amber-700',
+  active: 'bg-emerald-100 text-emerald-700',
+  past_due: 'bg-orange-100 text-orange-700',
+  grace: 'bg-yellow-100 text-yellow-700',
+  suspended: 'bg-red-100 text-red-700',
+  canceled: 'bg-slate-100 text-slate-500',
+  incomplete: 'bg-slate-100 text-slate-600',
+}
+
+function subscriptionDeadline(account?: Account | null) {
+  if (!account) return null
+  if (account.subscription_status === 'trialing') return account.trial_ends_at
+  if (account.subscription_status === 'grace') return account.grace_ends_at
+  return account.current_period_end
+}
+
+function daysUntil(value?: string | null) {
+  if (!value) return null
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return null
+  return Math.max(0, Math.ceil((parsed.getTime() - Date.now()) / 86400000))
 }
 
 interface UserProfile {
@@ -1928,13 +1966,27 @@ export default function SettingsPage() {
           {activeTab === 'account' && (
             <div className="space-y-6">
               <div className="bg-slate-50 p-4 rounded-xl">
-                <h3 className="text-sm font-medium text-slate-900">Información de la Cuenta</h3>
-                <div className="mt-2 space-y-1 text-xs text-slate-500">
-                  <p>Plan: <span className="font-medium text-slate-900">{account?.plan || 'free'}</span></p>
-                  <p>Slug: <span className="font-medium text-slate-900">{account?.slug || 'N/A'}</span></p>
-                  <p>Creada: <span className="font-medium text-slate-900">
-                    {account?.created_at ? new Date(account.created_at).toLocaleDateString('es') : 'N/A'}
-                  </span></p>
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+                  <div>
+                    <h3 className="text-sm font-medium text-slate-900">Información de la Cuenta</h3>
+                    <div className="mt-2 space-y-1 text-xs text-slate-500">
+                      <p>Plan: <span className="font-medium text-slate-900">{account?.plan || 'free'}</span></p>
+                      <p>Slug: <span className="font-medium text-slate-900">{account?.slug || 'N/A'}</span></p>
+                      <p>Creada: <span className="font-medium text-slate-900">
+                        {account?.created_at ? new Date(account.created_at).toLocaleDateString('es') : 'N/A'}
+                      </span></p>
+                    </div>
+                  </div>
+                  <div className="sm:text-right shrink-0">
+                    <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${subscriptionColors[account?.subscription_status || 'active'] || 'bg-slate-100 text-slate-600'}`}>
+                      {subscriptionLabels[account?.subscription_status || 'active'] || account?.subscription_status || 'Activa'}
+                    </span>
+                    {subscriptionDeadline(account) && (
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        {daysUntil(subscriptionDeadline(account))} días restantes
+                      </p>
+                    )}
+                  </div>
                 </div>
               </div>
 
