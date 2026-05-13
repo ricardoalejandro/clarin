@@ -137,6 +137,9 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	}
 
 	// Get user's account assignments
+	if err := s.repos.UserAccount.NormalizeForUser(ctx, user.ID); err != nil {
+		return "", "", nil, nil, fmt.Errorf("failed to normalize user accounts: %w", err)
+	}
 	userAccounts, _ := s.repos.UserAccount.GetByUserID(ctx, user.ID)
 
 	// Determine first/default account
@@ -605,14 +608,30 @@ func (s *AccountService) DeleteUser(ctx context.Context, userID uuid.UUID) error
 }
 
 func (s *AccountService) AssignUserAccount(ctx context.Context, ua *domain.UserAccount) error {
-	return s.repos.UserAccount.Assign(ctx, ua)
+	if err := s.repos.UserAccount.Assign(ctx, ua); err != nil {
+		return err
+	}
+	return s.repos.UserAccount.NormalizeForUser(ctx, ua.UserID)
 }
 
 func (s *AccountService) RemoveUserAccount(ctx context.Context, userID, accountID uuid.UUID) error {
-	return s.repos.UserAccount.Remove(ctx, userID, accountID)
+	count, err := s.repos.UserAccount.CountByUserID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if count <= 1 {
+		return fmt.Errorf("el usuario debe conservar al menos una cuenta asignada")
+	}
+	if err := s.repos.UserAccount.Remove(ctx, userID, accountID); err != nil {
+		return err
+	}
+	return s.repos.UserAccount.NormalizeForUser(ctx, userID)
 }
 
 func (s *AccountService) GetUserAccountAssignments(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
+	if err := s.repos.UserAccount.NormalizeForUser(ctx, userID); err != nil {
+		return nil, err
+	}
 	return s.repos.UserAccount.GetByUserID(ctx, userID)
 }
 

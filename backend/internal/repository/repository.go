@@ -55,6 +55,7 @@ type Repositories struct {
 	WhatsAppAPI        *WhatsAppAPIRepository
 	Bot                *BotRepository
 	Integration        *IntegrationRepository
+	MediaAsset         *MediaAssetRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -99,6 +100,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		WhatsAppAPI:        &WhatsAppAPIRepository{db: db},
 		Bot:                &BotRepository{db: db},
 		Integration:        &IntegrationRepository{db: db},
+		MediaAsset:         &MediaAssetRepository{db: db},
 	}
 }
 
@@ -319,6 +321,80 @@ func (r *UserAccountRepository) Exists(ctx context.Context, userID, accountID uu
 	return count > 0, err
 }
 
+func (r *UserAccountRepository) CountByUserID(ctx context.Context, userID uuid.UUID) (int, error) {
+	var count int
+	err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM user_accounts WHERE user_id = $1`, userID).Scan(&count)
+	return count, err
+}
+
+// NormalizeForUser keeps the legacy users.account_id in sync with the user's
+// default assignment and guarantees exactly one default account when possible.
+func (r *UserAccountRepository) NormalizeForUser(ctx context.Context, userID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO user_accounts (user_id, account_id, role, is_default)
+		SELECT id, account_id, COALESCE(NULLIF(role, ''), 'agent'), TRUE
+		FROM users
+		WHERE id = $1
+		  AND account_id IS NOT NULL
+		  AND NOT EXISTS (
+		  	SELECT 1 FROM user_accounts existing WHERE existing.user_id = users.id
+		  )
+		ON CONFLICT (user_id, account_id) DO NOTHING
+	`, userID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		WITH preferred AS (
+			SELECT ua.id
+			FROM user_accounts ua
+			JOIN users u ON u.id = ua.user_id
+			WHERE ua.user_id = $1
+			ORDER BY ua.is_default DESC, (ua.account_id = u.account_id) DESC, ua.created_at ASC, ua.id ASC
+			LIMIT 1
+		)
+		UPDATE user_accounts ua
+		SET is_default = (ua.id = (SELECT id FROM preferred))
+		WHERE ua.user_id = $1
+	`, userID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		WITH chosen AS (
+			SELECT ua.account_id, COALESCE(NULLIF(ua.role, ''), 'agent') AS role
+			FROM user_accounts ua
+			WHERE ua.user_id = $1 AND ua.is_default = TRUE
+			ORDER BY ua.created_at ASC, ua.id ASC
+			LIMIT 1
+		)
+		UPDATE users u
+		SET account_id = chosen.account_id,
+			role = chosen.role,
+			is_admin = CASE
+				WHEN u.is_super_admin THEN TRUE
+				ELSE chosen.role IN ('admin', 'super_admin')
+			END,
+			is_super_admin = CASE
+				WHEN chosen.role = 'super_admin' THEN TRUE
+				ELSE u.is_super_admin
+			END,
+			updated_at = NOW()
+		FROM chosen
+		WHERE u.id = $1
+	`, userID); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (r *UserAccountRepository) Assign(ctx context.Context, ua *domain.UserAccount) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -396,7 +472,7 @@ type AccountRepository struct {
 
 func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices, COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
 			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
@@ -413,7 +489,7 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 	var accounts []*domain.Account
 	for rows.Next() {
 		a := &domain.Account{}
-		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.StorageLimitBytes, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
 			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
 			return nil, err
@@ -426,7 +502,7 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Account, error) {
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices, COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
+		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices, COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
 			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
@@ -435,7 +511,7 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		FROM accounts a
 		LEFT JOIN subscriptions s ON s.account_id = a.id
 		WHERE a.id = $1
-	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
+	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.StorageLimitBytes, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
 		&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
 		&a.UserCount, &a.DeviceCount, &a.ChatCount,
 		&a.GoogleEmail, &a.GoogleContactGroupID, &a.GoogleConnectedAt, &a.GoogleSyncLimit)
@@ -447,17 +523,17 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 
 func (r *AccountRepository) Create(ctx context.Context, a *domain.Account) error {
 	return r.db.QueryRow(ctx, `
-		INSERT INTO accounts (name, slug, plan, max_devices, is_active)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO accounts (name, slug, plan, max_devices, storage_limit_bytes, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at, updated_at
-	`, a.Name, a.Slug, a.Plan, a.MaxDevices, a.IsActive).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
+	`, a.Name, a.Slug, a.Plan, a.MaxDevices, a.StorageLimitBytes, a.IsActive).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
 }
 
 func (r *AccountRepository) Update(ctx context.Context, a *domain.Account) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, mcp_enabled = $6, kommo_enabled = $7, updated_at = NOW()
+		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, storage_limit_bytes = $6, mcp_enabled = $7, kommo_enabled = $8, updated_at = NOW()
 		WHERE id = $1
-	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices, a.MCPEnabled, a.KommoEnabled)
+	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices, a.StorageLimitBytes, a.MCPEnabled, a.KommoEnabled)
 	return err
 }
 
@@ -923,21 +999,75 @@ type MessageRepository struct {
 	db *pgxpool.Pool
 }
 
+type MediaAssetUpsert struct {
+	AccountID   uuid.UUID
+	ContentHash string
+	ObjectKey   string
+	MediaType   string
+	ContentType string
+	Filename    string
+	SizeBytes   int64
+}
+
+type MediaAssetRepository struct {
+	db *pgxpool.Pool
+}
+
+func (r *MediaAssetRepository) GetByHash(ctx context.Context, accountID uuid.UUID, contentHash string) (*domain.MediaAsset, error) {
+	asset := &domain.MediaAsset{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, content_hash, object_key, media_type, content_type, filename, size_bytes, status, created_at, updated_at, deleted_at
+		FROM media_assets
+		WHERE account_id = $1 AND content_hash = $2 AND status = 'active'
+		LIMIT 1
+	`, accountID, contentHash).Scan(
+		&asset.ID, &asset.AccountID, &asset.ContentHash, &asset.ObjectKey, &asset.MediaType,
+		&asset.ContentType, &asset.Filename, &asset.SizeBytes, &asset.Status, &asset.CreatedAt, &asset.UpdatedAt, &asset.DeletedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return asset, nil
+}
+
+func (r *MediaAssetRepository) Upsert(ctx context.Context, input MediaAssetUpsert) (*domain.MediaAsset, error) {
+	asset := &domain.MediaAsset{}
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO media_assets (account_id, content_hash, object_key, media_type, content_type, filename, size_bytes, status, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW())
+		ON CONFLICT (account_id, content_hash) DO UPDATE
+		SET status = 'active',
+		    deleted_at = NULL,
+		    updated_at = NOW()
+		RETURNING id, account_id, content_hash, object_key, media_type, content_type, filename, size_bytes, status, created_at, updated_at, deleted_at
+	`, input.AccountID, input.ContentHash, input.ObjectKey, input.MediaType, input.ContentType, input.Filename, input.SizeBytes).Scan(
+		&asset.ID, &asset.AccountID, &asset.ContentHash, &asset.ObjectKey, &asset.MediaType,
+		&asset.ContentType, &asset.Filename, &asset.SizeBytes, &asset.Status, &asset.CreatedAt, &asset.UpdatedAt, &asset.DeletedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return asset, nil
+}
+
 func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) error {
 	return r.db.QueryRow(ctx, `
 		INSERT INTO messages (account_id, device_id, chat_id, message_id, from_jid, from_name, body,
-		                      message_type, media_url, media_mimetype, media_filename, media_size,
+		                      message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
 		                      is_from_me, is_read, status, timestamp,
 		                      quoted_message_id, quoted_body, quoted_sender,
 		                      poll_question, poll_max_selections,
 		                      is_revoked, is_view_once, latitude, longitude,
 		                      contact_name, contact_phone, contact_vcard, provider, template_name)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-		        $22, $23, $24, $25, $26, $27, $28, COALESCE(NULLIF($29::text, ''), 'whatsapp_web'), $30)
+		        $22, $23, $24, $25, $26, $27, $28, $29, COALESCE(NULLIF($30::text, ''), 'whatsapp_web'), $31)
 		ON CONFLICT (chat_id, message_id) DO NOTHING
 		RETURNING id, created_at
 	`, msg.AccountID, msg.DeviceID, msg.ChatID, msg.MessageID, msg.FromJID, msg.FromName, msg.Body,
-		msg.MessageType, msg.MediaURL, msg.MediaMimetype, msg.MediaFilename, msg.MediaSize,
+		msg.MessageType, msg.MediaURL, msg.MediaMimetype, msg.MediaFilename, msg.MediaSize, msg.MediaAssetID,
 		msg.IsFromMe, msg.IsRead, msg.Status, msg.Timestamp,
 		msg.QuotedMessageID, msg.QuotedBody, msg.QuotedSender,
 		msg.PollQuestion, msg.PollMaxSelections,
@@ -949,10 +1079,10 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*domain.Message, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
-		       message_type, media_url, media_mimetype, media_filename, media_size,
+		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
 		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender,
-		       COALESCE(is_revoked, false), COALESCE(is_view_once, false),
+		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
 		FROM (
 			SELECT * FROM messages WHERE chat_id = $1
@@ -971,10 +1101,10 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 		if err := rows.Scan(
 			&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
 			&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
-			&msg.MediaFilename, &msg.MediaSize, &msg.IsFromMe, &msg.IsRead, &msg.Status,
+			&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
 			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender,
-			&msg.IsRevoked, &msg.IsViewOnce,
+			&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
 			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard,
 		); err != nil {
 			return nil, err
@@ -989,20 +1119,20 @@ func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID
 	msg := &domain.Message{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
-		       message_type, media_url, media_mimetype, media_filename, media_size,
+		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
 		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender,
-		       COALESCE(is_revoked, false), COALESCE(is_view_once, false),
+		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
 		FROM messages WHERE chat_id = $1 AND message_id = $2
 		LIMIT 1
 	`, chatID, messageID).Scan(
 		&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
 		&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
-		&msg.MediaFilename, &msg.MediaSize, &msg.IsFromMe, &msg.IsRead, &msg.Status,
+		&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
 		&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 		&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender,
-		&msg.IsRevoked, &msg.IsViewOnce,
+		&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
 		&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard,
 	)
 	if err != nil {

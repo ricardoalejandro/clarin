@@ -156,11 +156,15 @@ services:
       args:
         NEXT_PUBLIC_API_URL: https://clarin.naperu.cloud
         NEXT_PUBLIC_WS_URL: wss://clarin.naperu.cloud
+        NEXT_PUBLIC_APP_URL: https://clarin.naperu.cloud
+        NEXT_PUBLIC_MARKETING_URL: https://landing.clarin.naperu.cloud
     container_name: clarin-frontend
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: https://clarin.naperu.cloud
       NEXT_PUBLIC_WS_URL: wss://clarin.naperu.cloud
+      NEXT_PUBLIC_APP_URL: https://clarin.naperu.cloud
+      NEXT_PUBLIC_MARKETING_URL: https://landing.clarin.naperu.cloud
     depends_on:
       - backend
     ports:
@@ -170,12 +174,30 @@ services:
       - dokploy-network
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.clarin-frontend.rule=Host(`clarin.naperu.cloud`)"
-      - "traefik.http.routers.clarin-frontend.entrypoints=websecure"
-      - "traefik.http.routers.clarin-frontend.tls=true"
-      - "traefik.http.routers.clarin-frontend.tls.certresolver=letsencrypt"
+      - "traefik.docker.network=dokploy-network"
+      - "traefik.http.middlewares.clarin-frontend-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.clarin-frontend-https.redirectscheme.permanent=true"
+      - "traefik.http.routers.clarin-frontend-app.rule=Host(`clarin.naperu.cloud`)"
+      - "traefik.http.routers.clarin-frontend-app.entrypoints=websecure"
+      - "traefik.http.routers.clarin-frontend-app.tls=true"
+      - "traefik.http.routers.clarin-frontend-app.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-frontend-app.service=clarin-frontend"
+      - "traefik.http.routers.clarin-frontend-app.priority=1"
+      - "traefik.http.routers.clarin-frontend-landing.rule=Host(`landing.clarin.naperu.cloud`)"
+      - "traefik.http.routers.clarin-frontend-landing.entrypoints=websecure"
+      - "traefik.http.routers.clarin-frontend-landing.tls=true"
+      - "traefik.http.routers.clarin-frontend-landing.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-frontend-landing.service=clarin-frontend"
+      - "traefik.http.routers.clarin-frontend-landing.priority=1"
+      - "traefik.http.routers.clarin-frontend-app-http.rule=Host(`clarin.naperu.cloud`)"
+      - "traefik.http.routers.clarin-frontend-app-http.entrypoints=web"
+      - "traefik.http.routers.clarin-frontend-app-http.middlewares=clarin-frontend-https"
+      - "traefik.http.routers.clarin-frontend-app-http.service=clarin-frontend"
+      - "traefik.http.routers.clarin-frontend-landing-http.rule=Host(`landing.clarin.naperu.cloud`)"
+      - "traefik.http.routers.clarin-frontend-landing-http.entrypoints=web"
+      - "traefik.http.routers.clarin-frontend-landing-http.middlewares=clarin-frontend-https"
+      - "traefik.http.routers.clarin-frontend-landing-http.service=clarin-frontend"
       - "traefik.http.services.clarin-frontend.loadbalancer.server.port=3000"
-      - "traefik.http.routers.clarin-frontend.priority=1"
 
 volumes:
   postgres_data:

@@ -451,7 +451,56 @@ func Migrate(db *pgxpool.Pool) error {
 		// Seed existing user-account relationships into junction table
 		`INSERT INTO user_accounts (user_id, account_id, role, is_default)
 		 SELECT id, account_id, role, TRUE FROM users
+		 WHERE NOT EXISTS (
+		 	SELECT 1 FROM user_accounts existing WHERE existing.user_id = users.id
+		 )
 		 ON CONFLICT (user_id, account_id) DO NOTHING`,
+		// Normalize user-account assignments so every user has one default and
+		// the legacy users.account_id mirrors that default assignment.
+		`INSERT INTO user_accounts (user_id, account_id, role, is_default)
+		 SELECT id, account_id, COALESCE(NULLIF(role, ''), 'agent'), TRUE
+		 FROM users
+		 WHERE account_id IS NOT NULL
+		   AND NOT EXISTS (
+		   	SELECT 1 FROM user_accounts existing WHERE existing.user_id = users.id
+		   )
+		 ON CONFLICT (user_id, account_id) DO NOTHING`,
+		`WITH ranked AS (
+			SELECT ua.id,
+			       ROW_NUMBER() OVER (
+			         PARTITION BY ua.user_id
+			         ORDER BY ua.is_default DESC, (ua.account_id = u.account_id) DESC, ua.created_at ASC, ua.id ASC
+			       ) AS rn
+			FROM user_accounts ua
+			JOIN users u ON u.id = ua.user_id
+		)
+		UPDATE user_accounts ua
+		SET is_default = (ranked.rn = 1)
+		FROM ranked
+		WHERE ua.id = ranked.id`,
+		`WITH chosen AS (
+			SELECT DISTINCT ON (ua.user_id)
+			       ua.user_id,
+			       ua.account_id,
+			       COALESCE(NULLIF(ua.role, ''), 'agent') AS role
+			FROM user_accounts ua
+			WHERE ua.is_default = TRUE
+			ORDER BY ua.user_id, ua.created_at ASC, ua.id ASC
+		)
+		UPDATE users u
+		SET account_id = chosen.account_id,
+		    role = chosen.role,
+		    is_admin = CASE
+		      WHEN u.is_super_admin THEN TRUE
+		      ELSE chosen.role IN ('admin', 'super_admin')
+		    END,
+		    is_super_admin = CASE
+		      WHEN chosen.role = 'super_admin' THEN TRUE
+		      ELSE u.is_super_admin
+		    END,
+		    updated_at = NOW()
+		FROM chosen
+		WHERE u.id = chosen.user_id`,
 
 		// Allow saving attendance notes without a status
 		`ALTER TABLE program_attendance ALTER COLUMN status DROP NOT NULL`,
@@ -699,6 +748,30 @@ func Migrate(db *pgxpool.Pool) error {
 		`INSERT INTO roles (name, description, is_system, permissions) VALUES
 			('Agente Básico', 'Acceso solo a chats y contactos', TRUE, ARRAY['chats','contacts','tags'])
 		 ON CONFLICT (name) DO NOTHING`,
+		// Backfill newly split module permissions only for the platform admin.
+		// Custom roles must preserve the exact permissions saved by admins.
+		`UPDATE roles SET permissions = array_append(permissions, 'automations') WHERE name = 'Administrador' AND NOT ('automations' = ANY(permissions))`,
+		`UPDATE roles SET permissions = array_append(permissions, 'bots') WHERE name = 'Administrador' AND NOT ('bots' = ANY(permissions))`,
+		`CREATE TABLE IF NOT EXISTS migration_flags (
+			key TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		// One-time repair for roles affected by the previous Leads backfill.
+		// After this marker is set, admins can grant these permissions normally.
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM migration_flags WHERE key = 'repair_role_permissions_leads_backfill_20260510') THEN
+				UPDATE roles
+				SET permissions = array_remove(array_remove(permissions, 'automations'), 'bots')
+				WHERE name <> 'Administrador'
+				  AND 'leads' = ANY(permissions)
+				  AND ('automations' = ANY(permissions) OR 'bots' = ANY(permissions));
+
+				INSERT INTO migration_flags (key)
+				VALUES ('repair_role_permissions_leads_backfill_20260510')
+				ON CONFLICT (key) DO NOTHING;
+			END IF;
+		END $$`,
 
 		// Event folders – Windows Explorer style folder organisation
 		`CREATE TABLE IF NOT EXISTS event_folders (
@@ -717,6 +790,8 @@ func Migrate(db *pgxpool.Pool) error {
 		// WhatsApp extended message fields
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_revoked BOOLEAN DEFAULT FALSE`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_view_once BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_deleted BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_deleted_at TIMESTAMPTZ`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS contact_name VARCHAR(255)`,
@@ -947,6 +1022,64 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Per-account Kommo integration flag
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS kommo_enabled BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS storage_limit_bytes BIGINT NOT NULL DEFAULT 0`,
+
+		// Storage inventory/audit. V1 uses this as a deletion/audit ledger while
+		// live usage is measured from MinIO to avoid drift on legacy objects.
+		`CREATE TABLE IF NOT EXISTS storage_objects (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			object_key TEXT NOT NULL,
+			media_type VARCHAR(50) NOT NULL DEFAULT 'other',
+			content_type VARCHAR(255) NOT NULL DEFAULT '',
+			filename TEXT NOT NULL DEFAULT '',
+			size_bytes BIGINT NOT NULL DEFAULT 0,
+			source VARCHAR(50) NOT NULL DEFAULT 'unknown',
+			status VARCHAR(50) NOT NULL DEFAULT 'active',
+			deleted_at TIMESTAMPTZ,
+			deleted_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(account_id, object_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_storage_objects_account_status ON storage_objects(account_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_storage_objects_account_type ON storage_objects(account_id, media_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_account_media_url ON messages(account_id, media_url) WHERE media_url IS NOT NULL AND media_url <> ''`,
+		`CREATE TABLE IF NOT EXISTS media_assets (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			content_hash TEXT NOT NULL,
+			object_key TEXT NOT NULL,
+			media_type VARCHAR(50) NOT NULL DEFAULT 'other',
+			content_type VARCHAR(255) NOT NULL DEFAULT '',
+			filename TEXT NOT NULL DEFAULT '',
+			size_bytes BIGINT NOT NULL DEFAULT 0,
+			status VARCHAR(50) NOT NULL DEFAULT 'active',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMPTZ,
+			UNIQUE(account_id, content_hash)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_media_assets_account_status ON media_assets(account_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_media_assets_object_key ON media_assets(object_key)`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_asset_id UUID REFERENCES media_assets(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_media_asset ON messages(media_asset_id) WHERE media_asset_id IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS storage_dedupe_jobs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			status VARCHAR(50) NOT NULL DEFAULT 'queued',
+			total_objects BIGINT NOT NULL DEFAULT 0,
+			processed_objects BIGINT NOT NULL DEFAULT 0,
+			duplicates_found BIGINT NOT NULL DEFAULT 0,
+			duplicates_deleted BIGINT NOT NULL DEFAULT 0,
+			bytes_freed BIGINT NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			started_at TIMESTAMPTZ,
+			completed_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_storage_dedupe_jobs_account_created ON storage_dedupe_jobs(account_id, created_at DESC)`,
 
 		// ─── Data Unification: Contact = source of truth ───────────────────
 

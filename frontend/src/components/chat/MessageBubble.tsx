@@ -186,6 +186,20 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
   }
 
   const renderMedia = () => {
+    if (message.media_deleted) {
+      return (
+        <div className="flex items-center gap-3 p-2 bg-slate-100 rounded-lg mb-1">
+          <div className="w-9 h-9 bg-slate-200 rounded-lg flex items-center justify-center shrink-0">
+            <FileText className="w-5 h-5 text-slate-500" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-slate-600">Archivo eliminado</p>
+            <p className="text-xs text-slate-400">Se liberó espacio de la cuenta</p>
+          </div>
+        </div>
+      )
+    }
+
     // View-once: show special indicator instead of actual media
     if (message.is_view_once) {
       return (

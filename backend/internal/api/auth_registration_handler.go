@@ -94,6 +94,7 @@ func (s *Server) setAuthCookies(c *fiber.Ctx, token string, refreshToken string)
 		HTTPOnly: true,
 		Secure:   s.cfg.IsProduction(),
 		SameSite: "Lax",
+		Path:     "/",
 	})
 	c.Cookie(&fiber.Cookie{
 		Name:     "refresh-token",

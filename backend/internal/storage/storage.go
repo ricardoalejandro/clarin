@@ -23,6 +23,12 @@ type Storage struct {
 	internalURL string // internal endpoint (for URL replacement)
 }
 
+type ObjectSummary struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+}
+
 // Config holds MinIO configuration
 type Config struct {
 	Endpoint  string
@@ -111,6 +117,17 @@ func (s *Storage) UploadFile(ctx context.Context, accountID uuid.UUID, folder, f
 	}
 
 	// Return the public URL
+	return fmt.Sprintf("%s/%s/%s", s.publicURL, s.bucket, objectKey), nil
+}
+
+// UploadObject stores a file using an already-built object key.
+func (s *Storage) UploadObject(ctx context.Context, objectKey string, data []byte, contentType string) (string, error) {
+	_, err := s.client.PutObject(ctx, s.bucket, objectKey, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
+		ContentType: contentType,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to upload object: %w", err)
+	}
 	return fmt.Sprintf("%s/%s/%s", s.publicURL, s.bucket, objectKey), nil
 }
 
@@ -206,6 +223,40 @@ func (s *Storage) CountPrefix(ctx context.Context, prefix string) (int64, error)
 		count++
 	}
 	return count, nil
+}
+
+func (s *Storage) ListPrefix(ctx context.Context, prefix string) ([]ObjectSummary, error) {
+	objects := make([]ObjectSummary, 0)
+	for object := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if object.Err != nil {
+			return objects, object.Err
+		}
+		if strings.HasSuffix(object.Key, "/") {
+			continue
+		}
+		objects = append(objects, ObjectSummary{
+			Key:          object.Key,
+			Size:         object.Size,
+			LastModified: object.LastModified,
+		})
+	}
+	return objects, nil
+}
+
+func (s *Storage) UsagePrefix(ctx context.Context, prefix string) (int64, int64, error) {
+	var size int64
+	var count int64
+	for object := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if object.Err != nil {
+			return size, count, object.Err
+		}
+		if strings.HasSuffix(object.Key, "/") {
+			continue
+		}
+		size += object.Size
+		count++
+	}
+	return size, count, nil
 }
 
 func (s *Storage) DeletePrefix(ctx context.Context, prefix string) (int64, error) {

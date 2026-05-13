@@ -1,280 +1,250 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useState } from 'react'
+import Link from 'next/link'
+import PublicPageScroll from '@/components/PublicPageScroll'
 import {
   ArrowRight,
   BarChart3,
   Check,
-  Eye,
-  EyeOff,
-  Lock,
+  ChevronDown,
   MessageSquare,
   ShieldCheck,
   Sparkles,
-  User,
   Users,
   Zap,
+  Star,
+  Phone,
+  Mail,
+  Lock,
+  Globe,
+  Menu,
+  X,
 } from 'lucide-react'
-import { tryRefreshToken } from '@/lib/api'
 
-interface PublicPlan {
-  code: string
-  name: string
-  description: string
-  trial_days: number
-  is_public: boolean
-  sort_order: number
-  entitlements?: Record<string, unknown>
-}
-
-const fallbackPlans: PublicPlan[] = [
-  { code: 'starter', name: 'Starter', description: 'Para equipos pequeños que empiezan con WhatsApp CRM.', trial_days: 14, is_public: true, sort_order: 30 },
-  { code: 'pro', name: 'Pro', description: 'Para equipos comerciales con más volumen y campañas.', trial_days: 14, is_public: true, sort_order: 40 },
-  { code: 'business', name: 'Business', description: 'Para operaciones con automatizaciones y más capacidad.', trial_days: 14, is_public: true, sort_order: 50 },
+const features = [
+  { icon: MessageSquare, title: 'Bandeja WhatsApp para equipos', desc: 'Atiende todos tus numeros desde una sola vista, con historial, etiquetas, responsables y mensajes en tiempo real.' },
+  { icon: Users, title: 'Contactos y leads ordenados', desc: 'Centraliza clientes, sincroniza fuentes externas y conserva el contexto comercial sin depender de hojas sueltas.' },
+  { icon: BarChart3, title: 'Pipeline comercial visible', desc: 'Mira cada oportunidad por etapa, filtra por etiquetas y detecta rapido que conversaciones necesitan seguimiento.' },
+  { icon: Zap, title: 'Campañas con control', desc: 'Prepara difusiones segmentadas, adjunta medios y mide estados de envio sin perder trazabilidad.' },
+  { icon: ShieldCheck, title: 'Cuentas aisladas', desc: 'Cada empresa trabaja separada por cuenta, usuarios y permisos para mantener la operacion bajo control.' },
+  { icon: Lock, title: 'Prueba sin friccion', desc: 'Empieza con 14 dias gratis, sin tarjeta de credito y con una configuracion pensada para equipos comerciales.' },
 ]
 
-const planDetails: Record<string, { price: string; badge?: string; features: string[] }> = {
-  starter: {
-    price: 'S/ 149',
-    features: ['3 dispositivos WhatsApp', '5 usuarios', '10 mil contactos', 'Kommo y Google Contacts'],
-  },
-  pro: {
-    price: 'S/ 299',
-    badge: 'Más elegido',
-    features: ['8 dispositivos WhatsApp', '12 usuarios', '50 mil contactos', 'Campañas de difusión'],
-  },
-  business: {
-    price: 'S/ 599',
-    features: ['20 dispositivos WhatsApp', '30 usuarios', '150 mil contactos', 'Automatizaciones avanzadas'],
-  },
-}
+const pricing = [
+  { code: 'starter', name: 'Starter', price: 'S/ 149', desc: 'Para equipos pequeños que empiezan.', features: ['3 dispositivos WhatsApp', '5 usuarios', '10 mil contactos', 'Kommo y Google Contacts'] },
+  { code: 'pro', name: 'Pro', price: 'S/ 299', desc: 'Para equipos comerciales con más volumen.', features: ['8 dispositivos WhatsApp', '12 usuarios', '50 mil contactos', 'Campañas de difusión'], popular: true },
+  { code: 'business', name: 'Business', price: 'S/ 599', desc: 'Para operaciones con automatizaciones.', features: ['20 dispositivos WhatsApp', '30 usuarios', '150 mil contactos', 'Automatizaciones avanzadas'] },
+]
 
-type AuthMode = 'signup' | 'login'
+const testimonials = [
+  { quote: 'Clarin nos ayudo a ordenar mas de 15 numeros de WhatsApp en una sola operacion. El pipeline cambio como seguimos leads.', author: 'Gerencia comercial', company: 'Retail multicanal' },
+  { quote: 'Pasamos de responder con hojas de Excel abiertas todo el dia a tener campañas, contactos y conversaciones en una sola pantalla.', author: 'Direccion de marketing', company: 'Agencia digital' },
+  { quote: 'La integracion con Kommo fue clave. Ahora el lead entra, se asigna y se atiende por WhatsApp sin perder informacion.', author: 'Direccion general', company: 'Consultora B2B' },
+]
+
+const stats = [
+  { value: '20+', label: 'dispositivos por cuenta' },
+  { value: '150k', label: 'contactos en planes altos' },
+  { value: '14 dias', label: 'de prueba gratis' },
+]
+
+const faqs = [
+  { q: '¿Necesito tarjeta de crédito para la prueba?', a: 'No. La prueba de 14 días es completamente gratuita y no requiere tarjeta de crédito para empezar.' },
+  { q: '¿Puedo conectar varios números de WhatsApp?', a: 'Sí. Dependiendo del plan, puedes conectar desde 3 hasta 20 dispositivos WhatsApp a una sola cuenta.' },
+  { q: '¿Qué pasa después de los 14 días de prueba?', a: 'Elige el plan que se ajuste a tu operación. Si decides no continuar, tu cuenta se pausa pero puedes exportar tus datos.' },
+  { q: '¿Es seguro compartir mi cuenta con mi equipo?', a: 'Totalmente. Cada usuario tiene permisos controlados y cada cuenta está aislada de otras empresas.' },
+  { q: '¿Se integra con otros CRMs?', a: 'Sí. Actualmente integramos con Kommo y Google Contacts. Estamos trabajando en más integraciones.' },
+]
+
+const APP_URL = (process.env.NEXT_PUBLIC_APP_URL || 'https://clarin.naperu.cloud').replace(/\/$/, '')
+const LOGIN_URL = `${APP_URL}/login`
+const SIGNUP_URL = `${APP_URL}/signup`
 
 export default function HomePage() {
-  const router = useRouter()
-  const [mode, setMode] = useState<AuthMode>('signup')
-  const [plans, setPlans] = useState<PublicPlan[]>([])
-  const [selectedPlan, setSelectedPlan] = useState('pro')
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [signupForm, setSignupForm] = useState({ account_name: '', display_name: '', email: '', password: '' })
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [checking, setChecking] = useState(true)
-
-  const visiblePlans = useMemo(() => {
-    const commercial = plans.filter(plan => ['starter', 'pro', 'business'].includes(plan.code))
-    return commercial.length > 0 ? commercial : fallbackPlans
-  }, [plans])
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [scrolled, setScrolled] = useState(false)
+  const [openFaq, setOpenFaq] = useState<number | null>(null)
 
   useEffect(() => {
-    const check = async () => {
-      const token = localStorage.getItem('token')
-      if (token) {
-        try {
-          const res = await fetch('/api/me', {
-            headers: { Authorization: `Bearer ${token}` },
-          })
-          if (res.ok) {
-            router.push('/dashboard')
-            return
-          }
-        } catch { /* ignore */ }
-        const refreshed = await tryRefreshToken()
-        if (refreshed) {
-          router.push('/dashboard')
-          return
-        }
-      }
-      setChecking(false)
-    }
-    check()
-  }, [router])
-
-  useEffect(() => {
-    const loadPlans = async () => {
-      try {
-        const res = await fetch('/api/public/plans')
-        const data = await res.json()
-        if (data.success && Array.isArray(data.plans)) {
-          setPlans(data.plans)
-        }
-      } catch { /* fallback plans keep page usable */ }
-    }
-    loadPlans()
+    const onScroll = () => setScrolled(window.scrollY > 10)
+    window.addEventListener('scroll', onScroll)
+    return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
-  useEffect(() => {
-    if (!visiblePlans.some(plan => plan.code === selectedPlan)) {
-      setSelectedPlan(visiblePlans[0]?.code || 'starter')
-    }
-  }, [selectedPlan, visiblePlans])
-
-  const handleLogin = async (event: React.FormEvent) => {
-    event.preventDefault()
-    setError('')
-    setLoading(true)
-
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-        credentials: 'include',
-      })
-      const data = await res.json()
-      if (!data.success) {
-        setError(data.error || 'Error al iniciar sesión')
-        return
-      }
-      localStorage.setItem('token', data.token)
-      router.push('/dashboard')
-      router.refresh()
-    } catch {
-      setError('Error de conexión')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleSignup = async (event: React.FormEvent) => {
-    event.preventDefault()
-    setError('')
-    setLoading(true)
-
-    try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...signupForm, plan_code: selectedPlan }),
-        credentials: 'include',
-      })
-      const data = await res.json()
-      if (!data.success) {
-        setError(data.error || 'No se pudo crear la cuenta')
-        return
-      }
-      if (data.token) {
-        localStorage.setItem('token', data.token)
-        router.push('/dashboard')
-        router.refresh()
-        return
-      }
-      setMode('login')
-      setUsername(signupForm.email)
-      setError('Cuenta creada. Inicia sesión para continuar.')
-    } catch {
-      setError('Error de conexión')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  if (checking) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-950">
-        <div className="animate-spin rounded-full h-8 w-8 border-2 border-emerald-200/30 border-t-emerald-400" />
-      </div>
-    )
-  }
-
   return (
-    <main className="min-h-screen bg-slate-950 text-white overflow-x-hidden">
-      <header className="border-b border-slate-800/80 bg-slate-950/95 backdrop-blur sticky top-0 z-30">
+    <main className="min-h-screen bg-white text-slate-900">
+      <PublicPageScroll />
+      {/* Header */}
+      <header
+        className={`sticky top-0 z-40 transition-all duration-300 ${
+          scrolled ? 'border-b border-slate-200 bg-white/90 backdrop-blur shadow-sm' : 'bg-transparent'
+        }`}
+      >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 bg-emerald-500 rounded-lg flex items-center justify-center shadow-lg shadow-emerald-500/20">
+          <Link href="/" className="flex items-center gap-2.5">
+            <div className="w-9 h-9 bg-emerald-600 rounded-lg flex items-center justify-center shadow-sm">
               <MessageSquare className="w-5 h-5 text-white" />
             </div>
-            <span className="font-bold text-lg tracking-tight">Clarin</span>
-          </div>
-          <nav className="hidden md:flex items-center gap-6 text-sm text-slate-400">
-            <a href="#planes" className="hover:text-white transition-colors">Planes</a>
-            <a href="#crm" className="hover:text-white transition-colors">CRM WhatsApp</a>
-            <button onClick={() => setMode('login')} className="hover:text-white transition-colors">Ingresar</button>
+            <span className="font-bold text-lg tracking-tight text-slate-900">Clarin</span>
+          </Link>
+
+          <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-slate-600">
+            <a href="#funciones" className="hover:text-emerald-600 transition-colors">Funciones</a>
+            <a href="#precios" className="hover:text-emerald-600 transition-colors">Precios</a>
+            <a href="#faq" className="hover:text-emerald-600 transition-colors">Preguntas</a>
           </nav>
-          <button
-            onClick={() => setMode('signup')}
-            className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 px-4 py-2 rounded-lg text-sm font-semibold transition-all duration-200 shadow-lg shadow-emerald-500/20"
-          >
-            Empezar prueba
+
+          <div className="hidden md:flex items-center gap-3">
+            <Link
+              href={LOGIN_URL}
+              className="text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors px-4 py-2"
+            >
+              Ingresar
+            </Link>
+            <Link
+              href={SIGNUP_URL}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors shadow-sm"
+            >
+              Empezar prueba
+            </Link>
+          </div>
+
+          <button className="md:hidden p-2 text-slate-600" onClick={() => setMobileMenuOpen((v) => !v)}>
+            {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
           </button>
         </div>
+
+        {mobileMenuOpen && (
+          <div className="md:hidden border-t border-slate-200 bg-white px-4 py-4 space-y-3">
+            <a href="#funciones" onClick={() => setMobileMenuOpen(false)} className="block text-sm font-medium text-slate-600 hover:text-emerald-600">Funciones</a>
+            <a href="#precios" onClick={() => setMobileMenuOpen(false)} className="block text-sm font-medium text-slate-600 hover:text-emerald-600">Precios</a>
+            <a href="#faq" onClick={() => setMobileMenuOpen(false)} className="block text-sm font-medium text-slate-600 hover:text-emerald-600">Preguntas</a>
+            <div className="pt-2 flex flex-col gap-2">
+              <Link href={LOGIN_URL} className="text-center text-sm font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-xl py-2.5">Ingresar</Link>
+              <Link href={SIGNUP_URL} className="text-center bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 rounded-xl text-sm font-semibold transition-colors">Empezar prueba</Link>
+            </div>
+          </div>
+        )}
       </header>
 
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 py-10 lg:py-16 grid lg:grid-cols-[1.1fr_0.9fr] gap-8 lg:gap-12 items-start">
-        <div className="space-y-8">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-400/20 bg-emerald-400/10 text-emerald-300 text-xs font-medium">
-            <Sparkles className="w-3.5 h-3.5" />
-            SaaS CRM para equipos que venden por WhatsApp
-          </div>
-
-          <div className="space-y-5">
-            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight leading-[1.05] max-w-4xl">
-              Convierte tus chats de WhatsApp en una operación comercial ordenada.
-            </h1>
-            <p className="text-base sm:text-lg text-slate-300 max-w-2xl leading-relaxed">
-              Centraliza conversaciones, contactos, leads, campañas, eventos y automatizaciones en un solo CRM listo para crecer por cuentas y planes.
-            </p>
-          </div>
-
-          <div className="grid sm:grid-cols-3 gap-3 max-w-3xl">
-            {[
-              { icon: MessageSquare, label: 'Chats multi-dispositivo', value: 'WhatsApp Web y API' },
-              { icon: BarChart3, label: 'Pipeline comercial', value: 'Leads y etapas' },
-              { icon: Zap, label: 'Automatización', value: 'Campañas y flujos' },
-            ].map(item => (
-              <div key={item.label} className="border border-slate-800 bg-slate-900/70 rounded-xl p-4 transition-all duration-200 hover:border-emerald-500/40">
-                <item.icon className="w-5 h-5 text-emerald-400 mb-3" />
-                <p className="text-sm font-semibold text-slate-100">{item.label}</p>
-                <p className="text-xs text-slate-500 mt-1">{item.value}</p>
-              </div>
-            ))}
-          </div>
-
-          <div id="crm" className="rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl shadow-black/30 overflow-hidden">
-            <div className="h-11 border-b border-slate-800 flex items-center justify-between px-4">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-red-400" />
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-              </div>
-              <span className="text-xs text-slate-500">Panel Clarin</span>
+      {/* Hero */}
+      <section className="relative overflow-hidden">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.16),_transparent_34%),linear-gradient(to_bottom,_#ecfdf5_0%,_#ffffff_48%,_#ffffff_100%)] pointer-events-none" />
+        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 pt-14 pb-20 lg:pt-24 lg:pb-28">
+          <div className="text-center max-w-3xl mx-auto">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50/80 text-emerald-700 text-xs font-semibold mb-6">
+              <Sparkles className="w-3.5 h-3.5" />
+              CRM para equipos que venden por WhatsApp
             </div>
-            <div className="grid md:grid-cols-[220px_1fr] min-h-[320px]">
-              <aside className="hidden md:block border-r border-slate-800 p-4 space-y-3">
-                {['Chats', 'Leads', 'Campañas', 'Eventos', 'Ajustes'].map((item, index) => (
-                  <div key={item} className={`h-9 rounded-lg flex items-center px-3 text-sm ${index === 0 ? 'bg-emerald-500/15 text-emerald-300' : 'text-slate-500 bg-slate-950/40'}`}>
-                    {item}
-                  </div>
-                ))}
-              </aside>
-              <div className="p-4 sm:p-5 space-y-4">
-                <div className="grid sm:grid-cols-3 gap-3">
-                  {['Leads activos', 'Mensajes nuevos', 'Campañas'].map((item, index) => (
-                    <div key={item} className="bg-slate-950 border border-slate-800 rounded-xl p-4">
-                      <p className="text-xs text-slate-500">{item}</p>
-                      <p className="text-2xl font-bold mt-2 text-slate-100">{[148, 37, 12][index]}</p>
+
+            <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight leading-[1.08] text-slate-900">
+              Vende por WhatsApp sin perder{' '}
+              <span className="text-emerald-600">leads, contexto ni control</span>
+            </h1>
+
+            <p className="mt-6 text-lg sm:text-xl text-slate-600 max-w-2xl mx-auto leading-relaxed">
+              Clarin junta conversaciones, contactos, campañas, pipelines y tareas para que tu equipo responda mas rapido y cierre mejor.
+            </p>
+
+            <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
+              <Link
+                href={SIGNUP_URL}
+                className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-4 rounded-xl font-bold text-base transition-colors shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
+              >
+                Empezar prueba gratis <ArrowRight className="w-5 h-5" />
+              </Link>
+              <a
+                href="#funciones"
+                className="w-full sm:w-auto bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 px-8 py-4 rounded-xl font-semibold text-base transition-colors flex items-center justify-center"
+              >
+                Conocer funciones
+              </a>
+            </div>
+
+            <p className="mt-4 text-sm text-slate-400">Sin tarjeta de crédito · 14 días gratis · Cancela cuando quieras</p>
+
+            <div className="mt-10 grid grid-cols-3 gap-3 max-w-xl mx-auto">
+              {stats.map((stat) => (
+                <div key={stat.label} className="rounded-xl border border-emerald-100 bg-white/75 px-3 py-4 shadow-sm">
+                  <p className="text-2xl font-extrabold text-slate-900 tracking-tight">{stat.value}</p>
+                  <p className="mt-1 text-xs font-medium text-slate-500">{stat.label}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Product mockup */}
+          <div className="mt-14 lg:mt-20 max-w-5xl mx-auto">
+            <div className="relative rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-emerald-900/10 overflow-hidden">
+              <div className="bg-slate-50 border-b border-slate-200 px-4 py-3 flex items-center gap-2">
+                <div className="flex gap-1.5">
+                  <div className="w-3 h-3 rounded-full bg-red-400" />
+                  <div className="w-3 h-3 rounded-full bg-amber-400" />
+                  <div className="w-3 h-3 rounded-full bg-emerald-400" />
+                </div>
+                <div className="ml-4 flex-1 max-w-md">
+                  <div className="bg-white border border-slate-200 rounded-md px-3 py-1 text-xs text-slate-400">app.clarin.io/dashboard</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-12 min-h-[360px]">
+                <div className="col-span-3 border-r border-slate-100 bg-slate-50/70 p-4 space-y-3 hidden sm:block">
+                  <div className="h-9 bg-emerald-600 rounded-lg px-3 flex items-center text-xs font-bold text-white">Chats activos</div>
+                  {['Maria Lopez', 'Carlos Vera', 'Inmobiliaria Sur', 'Lead Iquitos', 'Nuevo contacto'].map((name, i) => (
+                    <div key={name} className="flex items-center gap-2 rounded-lg bg-white border border-slate-100 p-2">
+                      <div className={`w-8 h-8 rounded-full ${i === 0 ? 'bg-emerald-100' : 'bg-slate-200'}`} />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-xs font-semibold text-slate-700">{name}</p>
+                        <p className="truncate text-[11px] text-slate-400">{i === 0 ? 'Quiere una demo hoy' : 'Mensaje pendiente'}</p>
+                      </div>
                     </div>
                   ))}
                 </div>
-                <div className="grid sm:grid-cols-2 gap-3">
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
-                    <p className="text-sm font-semibold text-slate-200">Conversación prioritaria</p>
-                    <div className="space-y-2">
-                      <div className="w-4/5 bg-slate-800 rounded-lg px-3 py-2 text-xs text-slate-300">Hola, quiero información del programa.</div>
-                      <div className="ml-auto w-4/5 bg-emerald-500 text-slate-950 rounded-lg px-3 py-2 text-xs font-medium">Te envío los detalles y opciones de pago.</div>
+                <div className="col-span-12 sm:col-span-9 p-4 sm:p-6">
+                  <div className="flex items-center justify-between mb-6">
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Panel comercial</p>
+                      <p className="text-xs text-slate-500">Seguimiento de conversaciones y oportunidades</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <div className="h-8 px-3 bg-emerald-100 text-emerald-700 rounded-lg text-xs font-bold flex items-center">+18%</div>
+                      <div className="h-8 px-3 bg-slate-100 text-slate-500 rounded-lg text-xs font-bold flex items-center">Hoy</div>
                     </div>
                   </div>
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
-                    <p className="text-sm font-semibold text-slate-200">Pipeline</p>
-                    {['Nuevo', 'Contactado', 'Cierre'].map((item, index) => (
-                      <div key={item} className="flex items-center gap-3">
-                        <div className="h-2 rounded-full bg-emerald-400" style={{ width: `${80 - index * 18}%` }} />
-                        <span className="text-xs text-slate-500 w-20">{item}</span>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+                    {[
+                      ['Leads nuevos', '48', '12 sin asignar'],
+                      ['Respuestas', '92%', 'promedio del dia'],
+                      ['Campanas', '3', 'en ejecucion'],
+                    ].map(([label, value, hint]) => (
+                      <div key={label} className="border border-slate-100 rounded-xl p-4 bg-white shadow-sm">
+                        <p className="text-xs font-medium text-slate-400">{label}</p>
+                        <p className="mt-1 text-2xl font-extrabold text-slate-900">{value}</p>
+                        <p className="mt-1 text-[11px] text-slate-400">{hint}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="border border-slate-100 rounded-xl overflow-hidden">
+                    <div className="grid grid-cols-4 bg-slate-50 p-3 border-b border-slate-100 text-xs font-semibold text-slate-400">
+                      <span>Contacto</span>
+                      <span>Estado</span>
+                      <span>Asignado</span>
+                      <span>Último mensaje</span>
+                    </div>
+                    {[
+                      ['Maria Lopez', 'Caliente', 'Ana', 'Puede hoy a las 4pm'],
+                      ['Carlos Vera', 'Propuesta', 'Luis', 'Pidio cotizacion'],
+                      ['Lead Iquitos', 'Seguimiento', 'Rosa', 'Enviar recordatorio'],
+                      ['Empresa Norte', 'Nuevo', 'Sin asignar', 'Pregunta por plan Pro'],
+                    ].map(([contact, status, owner, msg]) => (
+                      <div key={contact} className="grid grid-cols-4 p-3 items-center border-b border-slate-50 last:border-0 text-xs">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="w-7 h-7 rounded-full bg-slate-200 shrink-0" />
+                          <span className="truncate font-semibold text-slate-700">{contact}</span>
+                        </div>
+                        <span className="w-fit rounded-full bg-emerald-50 px-2 py-1 font-semibold text-emerald-700">{status}</span>
+                        <span className="text-slate-500">{owner}</span>
+                        <span className="truncate text-slate-500">{msg}</span>
                       </div>
                     ))}
                   </div>
@@ -283,186 +253,225 @@ export default function HomePage() {
             </div>
           </div>
         </div>
+      </section>
 
-        <aside className="lg:sticky lg:top-24 space-y-4">
-          <div className="border border-slate-800 bg-slate-900 rounded-2xl shadow-2xl shadow-black/30 overflow-hidden">
-            <div className="grid grid-cols-2 p-1 bg-slate-950/70 border-b border-slate-800">
-              <button
-                onClick={() => { setMode('signup'); setError('') }}
-                className={`py-2.5 rounded-xl text-sm font-semibold transition-all ${mode === 'signup' ? 'bg-emerald-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-              >
-                Suscribirme
-              </button>
-              <button
-                onClick={() => { setMode('login'); setError('') }}
-                className={`py-2.5 rounded-xl text-sm font-semibold transition-all ${mode === 'login' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-white'}`}
-              >
-                Ingresar
-              </button>
-            </div>
+      {/* Social proof */}
+      <section className="py-10 border-y border-slate-100 bg-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 text-center">
+          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-6">Equipos de todo tipo confían en Clarin</p>
+          <div className="flex flex-wrap items-center justify-center gap-x-10 gap-y-4 opacity-40 grayscale">
+            {['Retail', 'Agencias', 'Consultoras', 'E-commerce', 'Inmobiliarias', 'Salud'].map((name) => (
+              <span key={name} className="text-lg font-bold text-slate-700 tracking-tight">{name}</span>
+            ))}
+          </div>
+        </div>
+      </section>
 
-            <div className="p-5 sm:p-6">
-              {mode === 'signup' ? (
-                <form onSubmit={handleSignup} className="space-y-4">
-                  <div>
-                    <p className="text-xl font-bold text-white">Crea tu cuenta SaaS</p>
-                    <p className="text-sm text-slate-400 mt-1">Prueba gratis y configura tu operación en minutos.</p>
-                  </div>
-
-                  {error && <div className="bg-red-500/10 border border-red-500/20 text-red-300 px-4 py-3 rounded-xl text-sm">{error}</div>}
-
-                  <div className="grid sm:grid-cols-2 gap-3">
-                    <Field label="Empresa" value={signupForm.account_name} onChange={value => setSignupForm(form => ({ ...form, account_name: value }))} placeholder="Mi empresa" />
-                    <Field label="Tu nombre" value={signupForm.display_name} onChange={value => setSignupForm(form => ({ ...form, display_name: value }))} placeholder="Nombre completo" />
-                  </div>
-                  <Field label="Correo" type="email" value={signupForm.email} onChange={value => setSignupForm(form => ({ ...form, email: value }))} placeholder="ventas@empresa.com" />
-                  <PasswordField value={signupForm.password} show={showPassword} onShowChange={setShowPassword} onChange={value => setSignupForm(form => ({ ...form, password: value }))} />
-
-                  <div id="planes" className="space-y-2">
-                    <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider">Plan de prueba</label>
-                    <div className="grid gap-2">
-                      {visiblePlans.map(plan => {
-                        const details = planDetails[plan.code] || { price: 'A medida', features: ['Configuración personalizada'] }
-                        const active = selectedPlan === plan.code
-                        return (
-                          <button
-                            key={plan.code}
-                            type="button"
-                            onClick={() => setSelectedPlan(plan.code)}
-                            className={`text-left border rounded-xl p-3 transition-all duration-200 ${active ? 'border-emerald-400 bg-emerald-400/10' : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'}`}
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <span className="font-semibold text-slate-100">{plan.name}</span>
-                                  {details.badge && <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-400/15 text-emerald-300">{details.badge}</span>}
-                                </div>
-                                <p className="text-xs text-slate-500 mt-1">{plan.description}</p>
-                              </div>
-                              <div className="text-right shrink-0">
-                                <p className="text-sm font-bold text-white">{details.price}</p>
-                                <p className="text-[11px] text-slate-500">mensual</p>
-                              </div>
-                            </div>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 py-3 rounded-xl font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20"
-                    disabled={loading}
-                  >
-                    {loading ? <div className="animate-spin rounded-full h-5 w-5 border-2 border-slate-950/20 border-t-slate-950" /> : <>Crear cuenta y empezar <ArrowRight className="w-4 h-4" /></>}
-                  </button>
-                </form>
-              ) : (
-                <form onSubmit={handleLogin} className="space-y-5">
-                  <div>
-                    <p className="text-xl font-bold text-white">Bienvenido de vuelta</p>
-                    <p className="text-sm text-slate-400 mt-1">Ingresa a tu dashboard de Clarin.</p>
-                  </div>
-                  {error && <div className="bg-red-500/10 border border-red-500/20 text-red-300 px-4 py-3 rounded-xl text-sm">{error}</div>}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">Usuario</label>
-                    <div className="relative">
-                      <User className="absolute left-3.5 top-1/2 -translate-y-1/2 w-[18px] h-[18px] text-slate-500" />
-                      <input
-                        type="text"
-                        value={username}
-                        onChange={(event) => setUsername(event.target.value)}
-                        placeholder="usuario o correo"
-                        className="w-full pl-11 pr-4 py-3 bg-slate-950 border border-slate-700 text-white placeholder:text-slate-600 rounded-xl focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none transition-all text-sm"
-                        required
-                        disabled={loading}
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">Contraseña</label>
-                    <div className="relative">
-                      <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-[18px] h-[18px] text-slate-500" />
-                      <input
-                        type={showPassword ? 'text' : 'password'}
-                        value={password}
-                        onChange={(event) => setPassword(event.target.value)}
-                        placeholder="tu contraseña"
-                        className="w-full pl-11 pr-11 py-3 bg-slate-950 border border-slate-700 text-white placeholder:text-slate-600 rounded-xl focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none transition-all text-sm"
-                        required
-                        disabled={loading}
-                      />
-                      <button type="button" onClick={() => setShowPassword(value => !value)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors" title={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}>
-                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                    </div>
-                  </div>
-                  <button
-                    type="submit"
-                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 py-3 rounded-xl font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20"
-                    disabled={loading}
-                  >
-                    {loading ? <div className="animate-spin rounded-full h-5 w-5 border-2 border-slate-950/20 border-t-slate-950" /> : <>Iniciar sesión <ArrowRight className="w-4 h-4" /></>}
-                  </button>
-                </form>
-              )}
-            </div>
+      {/* Features */}
+      <section id="funciones" className="py-20 lg:py-28 bg-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6">
+          <div className="text-center max-w-2xl mx-auto mb-16">
+            <h2 className="text-3xl sm:text-4xl font-bold text-slate-900">Todo lo que necesitas para vender más</h2>
+            <p className="mt-4 text-lg text-slate-600">Una plataforma completa que reemplaza las hojas de cálculo y los grupos de WhatsApp desordenados.</p>
           </div>
 
-          <div className="grid grid-cols-3 gap-3 text-center">
-            {[
-              { icon: ShieldCheck, label: 'Multi-tenant' },
-              { icon: Users, label: 'Equipos' },
-              { icon: Check, label: '14 días' },
-            ].map(item => (
-              <div key={item.label} className="border border-slate-800 bg-slate-900/70 rounded-xl p-3">
-                <item.icon className="w-4 h-4 text-emerald-400 mx-auto" />
-                <p className="text-[11px] text-slate-400 mt-2">{item.label}</p>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-8">
+            {features.map((item) => (
+              <div key={item.title} className="group rounded-2xl p-6 transition-all hover:bg-emerald-50/40 border border-transparent hover:border-emerald-100">
+                <div className="w-12 h-12 rounded-xl bg-emerald-50 flex items-center justify-center mb-5 group-hover:bg-emerald-100 transition-colors">
+                  <item.icon className="w-6 h-6 text-emerald-600" />
+                </div>
+                <h3 className="font-semibold text-slate-900 text-lg mb-2">{item.title}</h3>
+                <p className="text-slate-600 leading-relaxed">{item.desc}</p>
               </div>
             ))}
           </div>
-        </aside>
+        </div>
       </section>
+
+      {/* Testimonials */}
+      <section className="py-20 lg:py-28 bg-slate-50/50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6">
+          <div className="text-center max-w-2xl mx-auto mb-16">
+            <h2 className="text-3xl sm:text-4xl font-bold text-slate-900">Lo que dicen nuestros clientes</h2>
+            <p className="mt-4 text-lg text-slate-600">Empresas que ya organizaron su operación con Clarin.</p>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-8">
+            {testimonials.map((t, i) => (
+              <div key={i} className="bg-white rounded-2xl p-8 border border-slate-100 shadow-sm">
+                <div className="flex gap-1 mb-4">
+                  {Array.from({ length: 5 }).map((_, j) => (
+                    <Star key={j} className="w-4 h-4 text-amber-400 fill-amber-400" />
+                  ))}
+                </div>
+                <p className="text-slate-700 leading-relaxed mb-6">&ldquo;{t.quote}&rdquo;</p>
+                <div>
+                  <p className="font-semibold text-slate-900 text-sm">{t.author}</p>
+                  <p className="text-slate-500 text-sm">{t.company}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Pricing */}
+      <section id="precios" className="py-20 lg:py-28 bg-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6">
+          <div className="text-center max-w-2xl mx-auto mb-16">
+            <h2 className="text-3xl sm:text-4xl font-bold text-slate-900">Planes simples y transparentes</h2>
+            <p className="mt-4 text-lg text-slate-600">Empieza gratis por 14 días. Escoge el plan que se ajuste al tamaño de tu operación.</p>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+            {pricing.map((plan) => (
+              <div
+                key={plan.code}
+                className={`relative rounded-2xl border p-8 flex flex-col transition-all hover:shadow-lg ${
+                  plan.popular ? 'border-emerald-500 bg-white shadow-md' : 'border-slate-200 bg-white hover:border-slate-300'
+                }`}
+              >
+                {plan.popular && (
+                  <div className="absolute -top-4 left-1/2 -translate-x-1/2">
+                    <span className="bg-emerald-600 text-white text-xs font-bold px-4 py-1.5 rounded-full shadow-sm">Más elegido</span>
+                  </div>
+                )}
+                <div className="mb-6">
+                  <h3 className="text-lg font-bold text-slate-900">{plan.name}</h3>
+                  <p className="text-sm text-slate-500 mt-1">{plan.desc}</p>
+                </div>
+                <div className="mb-8">
+                  <span className="text-4xl font-extrabold text-slate-900">{plan.price}</span>
+                  <span className="text-slate-500 text-sm">/mes</span>
+                </div>
+                <ul className="space-y-4 mb-8 flex-1">
+                  {plan.features.map((f) => (
+                    <li key={f} className="flex items-start gap-3 text-sm text-slate-600">
+                      <Check className="w-5 h-5 text-emerald-600 shrink-0" />
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+                <Link
+                  href={SIGNUP_URL}
+                  className={`w-full text-center py-3 rounded-xl text-sm font-bold transition-colors ${
+                    plan.popular ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm' : 'bg-white border border-slate-300 hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  Elegir {plan.name}
+                </Link>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* FAQ */}
+      <section id="faq" className="py-20 lg:py-28 bg-slate-50/50">
+        <div className="max-w-3xl mx-auto px-4 sm:px-6">
+          <div className="text-center mb-16">
+            <h2 className="text-3xl sm:text-4xl font-bold text-slate-900">Preguntas frecuentes</h2>
+            <p className="mt-4 text-lg text-slate-600">Todo lo que necesitas saber antes de empezar.</p>
+          </div>
+
+          <div className="space-y-4">
+            {faqs.map((faq, i) => (
+              <div key={i} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                <button
+                  onClick={() => setOpenFaq(openFaq === i ? null : i)}
+                  className="w-full flex items-center justify-between p-5 text-left"
+                >
+                  <span className="font-semibold text-slate-900 pr-4">{faq.q}</span>
+                  <ChevronDown className={`w-5 h-5 text-slate-400 shrink-0 transition-transform ${openFaq === i ? 'rotate-180' : ''}`} />
+                </button>
+                {openFaq === i && (
+                  <div className="px-5 pb-5 text-slate-600 leading-relaxed">
+                    {faq.a}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section className="py-20 lg:py-28 bg-emerald-600">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 text-center">
+          <h2 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
+            Empieza a vender más por WhatsApp hoy
+          </h2>
+          <p className="mt-4 text-emerald-100 text-lg max-w-2xl mx-auto">
+            Únete a los equipos que ya organizaron su operación comercial con Clarin.
+          </p>
+          <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
+            <Link
+              href={SIGNUP_URL}
+              className="w-full sm:w-auto bg-white hover:bg-emerald-50 text-emerald-700 px-8 py-4 rounded-xl font-bold text-base transition-colors shadow-lg flex items-center justify-center gap-2"
+            >
+              Crear cuenta gratis <ArrowRight className="w-5 h-5" />
+            </Link>
+            <Link
+              href={LOGIN_URL}
+              className="w-full sm:w-auto bg-emerald-700 hover:bg-emerald-800 text-white border border-emerald-500 px-8 py-4 rounded-xl font-semibold text-base transition-colors flex items-center justify-center"
+            >
+              Ya tengo cuenta
+            </Link>
+          </div>
+          <p className="mt-4 text-sm text-emerald-200/80">Sin tarjeta de crédito · Configuración en minutos</p>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="bg-white border-t border-slate-200">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12">
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-8 mb-12">
+            <div>
+              <div className="flex items-center gap-2 mb-4">
+                <div className="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center">
+                  <MessageSquare className="w-4 h-4 text-white" />
+                </div>
+                <span className="font-bold text-slate-900">Clarin</span>
+              </div>
+              <p className="text-sm text-slate-500 leading-relaxed">
+                CRM WhatsApp para equipos comerciales que quieren crecer sin perder el control de sus conversaciones.
+              </p>
+            </div>
+            <div>
+              <h4 className="font-semibold text-slate-900 mb-4 text-sm">Producto</h4>
+              <ul className="space-y-2 text-sm text-slate-500">
+                <li><a href="#funciones" className="hover:text-emerald-600 transition-colors">Funciones</a></li>
+                <li><a href="#precios" className="hover:text-emerald-600 transition-colors">Precios</a></li>
+                <li><Link href={SIGNUP_URL} className="hover:text-emerald-600 transition-colors">Registro</Link></li>
+                <li><Link href={LOGIN_URL} className="hover:text-emerald-600 transition-colors">Ingresar</Link></li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="font-semibold text-slate-900 mb-4 text-sm">Legal</h4>
+              <ul className="space-y-2 text-sm text-slate-500">
+                <li><a href="#" className="hover:text-emerald-600 transition-colors">Términos de servicio</a></li>
+                <li><a href="#" className="hover:text-emerald-600 transition-colors">Política de privacidad</a></li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="font-semibold text-slate-900 mb-4 text-sm">Contacto</h4>
+              <ul className="space-y-2 text-sm text-slate-500">
+                <li className="flex items-center gap-2"><Mail className="w-4 h-4" /> hola@clarin.io</li>
+                <li className="flex items-center gap-2"><Phone className="w-4 h-4" /> +51 999 888 777</li>
+                <li className="flex items-center gap-2"><Globe className="w-4 h-4" /> www.clarin.io</li>
+              </ul>
+            </div>
+          </div>
+          <div className="border-t border-slate-100 pt-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <p className="text-sm text-slate-400">© {new Date().getFullYear()} Clarin CRM. Todos los derechos reservados.</p>
+            <div className="flex items-center gap-2 text-sm text-slate-400">
+              <ShieldCheck className="w-4 h-4" />
+              Seguro y confiable
+            </div>
+          </div>
+        </div>
+      </footer>
     </main>
-  )
-}
-
-function Field({ label, value, onChange, placeholder, type = 'text' }: { label: string; value: string; onChange: (value: string) => void; placeholder: string; type?: string }) {
-  return (
-    <div>
-      <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">{label}</label>
-      <input
-        type={type}
-        value={value}
-        onChange={event => onChange(event.target.value)}
-        placeholder={placeholder}
-        className="w-full px-3.5 py-3 bg-slate-950 border border-slate-700 text-white placeholder:text-slate-600 rounded-xl focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none transition-all text-sm"
-        required
-      />
-    </div>
-  )
-}
-
-function PasswordField({ value, show, onShowChange, onChange }: { value: string; show: boolean; onShowChange: (show: boolean) => void; onChange: (value: string) => void }) {
-  return (
-    <div>
-      <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-1.5">Contraseña</label>
-      <div className="relative">
-        <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-[18px] h-[18px] text-slate-500" />
-        <input
-          type={show ? 'text' : 'password'}
-          value={value}
-          onChange={event => onChange(event.target.value)}
-          placeholder="mínimo 8 caracteres"
-          className="w-full pl-11 pr-11 py-3 bg-slate-950 border border-slate-700 text-white placeholder:text-slate-600 rounded-xl focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none transition-all text-sm"
-          minLength={8}
-          required
-        />
-        <button type="button" onClick={() => onShowChange(!show)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors" title={show ? 'Ocultar contraseña' : 'Mostrar contraseña'}>
-          {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-        </button>
-      </div>
-    </div>
   )
 }

@@ -146,6 +146,21 @@ func (p *DevicePool) SetCache(c *cache.Cache) {
 	p.cache = c
 }
 
+func (p *DevicePool) invalidateChatCaches(accountID, chatID uuid.UUID) {
+	if p.cache == nil {
+		return
+	}
+	_ = p.cache.DelPattern(context.Background(), "chats:"+accountID.String()+":*")
+	_ = p.cache.DelPattern(context.Background(), "messages:"+accountID.String()+":"+chatID.String()+":*")
+}
+
+func (p *DevicePool) invalidateAccountMessageCaches(accountID uuid.UUID) {
+	if p.cache == nil {
+		return
+	}
+	_ = p.cache.DelPattern(context.Background(), "messages:"+accountID.String()+":*")
+}
+
 // SetReceiveMessages updates the in-memory receive flag for a connected device
 func (p *DevicePool) SetReceiveMessages(deviceID uuid.UUID, value bool) {
 	p.mu.RLock()
@@ -564,12 +579,25 @@ type messageContentResult struct {
 	MediaMimetype *string
 	MediaFilename *string
 	MediaSize     *int64
+	MediaAssetID  *uuid.UUID
 	Latitude      *float64
 	Longitude     *float64
 	ContactName   *string
 	ContactPhone  *string
 	ContactVCard  *string
 	IsViewOnce    bool
+}
+
+type storedMediaResult struct {
+	URL        string
+	AssetID    *uuid.UUID
+	SizeBytes  int64
+	ObjectKey  string
+	Hash       string
+	Deduped    bool
+	MediaType  string
+	Filename   string
+	ContentTyp string
 }
 
 // extractMessageContent extracts body, type, and media info from a waE2E.Message.
@@ -591,9 +619,11 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 		r.MessageType = domain.MessageTypeImage
 		r.MediaMimetype = strPtr(imgMsg.GetMimetype())
 		if p.storage != nil && instance != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, chatJID, msgID, imgMsg.GetMimetype(), ".jpg")
+			stored, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, chatJID, msgID, imgMsg.GetMimetype(), ".jpg")
 			if err == nil {
-				r.MediaURL = &url
+				r.MediaURL = &stored.URL
+				r.MediaAssetID = stored.AssetID
+				r.MediaSize = &stored.SizeBytes
 			}
 		}
 	} else if vidMsg := waMsg.GetVideoMessage(); vidMsg != nil {
@@ -601,9 +631,11 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 		r.MessageType = domain.MessageTypeVideo
 		r.MediaMimetype = strPtr(vidMsg.GetMimetype())
 		if p.storage != nil && instance != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, chatJID, msgID, vidMsg.GetMimetype(), ".mp4")
+			stored, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, chatJID, msgID, vidMsg.GetMimetype(), ".mp4")
 			if err == nil {
-				r.MediaURL = &url
+				r.MediaURL = &stored.URL
+				r.MediaAssetID = stored.AssetID
+				r.MediaSize = &stored.SizeBytes
 			}
 		}
 	} else if audMsg := waMsg.GetAudioMessage(); audMsg != nil {
@@ -611,9 +643,11 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 		r.MediaMimetype = strPtr(audMsg.GetMimetype())
 		ext := ".ogg"
 		if p.storage != nil && instance != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, audMsg, chatJID, msgID, audMsg.GetMimetype(), ext)
+			stored, err := p.downloadAndStoreMedia(ctx, instance, audMsg, chatJID, msgID, audMsg.GetMimetype(), ext)
 			if err == nil {
-				r.MediaURL = &url
+				r.MediaURL = &stored.URL
+				r.MediaAssetID = stored.AssetID
+				r.MediaSize = &stored.SizeBytes
 			}
 		}
 	} else if docMsg := waMsg.GetDocumentMessage(); docMsg != nil {
@@ -630,18 +664,22 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 			ext = ".bin"
 		}
 		if p.storage != nil && instance != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, docMsg, chatJID, msgID, docMsg.GetMimetype(), ext)
+			stored, err := p.downloadAndStoreMedia(ctx, instance, docMsg, chatJID, msgID, docMsg.GetMimetype(), ext)
 			if err == nil {
-				r.MediaURL = &url
+				r.MediaURL = &stored.URL
+				r.MediaAssetID = stored.AssetID
+				r.MediaSize = &stored.SizeBytes
 			}
 		}
 	} else if stickerMsg := waMsg.GetStickerMessage(); stickerMsg != nil {
 		r.MessageType = domain.MessageTypeSticker
 		r.MediaMimetype = strPtr(stickerMsg.GetMimetype())
 		if p.storage != nil && instance != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, stickerMsg, chatJID, msgID, stickerMsg.GetMimetype(), ".webp")
+			stored, err := p.downloadAndStoreMedia(ctx, instance, stickerMsg, chatJID, msgID, stickerMsg.GetMimetype(), ".webp")
 			if err == nil {
-				r.MediaURL = &url
+				r.MediaURL = &stored.URL
+				r.MediaAssetID = stored.AssetID
+				r.MediaSize = &stored.SizeBytes
 			}
 		}
 	} else if locMsg := waMsg.GetLocationMessage(); locMsg != nil {
@@ -673,9 +711,11 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 				r.Body = imgMsg.GetCaption()
 				r.MediaMimetype = strPtr(imgMsg.GetMimetype())
 				if p.storage != nil && instance != nil {
-					url, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, chatJID, msgID, imgMsg.GetMimetype(), ".jpg")
+					stored, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, chatJID, msgID, imgMsg.GetMimetype(), ".jpg")
 					if err == nil {
-						r.MediaURL = &url
+						r.MediaURL = &stored.URL
+						r.MediaAssetID = stored.AssetID
+						r.MediaSize = &stored.SizeBytes
 					}
 				}
 			} else if vidMsg := inner.GetVideoMessage(); vidMsg != nil {
@@ -683,9 +723,11 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 				r.Body = vidMsg.GetCaption()
 				r.MediaMimetype = strPtr(vidMsg.GetMimetype())
 				if p.storage != nil && instance != nil {
-					url, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, chatJID, msgID, vidMsg.GetMimetype(), ".mp4")
+					stored, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, chatJID, msgID, vidMsg.GetMimetype(), ".mp4")
 					if err == nil {
-						r.MediaURL = &url
+						r.MediaURL = &stored.URL
+						r.MediaAssetID = stored.AssetID
+						r.MediaSize = &stored.SizeBytes
 					}
 				}
 			}
@@ -699,9 +741,11 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 				r.Body = imgMsg.GetCaption()
 				r.MediaMimetype = strPtr(imgMsg.GetMimetype())
 				if p.storage != nil && instance != nil {
-					url, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, chatJID, msgID, imgMsg.GetMimetype(), ".jpg")
+					stored, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, chatJID, msgID, imgMsg.GetMimetype(), ".jpg")
 					if err == nil {
-						r.MediaURL = &url
+						r.MediaURL = &stored.URL
+						r.MediaAssetID = stored.AssetID
+						r.MediaSize = &stored.SizeBytes
 					}
 				}
 			} else if vidMsg := inner.GetVideoMessage(); vidMsg != nil {
@@ -709,9 +753,11 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 				r.Body = vidMsg.GetCaption()
 				r.MediaMimetype = strPtr(vidMsg.GetMimetype())
 				if p.storage != nil && instance != nil {
-					url, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, chatJID, msgID, vidMsg.GetMimetype(), ".mp4")
+					stored, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, chatJID, msgID, vidMsg.GetMimetype(), ".mp4")
 					if err == nil {
-						r.MediaURL = &url
+						r.MediaURL = &stored.URL
+						r.MediaAssetID = stored.AssetID
+						r.MediaSize = &stored.SizeBytes
 					}
 				}
 			}
@@ -776,6 +822,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 			if err := p.repos.Message.MarkAsRevoked(ctx, instance.AccountID, chatJID, revokedID); err != nil {
 				log.Printf("[Revoke] Failed to mark message %s as revoked: %v", revokedID, err)
 			}
+			if chat, err := p.repos.Chat.FindByJID(ctx, instance.AccountID, chatJID); err == nil && chat != nil {
+				p.invalidateChatCaches(instance.AccountID, chat.ID)
+			} else {
+				p.invalidateAccountMessageCaches(instance.AccountID)
+			}
 
 			// Broadcast revocation to frontend
 			p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageRevoked, map[string]interface{}{
@@ -809,6 +860,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 			if err := p.repos.Message.UpdateBody(ctx, instance.AccountID, chatJID, editedMsgID, newBody); err != nil {
 				log.Printf("[Edit] Failed to update message %s: %v", editedMsgID, err)
 			}
+			if chat, err := p.repos.Chat.FindByJID(ctx, instance.AccountID, chatJID); err == nil && chat != nil {
+				p.invalidateChatCaches(instance.AccountID, chat.ID)
+			} else {
+				p.invalidateAccountMessageCaches(instance.AccountID)
+			}
 
 			p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageEdited, map[string]interface{}{
 				"chat_jid":   chatJID,
@@ -830,6 +886,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	msgType := domain.MessageTypeText
 	var mediaURL, mediaMimetype, mediaFilename *string
 	var mediaSize *int64
+	var mediaAssetID *uuid.UUID
 
 	if evt.Message.GetConversation() != "" {
 		body = evt.Message.GetConversation()
@@ -841,9 +898,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		mediaMimetype = strPtr(imgMsg.GetMimetype())
 		// Download and store the image
 		if p.storage != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, imgMsg.GetMimetype(), ".jpg")
+			stored, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, imgMsg.GetMimetype(), ".jpg")
 			if err == nil {
-				mediaURL = &url
+				mediaURL = &stored.URL
+				mediaAssetID = stored.AssetID
+				mediaSize = &stored.SizeBytes
 			}
 		}
 	} else if vidMsg := evt.Message.GetVideoMessage(); vidMsg != nil {
@@ -851,9 +910,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		msgType = domain.MessageTypeVideo
 		mediaMimetype = strPtr(vidMsg.GetMimetype())
 		if p.storage != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, vidMsg.GetMimetype(), ".mp4")
+			stored, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, vidMsg.GetMimetype(), ".mp4")
 			if err == nil {
-				mediaURL = &url
+				mediaURL = &stored.URL
+				mediaAssetID = stored.AssetID
+				mediaSize = &stored.SizeBytes
 			}
 		}
 	} else if audMsg := evt.Message.GetAudioMessage(); audMsg != nil {
@@ -864,9 +925,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 			ext = ".ogg"
 		}
 		if p.storage != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, audMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, audMsg.GetMimetype(), ext)
+			stored, err := p.downloadAndStoreMedia(ctx, instance, audMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, audMsg.GetMimetype(), ext)
 			if err == nil {
-				mediaURL = &url
+				mediaURL = &stored.URL
+				mediaAssetID = stored.AssetID
+				mediaSize = &stored.SizeBytes
 			}
 		}
 	} else if docMsg := evt.Message.GetDocumentMessage(); docMsg != nil {
@@ -883,18 +946,22 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 			ext = ".bin"
 		}
 		if p.storage != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, docMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, docMsg.GetMimetype(), ext)
+			stored, err := p.downloadAndStoreMedia(ctx, instance, docMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, docMsg.GetMimetype(), ext)
 			if err == nil {
-				mediaURL = &url
+				mediaURL = &stored.URL
+				mediaAssetID = stored.AssetID
+				mediaSize = &stored.SizeBytes
 			}
 		}
 	} else if stickerMsg := evt.Message.GetStickerMessage(); stickerMsg != nil {
 		msgType = domain.MessageTypeSticker
 		mediaMimetype = strPtr(stickerMsg.GetMimetype())
 		if p.storage != nil {
-			url, err := p.downloadAndStoreMedia(ctx, instance, stickerMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, stickerMsg.GetMimetype(), ".webp")
+			stored, err := p.downloadAndStoreMedia(ctx, instance, stickerMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, stickerMsg.GetMimetype(), ".webp")
 			if err == nil {
-				mediaURL = &url
+				mediaURL = &stored.URL
+				mediaAssetID = stored.AssetID
+				mediaSize = &stored.SizeBytes
 			}
 		}
 	} else if locMsg := evt.Message.GetLocationMessage(); locMsg != nil {
@@ -996,6 +1063,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		MediaMimetype: mediaMimetype,
 		MediaFilename: mediaFilename,
 		MediaSize:     mediaSize,
+		MediaAssetID:  mediaAssetID,
 		IsFromMe:      isFromMe,
 		Status: strPtr(func() string {
 			if isFromMe {
@@ -1039,9 +1107,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				mediaMimetype = strPtr(imgMsg.GetMimetype())
 				msg.MediaMimetype = mediaMimetype
 				if p.storage != nil {
-					url, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, imgMsg.GetMimetype(), ".jpg")
+					stored, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, imgMsg.GetMimetype(), ".jpg")
 					if err == nil {
-						msg.MediaURL = &url
+						msg.MediaURL = &stored.URL
+						msg.MediaAssetID = stored.AssetID
+						msg.MediaSize = &stored.SizeBytes
 					}
 				}
 			} else if vidMsg := inner.GetVideoMessage(); vidMsg != nil {
@@ -1050,9 +1120,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				mediaMimetype = strPtr(vidMsg.GetMimetype())
 				msg.MediaMimetype = mediaMimetype
 				if p.storage != nil {
-					url, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, vidMsg.GetMimetype(), ".mp4")
+					stored, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, vidMsg.GetMimetype(), ".mp4")
 					if err == nil {
-						msg.MediaURL = &url
+						msg.MediaURL = &stored.URL
+						msg.MediaAssetID = stored.AssetID
+						msg.MediaSize = &stored.SizeBytes
 					}
 				}
 			}
@@ -1067,9 +1139,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				mediaMimetype = strPtr(imgMsg.GetMimetype())
 				msg.MediaMimetype = mediaMimetype
 				if p.storage != nil {
-					url, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, imgMsg.GetMimetype(), ".jpg")
+					stored, err := p.downloadAndStoreMedia(ctx, instance, imgMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, imgMsg.GetMimetype(), ".jpg")
 					if err == nil {
-						msg.MediaURL = &url
+						msg.MediaURL = &stored.URL
+						msg.MediaAssetID = stored.AssetID
+						msg.MediaSize = &stored.SizeBytes
 					}
 				}
 			} else if vidMsg := inner.GetVideoMessage(); vidMsg != nil {
@@ -1078,9 +1152,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				mediaMimetype = strPtr(vidMsg.GetMimetype())
 				msg.MediaMimetype = mediaMimetype
 				if p.storage != nil {
-					url, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, vidMsg.GetMimetype(), ".mp4")
+					stored, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, vidMsg.GetMimetype(), ".mp4")
 					if err == nil {
-						msg.MediaURL = &url
+						msg.MediaURL = &stored.URL
+						msg.MediaAssetID = stored.AssetID
+						msg.MediaSize = &stored.SizeBytes
 					}
 				}
 			}
@@ -1095,10 +1171,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	// Update chat last message
 	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, evt.Info.Timestamp, !isFromMe)
 
-	// Invalidate chats cache
-	if p.cache != nil {
-		_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
-	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Use chatJID for contact in 1-to-1 chats so the LEFT JOIN in queries matches
 	contactJID := senderJID
@@ -1281,35 +1354,101 @@ func avatarRefreshTTL(contact *domain.Contact) time.Duration {
 	return avatarExistingRefreshTTL
 }
 
-// downloadAndStoreMedia downloads media from WhatsApp and stores it in MinIO
-func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *DeviceInstance, msg whatsmeow.DownloadableMessage, chatJID, msgID, mimetype, extension string) (string, error) {
+// downloadAndStoreMedia downloads media from WhatsApp and stores one canonical object per account/content hash.
+func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *DeviceInstance, msg whatsmeow.DownloadableMessage, chatJID, msgID, mimetype, extension string) (*storedMediaResult, error) {
 	if p.storage == nil {
-		return "", fmt.Errorf("storage not configured")
+		return nil, fmt.Errorf("storage not configured")
 	}
 
 	// Download media
 	data, err := instance.Client.Download(ctx, msg)
 	if err != nil {
 		log.Printf("[Media] Failed to download: %v", err)
-		return "", err
+		return nil, err
+	}
+	hashBytes := sha256.Sum256(data)
+	contentHash := fmt.Sprintf("%x", hashBytes[:])
+	mediaType := strings.TrimPrefix(strings.ToLower(extension), ".")
+	if mediaType == "" {
+		mediaType = "bin"
+	}
+	filename := contentHash + extension
+	objectKey := fmt.Sprintf("%s/media/%s/%s", instance.AccountID.String(), mediaType, filename)
+	proxyURL := "/api/media/file/" + objectKey
+	sizeBytes := int64(len(data))
+
+	if p.repos != nil && p.repos.MediaAsset != nil {
+		if existing, err := p.repos.MediaAsset.GetByHash(ctx, instance.AccountID, contentHash); err == nil && existing != nil {
+			existingURL := "/api/media/file/" + existing.ObjectKey
+			log.Printf("[Media] Reused %s for message %s (%d bytes)", existingURL, msgID, existing.SizeBytes)
+			return &storedMediaResult{
+				URL:        existingURL,
+				AssetID:    &existing.ID,
+				SizeBytes:  existing.SizeBytes,
+				ObjectKey:  existing.ObjectKey,
+				Hash:       existing.ContentHash,
+				Deduped:    true,
+				MediaType:  existing.MediaType,
+				Filename:   existing.Filename,
+				ContentTyp: existing.ContentType,
+			}, nil
+		}
 	}
 
-	// Generate filename
-	filename := msgID + extension
+	if p.repos != nil && p.storage != nil {
+		if account, accErr := p.repos.Account.GetByID(ctx, instance.AccountID); accErr == nil && account != nil && account.StorageLimitBytes > 0 {
+			used, _, usageErr := p.storage.UsagePrefix(ctx, instance.AccountID.String()+"/")
+			if usageErr == nil && used+sizeBytes > account.StorageLimitBytes {
+				log.Printf("[Media] Storage quota reached for account %s; skipping media %s (%d bytes)", instance.AccountID, msgID, len(data))
+				return nil, fmt.Errorf("storage limit reached")
+			}
+		}
+	}
 
-	// Upload to storage
-	folder := "chats/" + chatJID
-
-	_, err = p.storage.UploadFile(ctx, instance.AccountID, folder, filename, data, mimetype)
-	if err != nil {
+	if _, err = p.storage.UploadObject(ctx, objectKey, data, mimetype); err != nil {
 		log.Printf("[Media] Failed to upload: %v", err)
-		return "", err
+		return nil, err
 	}
 
-	// Return proxy URL instead of public URL for reliable frontend loading
-	proxyURL := fmt.Sprintf("/api/media/file/%s/%s/%s", instance.AccountID.String(), folder, filename)
+	var assetID *uuid.UUID
+	if p.repos != nil && p.repos.MediaAsset != nil {
+		asset, assetErr := p.repos.MediaAsset.Upsert(ctx, repository.MediaAssetUpsert{
+			AccountID:   instance.AccountID,
+			ContentHash: contentHash,
+			ObjectKey:   objectKey,
+			MediaType:   mediaType,
+			ContentType: mimetype,
+			Filename:    filename,
+			SizeBytes:   sizeBytes,
+		})
+		if assetErr != nil {
+			log.Printf("[Media] Failed to upsert media asset: %v", assetErr)
+		} else if asset != nil {
+			assetID = &asset.ID
+			objectKey = asset.ObjectKey
+			proxyURL = "/api/media/file/" + objectKey
+		}
+	}
+
+	_, _ = p.repos.DB().Exec(ctx, `
+		INSERT INTO storage_objects (account_id, object_key, media_type, content_type, filename, size_bytes, source, status, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'chat', 'active', NOW())
+		ON CONFLICT (account_id, object_key) DO UPDATE
+		SET size_bytes = EXCLUDED.size_bytes, content_type = EXCLUDED.content_type, status = 'active', updated_at = NOW()
+	`, instance.AccountID, objectKey, mediaType, mimetype, filename, sizeBytes)
+
 	log.Printf("[Media] Stored %s (%d bytes)", proxyURL, len(data))
-	return proxyURL, nil
+	return &storedMediaResult{
+		URL:        proxyURL,
+		AssetID:    assetID,
+		SizeBytes:  sizeBytes,
+		ObjectKey:  objectKey,
+		Hash:       contentHash,
+		Deduped:    false,
+		MediaType:  mediaType,
+		Filename:   filename,
+		ContentTyp: mimetype,
+	}, nil
 }
 
 // handleReceipt processes delivery/read receipts
@@ -1652,10 +1791,10 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 
 	// Notify frontend that history sync completed
 	if totalSaved > 0 {
-		// Invalidate chats cache
 		if p.cache != nil {
 			_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
 		}
+		p.invalidateAccountMessageCaches(instance.AccountID)
 
 		p.hub.BroadcastToAccount(instance.AccountID, ws.EventHistorySyncComplete, map[string]interface{}{
 			"device_id":      instance.ID.String(),
@@ -1820,6 +1959,7 @@ func (p *DevicePool) handleReaction(ctx context.Context, instance *DeviceInstanc
 		}
 		log.Printf("[Reaction] %s reacted %s to %s", senderJID, emoji, targetMsgID)
 	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Broadcast to frontend
 	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageReaction, map[string]interface{}{
@@ -1898,6 +2038,7 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 		log.Printf("[Poll] Failed to save message: %v", err)
 		return
 	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Create poll options
 	if err := p.repos.Poll.CreateOptions(ctx, msg.ID, optionNames); err != nil {
@@ -2347,6 +2488,7 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	if err := p.repos.Message.Create(ctx, message); err != nil {
 		log.Printf("[SendMessage] Failed to save message: %v", err)
 	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Update chat
 	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, resp.Timestamp, false)
@@ -2444,6 +2586,7 @@ func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, t
 	if err := p.repos.Message.Create(ctx, message); err != nil {
 		log.Printf("[SendReplyMessage] Failed to save message: %v", err)
 	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Update chat
 	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, resp.Timestamp, false)
@@ -2541,6 +2684,7 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 		}
 		_ = p.repos.Reaction.Upsert(ctx, reaction)
 	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Broadcast
 	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageReaction, map[string]interface{}{
@@ -2639,6 +2783,7 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 	if err := p.repos.Message.Create(ctx, message); err != nil {
 		log.Printf("[SendPoll] Failed to save message: %v", err)
 	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Create poll options
 	_ = p.repos.Poll.CreateOptions(ctx, message.ID, options)
@@ -2965,6 +3110,7 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 	if err := p.repos.Message.Create(ctx, message); err != nil {
 		log.Printf("[SendPreUploadedMedia] Failed to save message: %v", err)
 	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	lastMsg := caption
 	if lastMsg == "" {
@@ -3075,6 +3221,7 @@ func (p *DevicePool) SendContactMessage(ctx context.Context, deviceID uuid.UUID,
 	if err := p.repos.Message.Create(ctx, dbMsg); err != nil {
 		log.Printf("[SendContactMessage] Failed to save message: %v", err)
 	}
+	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Broadcast via WebSocket
 	if p.hub != nil {

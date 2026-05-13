@@ -24,6 +24,11 @@ import QuickReplyPicker from './QuickReplyPicker'
 import ContactSelector, { SelectedPerson } from '../ContactSelector'
 import { compressImageStandard } from '@/utils/imageCompression'
 
+type CachedChatMessages = {
+  messages: Message[]
+  hasMore: boolean
+}
+
 interface ChatPanelProps {
   chatId: string | null
   deviceId?: string
@@ -38,6 +43,7 @@ interface ChatPanelProps {
 export default function ChatPanel({ chatId, deviceId, initialChat, onClose, className = '', readOnly = false, onContactInfoToggle, contactInfoOpen }: ChatPanelProps) {
   const [chat, setChat] = useState<Chat | null>(initialChat || null)
   const [messages, setMessages] = useState<Message[]>([])
+  const messagesCacheRef = useRef<Map<string, CachedChatMessages>>(new Map())
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [hasMoreMessages, setHasMoreMessages] = useState(true)
@@ -97,6 +103,22 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
   // History sync
   const [syncingHistory, setSyncingHistory] = useState(false)
+
+  const cacheMessages = useCallback((targetChatId: string | null | undefined, nextMessages: Message[], nextHasMore = hasMoreMessages) => {
+    if (!targetChatId) return
+    messagesCacheRef.current.set(targetChatId, {
+      messages: nextMessages,
+      hasMore: nextHasMore
+    })
+  }, [hasMoreMessages])
+
+  const updateMessages = useCallback((updater: Message[] | ((prev: Message[]) => Message[]), targetChatId = chatId) => {
+    setMessages(prev => {
+      const nextMessages = typeof updater === 'function' ? updater(prev) : updater
+      cacheMessages(targetChatId, nextMessages)
+      return nextMessages
+    })
+  }, [cacheMessages, chatId])
 
   // Helper: send typing/composing presence to recipient
   const sendPresence = useCallback((composing: boolean, media: string = '') => {
@@ -192,13 +214,25 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   useEffect(() => {
     if (initialChat) {
         setChat(initialChat)
-        setMessages([]) // Clear previous messages to avoid flash
-        setHasMoreMessages(true)
+        const cached = messagesCacheRef.current.get(initialChat.id)
+        if (cached) {
+          setMessages(cached.messages)
+          setHasMoreMessages(cached.hasMore)
+        } else {
+          setMessages([])
+          setHasMoreMessages(true)
+        }
     }
   }, [initialChat])
 
   useEffect(() => {
     if (chatId) {
+      const cached = messagesCacheRef.current.get(chatId)
+      if (cached) {
+        setMessages(cached.messages)
+        setHasMoreMessages(cached.hasMore)
+        requestAnimationFrame(scrollToBottom)
+      }
       fetchChatDetails()
     } else {
         setChat(null)
@@ -223,7 +257,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           if (matchChatId === chatId ||
               (chat && actualMsg.from_jid === chat?.jid) ||
               (chat && actualMsg.to === chat?.jid)) {
-            setMessages(prev => {
+            updateMessages(prev => {
               // Already in list by real ID → update in place (no duplicate)
               if (prev.some(m => m.id === actualMsg.id)) {
                 return prev.map(m => m.id === actualMsg.id ? (actualMsg as Message) : m)
@@ -248,7 +282,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           }
         } else if ((eventType === 'message_update') && payload) {
           const actualMsg = payload.message || payload
-          setMessages(prev => prev.map(m => m.id === actualMsg.id ? (actualMsg as Message) : m))
+          updateMessages(prev => prev.map(m => m.id === actualMsg.id ? (actualMsg as Message) : m))
         } else if (eventType === 'message_status' && payload) {
           // Update message delivery/read status (only upgrade, never downgrade)
           const msgIds: string[] = payload.message_ids || []
@@ -256,7 +290,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           const statusOrder: Record<string, number> = { sending: 0, sent: 1, delivered: 2, read: 3 }
           const newLevel = statusOrder[newStatus] ?? -1
           if (chat && payload.chat_jid === chat.jid && msgIds.length > 0 && newLevel >= 0) {
-            setMessages(prev => prev.map(m => {
+            updateMessages(prev => prev.map(m => {
               if (!msgIds.includes(m.message_id)) return m
               const currentLevel = statusOrder[m.status] ?? -1
               if (newLevel > currentLevel) return { ...m, status: newStatus }
@@ -267,7 +301,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           // Mark message as revoked
           const revokedMsgId: string = payload.message_id
           if (chat && payload.chat_jid === chat.jid) {
-            setMessages(prev => prev.map(m =>
+            updateMessages(prev => prev.map(m =>
               m.message_id === revokedMsgId ? { ...m, is_revoked: true, body: undefined } : m
             ))
           }
@@ -276,7 +310,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           const editedMsgId: string = payload.message_id
           const newBody: string = payload.new_body
           if (chat && payload.chat_jid === chat.jid) {
-            setMessages(prev => prev.map(m =>
+            updateMessages(prev => prev.map(m =>
               m.message_id === editedMsgId ? { ...m, body: newBody, is_edited: true } : m
             ))
           }
@@ -308,7 +342,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
             const isFromMe: boolean = !!payload.is_from_me
             const removed: boolean = !!payload.removed
 
-            setMessages(prev => prev.map(m => {
+            updateMessages(prev => prev.map(m => {
               if (m.message_id !== targetMsgId) return m
               const reactions = [...(m.reactions || [])]
               if (removed) {
@@ -348,7 +382,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
   const fetchChatDetails = async () => {
     if (!chatId) return
-    setLoading(true)
+    const hasCachedMessages = messagesCacheRef.current.has(chatId)
+    setLoading(!hasCachedMessages)
     const token = localStorage.getItem('token')
     try {
       const res = await fetch(`/api/chats/${chatId}`, {
@@ -365,8 +400,10 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       })
       const msgData = await msgRes.json()
       if (msgData.success && msgData.messages) {
+        const nextHasMore = msgData.messages.length >= 50
         setMessages(msgData.messages)
-        setHasMoreMessages(msgData.messages.length >= 50)
+        setHasMoreMessages(nextHasMore)
+        cacheMessages(chatId, msgData.messages, nextHasMore)
         scrollToBottom()
 
         // Send read receipts for unread incoming messages
@@ -421,8 +458,13 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           // Preserve scroll position
           const container = messagesContainerRef.current
           const prevHeight = container?.scrollHeight || 0
-          setMessages(prev => [...data.messages, ...prev])
-          setHasMoreMessages(data.messages.length >= 50)
+          const nextHasMore = data.messages.length >= 50
+          updateMessages(prev => {
+            const nextMessages = [...data.messages, ...prev]
+            cacheMessages(chatId, nextMessages, nextHasMore)
+            return nextMessages
+          })
+          setHasMoreMessages(nextHasMore)
           // Restore scroll position after prepending
           requestAnimationFrame(() => {
             if (container) {
@@ -468,7 +510,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         })
         const data = await res.json()
         if (data.success) {
-          setMessages(prev => prev.map(m =>
+          updateMessages(prev => prev.map(m =>
             m.message_id === editingMsg.message_id ? { ...m, body: text, is_edited: true } : m
           ))
         } else {
@@ -518,7 +560,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       quoted_sender: replyingTo?.from_jid
     }
 
-    setMessages(prev => [...prev, optimisticMsg])
+    updateMessages(prev => [...prev, optimisticMsg])
     scrollToBottom()
 
     const token = localStorage.getItem('token')
@@ -542,16 +584,16 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
             // Always update the optimistic message from the API response
             const realMsg = data.message
             if (realMsg) {
-                setMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+                updateMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
             } else {
-                setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+                updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
             }
         } else {
-            setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+            updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
             // alert('Error al enviar mensaje: ' + (data.error || 'Desconocido'))
         }
     } catch (err) {
-        setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
         console.error(err)
     } finally {
         setSendingMessage(false)
@@ -561,7 +603,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const handleRetrySend = async (failedMsg: Message) => {
     if (!chat || !deviceId) return
 
-    setMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'sending' } : m))
+    updateMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'sending' } : m))
 
     const token = localStorage.getItem('token')
     try {
@@ -579,12 +621,12 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         })
         const data = await res.json()
         if (data.success && data.message) {
-            setMessages(prev => prev.map(m => m.id === failedMsg.id ? data.message : m))
+            updateMessages(prev => prev.map(m => m.id === failedMsg.id ? data.message : m))
         } else {
-            setMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'failed' } : m))
+            updateMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'failed' } : m))
         }
     } catch (e) {
-        setMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'failed' } : m))
+        updateMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'failed' } : m))
     }
   }
 
@@ -619,7 +661,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         timestamp: new Date().toISOString()
       }
 
-      setMessages(prev => [...prev, optimisticMsg])
+      updateMessages(prev => [...prev, optimisticMsg])
       setActivePopup(null)
       scrollToBottom()
 
@@ -654,16 +696,16 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
            if (data.success) {
                const realMsg = data.message
                if (realMsg) {
-                   setMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+                   updateMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
                } else {
-                   setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+                   updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
                }
            } else {
-               setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+               updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
            }
       } catch (err) {
            console.error(err)
-           setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+           updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
       }
   }
 
@@ -686,7 +728,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       timestamp: new Date().toISOString()
     }
 
-    setMessages(prev => [...prev, optimisticMsg])
+    updateMessages(prev => [...prev, optimisticMsg])
     scrollToBottom()
 
     const token = localStorage.getItem('token')
@@ -707,16 +749,16 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         if (data.success) {
             const realMsg = data.message
             if (realMsg) {
-                setMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+                updateMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
             } else {
-                setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+                updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
             }
         } else {
-            setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+            updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
         }
     } catch (err) {
         console.error(err)
-        setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
     }
   }
 
@@ -742,7 +784,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           status: 'sending',
           timestamp: new Date().toISOString()
       }
-      setMessages(prev => [...prev, optimisticMsg])
+      updateMessages(prev => [...prev, optimisticMsg])
       scrollToBottom()
 
       const token = localStorage.getItem('token')
@@ -759,12 +801,12 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           if (data.success) {
               const realMsg = data.message
               if (realMsg) {
-                  setMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+                  updateMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
               } else {
-                  setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+                  updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
               }
           } else {
-              setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+              updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
           }
       })
   }
@@ -818,7 +860,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         contact_name: displayName,
         contact_phone: contact.phone,
       }
-      setMessages(prev => [...prev, optimisticMsg])
+      updateMessages(prev => [...prev, optimisticMsg])
       scrollToBottom()
       try {
         const res = await fetch('/api/messages/send-contact', {
@@ -833,12 +875,12 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         })
         const data = await res.json()
         if (data.success && data.message) {
-          setMessages(prev => prev.map(m => m.id === tempId ? { ...data.message, is_from_me: true } : m))
+          updateMessages(prev => prev.map(m => m.id === tempId ? { ...data.message, is_from_me: true } : m))
         } else {
-          setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+          updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
         }
       } catch {
-        setMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
       }
     }
   }
@@ -1169,7 +1211,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                                     })
                                     const data = await res.json()
                                     if (data.success) {
-                                      setMessages(prev => prev.map(msg =>
+                                      updateMessages(prev => prev.map(msg =>
                                         msg.message_id === m.message_id ? { ...msg, is_revoked: true, body: undefined } : msg
                                       ))
                                     }
@@ -1189,7 +1231,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                                   const token = localStorage.getItem('token')
                                   try {
                                     // Optimistically update UI
-                                    setMessages(prev => prev.map(msg => {
+                                    updateMessages(prev => prev.map(msg => {
                                       if (msg.message_id !== m.message_id) return msg
                                       const reactions = [...(msg.reactions || [])]
                                       const existingIdx = reactions.findIndex(r => r.is_from_me && r.emoji === emoji)

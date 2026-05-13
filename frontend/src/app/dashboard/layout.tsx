@@ -6,7 +6,7 @@ import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
 import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
-import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken } from '@/lib/api'
+import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState } from '@/lib/api'
 import {
   MessageSquare,
   Settings,
@@ -34,7 +34,9 @@ import {
   Stamp,
   Bot,
   AlertTriangle,
-  CreditCard
+  CreditCard,
+  Smartphone,
+  HardDrive
 } from 'lucide-react'
 
 interface User {
@@ -138,7 +140,8 @@ export default function DashboardLayout({
           // Try refresh — maybe the JWT expired but refresh token cookie is valid
           const refreshed = await tryRefreshToken()
           if (!refreshed) {
-            router.push('/')
+            clearAuthState()
+            router.push('/login')
             return
           }
         }
@@ -167,8 +170,8 @@ export default function DashboardLayout({
               }
             }
           }
-          localStorage.removeItem('token')
-          router.push('/')
+          clearAuthState()
+          router.push('/login')
           return
         }
 
@@ -179,10 +182,12 @@ export default function DashboardLayout({
           localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
           initIdleTimeout() // Start idle timeout detector
         } else {
-          router.push('/')
+          clearAuthState()
+          router.push('/login')
         }
       } catch {
-        router.push('/')
+        clearAuthState()
+        router.push('/login')
       } finally {
         setLoading(false)
       }
@@ -265,13 +270,13 @@ export default function DashboardLayout({
   const handleLogout = async () => {
     const token = localStorage.getItem('token')
     clearIdleTimeout()
-    localStorage.removeItem('token')
+    clearAuthState()
     await fetch('/api/auth/logout', {
       method: 'POST',
       credentials: 'include',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
-    router.push('/')
+    router.push('/login')
   }
 
   const handleSwitchAccount = async (accountId: string) => {
@@ -302,8 +307,8 @@ export default function DashboardLayout({
     '/dashboard/chats': 'chats',
     '/dashboard/contacts': 'contacts',
     '/dashboard/programs': 'programs',
-    '/dashboard/automations': 'leads',
-    '/dashboard/bots': 'leads',
+    '/dashboard/automations': 'automations',
+    '/dashboard/bots': 'bots',
     '/dashboard/devices': 'devices',
     '/dashboard/leads': 'leads',
     '/dashboard/events': 'events',
@@ -312,12 +317,13 @@ export default function DashboardLayout({
     '/dashboard/dynamics': 'dynamics',
     '/dashboard/tasks': 'tasks',
     '/dashboard/documents': 'documents',
-      '/dashboard/tags': 'tags',
+    '/dashboard/tags': 'tags',
     '/dashboard/settings': 'settings',
   }
 
   function hasPermission(href: string): boolean {
     if (!user) return false
+    if (href === '/dashboard/storage') return true
     if (user.is_admin || user.is_super_admin) return true
     const module = MODULE_PERMS[href]
     if (!module) return true // Dashboard and Admin (no module restriction)
@@ -332,6 +338,7 @@ export default function DashboardLayout({
     { href: '/dashboard/programs', icon: GraduationCap, label: 'Programas', desc: 'Programas educativos' },
     { href: '/dashboard/automations', icon: Zap, label: 'Automatizaciones', desc: 'Flujos automáticos' },
     { href: '/dashboard/bots', icon: Bot, label: 'Bots', desc: 'Respuestas conversacionales' },
+    { href: '/dashboard/devices', icon: Smartphone, label: 'Dispositivos', desc: 'Canales WhatsApp' },
     { href: '/dashboard/leads', icon: UserPlus, label: 'Leads', desc: 'Prospectos y oportunidades' },
     { href: '/dashboard/events', icon: CalendarDays, label: 'Eventos', desc: 'Gestión de eventos' },
     { href: '/dashboard/broadcasts', icon: Megaphone, label: 'Difusión', desc: 'Mensajes masivos' },
@@ -340,6 +347,7 @@ export default function DashboardLayout({
     { href: '/dashboard/dynamics', icon: Dices, label: 'Dinámicas', desc: 'Actividades interactivas' },
     { href: '/dashboard/documents', icon: Stamp, label: 'Plantillas', desc: 'Editor de plantillas' },
     { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas', desc: 'Organización por etiquetas' },
+    { href: '/dashboard/storage', icon: HardDrive, label: 'Almacenamiento', desc: 'Archivos y espacio' },
     { href: '/dashboard/settings', icon: Settings, label: 'Configuración', desc: 'Ajustes del sistema' },
     ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin', desc: 'Administración global' }] : []),
   ].filter(item => hasPermission(item.href))

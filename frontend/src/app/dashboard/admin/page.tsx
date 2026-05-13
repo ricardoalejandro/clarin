@@ -14,6 +14,7 @@ interface Account {
   slug: string
   plan: string
   max_devices: number
+  storage_limit_bytes: number
   is_active: boolean
   mcp_enabled: boolean
   kommo_enabled?: boolean
@@ -166,6 +167,8 @@ const ALL_MODULES = [
   { key: 'contacts', label: 'Contactos', color: 'blue' },
   { key: 'leads', label: 'Leads', color: 'violet' },
   { key: 'programs', label: 'Programas', color: 'orange' },
+  { key: 'automations', label: 'Automatizaciones', color: 'emerald' },
+  { key: 'bots', label: 'Bots', color: 'sky' },
   { key: 'devices', label: 'Dispositivos', color: 'cyan' },
   { key: 'events', label: 'Eventos', color: 'pink' },
   { key: 'broadcasts', label: 'Difusión', color: 'yellow' },
@@ -177,6 +180,27 @@ const ALL_MODULES = [
   { key: 'tasks', label: 'Tareas', color: 'lime' },
   { key: 'documents', label: 'Plantillas', color: 'purple' },
 ]
+
+function formatBytes(bytes?: number) {
+  const value = bytes || 0
+  if (value <= 0) return 'Ilimitado'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = value
+  let idx = 0
+  while (size >= 1024 && idx < units.length - 1) {
+    size /= 1024
+    idx++
+  }
+  return `${size >= 10 || idx === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[idx]}`
+}
+
+function gbToBytes(value: number) {
+  return Math.max(0, Math.round(value * 1024 * 1024 * 1024))
+}
+
+function bytesToGb(value?: number) {
+  return value && value > 0 ? Math.round((value / 1024 / 1024 / 1024) * 10) / 10 : 0
+}
 
 type Tab = 'accounts' | 'users' | 'roles' | 'integrations'
 
@@ -235,7 +259,7 @@ export default function AdminPage() {
 
   // Account form
   const [accountForm, setAccountForm] = useState({
-    name: '', slug: '', plan: 'basic', max_devices: 5, mcp_enabled: false,
+    name: '', slug: '', plan: 'basic', max_devices: 5, storage_limit_gb: 0, mcp_enabled: false,
     subscription_status: 'active', trial_ends_at: '', current_period_end: ''
   })
 
@@ -334,7 +358,7 @@ export default function AdminPage() {
   // Account CRUD
   function openCreateAccount() {
     setEditingAccount(null)
-    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, mcp_enabled: false, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
+    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, storage_limit_gb: 0, mcp_enabled: false, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
     setShowAccountModal(true)
   }
 
@@ -345,6 +369,7 @@ export default function AdminPage() {
       slug: a.slug,
       plan: a.plan,
       max_devices: a.max_devices,
+      storage_limit_gb: bytesToGb(a.storage_limit_bytes),
       mcp_enabled: a.mcp_enabled,
       subscription_status: a.subscription_status || 'active',
       trial_ends_at: dateInputValue(a.trial_ends_at),
@@ -364,6 +389,7 @@ export default function AdminPage() {
       slug: accountForm.slug,
       plan: accountForm.plan,
       max_devices: accountForm.max_devices,
+      storage_limit_bytes: gbToBytes(accountForm.storage_limit_gb),
       mcp_enabled: accountForm.mcp_enabled,
     }
 
@@ -1069,6 +1095,7 @@ export default function AdminPage() {
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Usuarios</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Dispositivos</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Chats</th>
+                <th className="text-center px-4 py-3 font-medium text-gray-500">Espacio</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Estado</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">MCP</th>
                 <th className="text-right px-4 py-3 font-medium text-gray-500">Acciones</th>
@@ -1076,7 +1103,7 @@ export default function AdminPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filteredAccounts.length === 0 ? (
-                <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">No se encontraron cuentas</td></tr>
+                <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-400">No se encontraron cuentas</td></tr>
               ) : filteredAccounts.map(a => (
                 <tr key={a.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3">
@@ -1103,6 +1130,7 @@ export default function AdminPage() {
                   <td className="px-4 py-3 text-center text-gray-600">{a.user_count}</td>
                   <td className="px-4 py-3 text-center text-gray-600">{a.device_count}/{a.max_devices}</td>
                   <td className="px-4 py-3 text-center text-gray-600">{a.chat_count}</td>
+                  <td className="px-4 py-3 text-center text-gray-600">{formatBytes(a.storage_limit_bytes)}</td>
                   <td className="px-4 py-3 text-center">
                     <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${a.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                       {a.is_active ? 'Activa' : 'Inactiva'}
@@ -1639,6 +1667,18 @@ export default function AdminPage() {
                     min={1}
                   />
                 </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Límite de almacenamiento (GB)</label>
+                <input
+                  type="number"
+                  value={accountForm.storage_limit_gb}
+                  onChange={e => setAccountForm(f => ({ ...f, storage_limit_gb: Math.max(0, parseFloat(e.target.value) || 0) }))}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  min={0}
+                  step={0.5}
+                />
+                <p className="mt-1 text-xs text-gray-400">Usa 0 para dejar la cuenta sin límite.</p>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>

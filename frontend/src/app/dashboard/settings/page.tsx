@@ -2,8 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
-import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe, Hash, Calendar, ToggleLeft, Mail, Phone, Link, DollarSign, Type, Tag, List, AlertCircle } from 'lucide-react'
-import { subscribeWebSocket } from '@/lib/api'
+import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe, Hash, Calendar, ToggleLeft, Mail, Phone, Link, DollarSign, Type, Tag, List, AlertCircle, HardDrive } from 'lucide-react'
+import { clearAuthState, subscribeWebSocket } from '@/lib/api'
 import WhatsAppAPISettingsPanel from '@/components/WhatsAppAPISettingsPanel'
 import { CustomFieldDefinition, CustomFieldType, CustomFieldOption, CustomFieldConfig } from '@/types/custom-field'
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
@@ -29,6 +29,27 @@ interface Account {
   current_period_end?: string | null
   grace_ends_at?: string | null
   created_at: string
+  storage_limit_bytes?: number
+}
+
+interface StorageUsage {
+  limit_bytes: number
+  used_bytes: number
+  available_bytes: number
+  object_count: number
+  percent_used: number
+  can_manage: boolean
+  by_type: Record<string, number>
+}
+
+interface StorageFile {
+  object_key: string
+  media_url: string
+  media_type: string
+  filename: string
+  size_bytes: number
+  last_used_at: string
+  references_count: number
 }
 
 const subscriptionLabels: Record<string, string> = {
@@ -63,6 +84,19 @@ function daysUntil(value?: string | null) {
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return null
   return Math.max(0, Math.ceil((parsed.getTime() - Date.now()) / 86400000))
+}
+
+function formatBytes(bytes?: number) {
+  const value = bytes || 0
+  if (value <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = value
+  let idx = 0
+  while (size >= 1024 && idx < units.length - 1) {
+    size /= 1024
+    idx++
+  }
+  return `${size >= 10 || idx === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[idx]}`
 }
 
 interface UserProfile {
@@ -1031,6 +1065,11 @@ export default function SettingsPage() {
   const [incomingStageId, setIncomingStageId] = useState<string>('')
   const [pipelineStages, setPipelineStages] = useState<{ id: string; name: string; color: string; pipeline_name: string }[]>([])
   const [savingStage, setSavingStage] = useState(false)
+  const [storageUsage, setStorageUsage] = useState<StorageUsage | null>(null)
+  const [storageFiles, setStorageFiles] = useState<StorageFile[]>([])
+  const [storageLoading, setStorageLoading] = useState(false)
+  const [storageDeleting, setStorageDeleting] = useState<string | null>(null)
+  const [storageType, setStorageType] = useState('')
 
   // Devices state
   type DeviceProvider = 'whatsapp_web' | 'whatsapp_cloud_api'
@@ -1158,8 +1197,12 @@ export default function SettingsPage() {
   // Read tab from URL param (for redirect from /dashboard/devices)
   useEffect(() => {
     const tab = searchParams.get('tab')
+    if (tab === 'storage') {
+      router.replace('/dashboard/storage')
+      return
+    }
     if (tab) setActiveTab(tab)
-  }, [searchParams])
+  }, [router, searchParams])
 
   const fetchQuickReplies = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -1551,6 +1594,53 @@ export default function SettingsPage() {
     }
   }
 
+  const fetchStorage = useCallback(async () => {
+    setStorageLoading(true)
+    const token = localStorage.getItem('token')
+    try {
+      const [usageRes, filesRes] = await Promise.all([
+        fetch('/api/storage/usage', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/storage/files?limit=80${storageType ? `&type=${storageType}` : ''}`, { headers: { Authorization: `Bearer ${token}` } }),
+      ])
+      const usageData = await usageRes.json()
+      const filesData = await filesRes.json()
+      if (usageData.success) setStorageUsage(usageData)
+      if (filesData.success) setStorageFiles(filesData.files || [])
+    } catch (err) {
+      showMessage('error', 'No se pudo cargar el almacenamiento')
+    } finally {
+      setStorageLoading(false)
+    }
+  }, [storageType])
+
+  useEffect(() => {
+    if (activeTab === 'storage') fetchStorage()
+  }, [activeTab, fetchStorage])
+
+  const handleDeleteStorageFile = async (file: StorageFile) => {
+    if (!confirm(`¿Eliminar "${file.filename}"? El archivo dejará de mostrarse en los chats.`)) return
+    setStorageDeleting(file.object_key)
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch('/api/storage/files', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ object_keys: [file.object_key], confirmation: 'DELETE_MEDIA' }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        showMessage('success', `Archivo eliminado. Liberado: ${formatBytes(data.freed_bytes)}`)
+        fetchStorage()
+      } else {
+        showMessage('error', data.error || 'No se pudo eliminar')
+      }
+    } catch (err) {
+      showMessage('error', 'No se pudo eliminar')
+    } finally {
+      setStorageDeleting(null)
+    }
+  }
+
   const showMessage = (type: 'success' | 'error', text: string) => {
     setMessage({ type, text })
     setTimeout(() => setMessage(null), 3000)
@@ -1842,8 +1932,8 @@ export default function SettingsPage() {
   }
 
   const handleLogout = () => {
-    localStorage.removeItem('token')
-    window.location.href = '/'
+    clearAuthState()
+    window.location.href = '/login'
   }
 
   if (loading) {
@@ -1989,6 +2079,22 @@ export default function SettingsPage() {
                   </div>
                 </div>
               </div>
+
+              <button
+                onClick={() => router.push('/dashboard/storage')}
+                className="w-full flex items-center justify-between gap-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-left hover:bg-emerald-100 transition-colors"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center shrink-0">
+                    <HardDrive className="w-5 h-5 text-emerald-600" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-emerald-900">Almacenamiento de la cuenta</p>
+                    <p className="text-xs text-emerald-700 truncate">Abre el explorador de archivos, uso y limpieza de multimedia.</p>
+                  </div>
+                </div>
+                <ExternalLink className="w-4 h-4 text-emerald-700 shrink-0" />
+              </button>
 
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">Nombre de la Cuenta</label>
@@ -2359,6 +2465,126 @@ export default function SettingsPage() {
                     Eliminar Cuenta
                   </button>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'storage' && (
+            <div className="space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900">Espacio de la cuenta</h3>
+                  <p className="text-xs text-slate-500">Gestiona archivos multimedia almacenados desde chats de WhatsApp.</p>
+                </div>
+                <button
+                  onClick={fetchStorage}
+                  disabled={storageLoading}
+                  className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${storageLoading ? 'animate-spin' : ''}`} />
+                  Actualizar
+                </button>
+              </div>
+
+              <div className="bg-slate-900 rounded-2xl p-5 text-white">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+                  <div className="flex items-center gap-4">
+                    <div className="w-16 h-16 rounded-2xl bg-emerald-500/15 flex items-center justify-center">
+                      <HardDrive className="w-8 h-8 text-emerald-300" />
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-400">Usado</p>
+                      <div className="text-3xl font-semibold tabular-nums">{formatBytes(storageUsage?.used_bytes)}</div>
+                      <p className="text-xs text-slate-400">
+                        {storageUsage?.limit_bytes ? `${formatBytes(storageUsage.available_bytes)} disponibles de ${formatBytes(storageUsage.limit_bytes)}` : 'Sin límite configurado'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="md:w-72">
+                    <div className="flex justify-between text-xs text-slate-400 mb-2">
+                      <span>{storageUsage?.object_count || 0} archivos</span>
+                      <span>{storageUsage?.limit_bytes ? `${Math.round(storageUsage.percent_used)}%` : 'Ilimitado'}</span>
+                    </div>
+                    <div className="h-3 rounded-full bg-slate-700 overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${(storageUsage?.percent_used || 0) >= 90 ? 'bg-red-500' : (storageUsage?.percent_used || 0) >= 75 ? 'bg-amber-400' : 'bg-emerald-400'}`}
+                        style={{ width: `${storageUsage?.limit_bytes ? Math.min(100, storageUsage.percent_used) : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {[
+                  { key: 'image', label: 'Imágenes', icon: Image },
+                  { key: 'video', label: 'Videos', icon: Video },
+                  { key: 'audio', label: 'Audios', icon: Volume2 },
+                  { key: 'document', label: 'Documentos', icon: File },
+                ].map(item => {
+                  const Icon = item.icon
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => setStorageType(storageType === item.key ? '' : item.key)}
+                      className={`text-left p-4 rounded-xl border transition ${storageType === item.key ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 hover:bg-slate-50'}`}
+                    >
+                      <Icon className="w-5 h-5 text-emerald-600 mb-2" />
+                      <p className="text-sm font-medium text-slate-900">{item.label}</p>
+                      <p className="text-xs text-slate-500">{formatBytes(storageUsage?.by_type?.[item.key] || 0)}</p>
+                    </button>
+                  )
+                })}
+              </div>
+
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm font-medium text-slate-900">Multimedia de chats</h4>
+                    <p className="text-xs text-slate-500">Al eliminar un archivo, el mensaje queda visible pero sin multimedia.</p>
+                  </div>
+                  {storageType && (
+                    <button onClick={() => setStorageType('')} className="text-xs text-emerald-600 hover:text-emerald-700 whitespace-nowrap">Quitar filtro</button>
+                  )}
+                </div>
+                {storageLoading ? (
+                  <div className="p-4 space-y-2">
+                    {[...Array(5)].map((_, i) => <div key={i} className="h-12 bg-slate-100 rounded-lg animate-pulse" />)}
+                  </div>
+                ) : storageFiles.length === 0 ? (
+                  <div className="py-12 text-center">
+                    <HardDrive className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                    <p className="text-sm font-medium text-slate-600">No hay archivos para mostrar</p>
+                    <p className="text-xs text-slate-400">Los archivos de chats aparecerán aquí cuando existan.</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {storageFiles.map(file => (
+                      <div key={file.object_key} className="px-4 py-3 flex items-center gap-3 hover:bg-slate-50">
+                        <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
+                          {file.media_type === 'image' ? <Image className="w-5 h-5 text-emerald-600" /> :
+                           file.media_type === 'video' ? <Video className="w-5 h-5 text-emerald-600" /> :
+                           file.media_type === 'audio' ? <Volume2 className="w-5 h-5 text-emerald-600" /> :
+                           <File className="w-5 h-5 text-emerald-600" />}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-slate-900 truncate">{file.filename || 'Archivo'}</p>
+                          <p className="text-xs text-slate-500">{formatBytes(file.size_bytes)} · {file.references_count} referencia{file.references_count === 1 ? '' : 's'}</p>
+                        </div>
+                        {storageUsage?.can_manage && (
+                          <button
+                            onClick={() => handleDeleteStorageFile(file)}
+                            disabled={storageDeleting === file.object_key}
+                            className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg disabled:opacity-50"
+                            title="Eliminar archivo"
+                          >
+                            {storageDeleting === file.object_key ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -14,6 +14,7 @@ type Account struct {
 	Slug                   string     `json:"slug"`
 	Plan                   string     `json:"plan"`
 	MaxDevices             int        `json:"max_devices"`
+	StorageLimitBytes      int64      `json:"storage_limit_bytes"`
 	IsActive               bool       `json:"is_active"`
 	MCPEnabled             bool       `json:"mcp_enabled"`
 	KommoEnabled           bool       `json:"kommo_enabled"`
@@ -159,6 +160,8 @@ const (
 	PermTags         = "tags"
 	PermSettings     = "settings"
 	PermIntegrations = "integrations"
+	PermAutomations  = "automations"
+	PermBots         = "bots"
 	PermSurveys      = "surveys"
 	PermDynamics     = "dynamics"
 	PermTasks        = "tasks"
@@ -169,7 +172,9 @@ const (
 // AllPermissions contains all available permission modules in display order
 var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
-	PermDevices, PermEvents, PermBroadcasts, PermTags, PermSettings, PermIntegrations, PermSurveys, PermDynamics, PermTasks, PermDocuments,
+	PermAutomations, PermBots, PermDevices, PermEvents,
+	PermBroadcasts, PermSurveys, PermTasks, PermDynamics,
+	PermDocuments, PermTags, PermSettings, PermIntegrations,
 }
 
 // Role represents a named set of module permissions
@@ -475,6 +480,8 @@ type Message struct {
 	MediaMimetype *string    `json:"media_mimetype,omitempty"`
 	MediaFilename *string    `json:"media_filename,omitempty"`
 	MediaSize     *int64     `json:"media_size,omitempty"`
+	MediaAssetID  *uuid.UUID `json:"media_asset_id,omitempty"`
+	MediaDeleted  bool       `json:"media_deleted"`
 	IsFromMe      bool       `json:"is_from_me"`
 	IsRead        bool       `json:"is_read"`
 	IsRevoked     bool       `json:"is_revoked"`
@@ -508,6 +515,21 @@ type Message struct {
 	PollOptions       []*PollOption `json:"poll_options,omitempty"`
 	PollVotes         []*PollVote   `json:"poll_votes,omitempty"`
 	PollMaxSelections int           `json:"poll_max_selections,omitempty"`
+}
+
+type MediaAsset struct {
+	ID          uuid.UUID  `json:"id"`
+	AccountID   uuid.UUID  `json:"account_id"`
+	ContentHash string     `json:"content_hash"`
+	ObjectKey   string     `json:"object_key"`
+	MediaType   string     `json:"media_type"`
+	ContentType string     `json:"content_type"`
+	Filename    string     `json:"filename"`
+	SizeBytes   int64      `json:"size_bytes"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
 }
 
 // MessageType constants

@@ -8,6 +8,12 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
 
 let _refreshPromise: Promise<boolean> | null = null
 
+export function clearAuthState() {
+  if (typeof window === 'undefined') return
+  localStorage.removeItem('token')
+  localStorage.removeItem('kommo_enabled')
+}
+
 export async function tryRefreshToken(): Promise<boolean> {
   // Deduplicate concurrent refresh attempts
   if (_refreshPromise) return _refreshPromise
@@ -18,12 +24,16 @@ export async function tryRefreshToken(): Promise<boolean> {
         method: 'POST',
         credentials: 'include', // sends httpOnly refresh-token cookie
       })
-      if (!res.ok) return false
+      if (!res.ok) {
+        clearAuthState()
+        return false
+      }
       const data = await res.json()
       if (data.success && data.token) {
         localStorage.setItem('token', data.token)
         return true
       }
+      clearAuthState()
       return false
     } catch {
       return false
@@ -46,8 +56,8 @@ function resetIdleTimer() {
   if (_idleTimer) clearTimeout(_idleTimer)
   _idleTimer = setTimeout(() => {
     // Auto-logout
-    localStorage.removeItem('token')
-    window.location.href = '/'
+    clearAuthState()
+    window.location.href = '/login'
   }, IDLE_TIMEOUT_MS)
 }
 
@@ -158,8 +168,8 @@ export async function api<T>(
           }
         }
         // Refresh failed — session truly expired
-        localStorage.removeItem('token')
-        window.location.href = '/'
+        clearAuthState()
+        window.location.href = '/login'
         return { success: false, error: 'Sesión expirada' }
       }
       return { success: false, error: data?.error || `Error ${res.status}` }
@@ -208,6 +218,8 @@ export async function apiUpload<T = any>(endpoint: string, formData: FormData): 
       if (refreshed) {
         res = await doFetch(getToken())
       } else {
+        clearAuthState()
+        window.location.href = '/login'
         return { success: false, error: 'Sesión expirada' }
       }
     }
@@ -443,6 +455,7 @@ export interface Message {
   from_name: string
   body: string
   message_type: string
+  media_deleted?: boolean
   is_from_me: boolean
   is_read: boolean
   status: string

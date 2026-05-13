@@ -38,6 +38,7 @@ export interface Message {
   media_mimetype?: string
   media_filename?: string
   media_size?: number
+  media_deleted?: boolean
   is_from_me: boolean
   is_read: boolean
   is_revoked?: boolean
