@@ -152,18 +152,6 @@ html {
   contain: size layout;
 }
 
-html.public-page-scroll,
-html.public-page-scroll body {
-  height: auto !important;
-  max-height: none !important;
-  overflow: visible !important;
-  overscroll-behavior: auto !important;
-}
-
-html.public-page-scroll {
-  contain: none !important;
-}
-
 body {
   color: var(--foreground);
   background: var(--background);

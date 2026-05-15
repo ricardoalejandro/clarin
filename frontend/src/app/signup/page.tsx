@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { ArrowRight, ArrowLeft, Check, Eye, EyeOff, Lock, MessageSquare, Sparkles } from 'lucide-react'
+import { ArrowRight, Check, Eye, EyeOff, Lock, Sparkles } from 'lucide-react'
 
 interface PublicPlan {
   code: string
@@ -87,22 +87,6 @@ export default function SignupPage() {
 
   return (
     <div className="min-h-screen bg-white flex flex-col">
-      {/* Header */}
-      <header className="border-b border-slate-100 bg-white/80 backdrop-blur sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2.5">
-            <div className="w-9 h-9 bg-emerald-600 rounded-lg flex items-center justify-center shadow-sm">
-              <MessageSquare className="w-5 h-5 text-white" />
-            </div>
-            <span className="font-bold text-lg tracking-tight text-slate-900">Clarin</span>
-          </Link>
-          <Link href="/" className="text-sm text-slate-500 hover:text-slate-900 transition-colors flex items-center gap-1.5">
-            <ArrowLeft className="w-4 h-4" />
-            Volver al inicio
-          </Link>
-        </div>
-      </header>
-
       <div className="flex-1 flex items-start justify-center px-4 py-12">
         <div className="w-full max-w-lg">
           <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">

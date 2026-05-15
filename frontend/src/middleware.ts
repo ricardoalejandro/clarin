@@ -12,7 +12,6 @@ function getHost(request: NextRequest) {
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
   const host = getHost(request)
-  const isAppHost = host === APP_HOST
   const isMarketingHost = host === MARKETING_HOST
 
   const authToken = request.cookies.get('auth-token')
@@ -28,10 +27,6 @@ export function middleware(request: NextRequest) {
 
   if (isMarketingHost && (pathname === '/login' || pathname === '/signup' || pathname.startsWith('/dashboard'))) {
     return NextResponse.redirect(new URL(`${pathname}${request.nextUrl.search}`, APP_URL))
-  }
-
-  if (isAppHost && pathname === '/') {
-    return NextResponse.redirect(new URL('/login', request.url))
   }
 
   // Dashboard routes: the client will validate/refresh the session.
