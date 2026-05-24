@@ -1196,7 +1196,11 @@ func (s *Server) sendRegistrationWhatsApp(ctx context.Context, link *domain.Dyna
 		return "failed", "No hay dispositivo WhatsApp conectado"
 	}
 
-	to := phone + "@s.whatsapp.net"
+	to, err := s.resolveDynamicWhatsAppRecipient(ctx, deviceID, phone)
+	if err != nil {
+		log.Printf("[DYNAMIC] ❌ WA recipient check failed for %s: %v", phone, err)
+		return "failed", err.Error()
+	}
 	caption := strings.TrimSpace(link.WhatsAppMessage)
 	if caption == "" {
 		caption = "¡Aquí tienes tu pensamiento del día! 🌟"
@@ -1211,7 +1215,7 @@ func (s *Server) sendRegistrationWhatsApp(ctx context.Context, link *domain.Dyna
 
 	if _, err := s.pool.SendMediaMessage(ctx, deviceID, to, caption, item.ImageURL, "image"); err != nil {
 		log.Printf("[DYNAMIC] ❌ Main WA send failed to %s: %v", phone, err)
-		return "failed", err.Error()
+		return "failed", friendlyDynamicWhatsAppSendError(err)
 	}
 	log.Printf("[DYNAMIC] ✅ Main WA sent to %s", phone)
 
@@ -1253,6 +1257,40 @@ func (s *Server) sendRegistrationWhatsApp(ctx context.Context, link *domain.Dyna
 	}
 
 	return "sent", ""
+}
+
+func (s *Server) resolveDynamicWhatsAppRecipient(ctx context.Context, deviceID uuid.UUID, phone string) (string, error) {
+	results, err := s.pool.IsOnWhatsApp(ctx, deviceID, []string{phone})
+	if err != nil {
+		return "", fmt.Errorf("No pudimos verificar el número en WhatsApp. Intenta nuevamente.")
+	}
+	if len(results) == 0 || !results[0].IsOnWhatsApp {
+		return "", fmt.Errorf("Ese número no está registrado en WhatsApp. Verifica el número e intenta nuevamente.")
+	}
+	jid := strings.TrimSpace(results[0].JID)
+	if jid == "" {
+		jid = phone + "@s.whatsapp.net"
+	}
+	return jid, nil
+}
+
+func friendlyDynamicWhatsAppSendError(err error) string {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "server returned error 400") || strings.Contains(msg, "bad request") {
+		return "WhatsApp rechazó el envío a ese número. Verifica que el número tenga WhatsApp e intenta nuevamente."
+	}
+	if strings.Contains(msg, "context deadline") || strings.Contains(msg, "timeout") {
+		return "El envío demoró demasiado. Intenta nuevamente."
+	}
+	return "No pudimos entregar el mensaje por WhatsApp. Intenta nuevamente."
+}
+
+func dynamicWhatsAppFailureHTTPStatus(msg string) int {
+	msg = strings.ToLower(msg)
+	if strings.Contains(msg, "número") || strings.Contains(msg, "numero") || strings.Contains(msg, "verifica") || strings.Contains(msg, "rechazó") || strings.Contains(msg, "rechazo") {
+		return fiber.StatusBadRequest
+	}
+	return fiber.StatusBadGateway
 }
 
 // ensureLeadForRegistration makes sure there is a Contact + Lead for the given
@@ -1397,7 +1435,7 @@ func (s *Server) handleRegisterOnLink(c *fiber.Ctx) error {
 		if msg == "" {
 			msg = "No pudimos entregar tu mensaje por WhatsApp. Intenta nuevamente."
 		}
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+		return c.Status(dynamicWhatsAppFailureHTTPStatus(msg)).JSON(fiber.Map{
 			"error":           msg,
 			"whatsapp_status": waStatus,
 		})
@@ -1532,7 +1570,7 @@ func (s *Server) handleShareOnLink(c *fiber.Ctx) error {
 		if msg == "" {
 			msg = "No pudimos entregar el mensaje por WhatsApp. Intenta nuevamente."
 		}
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+		return c.Status(dynamicWhatsAppFailureHTTPStatus(msg)).JSON(fiber.Map{
 			"error":           msg,
 			"whatsapp_status": waStatus,
 		})

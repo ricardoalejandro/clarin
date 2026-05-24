@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -473,8 +474,19 @@ func main() {
 								_ = repos.Dynamic.UpdateWhatsAppStatus(dynamicWACtx, q.ID, "failed", err.Error())
 								continue
 							}
-							phone := q.Phone + "@s.whatsapp.net"
-							_, sendErr := devicePool.SendMediaMessage(dynamicWACtx, deviceID, phone, q.Caption, q.ImageURL, "image")
+							recipient := q.Phone + "@s.whatsapp.net"
+							if results, checkErr := devicePool.IsOnWhatsApp(dynamicWACtx, deviceID, []string{q.Phone}); checkErr != nil {
+								log.Printf("[DynamicWA] ❌ Failed to check WhatsApp for %s: %v", q.Phone, checkErr)
+								_ = repos.Dynamic.UpdateWhatsAppStatus(dynamicWACtx, q.ID, "failed", "No pudimos verificar el número en WhatsApp")
+								continue
+							} else if len(results) == 0 || !results[0].IsOnWhatsApp {
+								log.Printf("[DynamicWA] ❌ Phone is not on WhatsApp: %s", q.Phone)
+								_ = repos.Dynamic.UpdateWhatsAppStatus(dynamicWACtx, q.ID, "failed", "Ese número no está registrado en WhatsApp")
+								continue
+							} else if jid := strings.TrimSpace(results[0].JID); jid != "" {
+								recipient = jid
+							}
+							_, sendErr := devicePool.SendMediaMessage(dynamicWACtx, deviceID, recipient, q.Caption, q.ImageURL, "image")
 							if sendErr != nil {
 								errMsg := sendErr.Error()
 								log.Printf("[DynamicWA] ❌ Failed to send to %s: %v", q.Phone, sendErr)
@@ -484,7 +496,7 @@ func main() {
 								// Send second message if configured
 								if q.ExtraMediaURL != "" {
 									time.Sleep(2 * time.Second)
-									_, extraErr := devicePool.SendMediaMessage(dynamicWACtx, deviceID, phone, q.ExtraText, q.ExtraMediaURL, q.ExtraMediaType)
+									_, extraErr := devicePool.SendMediaMessage(dynamicWACtx, deviceID, recipient, q.ExtraText, q.ExtraMediaURL, q.ExtraMediaType)
 									if extraErr != nil {
 										log.Printf("[DynamicWA] ⚠️ Failed to send extra media to %s: %v", q.Phone, extraErr)
 									} else {
@@ -492,7 +504,7 @@ func main() {
 									}
 								} else if q.ExtraText != "" {
 									time.Sleep(2 * time.Second)
-									_, extraErr := devicePool.SendMessage(dynamicWACtx, deviceID, phone, q.ExtraText)
+									_, extraErr := devicePool.SendMessage(dynamicWACtx, deviceID, recipient, q.ExtraText)
 									if extraErr != nil {
 										log.Printf("[DynamicWA] ⚠️ Failed to send extra text to %s: %v", q.Phone, extraErr)
 									} else {
