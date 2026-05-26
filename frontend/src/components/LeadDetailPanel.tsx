@@ -12,7 +12,6 @@ import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import TaskList from '@/components/TaskList'
 import TaskFormModal from '@/components/TaskFormModal'
 import GenerateDocumentModal from '@/components/GenerateDocumentModal'
-import ConfirmDeleteKommoModal from '@/components/ConfirmDeleteKommoModal'
 import CustomFieldInput from '@/components/CustomFieldInput'
 import type { CustomFieldDefinition, CustomFieldValue } from '@/types/custom-field'
 import type { Task, TaskList as TaskListType } from '@/types/task'
@@ -111,7 +110,6 @@ export default function LeadDetailPanel({
   onObservationChange,
   scrollToTasks = false,
 }: LeadDetailPanelProps) {
-  const kommoEnabled = typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true'
   // Internal lead state — updates immediately on save, syncs with prop
   const [lead, setLead] = useState(leadProp)
   useEffect(() => {
@@ -157,10 +155,6 @@ export default function LeadDetailPanel({
   // History modal
   const [showHistoryModal, setShowHistoryModal] = useState(false)
 
-  // Destructive Kommo delete modal
-  const [showKommoDeleteModal, setShowKommoDeleteModal] = useState(false)
-  const [kommoDeleting, setKommoDeleting] = useState(false)
-
   // Tasks
   const [leadTasks, setLeadTasks] = useState<Task[]>([])
   const [showTaskModal, setShowTaskModal] = useState(false)
@@ -171,9 +165,6 @@ export default function LeadDetailPanel({
   const [showPipelineDropdown, setShowPipelineDropdown] = useState(false)
   const [expandedPipelineId, setExpandedPipelineId] = useState<string | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
-
-  // Kommo sync
-  const [syncingKommo, setSyncingKommo] = useState(false)
 
   // History sync
   const [syncingHistory, setSyncingHistory] = useState(false)
@@ -644,30 +635,6 @@ export default function LeadDetailPanel({
     }
   }
 
-  const handleSyncKommo = async () => {
-    setSyncingKommo(true)
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch(`/api/leads/${lead.id}/sync-kommo`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success && data.lead) {
-        setLead(data.lead)
-        onLeadChange(data.lead)
-        fetchObservations(lead.id)
-      } else {
-        alert(data.error || 'Error al sincronizar')
-      }
-    } catch (err) {
-      console.error('Sync error:', err)
-      alert('Error de conexión al sincronizar')
-    } finally {
-      setSyncingKommo(false)
-    }
-  }
-
   const handleRequestHistorySync = async () => {
     const cleanPhone = (lead.phone || '').replace(/[^0-9]/g, '')
     if (syncingHistory || !cleanPhone) {
@@ -719,11 +686,6 @@ export default function LeadDetailPanel({
   }
 
   const handleDeleteLead = async () => {
-    // Blocked lead with Kommo sync → show special destructive modal
-    if (kommoEnabled && !contactMode && !eventMode && lead.is_blocked && lead.kommo_id && !lead.kommo_deleted_at) {
-      setShowKommoDeleteModal(true)
-      return
-    }
     const confirmMsg = contactMode ? '¿Estás seguro de eliminar este contacto?' : eventMode ? '¿Estás seguro de eliminar este participante?' : '¿Estás seguro de eliminar este lead?'
     if (!confirm(confirmMsg)) return
     const token = localStorage.getItem('token')
@@ -744,30 +706,6 @@ export default function LeadDetailPanel({
       }
     } catch (err) {
       console.error('Failed to delete:', err)
-    }
-  }
-
-  const handleDeleteFromKommo = async () => {
-    setKommoDeleting(true)
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch(`/api/leads/${lead.id}?delete_from_kommo=true`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        setShowKommoDeleteModal(false)
-        onDelete?.(lead.id)
-        onClose()
-      } else {
-        alert(data.error || 'Error al eliminar lead de Kommo')
-      }
-    } catch (err) {
-      console.error('Failed to delete lead from Kommo:', err)
-      alert('Error de conexión al eliminar lead')
-    } finally {
-      setKommoDeleting(false)
     }
   }
 
@@ -952,31 +890,14 @@ export default function LeadDetailPanel({
             </div>
           )}
 
-          {/* Kommo & Google sync status */}
+          {/* External metadata and Google sync status */}
           <div className="flex items-center justify-center gap-2 mt-3 flex-wrap">
-            {kommoEnabled && !eventMode && !contactMode && (
-              lead.kommo_id ? (
-              <>
+            {!eventMode && !contactMode && lead.kommo_id && (
                 <span className={`flex items-center gap-1.5 px-2.5 py-1 border rounded-full text-xs font-medium ${lead.kommo_deleted_at ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>
                   <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${lead.kommo_deleted_at ? 'bg-amber-500' : 'bg-emerald-500'}`} />
                   {lead.kommo_deleted_at ? `Eliminado de Kommo #${lead.kommo_id}` : `Kommo #${lead.kommo_id}`}
                 </span>
-                <button
-                  onClick={handleSyncKommo}
-                  disabled={syncingKommo}
-                  title="Sincronizar desde Kommo ahora"
-                  className="flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50 rounded-full text-xs font-medium text-slate-500 hover:text-emerald-700 transition-colors disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3 h-3 ${syncingKommo ? 'animate-spin text-emerald-600' : ''}`} />
-                  {syncingKommo ? 'Sincronizando…' : 'Sincronizar'}
-                </button>
-              </>
-            ) : (
-              <span className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-full text-xs text-slate-400">
-                <span className="w-1.5 h-1.5 rounded-full bg-slate-300 flex-shrink-0" />
-                Sin vínculo Kommo
-              </span>
-            ))}
+            )}
             {googleConnected && (contactMode ? contactId : lead.contact_id) && (
               <button
                 onClick={googleSynced ? handleGoogleDesync : handleGoogleSync}
@@ -1762,17 +1683,6 @@ export default function LeadDetailPanel({
         />
       )}
 
-      {/* Destructive Kommo Delete Modal */}
-      {kommoEnabled && (
-      <ConfirmDeleteKommoModal
-        isOpen={showKommoDeleteModal}
-        onConfirm={handleDeleteFromKommo}
-        onCancel={() => { setShowKommoDeleteModal(false); setKommoDeleting(false) }}
-        leadName={lead.name || 'Sin nombre'}
-        kommoId={lead.kommo_id || 0}
-        loading={kommoDeleting}
-      />
-      )}
     </div>
   )
 }

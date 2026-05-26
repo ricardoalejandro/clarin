@@ -183,6 +183,8 @@ const ALL_MODULES = [
   { key: 'documents', label: 'Plantillas', color: 'purple' },
 ]
 
+const KOMMO_ADMIN_UI_ENABLED = false
+
 function formatBytes(bytes?: number) {
   const value = bytes || 0
   if (value <= 0) return 'Ilimitado'
@@ -322,6 +324,10 @@ export default function AdminPage() {
   }
 
   async function fetchIntegrations() {
+    if (!KOMMO_ADMIN_UI_ENABLED) {
+      setIntegrations([])
+      return
+    }
     try {
       const res = await fetch('/api/admin/integrations?provider=kommo', { headers })
       const data = await res.json()
@@ -333,7 +339,13 @@ export default function AdminPage() {
 
   useEffect(() => {
     setLoading(true)
-    Promise.all([fetchAccounts(), fetchUsers(), fetchPlans(), fetchRoles(), fetchIntegrations()]).finally(() => setLoading(false))
+    Promise.all([
+      fetchAccounts(),
+      fetchUsers(),
+      fetchPlans(),
+      fetchRoles(),
+      ...(KOMMO_ADMIN_UI_ENABLED ? [fetchIntegrations()] : []),
+    ]).finally(() => setLoading(false))
   }, [])
 
   useEffect(() => {
@@ -1030,15 +1042,17 @@ export default function AdminPage() {
           <Lock className="w-4 h-4" /> Roles
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{roles.length}</span>
         </button>
-        <button
-          onClick={() => { setTab('integrations'); setSearch('') }}
-          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-            tab === 'integrations' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <Plug className="w-4 h-4" /> Integraciones
-          <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{integrations.length}</span>
-        </button>
+        {KOMMO_ADMIN_UI_ENABLED && (
+          <button
+            onClick={() => { setTab('integrations'); setSearch('') }}
+            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              tab === 'integrations' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <Plug className="w-4 h-4" /> Integraciones
+            <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{integrations.length}</span>
+          </button>
+        )}
       </div>
 
       {/* Search & Actions */}
@@ -1047,7 +1061,7 @@ export default function AdminPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder={tab === 'accounts' ? 'Buscar cuentas...' : tab === 'users' ? 'Buscar usuarios...' : tab === 'roles' ? 'Buscar roles...' : 'Buscar integraciones...'}
+            placeholder={tab === 'accounts' ? 'Buscar cuentas...' : tab === 'users' ? 'Buscar usuarios...' : tab === 'roles' ? 'Buscar roles...' : 'Buscar...'}
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent"
@@ -1072,7 +1086,7 @@ export default function AdminPage() {
           </select>
         )}
 
-        {tab === 'integrations' ? (
+        {KOMMO_ADMIN_UI_ENABLED && tab === 'integrations' ? (
           <div className="flex items-center gap-2">
             <button
               onClick={reloadIntegrations}
@@ -1312,7 +1326,7 @@ export default function AdminPage() {
               ))}
             </tbody>
           </table>
-        ) : (
+        ) : KOMMO_ADMIN_UI_ENABLED && tab === 'integrations' ? (
           <table className="w-full text-sm">
             <thead className="bg-gray-50 sticky top-0">
               <tr>
@@ -1372,11 +1386,11 @@ export default function AdminPage() {
               ))}
             </tbody>
           </table>
-        )}
+        ) : null}
       </div>
 
       {/* Integration Monitor Modal */}
-      {showIntegrationMonitor && monitorIntegration && (
+      {KOMMO_ADMIN_UI_ENABLED && showIntegrationMonitor && monitorIntegration && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-6xl max-h-[90vh] flex flex-col">
             <div className="p-5 border-b border-gray-200 flex items-start justify-between gap-4">
@@ -2042,7 +2056,7 @@ export default function AdminPage() {
         </div>
       )}
 
-      {showIntegrationModal && (
+      {KOMMO_ADMIN_UI_ENABLED && showIntegrationModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
             <div className="p-6 border-b border-gray-200 flex items-center justify-between">

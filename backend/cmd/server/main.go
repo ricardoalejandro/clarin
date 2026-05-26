@@ -135,39 +135,45 @@ func main() {
 	services.Automation.Start()
 	log.Printf("✅ Automation engine started (50 workers, 500/hr rate limit)")
 
-	// Initialize Kommo integrations (optional, multi-instance).
-	// Legacy env vars are migrated into a default integration instance so current
-	// accounts keep working while Admin can add more Kommo licenses.
-	if cfg.KommoSubdomain != "" && cfg.KommoAccessToken != "" {
-		if _, err := repos.Integration.EnsureDefaultKommoInstance(ctx, repository.EnvKommoInstance{
-			Name:          "Kommo " + cfg.KommoSubdomain,
-			Subdomain:     cfg.KommoSubdomain,
-			ClientID:      cfg.KommoClientID,
-			ClientSecret:  cfg.KommoClientSecret,
-			AccessToken:   cfg.KommoAccessToken,
-			RedirectURI:   cfg.KommoRedirectURI,
-			WebhookSecret: cfg.KommoWebhookSecret,
-		}); err != nil {
-			log.Printf("Warning: Failed to migrate Kommo env integration: %v", err)
+	// Kommo API communication is dormant by policy. The code, DB columns, CSV
+	// import metadata, and future integration structure stay in place, but the
+	// runtime manager/outbox/webhook/poller must not start while disabled.
+	var kommoManager *kommo.Manager
+	var kommoSyncSvc *kommo.SyncService
+	if kommo.APICommunicationEnabled {
+		if cfg.KommoSubdomain != "" && cfg.KommoAccessToken != "" {
+			if _, err := repos.Integration.EnsureDefaultKommoInstance(ctx, repository.EnvKommoInstance{
+				Name:          "Kommo " + cfg.KommoSubdomain,
+				Subdomain:     cfg.KommoSubdomain,
+				ClientID:      cfg.KommoClientID,
+				ClientSecret:  cfg.KommoClientSecret,
+				AccessToken:   cfg.KommoAccessToken,
+				RedirectURI:   cfg.KommoRedirectURI,
+				WebhookSecret: cfg.KommoWebhookSecret,
+			}); err != nil {
+				log.Printf("Warning: Failed to migrate Kommo env integration: %v", err)
+			}
 		}
-	}
-	kommoManager := kommo.NewManager(db, hub, kommo.ManagerConfig{
-		PublicURL:           cfg.PublicURL,
-		ProxyURL:            cfg.KommoProxyURL,
-		OutboxEnabled:       cfg.KommoOutboxEnabled,
-		OutboxBatchSize:     cfg.KommoOutboxBatchSize,
-		OutboxFlushInterval: cfg.KommoOutboxFlushInterval,
-	})
-	kommoManager.OnLeadTagsChanged = services.Event.ReconcileAllAccountEvents
-	if err := kommoManager.Reload(ctx); err != nil {
-		log.Printf("Warning: Failed to start Kommo manager: %v", err)
-	}
-	kommoSyncSvc := kommoManager.Primary()
-	if kommoSyncSvc != nil {
-		log.Printf("✅ Kommo manager started (%d active instance(s))", kommoManager.RuntimeStatus()["running_instances"])
-		if cfg.KommoOutboxEnabled {
-			log.Printf("✅ Kommo outbox enabled (batch=%d, interval=%s)", cfg.KommoOutboxBatchSize, cfg.KommoOutboxFlushInterval)
+		kommoManager = kommo.NewManager(db, hub, kommo.ManagerConfig{
+			PublicURL:           cfg.PublicURL,
+			ProxyURL:            cfg.KommoProxyURL,
+			OutboxEnabled:       cfg.KommoOutboxEnabled,
+			OutboxBatchSize:     cfg.KommoOutboxBatchSize,
+			OutboxFlushInterval: cfg.KommoOutboxFlushInterval,
+		})
+		kommoManager.OnLeadTagsChanged = services.Event.ReconcileAllAccountEvents
+		if err := kommoManager.Reload(ctx); err != nil {
+			log.Printf("Warning: Failed to start Kommo manager: %v", err)
 		}
+		kommoSyncSvc = kommoManager.Primary()
+		if kommoSyncSvc != nil {
+			log.Printf("✅ Kommo manager started (%d active instance(s))", kommoManager.RuntimeStatus()["running_instances"])
+			if cfg.KommoOutboxEnabled {
+				log.Printf("✅ Kommo outbox enabled (batch=%d, interval=%s)", cfg.KommoOutboxBatchSize, cfg.KommoOutboxFlushInterval)
+			}
+		}
+	} else {
+		log.Println("ℹ️ Kommo API communication disabled; local Kommo metadata and CSV import remain available")
 	}
 
 	// Initialize Google Contacts client (optional)

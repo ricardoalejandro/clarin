@@ -186,6 +186,9 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 }
 
 func (s *Server) kommoForAccount(ctx context.Context, accountID uuid.UUID) *kommo.SyncService {
+	if !kommo.APICommunicationEnabled {
+		return nil
+	}
 	if s.kommoManager != nil {
 		if svc := s.kommoManager.ForAccount(ctx, accountID); svc != nil {
 			return svc
@@ -195,6 +198,9 @@ func (s *Server) kommoForAccount(ctx context.Context, accountID uuid.UUID) *komm
 }
 
 func (s *Server) kommoForWebhook(secret string) *kommo.SyncService {
+	if !kommo.APICommunicationEnabled {
+		return nil
+	}
 	if s.kommoManager != nil {
 		if svc := s.kommoManager.ForWebhook(secret); svc != nil {
 			return svc
@@ -207,6 +213,9 @@ func (s *Server) kommoForWebhook(secret string) *kommo.SyncService {
 }
 
 func (s *Server) defaultKommoSync() *kommo.SyncService {
+	if !kommo.APICommunicationEnabled {
+		return nil
+	}
 	if s.kommoManager != nil {
 		if svc := s.kommoManager.Primary(); svc != nil {
 			return svc
@@ -253,8 +262,10 @@ func (s *Server) setupRoutes() {
 	auth.Post("/refresh", s.handleRefreshToken)
 	auth.Post("/logout", s.handleLogout)
 
-	// Kommo webhook (public — called by Kommo, secret in URL for validation)
-	api.Post("/kommo/webhook/:secret", s.handleKommoWebhook)
+	// Kommo webhook is only registered when Kommo API communication is explicitly re-enabled.
+	if kommo.APICommunicationEnabled {
+		api.Post("/kommo/webhook/:secret", s.handleKommoWebhook)
+	}
 
 	// WhatsApp Cloud API webhook (public — verification token in env, device resolved by phone_number_id)
 	api.Get("/whatsapp/cloud/webhook", s.handleWhatsAppCloudVerify)
@@ -366,7 +377,9 @@ func (s *Server) setupRoutes() {
 	leads.Patch("/:id/status", s.handleUpdateLeadStatus)
 	leads.Patch("/:id/stage", s.handleUpdateLeadStage)
 	leads.Get("/:id/interactions", s.handleGetLeadInteractions)
-	leads.Post("/:id/sync-kommo", s.requirePlanFeature("kommo_sync"), s.handleSyncLeadFromKommo)
+	if kommo.APICommunicationEnabled {
+		leads.Post("/:id/sync-kommo", s.requirePlanFeature("kommo_sync"), s.handleSyncLeadFromKommo)
+	}
 	leads.Patch("/:id/archive", s.handleArchiveLead)
 	leads.Patch("/:id/block", s.handleBlockLead)
 
@@ -461,7 +474,9 @@ func (s *Server) setupRoutes() {
 	contacts.Get("/:id/leads", s.handleGetContactLeads)
 	contacts.Put("/:id", s.handleUpdateContact)
 	contacts.Post("/:id/reset", s.handleResetContactFromDevice)
-	contacts.Post("/:id/sync-kommo", s.requirePlanFeature("kommo_sync"), s.handleSyncContactFromKommo)
+	if kommo.APICommunicationEnabled {
+		contacts.Post("/:id/sync-kommo", s.requirePlanFeature("kommo_sync"), s.handleSyncContactFromKommo)
+	}
 	contacts.Delete("/:id", s.handleDeleteContact)
 
 	// Custom field value routes (under contacts, all authenticated users)
@@ -5386,9 +5401,9 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 
 	accountID := c.Locals("account_id").(uuid.UUID)
 
-	// If delete_from_kommo=true, enqueue a "Perdido" (status 143) move in Kommo.
-	// The outbox will flush it in batch; the local delete below runs immediately.
-	if c.Query("delete_from_kommo") == "true" {
+	// Kommo API communication is dormant. If an old client sends
+	// delete_from_kommo=true, ignore it and delete only in Clarin.
+	if kommo.APICommunicationEnabled && c.Query("delete_from_kommo") == "true" {
 		kommoSync := s.kommoForAccount(c.Context(), accountID)
 		if kommoSync == nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Kommo integration not configured"})
@@ -5435,7 +5450,7 @@ func (s *Server) handleDeleteLead(c *fiber.Ctx) error {
 
 func (s *Server) handleDeleteLeadsBatch(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-	deleteFromKommo := c.Query("delete_from_kommo") == "true"
+	deleteFromKommo := kommo.APICommunicationEnabled && c.Query("delete_from_kommo") == "true"
 
 	var req struct {
 		IDs       []string `json:"ids"`
@@ -13544,6 +13559,10 @@ func integrationResponse(instance *domain.IntegrationInstance) fiber.Map {
 }
 
 func (s *Server) reloadKommoManager(ctx context.Context) {
+	if !kommo.APICommunicationEnabled {
+		s.kommoSync = nil
+		return
+	}
 	if s.kommoManager == nil {
 		return
 	}
@@ -13746,6 +13765,10 @@ func (s *Server) handleAdminRemoveIntegrationAccount(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleAdminReloadIntegrations(c *fiber.Ctx) error {
+	if !kommo.APICommunicationEnabled {
+		s.kommoSync = nil
+		return c.JSON(fiber.Map{"success": true, "runtime": fiber.Map{"running_instances": 0, "disabled": true}})
+	}
 	s.reloadKommoManager(c.Context())
 	if s.kommoManager == nil {
 		return c.JSON(fiber.Map{"success": true, "runtime": fiber.Map{"running_instances": 0}})
@@ -13836,6 +13859,9 @@ func (s *Server) handleAdminIntegrationOutbox(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleAdminForceIntegrationPoll(c *fiber.Ctx) error {
+	if !kommo.APICommunicationEnabled {
+		return c.Status(410).JSON(fiber.Map{"success": false, "error": "Kommo API communication is disabled"})
+	}
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid integration ID"})
@@ -13849,6 +13875,9 @@ func (s *Server) handleAdminForceIntegrationPoll(c *fiber.Ctx) error {
 }
 
 func (s *Server) kommoSyncForInstance(id uuid.UUID) *kommo.SyncService {
+	if !kommo.APICommunicationEnabled {
+		return nil
+	}
 	if s.kommoManager != nil {
 		if svc := s.kommoManager.ForInstance(id); svc != nil {
 			return svc

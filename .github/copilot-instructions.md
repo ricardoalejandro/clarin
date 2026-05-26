@@ -37,6 +37,20 @@ Actúa como un ingeniero de software senior con más de 15 años de experiencia 
 
 ---
 
+## Kommo API Dormido
+
+La estructura Kommo se conserva para compatibilidad futura: columnas `kommo_id`,
+metadata de importación CSV, repositorios, tipos y helpers como
+`kommo.NormalizePhone()`. Sin embargo, la comunicación por API con Kommo está
+intencionalmente desactivada.
+
+- No iniciar `kommo.Manager`, outbox, reconciliación, poller de eventos ni auto-registro de webhooks.
+- No exponer acciones frontend para sincronizar, forzar pull, crear/editar integraciones Kommo o borrar/mover leads en Kommo.
+- No reactivar rutas o workers que llamen a Kommo sin una decisión explícita de producto y una revisión de seguridad de datos.
+- La importación CSV Kommo sí puede seguir funcionando porque es un flujo local y no llama a la API de Kommo.
+
+---
+
 ## Arquitectura del Proyecto
 
 ```

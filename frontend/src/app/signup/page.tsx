@@ -22,7 +22,7 @@ const fallbackPlans: PublicPlan[] = [
 ]
 
 const planDetails: Record<string, { price: string; badge?: string; features: string[] }> = {
-  starter: { price: 'S/ 149', features: ['3 dispositivos WhatsApp', '5 usuarios', '10 mil contactos', 'Kommo y Google Contacts'] },
+  starter: { price: 'S/ 149', features: ['3 dispositivos WhatsApp', '5 usuarios', '10 mil contactos', 'Google Contacts'] },
   pro: { price: 'S/ 299', badge: 'Más elegido', features: ['8 dispositivos WhatsApp', '12 usuarios', '50 mil contactos', 'Campañas de difusión'] },
   business: { price: 'S/ 599', features: ['20 dispositivos WhatsApp', '30 usuarios', '150 mil contactos', 'Automatizaciones avanzadas'] },
 }
