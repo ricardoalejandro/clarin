@@ -29,7 +29,7 @@ CRM SaaS multi-tenant centrado en WhatsApp, con dashboard web, automatizaciones,
 ## Stack Tecnologico
 
 ### Backend (Go)
-- **Go 1.24** - Lenguaje principal y toolchain del modulo.
+- **Go 1.25** - Lenguaje principal y toolchain del modulo.
 - **Fiber v2** - Framework HTTP.
 - **whatsmeow** - Integracion directa con WhatsApp Web.
 - **pgx v5** - Driver PostgreSQL nativo.
@@ -67,7 +67,7 @@ CRM SaaS multi-tenant centrado en WhatsApp, con dashboard web, automatizaciones,
 
 ### Prerrequisitos
 - Docker & Docker Compose.
-- Go 1.24+ para desarrollo local.
+- Go 1.25+ para desarrollo local.
 - Node.js 20+ para desarrollo local.
 
 ### Con Docker

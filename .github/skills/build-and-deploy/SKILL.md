@@ -65,6 +65,6 @@ After EVERY code change, follow this exact sequence:
 
 ## Docker Architecture
 
-- Backend: Multi-stage build using `golang:1.24-alpine` with CGO_ENABLED=1 (required for whatsmeow/sqlite)
+- Backend: Multi-stage build using `golang:1.25-alpine` with CGO_ENABLED=1 (required for whatsmeow/sqlite)
 - Frontend: Multi-stage build using `node:20-alpine` with standalone Next.js output
 - Dockerfiles are in `deploy/Dockerfile.backend` and `deploy/Dockerfile.frontend`

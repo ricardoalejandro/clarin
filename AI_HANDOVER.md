@@ -13,7 +13,7 @@ Current implementation notes:
 ## 2. Tech Stack
 
 - **Frontend**: Next.js 14, TypeScript, Tailwind CSS, Lucide React, Zustand.
-- **Backend**: Go 1.24, Fiber, pgx, PostgreSQL, Redis.
+- **Backend**: Go 1.25, Fiber, pgx, PostgreSQL, Redis.
 - **Storage**: MinIO/S3-compatible media storage.
 - **Realtime**: WebSocket hub at `/ws`.
 - **Integrations**: Kommo CRM, Google Contacts, WhatsApp Cloud API.

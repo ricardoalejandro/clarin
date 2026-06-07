@@ -16,7 +16,7 @@ Eres un ingeniero de software senior con más de 15 años de experiencia en Go, 
 
 | Capa | Tecnología |
 |------|-----------|
-| Backend | Go 1.24 + Fiber 2.52 |
+| Backend | Go 1.25 + Fiber 2.52 |
 | Frontend | Next.js 14.2 + React 18.3 + TypeScript 5.4 + Tailwind CSS 3.4 |
 | Base de datos | PostgreSQL 16 |
 | Cache | Redis 7 |

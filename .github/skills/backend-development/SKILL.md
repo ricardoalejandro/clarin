@@ -10,7 +10,7 @@ description: Build high-performance, optimized Go/Fiber backend services for Cla
 Every endpoint must be fast. Think sub-50ms for reads, sub-200ms for writes. Never accept slow queries, N+1 problems, or wasteful memory allocations. Profile mentally before coding.
 
 ## Stack
-- Go 1.24, Fiber v2.52, pgx v5 (PostgreSQL), Redis v9
+- Go 1.25, Fiber v2.52, pgx v5 (PostgreSQL), Redis v9
 - No local Go compiler — build via `docker compose build backend`
 
 ## Project Layout

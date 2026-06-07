@@ -124,7 +124,7 @@ def main():
     doc.add_paragraph('• SWC Compiler: Compilación veloz y minificada de assets.')
 
     add_heading(doc, 'Backend (API / Lógica Core)', 2)
-    doc.add_paragraph('• Golang (Go 1.24): Utilizado para máxima concurrencia y bajo consumo de memoria.')
+    doc.add_paragraph('• Golang (Go 1.25): Utilizado para máxima concurrencia y bajo consumo de memoria.')
     doc.add_paragraph('• Fiber Framework v2.52: Enrutador HTTP ultra rápido que gestiona los 18+ Endpoints REST del sistema.')
     doc.add_paragraph('• WebSockets Hub: Sistema de eventos WS centralizados en memoria usando workers asíncronos que empujan eventos de chat y UI al instante.')
     doc.add_paragraph('• whatsmeow: Librería nativa en Go para interacción con WhatsApp Multi-Device.')
