@@ -1710,6 +1710,24 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	if jid == "" {
 		jid = fmt.Sprintf("kommo_%d@kommo.lead", kl.ID)
 	}
+	if contactID == nil && phone != "" {
+		var cid uuid.UUID
+		if err := s.db.QueryRow(ctx, `
+			INSERT INTO contacts (account_id, jid, phone, name)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (account_id, jid) DO UPDATE SET
+				phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
+				name = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
+				updated_at = NOW()
+			RETURNING id
+		`, accountID, jid, normalizePhone(phone), cleanQuotes(kl.Name)).Scan(&cid); err == nil {
+			contactID = &cid
+			contactChanged = true
+		} else {
+			log.Printf("[Kommo Sync] lead %d SKIPPED: failed to ensure contact for %s: %v", kl.ID, jid, err)
+			return false, nil
+		}
+	}
 
 	var tagNames []string
 	if kl.Embedded != nil {
@@ -1743,6 +1761,10 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		}
 		if jid == "" {
 			log.Printf("[Kommo Sync] lead %d SKIPPED: no JID could be resolved", kl.ID)
+			return false, nil
+		}
+		if contactID == nil {
+			log.Printf("[Kommo Sync] lead %d SKIPPED: no contact could be resolved", kl.ID)
 			return false, nil
 		}
 

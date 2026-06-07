@@ -14,7 +14,7 @@ export interface FormulaNode {
 
 // ─── Tokenizer ────────────────────────────────────────────────────────────────
 
-type TokenKind = 'eof' | 'lparen' | 'rparen' | 'and' | 'or' | 'not' | 'string'
+type TokenKind = 'eof' | 'lparen' | 'rparen' | 'and' | 'or' | 'not' | 'in' | 'string'
 
 interface Token {
   kind: TokenKind
@@ -45,6 +45,7 @@ function tokenize(input: string): Token[] {
     if (rest.startsWith('and') && boundary(i + 3)) { tokens.push({ kind: 'and', value: 'and' }); i += 3; continue }
     if (rest.startsWith('or') && boundary(i + 2)) { tokens.push({ kind: 'or', value: 'or' }); i += 2; continue }
     if (rest.startsWith('not') && boundary(i + 3)) { tokens.push({ kind: 'not', value: 'not' }); i += 3; continue }
+    if (rest.startsWith('in') && boundary(i + 2)) { tokens.push({ kind: 'in', value: 'in' }); i += 2; continue }
 
     throw new Error(`Unexpected character at position ${i}`)
   }
@@ -86,6 +87,15 @@ class Parser {
   parsePrimary(): FormulaNode {
     const t = this.peek()
     if (t.kind === 'lparen') {
+      this.advance()
+      const node = this.parseOrExpr()
+      if (this.peek().kind !== 'rparen') throw new Error('Missing closing parenthesis')
+      this.advance()
+      return node
+    }
+    if (t.kind === 'in') {
+      this.advance()
+      if (this.peek().kind !== 'lparen') throw new Error("'in' must be followed by '('")
       this.advance()
       const node = this.parseOrExpr()
       if (this.peek().kind !== 'rparen') throw new Error('Missing closing parenthesis')

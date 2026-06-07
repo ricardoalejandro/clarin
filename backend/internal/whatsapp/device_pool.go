@@ -1178,7 +1178,10 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	if !isFromMe {
 		contactJID = chatJID
 	}
-	contact, _ := p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, contactJID, phone, senderName, evt.Info.PushName, false)
+	contact, contactErr := p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, contactJID, phone, senderName, evt.Info.PushName, false)
+	if contactErr != nil {
+		log.Printf("[Contact] Failed to get/create contact for %s: %v", contactJID, contactErr)
+	}
 	// Sync contact name/fields to linked lead (if lead exists)
 	if contact != nil {
 		_ = p.repos.Contact.SyncToLead(ctx, contact)
@@ -1207,6 +1210,14 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	if !isFromMe {
 		lead, _ := p.repos.Lead.GetByJID(ctx, instance.AccountID, contactJID)
 		if lead == nil {
+			contactID := chat.ContactID
+			if contactID == nil && contact != nil {
+				contactID = &contact.ID
+			}
+			if contactID == nil {
+				log.Printf("[Lead] Skipping auto-create for %s: contact_id could not be resolved", contactJID)
+				return
+			}
 			newLead := &domain.Lead{
 				AccountID: instance.AccountID,
 				JID:       contactJID,
@@ -1214,9 +1225,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				Phone:     strPtr(phone),
 				Status:    strPtr(domain.LeadStatusNew),
 				Source:    strPtr("whatsapp"),
-			}
-			if contact != nil {
-				newLead.ContactID = &contact.ID
+				ContactID: contactID,
 			}
 			if pipelineID, stageID, err := p.repos.Pipeline.ResolveIncomingLeadDestination(ctx, instance.AccountID); err == nil {
 				newLead.PipelineID = pipelineID

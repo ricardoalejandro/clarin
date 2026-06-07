@@ -153,7 +153,7 @@ export default function EventsPage() {
 
   // Filters & View
   const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('active')
   const [hideCancelled, setHideCancelled] = useState(true)
   const [viewMode, setViewMode] = useState<'grid' | 'compact' | 'list'>('list')
 
@@ -990,12 +990,13 @@ export default function EventsPage() {
                       <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">and</code> — el lead debe tener ambas</div>
                       <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">or</code> — el lead debe tener al menos una</div>
                       <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not</code> — excluir leads con esta etiqueta</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not in (...)</code> — excluir una lista</div>
                       <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">( )</code> — agrupar expresiones</div>
                     </div>
                     <div className="mt-2 pt-2 border-t border-slate-100">
                       <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Ejemplo</div>
                       <code className="text-[11px] text-emerald-700 bg-emerald-50 px-2 py-1 rounded block">
-                        {`(("04-mar" or "07-mar") and "iquitos") and not "elimi%"`}
+                        {`"kommo" and not in ("iquitos" or "conf_03-jun" or "interesados junio")`}
                       </code>
                     </div>
                   </div>
@@ -1542,4 +1543,3 @@ export default function EventsPage() {
     </div>
   )
 }
-

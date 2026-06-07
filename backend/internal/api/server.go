@@ -5009,7 +5009,11 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		_ = s.repos.Contact.Update(c.Context(), contact)
 	} else {
 		// Auto-create contact from lead data (for both real phone and manual leads)
-		contact, _ = s.repos.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, req.Name, "", false)
+		var contactErr error
+		contact, contactErr = s.repos.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, req.Name, "", false)
+		if contactErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": contactErr.Error()})
+		}
 		if contact != nil {
 			lead.ContactID = &contact.ID
 			// Update contact with extra fields from lead
@@ -5025,6 +5029,9 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 			_ = s.repos.Contact.Update(c.Context(), contact)
 			log.Printf("[API] Auto-created contact %s for new lead (jid=%s)", contact.ID, jid)
 		}
+	}
+	if lead.ContactID == nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo asegurar contacto para el lead"})
 	}
 
 	if err := s.services.Lead.Create(c.Context(), lead); err != nil {

@@ -1827,6 +1827,92 @@ func Migrate(db *pgxpool.Pool) error {
 			('enterprise', 'max_users', '250'::jsonb), ('enterprise', 'max_devices', '100'::jsonb), ('enterprise', 'max_contacts', '1000000'::jsonb), ('enterprise', 'kommo_sync', 'true'::jsonb), ('enterprise', 'google_contacts', 'true'::jsonb), ('enterprise', 'broadcasts', 'true'::jsonb), ('enterprise', 'automations', 'true'::jsonb), ('enterprise', 'priority_support', 'true'::jsonb),
 			('internal', 'max_users', '1000'::jsonb), ('internal', 'max_devices', '1000'::jsonb), ('internal', 'max_contacts', '10000000'::jsonb), ('internal', 'kommo_sync', 'true'::jsonb), ('internal', 'google_contacts', 'true'::jsonb), ('internal', 'broadcasts', 'true'::jsonb), ('internal', 'automations', 'true'::jsonb)
 		ON CONFLICT (plan_code, key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = NOW()`,
+		`WITH orphan_chats AS (
+			SELECT ch.id AS chat_id, ch.account_id,
+			       regexp_replace(split_part(ch.jid, '@', 1), '[^0-9]', '', 'g') AS phone
+			FROM chats ch
+			LEFT JOIN contacts current_contact ON current_contact.id = ch.contact_id AND current_contact.account_id = ch.account_id
+			WHERE ch.contact_id IS NULL OR current_contact.id IS NULL
+		), contact_matches AS (
+			SELECT DISTINCT ON (oc.chat_id)
+			       oc.chat_id, c.id AS contact_id
+			FROM orphan_chats oc
+			JOIN contacts c ON c.account_id = oc.account_id
+			 AND regexp_replace(COALESCE(NULLIF(c.phone, ''), split_part(c.jid, '@', 1)), '[^0-9]', '', 'g') = oc.phone
+			WHERE oc.phone <> ''
+			ORDER BY oc.chat_id, c.updated_at DESC
+		)
+		UPDATE chats ch
+		SET contact_id = cm.contact_id,
+		    updated_at = NOW()
+		FROM contact_matches cm
+		WHERE ch.id = cm.chat_id`,
+		`WITH orphan_chats AS (
+			SELECT ch.id AS chat_id, ch.account_id,
+			       regexp_replace(split_part(ch.jid, '@', 1), '[^0-9]', '', 'g') AS phone
+			FROM chats ch
+			LEFT JOIN contacts current_contact ON current_contact.id = ch.contact_id AND current_contact.account_id = ch.account_id
+			WHERE ch.contact_id IS NULL OR current_contact.id IS NULL
+		), unmatched AS (
+			SELECT oc.chat_id
+			FROM orphan_chats oc
+			WHERE oc.phone = ''
+			   OR NOT EXISTS (
+				SELECT 1
+				FROM contacts c
+				WHERE c.account_id = oc.account_id
+				  AND regexp_replace(COALESCE(NULLIF(c.phone, ''), split_part(c.jid, '@', 1)), '[^0-9]', '', 'g') = oc.phone
+			   )
+		)
+		DELETE FROM chats ch
+		USING unmatched u
+		WHERE ch.id = u.chat_id`,
+		`WITH orphan_leads AS (
+			SELECT l.id AS lead_id, l.account_id,
+			       regexp_replace(COALESCE(NULLIF(l.phone, ''), split_part(l.jid, '@', 1)), '[^0-9]', '', 'g') AS phone
+			FROM leads l
+			LEFT JOIN contacts current_contact ON current_contact.id = l.contact_id AND current_contact.account_id = l.account_id
+			WHERE l.contact_id IS NULL OR current_contact.id IS NULL
+		), contact_matches AS (
+			SELECT DISTINCT ON (ol.lead_id)
+			       ol.lead_id, c.id AS contact_id
+			FROM orphan_leads ol
+			JOIN contacts c ON c.account_id = ol.account_id
+			 AND regexp_replace(COALESCE(NULLIF(c.phone, ''), split_part(c.jid, '@', 1)), '[^0-9]', '', 'g') = ol.phone
+			WHERE ol.phone <> ''
+			ORDER BY ol.lead_id, c.updated_at DESC
+		)
+		UPDATE leads l
+		SET contact_id = cm.contact_id,
+		    updated_at = NOW()
+		FROM contact_matches cm
+		WHERE l.id = cm.lead_id`,
+		`WITH orphan_leads AS (
+			SELECT l.id AS lead_id, l.account_id,
+			       regexp_replace(COALESCE(NULLIF(l.phone, ''), split_part(l.jid, '@', 1)), '[^0-9]', '', 'g') AS phone
+			FROM leads l
+			LEFT JOIN contacts current_contact ON current_contact.id = l.contact_id AND current_contact.account_id = l.account_id
+			WHERE l.contact_id IS NULL OR current_contact.id IS NULL
+		), unmatched AS (
+			SELECT ol.lead_id
+			FROM orphan_leads ol
+			WHERE ol.phone = ''
+			   OR NOT EXISTS (
+				SELECT 1
+				FROM contacts c
+				WHERE c.account_id = ol.account_id
+				  AND regexp_replace(COALESCE(NULLIF(c.phone, ''), split_part(c.jid, '@', 1)), '[^0-9]', '', 'g') = ol.phone
+			   )
+		)
+		DELETE FROM leads l
+		USING unmatched u
+		WHERE l.id = u.lead_id`,
+		`ALTER TABLE chats DROP CONSTRAINT IF EXISTS chats_contact_id_fkey`,
+		`ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_contact_id_fkey`,
+		`ALTER TABLE chats ALTER COLUMN contact_id SET NOT NULL`,
+		`ALTER TABLE leads ALTER COLUMN contact_id SET NOT NULL`,
+		`ALTER TABLE chats ADD CONSTRAINT chats_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE RESTRICT`,
+		`ALTER TABLE leads ADD CONSTRAINT leads_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE RESTRICT`,
 		`INSERT INTO subscriptions (account_id, plan_code, status, current_period_start, current_period_end, metadata)
 		SELECT
 			a.id,

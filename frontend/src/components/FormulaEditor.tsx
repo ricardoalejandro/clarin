@@ -70,7 +70,7 @@ function tokenize(input: string): Token[] {
       continue
     }
 
-    // Keywords: and, or, not
+    // Keywords: and, or, not, in
     const rest = input.slice(i).toLowerCase()
     if (rest.startsWith('and') && boundary(i + 3)) {
       tokens.push({ type: 'operator', value: 'and', start: i, end: i + 3 }); i += 3; continue
@@ -80,6 +80,9 @@ function tokenize(input: string): Token[] {
     }
     if (rest.startsWith('not') && boundary(i + 3)) {
       tokens.push({ type: 'operator', value: 'not', start: i, end: i + 3 }); i += 3; continue
+    }
+    if (rest.startsWith('in') && boundary(i + 2)) {
+      tokens.push({ type: 'operator', value: 'in', start: i, end: i + 2 }); i += 2; continue
     }
 
     // Unknown token → error
@@ -165,7 +168,7 @@ export default function FormulaEditor({ value, onChange, tags, placeholder, rows
       if (t.type === 'string' && !t.closed) errs.push(`Falta cerrar comillas: "${t.value}`)
     }
     for (const t of tokens) {
-      if (t.type === 'error') errs.push(`"${t.value}" no es válido — usa and, or, not o pon entre comillas`)
+      if (t.type === 'error') errs.push(`"${t.value}" no es válido — usa and, or, not, in o pon entre comillas`)
     }
     return errs
   }, [tokens])

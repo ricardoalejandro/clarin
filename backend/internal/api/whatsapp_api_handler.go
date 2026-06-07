@@ -228,7 +228,10 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 		contactName = phone
 	}
 
-	contact, _ := s.repos.Contact.GetOrCreate(ctx, device.AccountID, &device.ID, jid, phone, contactName, contactName, false)
+	contact, contactErr := s.repos.Contact.GetOrCreate(ctx, device.AccountID, &device.ID, jid, phone, contactName, contactName, false)
+	if contactErr != nil {
+		return fmt.Errorf("failed to get/create contact: %w", contactErr)
+	}
 	if contact != nil {
 		_ = s.repos.Contact.SyncToLead(ctx, contact)
 	}
@@ -266,25 +269,29 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 
 	lead, _ := s.repos.Lead.GetByJID(ctx, device.AccountID, jid)
 	if lead == nil {
+		contactID := chat.ContactID
+		if contactID == nil && contact != nil {
+			contactID = &contact.ID
+		}
+		if contactID == nil {
+			return fmt.Errorf("failed to ensure contact for lead: %s", jid)
+		}
 		newLead := &domain.Lead{
 			AccountID: device.AccountID,
-			ContactID: func() *uuid.UUID {
-				if contact != nil {
-					return &contact.ID
-				}
-				return nil
-			}(),
-			JID:    jid,
-			Name:   strPtr(contactName),
-			Phone:  strPtr(phone),
-			Status: strPtr(domain.LeadStatusNew),
-			Source: strPtr("whatsapp_api"),
+			ContactID: contactID,
+			JID:       jid,
+			Name:      strPtr(contactName),
+			Phone:     strPtr(phone),
+			Status:    strPtr(domain.LeadStatusNew),
+			Source:    strPtr("whatsapp_api"),
 		}
 		if pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, device.AccountID); err == nil {
 			newLead.PipelineID = pipelineID
 			newLead.StageID = stageID
 		}
-		_ = s.repos.Lead.Create(ctx, newLead)
+		if err := s.repos.Lead.Create(ctx, newLead); err != nil {
+			log.Printf("[WhatsApp Cloud] Failed to auto-create lead for %s: %v", jid, err)
+		}
 	}
 
 	s.invalidateChatsCache(device.AccountID)

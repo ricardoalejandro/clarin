@@ -379,24 +379,24 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     const lat = message.latitude
     const lng = message.longitude
     const mapUrl = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=15/${lat}/${lng}`
-    const staticMapUrl = `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}&zoom=15&size=300x200&markers=${lat},${lng},red-pushpin`
 
     return (
       <div className="mb-1">
         <a href={mapUrl} target="_blank" rel="noopener noreferrer" className="block">
-          <div className="relative rounded-lg overflow-hidden bg-slate-100">
-            <img
-              src={staticMapUrl}
-              alt="Ubicación"
-              className="w-full h-[150px] object-cover"
-              onError={(e) => {
-                (e.target as HTMLImageElement).style.display = 'none'
-              }}
-            />
-            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/50 to-transparent p-2">
-              <div className="flex items-center gap-1 text-white text-xs">
+          <div className="rounded-lg overflow-hidden bg-slate-100 border border-slate-200">
+            <div className="h-[150px] flex flex-col items-center justify-center gap-2 text-slate-600 px-4 text-center">
+              <div className="w-10 h-10 rounded-full bg-white shadow-sm flex items-center justify-center text-emerald-600">
+                <MapPin className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="text-sm font-medium text-slate-800">{message.body || 'Ubicación compartida'}</div>
+                <div className="text-xs text-slate-500 mt-0.5">{lat.toFixed(6)}, {lng.toFixed(6)}</div>
+              </div>
+            </div>
+            <div className="bg-white/80 px-3 py-2 border-t border-slate-200">
+              <div className="flex items-center gap-1 text-emerald-700 text-xs font-medium">
                 <MapPin className="w-3.5 h-3.5" />
-                <span>{message.body || 'Ubicación compartida'}</span>
+                <span>Abrir en OpenStreetMap</span>
               </div>
             </div>
           </div>

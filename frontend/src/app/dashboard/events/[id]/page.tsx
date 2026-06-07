@@ -2636,7 +2636,7 @@ export default function EventDetailPage() {
                               onChange={setPFormulaText}
                               onValidChange={setPFormulaIsValid}
                               tags={allUniqueTags.map(t => ({ name: t.name, color: t.color }))}
-                              placeholder={'Ej: ("etiqueta1" or "etiqueta2") and not "excluir"'}
+                              placeholder={'Ej: "kommo" and not in ("iquitos" or "conf_03-jun")'}
                             />
                             {pFormulaText && !pFormulaIsValid && (
                               <div className="mt-2 flex items-center gap-1.5 text-red-500 text-[11px]">

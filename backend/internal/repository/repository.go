@@ -733,21 +733,52 @@ type ChatRepository struct {
 }
 
 func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uuid.UUID, jid, name string) (*domain.Chat, error) {
+	if strings.TrimSpace(jid) == "" {
+		return nil, fmt.Errorf("chat jid is required")
+	}
+	phone := phoneFromJID(jid)
+	isGroup := strings.HasSuffix(jid, "@g.us")
 	chat := &domain.Chat{}
 	err := r.db.QueryRow(ctx, `
-		INSERT INTO chats (account_id, device_id, jid, name)
-		VALUES ($1, $2, $3, $4)
+		WITH contact AS (
+			INSERT INTO contacts (account_id, device_id, jid, phone, name, push_name, is_group)
+			VALUES ($1, $2, $3, $5, $4, $4, $6)
+			ON CONFLICT (account_id, jid) DO UPDATE SET
+				device_id = COALESCE(contacts.device_id, EXCLUDED.device_id),
+				name = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
+				push_name = COALESCE(NULLIF(EXCLUDED.push_name, ''), contacts.push_name),
+				phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
+				updated_at = NOW()
+			RETURNING id
+		)
+		INSERT INTO chats (account_id, device_id, contact_id, jid, name)
+		SELECT $1, $2, contact.id, $3, $4 FROM contact
 		ON CONFLICT (account_id, jid) DO UPDATE SET
 			device_id = EXCLUDED.device_id,
+			contact_id = COALESCE(chats.contact_id, EXCLUDED.contact_id),
 			name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name IS NOT NULL THEN EXCLUDED.name ELSE chats.name END
 		RETURNING id, account_id, device_id, contact_id, jid, name, last_message, last_message_at,
 		          unread_count, is_archived, is_pinned, created_at, updated_at
-	`, accountID, deviceID, jid, name).Scan(
+	`, accountID, deviceID, jid, name, phone, isGroup).Scan(
 		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
 		&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
 	)
 	return chat, err
+}
+
+func phoneFromJID(jid string) string {
+	user := strings.Split(strings.TrimSpace(jid), "@")[0]
+	if idx := strings.Index(user, ":"); idx >= 0 {
+		user = user[:idx]
+	}
+	var b strings.Builder
+	for _, r := range user {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (r *ChatRepository) FindByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Chat, error) {
@@ -1971,6 +2002,20 @@ type LeadRepository struct {
 }
 
 func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
+	if lead.ContactID == nil {
+		return fmt.Errorf("lead contact_id is required")
+	}
+	var contactExists bool
+	if err := r.db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM contacts WHERE id = $1 AND account_id = $2
+		)
+	`, *lead.ContactID, lead.AccountID).Scan(&contactExists); err != nil {
+		return err
+	}
+	if !contactExists {
+		return fmt.Errorf("lead contact_id does not belong to account")
+	}
 	return r.db.QueryRow(ctx, `
 		INSERT INTO leads (account_id, contact_id, jid, name, phone, email, notes, dni, birth_date, status, source, pipeline_id, stage_id, tags, custom_fields, assigned_to, kommo_id, kommo_synced_tags)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,

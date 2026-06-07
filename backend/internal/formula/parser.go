@@ -6,13 +6,14 @@
 //	or_expr   → and_expr ("or" and_expr)*
 //	and_expr  → unary ("and" unary)*
 //	unary     → "not" unary | primary
-//	primary   → "(" or_expr ")" | QUOTED_STRING
+//	primary   → "(" or_expr ")" | "in" "(" or_expr ")" | QUOTED_STRING
 //
 // QUOTED_STRING = double-quoted string e.g. "iquitos"
 // Without '%' = exact match (case-insensitive).
 // With '%' = LIKE/ILIKE pattern e.g. "04-mar%" matches any tag starting with "04-mar".
 //
 // Example: (("04-mar" or "07-mar") and "iquitos") and not "elimi%"
+// Example: "kommo" and not in ("iquitos" or "conf_03-jun")
 package formula
 
 import (
@@ -75,6 +76,7 @@ const (
 	tokAnd              // and
 	tokOr               // or
 	tokNot              // not
+	tokIn               // in
 	tokString           // quoted string value
 )
 
@@ -125,7 +127,7 @@ func tokenize(input string) ([]token, error) {
 			continue
 		}
 
-		// Keywords: and, or, not (case-insensitive)
+		// Keywords: and, or, not, in (case-insensitive)
 		if unicode.IsLetter(ch) {
 			start := i
 			for i < len(runes) && (unicode.IsLetter(runes[i]) || runes[i] == '_') {
@@ -139,6 +141,8 @@ func tokenize(input string) ([]token, error) {
 				tokens = append(tokens, token{kind: tokOr})
 			case "not":
 				tokens = append(tokens, token{kind: tokNot})
+			case "in":
+				tokens = append(tokens, token{kind: tokIn})
 			default:
 				return nil, fmt.Errorf("unexpected keyword %q at position %d (tag names must be quoted)", word, start)
 			}
@@ -287,6 +291,21 @@ func (p *parser) parsePrimary() (*Node, error) {
 		return node, nil
 	}
 
+	if t.kind == tokIn {
+		p.advance() // consume "in"
+		if _, err := p.expect(tokLParen); err != nil {
+			return nil, fmt.Errorf("'in' must be followed by '('")
+		}
+		node, err := p.parseOrExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tokRParen); err != nil {
+			return nil, fmt.Errorf("missing closing parenthesis")
+		}
+		return node, nil
+	}
+
 	if t.kind == tokString {
 		p.advance()
 		val := strings.ToLower(t.value)
@@ -335,6 +354,8 @@ func kindName(k tokenKind) string {
 		return "'or'"
 	case tokNot:
 		return "'not'"
+	case tokIn:
+		return "'in'"
 	case tokString:
 		return "string"
 	}

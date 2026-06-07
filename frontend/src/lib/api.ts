@@ -12,14 +12,17 @@ let _refreshPromise: Promise<boolean> | null = null
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000
 const ACTIVITY_THROTTLE_MS = 15 * 1000
+const ACCESS_TOKEN_REFRESH_MS = 20 * 60 * 1000
 const LAST_ACTIVITY_KEY = 'clarin:last_activity_at'
 const LOGOUT_EVENT_KEY = 'clarin:logout_at'
+const AUTH_REFRESHED_KEY = 'clarin:auth_refreshed_at'
 
 export function clearAuthState() {
   if (typeof window === 'undefined') return
   localStorage.removeItem('token')
   localStorage.removeItem('kommo_enabled')
   localStorage.removeItem(LAST_ACTIVITY_KEY)
+  localStorage.removeItem(AUTH_REFRESHED_KEY)
 }
 
 export function markAuthActivity(force = false) {
@@ -34,6 +37,7 @@ export function markAuthActivity(force = false) {
 export function markAuthSession() {
   if (typeof window === 'undefined') return
   localStorage.setItem('token', SESSION_MARKER)
+  localStorage.setItem(AUTH_REFRESHED_KEY, String(Date.now()))
   markAuthActivity(true)
 }
 
@@ -94,6 +98,14 @@ export async function tryRefreshToken(): Promise<boolean> {
   return _refreshPromise
 }
 
+async function refreshAccessTokenIfStale(): Promise<boolean> {
+  if (typeof window === 'undefined') return true
+  if (!localStorage.getItem('token')) return true
+  const refreshedAt = Number(localStorage.getItem(AUTH_REFRESHED_KEY) || '0')
+  if (refreshedAt && Date.now() - refreshedAt < ACCESS_TOKEN_REFRESH_MS) return true
+  return tryRefreshToken()
+}
+
 let _idleTimer: ReturnType<typeof setTimeout> | null = null
 let _heartbeatTimer: ReturnType<typeof setInterval> | null = null
 let _idleInitialized = false
@@ -128,6 +140,11 @@ async function sendActivityHeartbeat() {
   if (!localStorage.getItem('token')) return
   if (isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
+    return
+  }
+  const refreshed = await refreshAccessTokenIfStale()
+  if (!refreshed) {
+    await logoutFromBrowser('expired')
     return
   }
   try {
@@ -219,6 +236,14 @@ export async function api<T>(
   if (!skipAuth && isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
     return { success: false, error: 'Sesión expirada por inactividad' }
+  }
+
+  if (!skipAuth) {
+    const refreshed = await refreshAccessTokenIfStale()
+    if (!refreshed) {
+      await logoutFromBrowser('expired')
+      return { success: false, error: 'Sesión expirada' }
+    }
   }
 
   const headers: HeadersInit = {

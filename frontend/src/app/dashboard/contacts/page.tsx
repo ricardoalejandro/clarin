@@ -1578,7 +1578,7 @@ export default function ContactsPage() {
                             <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;etiqueta&quot;</code> exacta</div>
                             <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;mar%&quot;</code> comodín</div>
                             <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">and</code> <code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">or</code> <code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not</code></div>
-                            <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">( )</code> agrupar</div>
+                            <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">in ( )</code> agrupar lista</div>
                           </div>
                         </div>
                         <FormulaEditor

@@ -3,9 +3,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Plus, ListTodo, CalendarDays, ChevronLeft, ChevronRight, Search, CheckCircle2, MoreHorizontal, Pencil, Trash2, List, X, Star, ChevronDown, Columns3, GripVertical, PanelLeftClose, PanelLeftOpen, ArrowUpDown } from 'lucide-react'
 import dynamic from 'next/dynamic'
-import { subscribeWebSocket } from '@/lib/api'
+import { api, subscribeWebSocket } from '@/lib/api'
 import { useKanbanPan } from '@/lib/useKanbanPan'
-import { Task, TaskType, TaskList as TaskListType, TASK_TYPE_CONFIG } from '@/types/task'
+import { Task, TaskStats, TaskType, TaskList as TaskListType, TASK_TYPE_CONFIG } from '@/types/task'
 import TaskFormModal from '@/components/TaskFormModal'
 import TaskListComponent from '@/components/TaskList'
 import TaskInlineCard from '@/components/TaskInlineCard'
@@ -163,10 +163,8 @@ export default function TasksPage() {
 
   const fetchStats = useCallback(async () => {
     try {
-      const token = localStorage.getItem('token')
-      const res = await fetch('/api/tasks/stats', { headers: { Authorization: `Bearer ${token}` } })
-      const data = await res.json()
-      if (data.success) setStats(data.stats)
+      const result = await api<{ stats?: TaskStats }>('/api/tasks/stats')
+      if (result.success && result.data?.stats) setStats(result.data.stats)
     } catch { /* ignore */ }
   }, [])
 
