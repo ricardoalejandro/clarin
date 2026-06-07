@@ -158,6 +158,22 @@ interface IntegrationHealth {
   events_poller?: { last_poll_at?: string; seconds_since_last_poll?: number; last_poll_events_found?: number; last_poll_leads_synced?: number }
 }
 
+interface StorageOrphanGroup {
+  objects: number
+  bytes: number
+  accounts: { account_id: string; account_name?: string; objects: number; bytes: number }[]
+}
+
+interface StorageOrphanSummary {
+  total_objects: number
+  total_bytes: number
+  referenced_objects: number
+  min_age_days: number
+  deleted_account_orphans: StorageOrphanGroup
+  active_account_orphans: StorageOrphanGroup
+  active_eligible_orphans: StorageOrphanGroup
+}
+
 interface NewUserAssignment {
   account_id: string
   role: string
@@ -197,6 +213,12 @@ function formatBytes(bytes?: number) {
     idx++
   }
   return `${size >= 10 || idx === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[idx]}`
+}
+
+function formatStorageBytes(bytes?: number) {
+  const value = bytes || 0
+  if (value <= 0) return '0 B'
+  return formatBytes(value)
 }
 
 function gbToBytes(value: number) {
@@ -264,6 +286,10 @@ export default function AdminPage() {
   const [integrationHealth, setIntegrationHealth] = useState<IntegrationHealth | null>(null)
   const [integrationOutbox, setIntegrationOutbox] = useState<IntegrationOutboxData | null>(null)
   const [monitorLoading, setMonitorLoading] = useState(false)
+  const [storageOrphans, setStorageOrphans] = useState<StorageOrphanSummary | null>(null)
+  const [storageOrphansLoading, setStorageOrphansLoading] = useState(false)
+  const [storageCleanupLoading, setStorageCleanupLoading] = useState(false)
+  const [storageActiveMinAgeDays, setStorageActiveMinAgeDays] = useState(30)
 
   // Account form
   const [accountForm, setAccountForm] = useState({
@@ -341,6 +367,71 @@ export default function AdminPage() {
     }
   }
 
+  async function fetchStorageOrphans(minAgeDays = storageActiveMinAgeDays) {
+    setStorageOrphansLoading(true)
+    try {
+      const res = await fetch(`/api/admin/storage/orphans?min_age_days=${minAgeDays}`, { headers })
+      const data = await res.json()
+      if (data.success) {
+        setStorageOrphans(data.summary)
+      } else {
+        console.error('Failed to fetch storage orphans:', data.error)
+      }
+    } catch (e) {
+      console.error('Failed to fetch storage orphans:', e)
+    } finally {
+      setStorageOrphansLoading(false)
+    }
+  }
+
+  async function cleanupDeletedAccountStorageOrphans() {
+    const count = storageOrphans?.deleted_account_orphans?.objects || 0
+    if (count <= 0 || storageCleanupLoading) return
+    const confirmation = window.prompt(`Se eliminarán ${count} objetos de cuentas que ya no existen. Escribe DELETE_ORPHAN_STORAGE para confirmar.`)
+    if (confirmation !== 'DELETE_ORPHAN_STORAGE') return
+    setStorageCleanupLoading(true)
+    try {
+      const res = await fetch('/api/admin/storage/orphans/cleanup', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ scope: 'deleted_accounts', confirmation })
+      })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'Error al limpiar almacenamiento huérfano')
+        return
+      }
+      alert(`Limpieza completada: ${data.deleted || 0} objetos eliminados, ${formatStorageBytes(data.freed_bytes || 0)} liberados.`)
+      await fetchStorageOrphans()
+    } finally {
+      setStorageCleanupLoading(false)
+    }
+  }
+
+  async function cleanupActiveAccountStorageOrphans() {
+    const count = storageOrphans?.active_eligible_orphans?.objects || 0
+    if (count <= 0 || storageCleanupLoading) return
+    const confirmation = window.prompt(`Se eliminarán ${count} objetos sin referencia en cuentas activas con ${storageActiveMinAgeDays}+ días. Escribe DELETE_ORPHAN_STORAGE para confirmar.`)
+    if (confirmation !== 'DELETE_ORPHAN_STORAGE') return
+    setStorageCleanupLoading(true)
+    try {
+      const res = await fetch('/api/admin/storage/orphans/cleanup', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ scope: 'active_accounts', confirmation, min_age_days: storageActiveMinAgeDays })
+      })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'Error al limpiar almacenamiento huérfano')
+        return
+      }
+      alert(`Limpieza completada: ${data.deleted || 0} objetos eliminados, ${formatStorageBytes(data.freed_bytes || 0)} liberados.`)
+      await fetchStorageOrphans(storageActiveMinAgeDays)
+    } finally {
+      setStorageCleanupLoading(false)
+    }
+  }
+
   useEffect(() => {
     setLoading(true)
     Promise.all([
@@ -348,6 +439,7 @@ export default function AdminPage() {
       fetchUsers(),
       fetchPlans(),
       fetchRoles(),
+      fetchStorageOrphans(),
       ...(KOMMO_ADMIN_UI_ENABLED ? [fetchIntegrations()] : []),
     ]).finally(() => setLoading(false))
   }, [])
@@ -1153,7 +1245,83 @@ export default function AdminPage() {
       {/* Content */}
       <div className="flex-1 overflow-auto bg-white rounded-xl border border-gray-200">
         {tab === 'accounts' ? (
-          <table className="w-full text-sm">
+          <div>
+            <div className="border-b border-gray-200 bg-slate-50/80 p-4">
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+                    <HardDrive className="w-4 h-4 text-emerald-600" />
+                    Limpieza de almacenamiento huérfano
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Separa objetos de cuentas eliminadas de candidatos dentro de cuentas activas.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-gray-500">Antigüedad cuentas activas</label>
+                  <input
+                    type="number"
+                    min={7}
+                    value={storageActiveMinAgeDays}
+                    onChange={e => setStorageActiveMinAgeDays(Math.max(7, Number(e.target.value) || 30))}
+                    className="w-20 px-2 py-1.5 border border-gray-200 rounded-lg text-sm"
+                  />
+                  <span className="text-xs text-gray-500">días</span>
+                  <button
+                    onClick={() => fetchStorageOrphans(storageActiveMinAgeDays)}
+                    disabled={storageOrphansLoading}
+                    className="inline-flex items-center gap-2 px-3 py-2 text-sm text-slate-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${storageOrphansLoading ? 'animate-spin' : ''}`} />
+                    Revisar
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+                <div className="bg-white border border-gray-200 rounded-lg p-3">
+                  <div className="text-xs text-gray-500">Objetos revisados</div>
+                  <div className="text-xl font-semibold text-gray-900">{storageOrphans ? storageOrphans.total_objects.toLocaleString() : '...'}</div>
+                  <div className="text-xs text-gray-500">{storageOrphans ? formatStorageBytes(storageOrphans.total_bytes) : 'Calculando...'}</div>
+                </div>
+                <div className="bg-white border border-red-100 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-red-600">Cuentas eliminadas</div>
+                      <div className="text-xl font-semibold text-gray-900">{storageOrphans ? storageOrphans.deleted_account_orphans.objects.toLocaleString() : '...'}</div>
+                      <div className="text-xs text-gray-500">{storageOrphans ? formatStorageBytes(storageOrphans.deleted_account_orphans.bytes) : 'Calculando...'}</div>
+                    </div>
+                    <button
+                      onClick={cleanupDeletedAccountStorageOrphans}
+                      disabled={storageCleanupLoading || !storageOrphans || storageOrphans.deleted_account_orphans.objects === 0}
+                      className="inline-flex items-center gap-2 px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {storageCleanupLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                      Limpiar
+                    </button>
+                  </div>
+                </div>
+                <div className="bg-white border border-amber-100 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-amber-600">Cuentas activas sin referencia</div>
+                      <div className="text-xl font-semibold text-gray-900">{storageOrphans ? storageOrphans.active_account_orphans.objects.toLocaleString() : '...'}</div>
+                      <div className="text-xs text-gray-500">
+                        {storageOrphans ? `${formatStorageBytes(storageOrphans.active_account_orphans.bytes)} · ${storageOrphans.active_eligible_orphans.objects.toLocaleString()} elegibles` : 'Calculando...'}
+                      </div>
+                    </div>
+                    <button
+                      onClick={cleanupActiveAccountStorageOrphans}
+                      disabled={storageCleanupLoading || !storageOrphans || storageOrphans.active_eligible_orphans.objects === 0}
+                      className="inline-flex items-center gap-2 px-3 py-2 text-sm bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {storageCleanupLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                      Limpiar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <table className="w-full text-sm">
             <thead className="bg-gray-50 sticky top-0">
               <tr>
                 <th className="text-left px-4 py-3 font-medium text-gray-500">Cuenta</th>
@@ -1229,7 +1397,8 @@ export default function AdminPage() {
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </div>
         ) : tab === 'users' ? (
           <table className="w-full text-sm">
             <thead className="bg-gray-50 sticky top-0">

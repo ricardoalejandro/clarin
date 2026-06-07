@@ -749,6 +749,8 @@ func (s *Server) setupRoutes() {
 
 	// Account management
 	admin.Get("/plans", s.handleListPlans)
+	admin.Get("/storage/orphans", s.handleAdminStorageOrphans)
+	admin.Post("/storage/orphans/cleanup", s.handleAdminCleanupStorageOrphans)
 	adminAccounts := admin.Group("/accounts")
 	adminAccounts.Get("/", s.handleAdminGetAccounts)
 	adminAccounts.Post("/", s.handleAdminCreateAccount)
@@ -13103,6 +13105,302 @@ func (s *Server) adminAccountPurgeSummary(ctx context.Context, accountID uuid.UU
 		storageObjects = count
 	}
 	return fiber.Map{"tables": counts, "storage_objects": storageObjects}, nil
+}
+
+type adminStorageOrphanItem struct {
+	ObjectKey    string
+	AccountID    string
+	AccountName  string
+	SizeBytes    int64
+	LastModified time.Time
+}
+
+type adminStorageOrphanScan struct {
+	TotalObjects          int
+	TotalBytes            int64
+	DeletedAccountOrphans []adminStorageOrphanItem
+	ActiveAccountOrphans  []adminStorageOrphanItem
+	ActiveEligibleOrphans []adminStorageOrphanItem
+	ReferencedObjects     int
+	MinAgeDays            int
+}
+
+func storageObjectKeyFromValue(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	keys := make([]string, 0, 2)
+	if len(value) > 37 {
+		if _, err := uuid.Parse(value[:36]); err == nil && value[36] == '/' {
+			keys = append(keys, value)
+		}
+	}
+	for _, marker := range []string{"/api/media/file/", "/clarin-media/"} {
+		start := 0
+		for {
+			idx := strings.Index(value[start:], marker)
+			if idx < 0 {
+				break
+			}
+			keyStart := start + idx + len(marker)
+			key := value[keyStart:]
+			if end := strings.IndexFunc(key, func(r rune) bool {
+				return r == '"' || r == '\\' || r == '?' || r == ' ' || r == '<' || r == '>' || r == ')' || r == '(' || r == ',' || r == '}'
+			}); end >= 0 {
+				key = key[:end]
+			}
+			key = strings.Trim(strings.TrimSpace(key), `"'`)
+			if len(key) > 37 {
+				if _, err := uuid.Parse(key[:36]); err == nil && key[36] == '/' {
+					keys = append(keys, key)
+				}
+			}
+			start = keyStart
+		}
+	}
+	return keys
+}
+
+func (s *Server) storageReferencedObjectKeys(ctx context.Context) (map[string]struct{}, error) {
+	type refColumn struct {
+		table  string
+		column string
+		where  string
+		direct bool
+	}
+	columns := []refColumn{
+		{"messages", "media_url", "COALESCE(media_deleted, false) = false", false},
+		{"contacts", "avatar_url", "", false},
+		{"campaigns", "media_url", "", false},
+		{"campaign_attachments", "media_url", "", false},
+		{"document_templates", "thumbnail_url", "", false},
+		{"dynamic_items", "image_url", "", false},
+		{"dynamic_link_extra_media", "url", "", false},
+		{"dynamic_links", "extra_message_media_url", "", false},
+		{"dynamic_whatsapp_queue", "extra_media_url", "", false},
+		{"dynamic_whatsapp_queue", "image_url", "", false},
+		{"quick_replies", "media_url", "", false},
+		{"quick_reply_attachments", "media_url", "", false},
+		{"saved_stickers", "media_url", "", false},
+		{"survey_answers", "file_url", "", false},
+		{"media_assets", "object_key", "status = 'active'", true},
+	}
+	refs := make(map[string]struct{})
+	for _, col := range columns {
+		filter := fmt.Sprintf(`%s IS NOT NULL AND %s <> ''`, col.column, col.column)
+		if col.direct {
+			filter += fmt.Sprintf(` AND %s LIKE '________-____-____-____-____________/%%'`, col.column)
+		} else {
+			filter += fmt.Sprintf(` AND (%s LIKE '%%/api/media/file/%%' OR %s LIKE '%%/clarin-media/%%')`, col.column, col.column)
+		}
+		if col.where != "" {
+			filter += " AND " + col.where
+		}
+		query := fmt.Sprintf(`SELECT %s::text FROM %s WHERE %s`, col.column, col.table, filter)
+		rows, err := s.repos.DB().Query(ctx, query)
+		if err != nil {
+			log.Printf("[StorageOrphans] skipping reference source %s.%s: %v", col.table, col.column, err)
+			continue
+		}
+		for rows.Next() {
+			var value string
+			if err := rows.Scan(&value); err != nil {
+				rows.Close()
+				return refs, err
+			}
+			for _, key := range storageObjectKeyFromValue(value) {
+				refs[key] = struct{}{}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return refs, err
+		}
+		rows.Close()
+	}
+	return refs, nil
+}
+
+func (s *Server) scanStorageOrphans(ctx context.Context, minAgeDays int) (*adminStorageOrphanScan, error) {
+	if s.storage == nil {
+		return nil, fmt.Errorf("storage not configured")
+	}
+	if minAgeDays < 0 {
+		minAgeDays = 0
+	}
+	accountRows, err := s.repos.DB().Query(ctx, `SELECT id, name FROM accounts`)
+	if err != nil {
+		return nil, err
+	}
+	accounts := make(map[string]string)
+	for accountRows.Next() {
+		var id uuid.UUID
+		var name string
+		if err := accountRows.Scan(&id, &name); err != nil {
+			accountRows.Close()
+			return nil, err
+		}
+		accounts[id.String()] = name
+	}
+	if err := accountRows.Err(); err != nil {
+		accountRows.Close()
+		return nil, err
+	}
+	accountRows.Close()
+
+	refs, err := s.storageReferencedObjectKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	objects, err := s.storage.ListPrefix(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	scan := &adminStorageOrphanScan{
+		ReferencedObjects: len(refs),
+		MinAgeDays:        minAgeDays,
+	}
+	cutoff := time.Now().Add(-time.Duration(minAgeDays) * 24 * time.Hour)
+	for _, object := range objects {
+		if strings.HasSuffix(object.Key, "/") {
+			continue
+		}
+		scan.TotalObjects++
+		scan.TotalBytes += object.Size
+		accountID := strings.SplitN(object.Key, "/", 2)[0]
+		accountName, accountExists := accounts[accountID]
+		item := adminStorageOrphanItem{
+			ObjectKey:    object.Key,
+			AccountID:    accountID,
+			AccountName:  accountName,
+			SizeBytes:    object.Size,
+			LastModified: object.LastModified,
+		}
+		if !accountExists {
+			scan.DeletedAccountOrphans = append(scan.DeletedAccountOrphans, item)
+			continue
+		}
+		if _, ok := refs[object.Key]; !ok {
+			scan.ActiveAccountOrphans = append(scan.ActiveAccountOrphans, item)
+			if minAgeDays == 0 || object.LastModified.Before(cutoff) {
+				scan.ActiveEligibleOrphans = append(scan.ActiveEligibleOrphans, item)
+			}
+		}
+	}
+	return scan, nil
+}
+
+func summarizeStorageOrphanItems(items []adminStorageOrphanItem) fiber.Map {
+	var bytes int64
+	byAccount := make(map[string]fiber.Map)
+	for _, item := range items {
+		bytes += item.SizeBytes
+		entry, ok := byAccount[item.AccountID]
+		if !ok {
+			entry = fiber.Map{"account_id": item.AccountID, "account_name": item.AccountName, "objects": 0, "bytes": int64(0)}
+			byAccount[item.AccountID] = entry
+		}
+		entry["objects"] = entry["objects"].(int) + 1
+		entry["bytes"] = entry["bytes"].(int64) + item.SizeBytes
+	}
+	accounts := make([]fiber.Map, 0, len(byAccount))
+	for _, entry := range byAccount {
+		accounts = append(accounts, entry)
+	}
+	sort.Slice(accounts, func(i, j int) bool {
+		return accounts[i]["bytes"].(int64) > accounts[j]["bytes"].(int64)
+	})
+	return fiber.Map{"objects": len(items), "bytes": bytes, "accounts": accounts}
+}
+
+func storageOrphanScanSummary(scan *adminStorageOrphanScan) fiber.Map {
+	return fiber.Map{
+		"total_objects":           scan.TotalObjects,
+		"total_bytes":             scan.TotalBytes,
+		"referenced_objects":      scan.ReferencedObjects,
+		"min_age_days":            scan.MinAgeDays,
+		"deleted_account_orphans": summarizeStorageOrphanItems(scan.DeletedAccountOrphans),
+		"active_account_orphans":  summarizeStorageOrphanItems(scan.ActiveAccountOrphans),
+		"active_eligible_orphans": summarizeStorageOrphanItems(scan.ActiveEligibleOrphans),
+	}
+}
+
+func (s *Server) handleAdminStorageOrphans(c *fiber.Ctx) error {
+	minAgeDays := c.QueryInt("min_age_days", 30)
+	scan, err := s.scanStorageOrphans(c.Context(), minAgeDays)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "summary": storageOrphanScanSummary(scan)})
+}
+
+func (s *Server) handleAdminCleanupStorageOrphans(c *fiber.Ctx) error {
+	var req struct {
+		Scope        string `json:"scope"`
+		Confirmation string `json:"confirmation"`
+		MinAgeDays   int    `json:"min_age_days"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	scope := strings.TrimSpace(req.Scope)
+	if scope == "" {
+		scope = "deleted_accounts"
+	}
+	if req.Confirmation != "DELETE_ORPHAN_STORAGE" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Confirmation must be DELETE_ORPHAN_STORAGE"})
+	}
+	minAgeDays := req.MinAgeDays
+	if minAgeDays <= 0 {
+		minAgeDays = 30
+	}
+	if scope == "active_accounts" && minAgeDays < 7 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Los huérfanos de cuentas activas requieren al menos 7 días de antigüedad"})
+	}
+	scan, err := s.scanStorageOrphans(c.Context(), minAgeDays)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	targets := scan.DeletedAccountOrphans
+	if scope == "active_accounts" {
+		targets = scan.ActiveEligibleOrphans
+	} else if scope != "deleted_accounts" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid cleanup scope"})
+	}
+
+	var deleted int
+	var freedBytes int64
+	errors := make([]fiber.Map, 0)
+	for _, item := range targets {
+		if err := s.storage.DeleteFile(c.Context(), item.ObjectKey); err != nil {
+			errors = append(errors, fiber.Map{"object_key": item.ObjectKey, "error": err.Error()})
+			continue
+		}
+		deleted++
+		freedBytes += item.SizeBytes
+		if scope == "active_accounts" {
+			accountID, parseErr := uuid.Parse(item.AccountID)
+			if parseErr != nil {
+				log.Printf("[StorageOrphans] deleted active orphan but could not audit object %s: invalid account id %q", item.ObjectKey, item.AccountID)
+				continue
+			}
+			_, _ = s.repos.DB().Exec(c.Context(), `
+				INSERT INTO storage_objects (account_id, object_key, media_type, filename, size_bytes, source, status, deleted_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, 'deleted', NOW(), NOW())
+				ON CONFLICT (account_id, object_key) DO UPDATE
+				SET status = 'deleted', deleted_at = NOW(), updated_at = NOW()
+			`, accountID, item.ObjectKey, classifyStorageMediaType(item.ObjectKey, ""), filepath.Base(item.ObjectKey), item.SizeBytes, storageFolderFromObjectKey(accountID, item.ObjectKey))
+		}
+	}
+	return c.JSON(fiber.Map{
+		"success":     true,
+		"scope":       scope,
+		"deleted":     deleted,
+		"freed_bytes": freedBytes,
+		"errors":      errors,
+		"before":      storageOrphanScanSummary(scan),
+	})
 }
 
 func (s *Server) handleAdminAccountPurgePreview(c *fiber.Ctx) error {
