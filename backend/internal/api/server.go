@@ -13134,7 +13134,7 @@ func (s *Server) handleAdminPurgeAccount(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	if account == nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Account not found"})
+		return c.JSON(fiber.Map{"success": true, "purged": true, "already_purged": true, "deleted_files": 0})
 	}
 	var req struct {
 		Confirmation string `json:"confirmation"`

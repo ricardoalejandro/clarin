@@ -234,6 +234,8 @@ export default function AdminPage() {
   const [purgeSummary, setPurgeSummary] = useState<Record<string, unknown> | null>(null)
   const [purgeConfirmation, setPurgeConfirmation] = useState('')
   const [purgeDeleteFiles, setPurgeDeleteFiles] = useState(true)
+  const [purgeLoading, setPurgeLoading] = useState(false)
+  const [purgePreviewLoading, setPurgePreviewLoading] = useState(false)
 
   // Account assignments modal
   const [showAssignModal, setShowAssignModal] = useState(false)
@@ -464,30 +466,46 @@ export default function AdminPage() {
     setPurgeSummary(null)
     setPurgeConfirmation('')
     setPurgeDeleteFiles(true)
+    setPurgeLoading(false)
+    setPurgePreviewLoading(true)
     setShowPurgeModal(true)
-    const res = await fetch(`/api/admin/accounts/${account.id}/purge-preview`, { headers })
-    const data = await res.json()
-    if (data.success) {
-      setPurgeSummary(data.summary)
-    } else {
-      alert(data.error || 'Error al preparar la eliminación')
+    try {
+      const res = await fetch(`/api/admin/accounts/${account.id}/purge-preview`, { headers })
+      const data = await res.json()
+      if (data.success) {
+        setPurgeSummary(data.summary)
+      } else {
+        setShowPurgeModal(false)
+        setPurgeAccount(null)
+        await Promise.all([fetchAccounts(), fetchUsers(), fetchIntegrations()])
+        alert(data.error === 'Account not found' ? 'La cuenta ya no existe o ya fue eliminada.' : data.error || 'Error al preparar la eliminación')
+      }
+    } finally {
+      setPurgePreviewLoading(false)
     }
   }
 
   async function purgeAccountNow() {
-    if (!purgeAccount) return
-    const res = await fetch(`/api/admin/accounts/${purgeAccount.id}/purge`, {
-      method: 'DELETE', headers,
-      body: JSON.stringify({ confirmation: purgeConfirmation, delete_files: purgeDeleteFiles })
-    })
-    const data = await res.json()
-    if (!data.success) {
-      alert(data.error || 'Error al purgar cuenta')
-      return
+    if (!purgeAccount || purgeLoading || purgePreviewLoading) return
+    setPurgeLoading(true)
+    try {
+      const res = await fetch(`/api/admin/accounts/${purgeAccount.id}/purge`, {
+        method: 'DELETE', headers,
+        body: JSON.stringify({ confirmation: purgeConfirmation, delete_files: purgeDeleteFiles })
+      })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error === 'Account not found' ? 'La cuenta ya fue eliminada.' : data.error || 'Error al purgar cuenta')
+        return
+      }
+      setShowPurgeModal(false)
+      setPurgeAccount(null)
+      setPurgeSummary(null)
+      setPurgeConfirmation('')
+      await Promise.all([fetchAccounts(), fetchUsers(), fetchIntegrations()])
+    } finally {
+      setPurgeLoading(false)
     }
-    setShowPurgeModal(false)
-    setPurgeAccount(null)
-    await Promise.all([fetchAccounts(), fetchUsers(), fetchIntegrations()])
   }
 
   // User CRUD
@@ -2218,11 +2236,11 @@ export default function AdminPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
                   <div className="flex items-center gap-2 text-xs text-gray-500 mb-1"><Database className="w-4 h-4" /> Registros</div>
-                  <div className="text-2xl font-semibold text-gray-900">{purgeTables ? purgeRecordCount : '...'}</div>
+                  <div className="text-2xl font-semibold text-gray-900">{purgeTables ? purgeRecordCount : purgePreviewLoading ? '...' : '0'}</div>
                 </div>
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
                   <div className="flex items-center gap-2 text-xs text-gray-500 mb-1"><HardDrive className="w-4 h-4" /> Archivos</div>
-                  <div className="text-2xl font-semibold text-gray-900">{purgeSummary ? purgeStorageObjects : '...'}</div>
+                  <div className="text-2xl font-semibold text-gray-900">{purgeSummary ? purgeStorageObjects : purgePreviewLoading ? '...' : '0'}</div>
                 </div>
               </div>
               {purgeTables && (
@@ -2236,17 +2254,24 @@ export default function AdminPage() {
                 </div>
               )}
               <label className="flex items-center gap-3 text-sm text-gray-700">
-                <input type="checkbox" checked={purgeDeleteFiles} onChange={e => setPurgeDeleteFiles(e.target.checked)} className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500" />
+                <input type="checkbox" checked={purgeDeleteFiles} disabled={purgeLoading} onChange={e => setPurgeDeleteFiles(e.target.checked)} className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-50" />
                 Eliminar archivos de MinIO para esta cuenta
               </label>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Escribe el nombre de la cuenta para confirmar</label>
-                <input value={purgeConfirmation} onChange={e => setPurgeConfirmation(e.target.value)} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500" placeholder={purgeAccount.name} />
+                <input value={purgeConfirmation} disabled={purgeLoading} onChange={e => setPurgeConfirmation(e.target.value)} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 disabled:bg-gray-50 disabled:text-gray-400" placeholder={purgeAccount.name} />
               </div>
             </div>
             <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
-              <button onClick={() => setShowPurgeModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">Cancelar</button>
-              <button onClick={purgeAccountNow} disabled={purgeConfirmation !== purgeAccount.name} className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed">Purgar cuenta</button>
+              <button disabled={purgeLoading} onClick={() => setShowPurgeModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">Cancelar</button>
+              <button
+                onClick={purgeAccountNow}
+                disabled={purgeLoading || purgePreviewLoading || purgeConfirmation !== purgeAccount.name}
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {purgeLoading && <RefreshCw className="w-4 h-4 animate-spin" />}
+                {purgeLoading ? 'Purgando...' : 'Purgar cuenta'}
+              </button>
             </div>
           </div>
         </div>
