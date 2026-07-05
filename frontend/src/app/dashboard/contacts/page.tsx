@@ -303,6 +303,30 @@ export default function ContactsPage() {
   const [existingChatForWA, setExistingChatForWA] = useState<any>(null)
   const [allDevicesForModal, setAllDevicesForModal] = useState<Device[]>([])
   const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
+  const whatsappRequestRef = useRef(0)
+  const activeContactIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    activeContactIdRef.current = selectedContact?.id || null
+  }, [selectedContact?.id])
+
+  const resetInlineChatState = useCallback(() => {
+    whatsappRequestRef.current += 1
+    setShowSendMessage(false)
+    setWhatsappPhone('')
+    setShowInlineChat(false)
+    setInlineChatId('')
+    setInlineChat(null)
+    setInlineChatDeviceId('')
+    setInlineChatReadOnly(false)
+    setExistingChatForWA(null)
+    setAllDevicesForModal([])
+    setWhatsappHistoricalPhone('')
+  }, [])
+
+  const isCurrentWhatsAppRequest = useCallback((requestId: number, contactId: string | null) => {
+    return whatsappRequestRef.current === requestId && activeContactIdRef.current === contactId
+  }, [])
 
   // Ver Leads modal
   const [showContactLeads, setShowContactLeads] = useState(false)
@@ -609,6 +633,7 @@ export default function ContactsPage() {
         })
         const data = await res.json()
         if (data.success && data.contact) {
+          resetInlineChatState()
           setSelectedContact(data.contact)
           setShowDetailPanel(true)
           if (scroll === 'tasks') setScrollToTasks(true)
@@ -616,7 +641,7 @@ export default function ContactsPage() {
       } catch { /* ignore */ }
     }
     fetchAndOpenContact()
-  }, [])
+  }, [resetInlineChatState])
 
   // Lock body scroll when detail panel is open
   useEffect(() => {
@@ -632,17 +657,18 @@ export default function ContactsPage() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (showSendMessage) { setShowSendMessage(false); return }
+      if (showSendMessage) { resetInlineChatState(); return }
       if (showDuplicates) { setShowDuplicates(false); return }
       if (showEditModal) { setShowEditModal(false); setSelectedContact(null); return }
-      if (showInlineChat) { setShowInlineChat(false); setInlineChatReadOnly(false); return }
-      if (showDetailPanel) { setShowDetailPanel(false); return }
+      if (showInlineChat) { resetInlineChatState(); return }
+      if (showDetailPanel) { setShowDetailPanel(false); resetInlineChatState(); return }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showSendMessage, showDuplicates, showEditModal, showInlineChat, showDetailPanel])
+  }, [resetInlineChatState, showSendMessage, showDuplicates, showEditModal, showInlineChat, showDetailPanel])
 
   const openDetail = async (contact: Contact) => {
+    resetInlineChatState()
     // Fetch full contact with device names
     try {
       const res = await fetch(`/api/contacts/${contact.id}`, {
@@ -873,9 +899,13 @@ export default function ContactsPage() {
 
 
   const handleSendWhatsApp = async (phone: string) => {
+    const contactId = activeContactIdRef.current
+    resetInlineChatState()
+    const requestId = whatsappRequestRef.current
     setWhatsappPhone(phone)
     try {
       const resolution = await resolveWhatsAppChat(phone)
+      if (!isCurrentWhatsAppRequest(requestId, contactId)) return
       if (!resolution.success) {
         alert(resolution.error || 'Error al resolver conversación')
         return
@@ -891,27 +921,33 @@ export default function ContactsPage() {
         return
       }
       if (resolution.mode === 'open_direct' && resolution.devices[0]) {
-        await handleContactDeviceSelected(resolution.devices[0] as Device, phone)
+        await handleContactDeviceSelected(resolution.devices[0] as Device, phone, requestId, contactId)
         return
       }
       if (resolution.mode === 'choose_device') {
         setAllDevicesForModal(resolution.devices as Device[])
-        setDevices(resolution.devices as Device[])
         setShowSendMessage(true)
         return
       }
       alert('No hay dispositivos conectados para enviar')
     } catch (err) {
+      if (!isCurrentWhatsAppRequest(requestId, contactId)) return
       console.error('Failed to resolve WhatsApp chat:', err)
       alert('Error de conexión')
     }
   }
 
-  const handleContactDeviceSelected = async (device: Device, phoneOverride?: string) => {
+  const handleContactDeviceSelected = async (
+    device: Device,
+    phoneOverride?: string,
+    requestId: number = whatsappRequestRef.current,
+    contactId: string | null = activeContactIdRef.current
+  ) => {
     setShowSendMessage(false)
     setInlineChatReadOnly(false)
     try {
       const data = await createWhatsAppChat(device.id, phoneOverride || whatsappPhone)
+      if (!isCurrentWhatsAppRequest(requestId, contactId)) return
       if (data.success && data.chat) {
         setInlineChatId(data.chat.id)
         setInlineChat(data.chat)
@@ -921,6 +957,7 @@ export default function ContactsPage() {
         alert(data.error || 'Error al crear conversación')
       }
     } catch {
+      if (!isCurrentWhatsAppRequest(requestId, contactId)) return
       alert('Error de conexión')
     }
   }
@@ -2058,7 +2095,7 @@ export default function ContactsPage() {
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
-            onClick={() => { setShowDetailPanel(false); setShowInlineChat(false); setInlineChatReadOnly(false) }}
+            onClick={() => { setShowDetailPanel(false); resetInlineChatState() }}
           />
           <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
 
@@ -2066,11 +2103,12 @@ export default function ContactsPage() {
             {showInlineChat && inlineChatId && (
               <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
                 <ChatPanel
+                  key={inlineChatId}
                   chatId={inlineChatId}
                   deviceId={inlineChatDeviceId}
                   initialChat={inlineChat || undefined}
                   readOnly={inlineChatReadOnly}
-                  onClose={() => { setShowInlineChat(false); setInlineChatReadOnly(false) }}
+                  onClose={resetInlineChatState}
                   className="h-full"
                 />
               </div>
@@ -2104,10 +2142,10 @@ export default function ContactsPage() {
                 setSelectedContact(updatedContact)
                 setContacts(prev => prev.map(c => c.id === updatedContact.id ? { ...c, ...updatedContact } : c))
               }}
-              onClose={() => { setShowDetailPanel(false); setShowInlineChat(false); setInlineChatReadOnly(false); setScrollToTasks(false) }}
+              onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
               onDelete={() => {
                 setShowDetailPanel(false)
-                setShowInlineChat(false)
+                resetInlineChatState()
                 setSelectedContact(null)
                 fetchContacts()
               }}
@@ -2327,12 +2365,12 @@ export default function ContactsPage() {
 	                Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
 	              </p>
 	            )}
-            {devices.filter(d => d.status === 'connected').length === 0 ? (
+            {allDevicesForModal.filter(d => d.status === 'connected').length === 0 ? (
               <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
               <div className="space-y-2">
                 {/* Connected devices — sort chat owner first */}
-                {[...devices.filter(d => d.status === 'connected')].sort((a, b) => {
+                {[...allDevicesForModal.filter(d => d.status === 'connected')].sort((a, b) => {
                   if (existingChatForWA?.device_id === a.id) return -1
                   if (existingChatForWA?.device_id === b.id) return 1
                   return 0
@@ -2362,7 +2400,7 @@ export default function ContactsPage() {
                 })}
 
                 {/* Previous device option (disconnected) — read-only mode */}
-                {existingChatForWA && existingChatForWA.device_id && !devices.find(d => d.id === existingChatForWA.device_id && d.status === 'connected') && (
+                {existingChatForWA && existingChatForWA.device_id && !allDevicesForModal.find(d => d.id === existingChatForWA.device_id && d.status === 'connected') && (
                   <div className="pt-2 mt-2 border-t border-slate-100">
                     <button
                       onClick={handlePreviousDeviceSelected}
@@ -2381,7 +2419,7 @@ export default function ContactsPage() {
               </div>
             )}
             <button
-              onClick={() => setShowSendMessage(false)}
+              onClick={resetInlineChatState}
               className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
             >
               Cancelar

@@ -14,7 +14,7 @@ import (
 
 // ──── list_programs ────
 func (s *MCPServer) toolListPrograms(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -77,7 +77,7 @@ func (s *MCPServer) toolListPrograms(ctx context.Context, req mcp.CallToolReques
 
 // ──── get_program_detail ────
 func (s *MCPServer) toolGetProgramDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -227,7 +227,7 @@ func (s *MCPServer) toolGetProgramAttendance(ctx context.Context, req mcp.CallTo
 
 // ──── list_campaigns ────
 func (s *MCPServer) toolListCampaigns(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -269,7 +269,7 @@ func (s *MCPServer) toolListCampaigns(ctx context.Context, req mcp.CallToolReque
 
 // ──── get_campaign_detail ────
 func (s *MCPServer) toolGetCampaignDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -339,7 +339,7 @@ func (s *MCPServer) toolGetCampaignDetail(ctx context.Context, req mcp.CallToolR
 
 // ──── list_surveys ────
 func (s *MCPServer) toolListSurveys(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -383,7 +383,7 @@ func (s *MCPServer) toolListSurveys(ctx context.Context, req mcp.CallToolRequest
 
 // ──── get_survey_detail ────
 func (s *MCPServer) toolGetSurveyDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -456,7 +456,7 @@ func (s *MCPServer) toolGetSurveyAnalytics(ctx context.Context, req mcp.CallTool
 
 // ──── list_automations ────
 func (s *MCPServer) toolListAutomations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -498,7 +498,7 @@ func (s *MCPServer) toolListAutomations(ctx context.Context, req mcp.CallToolReq
 
 // ──── get_automation_detail ────
 func (s *MCPServer) toolGetAutomationDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -564,7 +564,7 @@ func (s *MCPServer) toolGetAutomationDetail(ctx context.Context, req mcp.CallToo
 
 // ──── get_contact_detail ────
 func (s *MCPServer) toolGetContactDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -662,7 +662,7 @@ func (s *MCPServer) toolGetContactDetail(ctx context.Context, req mcp.CallToolRe
 
 // ──── list_chats ────
 func (s *MCPServer) toolListChats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -734,7 +734,7 @@ func (s *MCPServer) toolListChats(ctx context.Context, req mcp.CallToolRequest) 
 
 // ──── search_chat_messages ────
 func (s *MCPServer) toolSearchChatMessages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}

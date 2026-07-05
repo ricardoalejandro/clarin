@@ -136,6 +136,7 @@ services:
       - dokploy-network
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=dokploy-network"
       - "traefik.http.routers.clarin-api.rule=Host(`clarin.naperu.cloud`) && (PathPrefix(`/api`) || PathPrefix(`/ws`) || PathPrefix(`/health`))"
       - "traefik.http.routers.clarin-api.entrypoints=websecure"
       - "traefik.http.routers.clarin-api.tls=true"
@@ -143,7 +144,7 @@ services:
       - "traefik.http.services.clarin-api.loadbalancer.server.port=8080"
       - "traefik.http.routers.clarin-api.service=clarin-api"
       - "traefik.http.routers.clarin-api.priority=100"
-      # MCP Server (Model Context Protocol) — SSE transport on port 8081
+      # MCP Server (Model Context Protocol) on port 8081.
       - "traefik.http.routers.clarin-mcp.rule=Host(`clarin.naperu.cloud`) && PathPrefix(`/mcp`)"
       - "traefik.http.routers.clarin-mcp.entrypoints=websecure"
       - "traefik.http.routers.clarin-mcp.tls=true"
@@ -151,6 +152,19 @@ services:
       - "traefik.http.services.clarin-mcp.loadbalancer.server.port=8081"
       - "traefik.http.routers.clarin-mcp.service=clarin-mcp"
       - "traefik.http.routers.clarin-mcp.priority=110"
+      # OAuth endpoints for ChatGPT MCP custom connectors.
+      - "traefik.http.routers.clarin-mcp-oauth.rule=Host(`clarin.naperu.cloud`) && PathPrefix(`/oauth`)"
+      - "traefik.http.routers.clarin-mcp-oauth.entrypoints=websecure"
+      - "traefik.http.routers.clarin-mcp-oauth.tls=true"
+      - "traefik.http.routers.clarin-mcp-oauth.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-mcp-oauth.service=clarin-mcp"
+      - "traefik.http.routers.clarin-mcp-oauth.priority=200"
+      - "traefik.http.routers.clarin-mcp-well-known.rule=Host(`clarin.naperu.cloud`) && PathPrefix(`/.well-known`)"
+      - "traefik.http.routers.clarin-mcp-well-known.entrypoints=websecure"
+      - "traefik.http.routers.clarin-mcp-well-known.tls=true"
+      - "traefik.http.routers.clarin-mcp-well-known.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-mcp-well-known.service=clarin-mcp"
+      - "traefik.http.routers.clarin-mcp-well-known.priority=200"
 
   frontend:
     build:

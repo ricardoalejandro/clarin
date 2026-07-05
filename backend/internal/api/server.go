@@ -790,6 +790,16 @@ func (s *Server) setupRoutes() {
 	adminRoles.Put("/:id", s.handleAdminUpdateRole)
 	adminRoles.Delete("/:id", s.handleAdminDeleteRole)
 
+	// Global MCP management
+	adminMCP := admin.Group("/mcp")
+	adminMCP.Get("/clients", s.handleAdminListMCPClients)
+	adminMCP.Post("/clients", s.handleAdminCreateMCPClient)
+	adminMCP.Post("/clients/:id/rotate", s.handleAdminRotateMCPClient)
+	adminMCP.Patch("/clients/:id", s.handleAdminUpdateMCPClient)
+	adminMCP.Get("/sessions", s.handleAdminListMCPSessions)
+	adminMCP.Patch("/sessions/:id", s.handleAdminUpdateMCPSession)
+	adminMCP.Get("/audit", s.handleAdminListMCPAudit)
+
 	// Integration management
 	adminIntegrations := admin.Group("/integrations")
 	adminIntegrations.Get("/", s.handleAdminListIntegrations)
@@ -13368,12 +13378,11 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		Name              string `json:"name"`
 		Slug              string `json:"slug"`
 		Plan              string `json:"plan"`
-		MaxDevices        int    `json:"max_devices"`
-		MaxUsersOverride  *int   `json:"max_users_override"`
-		StorageLimitBytes int64  `json:"storage_limit_bytes"`
-		MCPEnabled        bool   `json:"mcp_enabled"`
-		KommoEnabled      bool   `json:"kommo_enabled"`
-	}
+			MaxDevices        int    `json:"max_devices"`
+			MaxUsersOverride  *int   `json:"max_users_override"`
+			StorageLimitBytes int64  `json:"storage_limit_bytes"`
+			KommoEnabled      bool   `json:"kommo_enabled"`
+		}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
@@ -13396,12 +13405,11 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		Name:              req.Name,
 		Slug:              req.Slug,
 		Plan:              req.Plan,
-		MaxDevices:        req.MaxDevices,
-		MaxUsersOverride:  req.MaxUsersOverride,
-		StorageLimitBytes: req.StorageLimitBytes,
-		MCPEnabled:        req.MCPEnabled,
-		KommoEnabled:      req.KommoEnabled,
-	}
+			MaxDevices:        req.MaxDevices,
+			MaxUsersOverride:  req.MaxUsersOverride,
+			StorageLimitBytes: req.StorageLimitBytes,
+			KommoEnabled:      req.KommoEnabled,
+		}
 
 	if err := s.services.Account.Update(c.Context(), account); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})

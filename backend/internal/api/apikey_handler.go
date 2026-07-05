@@ -29,7 +29,7 @@ func hashAPIKey(key string) string {
 }
 
 // handleCreateAPIKey creates a new API key for the current account.
-// POST /api/settings/api-keys  { "name": "ChatGPT MCP" }
+// POST /api/settings/api-keys  { "name": "Legacy integration" }
 // Returns the plaintext key ONCE — it is never stored or shown again.
 func (s *Server) handleCreateAPIKey(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)

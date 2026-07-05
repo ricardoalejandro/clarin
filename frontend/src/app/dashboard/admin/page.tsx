@@ -5,7 +5,7 @@ import {
   Building2, Users, Plus, Pencil, Trash2, Power, KeyRound,
   Search, X, Shield, ChevronDown, Link2, Lock, CheckSquare, Square, Bot,
   Plug, RefreshCw, AlertTriangle, HardDrive, Database, CheckCircle2,
-  Activity, Eye, Send, Clock
+  Activity, Eye, Send, Clock, Copy
 } from 'lucide-react'
 import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 
@@ -16,11 +16,10 @@ interface Account {
   plan: string
   max_devices: number
   max_users_override?: number | null
-  max_users_effective?: number
-  storage_limit_bytes: number
-  is_active: boolean
-  mcp_enabled: boolean
-  kommo_enabled?: boolean
+	  max_users_effective?: number
+	  storage_limit_bytes: number
+	  is_active: boolean
+	  kommo_enabled?: boolean
   subscription_status?: string
   trial_ends_at?: string | null
   current_period_end?: string | null
@@ -174,6 +173,62 @@ interface StorageOrphanSummary {
   active_eligible_orphans: StorageOrphanGroup
 }
 
+interface MCPClient {
+  id: string
+  name: string
+  client_kind: string
+  scope_type: string
+  status: 'pending' | 'active' | 'blocked' | 'revoked'
+  token_prefix: string
+  oauth_redirect_uri?: string
+  oauth_client_id?: string
+  created_by_user_id?: string
+  created_at: string
+  activated_at?: string
+  last_seen_at?: string
+  blocked_at?: string
+  blocked_reason?: string
+  active_sessions?: number
+  allowed_accounts?: MCPAllowedAccount[]
+}
+
+interface MCPAllowedAccount {
+  account_id: string
+  account_name: string
+  account_slug?: string
+  is_active: boolean
+}
+
+interface MCPSession {
+  id: string
+  client_id: string
+  client_name?: string
+  transport: string
+  ip_hash?: string
+  user_agent_hash?: string
+  origin_hash?: string
+  status: 'active' | 'blocked' | 'closed'
+  block_reason?: string
+  first_seen_at: string
+  last_seen_at: string
+  disconnected_at?: string
+}
+
+interface MCPAuditEvent {
+  id: string
+  client_id?: string
+  client_name?: string
+  session_id?: string
+  event_type: string
+  tool_name?: string
+  account_ids?: string[]
+  result_count?: number
+  ip_hash?: string
+  user_agent_hash?: string
+  metadata?: Record<string, unknown>
+  created_at: string
+}
+
 interface NewUserAssignment {
   account_id: string
   role: string
@@ -229,7 +284,7 @@ function bytesToGb(value?: number) {
   return value && value > 0 ? Math.round((value / 1024 / 1024 / 1024) * 10) / 10 : 0
 }
 
-type Tab = 'accounts' | 'users' | 'roles' | 'integrations'
+type Tab = 'accounts' | 'users' | 'roles' | 'mcp' | 'integrations'
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>('accounts')
@@ -237,9 +292,18 @@ export default function AdminPage() {
   const [users, setUsers] = useState<User[]>([])
   const [plans, setPlans] = useState<Plan[]>([])
   const [integrations, setIntegrations] = useState<IntegrationInstance[]>([])
+  const [mcpClients, setMcpClients] = useState<MCPClient[]>([])
+  const [mcpSessions, setMcpSessions] = useState<MCPSession[]>([])
+  const [mcpAudit, setMcpAudit] = useState<MCPAuditEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [filterAccountId, setFilterAccountId] = useState('')
+  const [newMcpName, setNewMcpName] = useState('')
+  const [newMcpRedirectUri, setNewMcpRedirectUri] = useState('')
+  const [newMcpAccountIds, setNewMcpAccountIds] = useState<string[]>([])
+  const [revealedMcpToken, setRevealedMcpToken] = useState<string | null>(null)
+  const [revealedMcpClient, setRevealedMcpClient] = useState<MCPClient | null>(null)
+  const [mcpBusy, setMcpBusy] = useState<string | null>(null)
 
   // Modals
   const [showAccountModal, setShowAccountModal] = useState(false)
@@ -291,11 +355,11 @@ export default function AdminPage() {
   const [storageCleanupLoading, setStorageCleanupLoading] = useState(false)
   const [storageActiveMinAgeDays, setStorageActiveMinAgeDays] = useState(30)
 
-  // Account form
-  const [accountForm, setAccountForm] = useState({
-    name: '', slug: '', plan: 'basic', max_devices: 5, max_users_override: '', storage_limit_gb: 0, mcp_enabled: false,
-    subscription_status: 'active', trial_ends_at: '', current_period_end: ''
-  })
+	  // Account form
+	  const [accountForm, setAccountForm] = useState({
+	    name: '', slug: '', plan: 'basic', max_devices: 5, max_users_override: '', storage_limit_gb: 0,
+	    subscription_status: 'active', trial_ends_at: '', current_period_end: ''
+	  })
 
   // User form
   const [userForm, setUserForm] = useState({
@@ -364,6 +428,24 @@ export default function AdminPage() {
       if (data.success) setIntegrations(data.integrations || [])
     } catch (e) {
       console.error('Failed to fetch integrations:', e)
+    }
+  }
+
+  async function fetchMCPData() {
+    try {
+      const [clientsRes, sessionsRes, auditRes] = await Promise.all([
+        fetch('/api/admin/mcp/clients', { headers }),
+        fetch('/api/admin/mcp/sessions?limit=100', { headers }),
+        fetch('/api/admin/mcp/audit?limit=100', { headers }),
+      ])
+      const [clientsData, sessionsData, auditData] = await Promise.all([
+        clientsRes.json(), sessionsRes.json(), auditRes.json()
+      ])
+      if (clientsData.success) setMcpClients(clientsData.clients || [])
+      if (sessionsData.success) setMcpSessions(sessionsData.sessions || [])
+      if (auditData.success) setMcpAudit(auditData.events || [])
+    } catch (e) {
+      console.error('Failed to fetch MCP data:', e)
     }
   }
 
@@ -440,6 +522,7 @@ export default function AdminPage() {
       fetchPlans(),
       fetchRoles(),
       fetchStorageOrphans(),
+      fetchMCPData(),
       ...(KOMMO_ADMIN_UI_ENABLED ? [fetchIntegrations()] : []),
     ]).finally(() => setLoading(false))
   }, [])
@@ -466,11 +549,11 @@ export default function AdminPage() {
   }, [showIntegrationMonitor, showPasswordModal, showPurgeModal, showIntegrationModal, showRoleModal, showAssignModal, showUserModal, showAccountModal])
 
   // Account CRUD
-  function openCreateAccount() {
-    setEditingAccount(null)
-    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, max_users_override: '', storage_limit_gb: 0, mcp_enabled: false, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
-    setShowAccountModal(true)
-  }
+	  function openCreateAccount() {
+	    setEditingAccount(null)
+	    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, max_users_override: '', storage_limit_gb: 0, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
+	    setShowAccountModal(true)
+	  }
 
   function openEditAccount(a: Account) {
     setEditingAccount(a)
@@ -478,11 +561,10 @@ export default function AdminPage() {
       name: a.name,
       slug: a.slug,
       plan: a.plan,
-      max_devices: a.max_devices,
-      max_users_override: a.max_users_override === null || a.max_users_override === undefined ? '' : String(a.max_users_override),
-      storage_limit_gb: bytesToGb(a.storage_limit_bytes),
-      mcp_enabled: a.mcp_enabled,
-      subscription_status: a.subscription_status || 'active',
+	      max_devices: a.max_devices,
+	      max_users_override: a.max_users_override === null || a.max_users_override === undefined ? '' : String(a.max_users_override),
+	      storage_limit_gb: bytesToGb(a.storage_limit_bytes),
+	      subscription_status: a.subscription_status || 'active',
       trial_ends_at: dateInputValue(a.trial_ends_at),
       current_period_end: dateInputValue(a.current_period_end),
     })
@@ -499,11 +581,10 @@ export default function AdminPage() {
       name: accountForm.name,
       slug: accountForm.slug,
       plan: accountForm.plan,
-      max_devices: accountForm.max_devices,
-      max_users_override: accountForm.max_users_override === '' ? null : Math.max(0, parseInt(accountForm.max_users_override, 10) || 0),
-      storage_limit_bytes: gbToBytes(accountForm.storage_limit_gb),
-      mcp_enabled: accountForm.mcp_enabled,
-    }
+	      max_devices: accountForm.max_devices,
+	      max_users_override: accountForm.max_users_override === '' ? null : Math.max(0, parseInt(accountForm.max_users_override, 10) || 0),
+	      storage_limit_bytes: gbToBytes(accountForm.storage_limit_gb),
+	    }
 
     const res = await fetch(url, { method, headers, body: JSON.stringify(accountPayload) })
     const data = await res.json()
@@ -787,6 +868,27 @@ export default function AdminPage() {
     (i.subdomain || '').toLowerCase().includes(search.toLowerCase())
   )
 
+  const filteredMCPClients = mcpClients.filter(c =>
+    c.name.toLowerCase().includes(search.toLowerCase()) ||
+    c.status.toLowerCase().includes(search.toLowerCase()) ||
+    c.token_prefix.toLowerCase().includes(search.toLowerCase()) ||
+    (c.allowed_accounts || []).some(a => a.account_name.toLowerCase().includes(search.toLowerCase()))
+  )
+
+  const activeAccounts = accounts.filter(a => a.is_active)
+
+  function toggleNewMcpAccount(accountId: string) {
+    setNewMcpAccountIds(prev =>
+      prev.includes(accountId)
+        ? prev.filter(id => id !== accountId)
+        : [...prev, accountId]
+    )
+  }
+
+  function allowedAccountIds(client: MCPClient) {
+    return (client.allowed_accounts || []).filter(a => a.is_active).map(a => a.account_id)
+  }
+
   // Role CRUD
   function openCreateRole() {
     setEditingRole(null)
@@ -962,6 +1064,133 @@ export default function AdminPage() {
     }
   }
 
+  async function createMCPClient() {
+    const name = newMcpName.trim()
+    const oauthRedirectUri = newMcpRedirectUri.trim()
+    if (!name || mcpBusy) return
+    if (!oauthRedirectUri) {
+      alert('Copia la URL de retorno OAuth que te muestra ChatGPT')
+      return
+    }
+    if (newMcpAccountIds.length === 0) {
+      alert('Selecciona al menos una cuenta permitida para esta conexión MCP')
+      return
+    }
+    setMcpBusy('create')
+    try {
+      const res = await fetch('/api/admin/mcp/clients', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name, client_kind: 'chatgpt', account_ids: newMcpAccountIds, oauth_redirect_uri: oauthRedirectUri }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'No se pudo crear la conexión MCP')
+        return
+      }
+      setNewMcpName('')
+      setNewMcpRedirectUri('')
+      setNewMcpAccountIds([])
+      setRevealedMcpToken(null)
+      setRevealedMcpClient(data.client || null)
+      await fetchMCPData()
+    } finally {
+      setMcpBusy(null)
+    }
+  }
+
+  async function updateMCPClientStatus(client: MCPClient, status: MCPClient['status']) {
+    if (mcpBusy) return
+    const labels: Record<string, string> = { active: 'activar', blocked: 'bloquear', revoked: 'revocar' }
+    if (status !== 'active' && !confirm(`¿${labels[status]} la conexión "${client.name}"?`)) return
+    setMcpBusy(client.id)
+    try {
+      const reason = status === 'blocked' ? window.prompt('Motivo del bloqueo (opcional):') || '' : ''
+      const res = await fetch(`/api/admin/mcp/clients/${client.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ status, reason }),
+      })
+      const data = await res.json()
+      if (!data.success) alert(data.error || 'No se pudo actualizar la conexión MCP')
+      if (data.success && status === 'revoked') {
+        setMcpClients(prev => prev.filter(item => item.id !== client.id))
+      }
+      await fetchMCPData()
+    } finally {
+      setMcpBusy(null)
+    }
+  }
+
+  async function updateMCPClientAccounts(client: MCPClient, accountId: string) {
+    if (mcpBusy) return
+    const current = allowedAccountIds(client)
+    const next = current.includes(accountId)
+      ? current.filter(id => id !== accountId)
+      : [...current, accountId]
+    if (next.length === 0) {
+      alert('Cada conexión MCP debe tener al menos una cuenta permitida')
+      return
+    }
+    setMcpBusy(client.id)
+    try {
+      const res = await fetch(`/api/admin/mcp/clients/${client.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ account_ids: next }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'No se pudieron actualizar las cuentas permitidas')
+      }
+      await fetchMCPData()
+    } finally {
+      setMcpBusy(null)
+    }
+  }
+
+  async function rotateMCPClient(client: MCPClient) {
+    if (mcpBusy) return
+    if (!confirm(`¿Rotar el token de "${client.name}"? El token anterior dejará de funcionar.`)) return
+    setMcpBusy(client.id)
+    try {
+      const res = await fetch(`/api/admin/mcp/clients/${client.id}/rotate`, { method: 'POST', headers })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'No se pudo rotar el token')
+        return
+      }
+      setRevealedMcpToken(data.token || null)
+      setRevealedMcpClient(null)
+      await fetchMCPData()
+    } finally {
+      setMcpBusy(null)
+    }
+  }
+
+  async function updateMCPSessionStatus(session: MCPSession, status: MCPSession['status']) {
+    if (mcpBusy) return
+    if (status === 'blocked' && !confirm(`¿Bloquear esta sesión de "${session.client_name || 'MCP'}"?`)) return
+    setMcpBusy(session.id)
+    try {
+      const reason = status === 'blocked' ? window.prompt('Motivo del bloqueo (opcional):') || '' : ''
+      const res = await fetch(`/api/admin/mcp/sessions/${session.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ status, reason }),
+      })
+      const data = await res.json()
+      if (!data.success) alert(data.error || 'No se pudo actualizar la sesión MCP')
+      await fetchMCPData()
+    } finally {
+      setMcpBusy(null)
+    }
+  }
+
+  function copyText(text: string) {
+    navigator.clipboard.writeText(text)
+  }
+
   const planColors: Record<string, string> = {
     free: 'bg-slate-100 text-slate-600',
     trial: 'bg-amber-100 text-amber-700',
@@ -1085,6 +1314,24 @@ export default function AdminPage() {
     return 'bg-slate-100 text-slate-700'
   }
 
+  function mcpStatusClass(status: string) {
+    if (status === 'active') return 'bg-emerald-100 text-emerald-700'
+    if (status === 'blocked') return 'bg-red-100 text-red-700'
+    if (status === 'revoked') return 'bg-slate-100 text-slate-500'
+    return 'bg-amber-100 text-amber-700'
+  }
+
+  function mcpStatusLabel(status: string) {
+    const labels: Record<string, string> = {
+      active: 'Activa',
+      blocked: 'Bloqueada',
+      revoked: 'Revocada',
+      pending: 'Pendiente',
+      closed: 'Cerrada',
+    }
+    return labels[status] || status
+  }
+
   function formatDateTime(value?: string) {
     if (!value) return 'Sin datos'
     const date = new Date(value)
@@ -1165,6 +1412,15 @@ export default function AdminPage() {
           <Lock className="w-4 h-4" /> Roles
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{roles.length}</span>
         </button>
+        <button
+          onClick={() => { setTab('mcp'); setSearch('') }}
+          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            tab === 'mcp' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Bot className="w-4 h-4" /> MCP Global
+          <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{mcpClients.length}</span>
+        </button>
         {KOMMO_ADMIN_UI_ENABLED && (
           <button
             onClick={() => { setTab('integrations'); setSearch('') }}
@@ -1184,7 +1440,7 @@ export default function AdminPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder={tab === 'accounts' ? 'Buscar cuentas...' : tab === 'users' ? 'Buscar usuarios...' : tab === 'roles' ? 'Buscar roles...' : 'Buscar...'}
+            placeholder={tab === 'accounts' ? 'Buscar cuentas...' : tab === 'users' ? 'Buscar usuarios...' : tab === 'roles' ? 'Buscar roles...' : tab === 'mcp' ? 'Buscar conexiones MCP...' : 'Buscar...'}
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent"
@@ -1209,7 +1465,16 @@ export default function AdminPage() {
           </select>
         )}
 
-        {KOMMO_ADMIN_UI_ENABLED && tab === 'integrations' ? (
+        {tab === 'mcp' ? (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={fetchMCPData}
+              className="flex items-center gap-2 px-3 py-2 bg-slate-700 text-slate-100 rounded-lg hover:bg-slate-600 transition-colors text-sm font-medium whitespace-nowrap"
+            >
+              <RefreshCw className="w-4 h-4" /> Actualizar
+            </button>
+          </div>
+        ) : KOMMO_ADMIN_UI_ENABLED && tab === 'integrations' ? (
           <div className="flex items-center gap-2">
             <button
               onClick={reloadIntegrations}
@@ -1332,13 +1597,12 @@ export default function AdminPage() {
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Chats</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Espacio</th>
                 <th className="text-center px-4 py-3 font-medium text-gray-500">Estado</th>
-                <th className="text-center px-4 py-3 font-medium text-gray-500">MCP</th>
-                <th className="text-right px-4 py-3 font-medium text-gray-500">Acciones</th>
+	                <th className="text-right px-4 py-3 font-medium text-gray-500">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filteredAccounts.length === 0 ? (
-                <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-400">No se encontraron cuentas</td></tr>
+	                <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">No se encontraron cuentas</td></tr>
               ) : filteredAccounts.map(a => (
                 <tr key={a.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3">
@@ -1375,13 +1639,7 @@ export default function AdminPage() {
                       {a.is_active ? 'Activa' : 'Inactiva'}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-center">
-                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${a.mcp_enabled ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-400'}`}>
-                      <Bot className="w-3 h-3" />
-                      {a.mcp_enabled ? 'Sí' : 'No'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-right">
+	                  <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-1">
                       <button onClick={() => openEditAccount(a)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded" title="Editar">
                         <Pencil className="w-4 h-4" />
@@ -1526,6 +1784,204 @@ export default function AdminPage() {
               ))}
             </tbody>
           </table>
+        ) : tab === 'mcp' ? (
+          <div className="p-5 space-y-6">
+            <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-5">
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2"><Shield className="w-4 h-4 text-emerald-600" /> Conexiones MCP Globales</h3>
+                    <p className="text-xs text-gray-500 mt-0.5">Tokens únicos, sesiones visibles, bloqueo por conexión y auditoría.</p>
+                  </div>
+                  <span className="text-xs text-gray-400">{filteredMCPClients.length} conexiones</span>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {filteredMCPClients.length === 0 ? (
+                    <div className="p-8 text-center text-sm text-gray-400">Sin conexiones MCP</div>
+                  ) : filteredMCPClients.map(client => (
+                    <div key={client.id} className="p-4 hover:bg-gray-50">
+                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium text-gray-900">{client.name}</span>
+                            <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${mcpStatusClass(client.status)}`}>{mcpStatusLabel(client.status)}</span>
+                            <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{client.client_kind}</span>
+                          </div>
+	                          <div className="flex flex-wrap items-center gap-2 mt-1 text-xs text-gray-400">
+	                            <code>{client.oauth_client_id || client.id}</code><span>·</span><span>{client.active_sessions || 0} sesiones activas</span><span>·</span><span>Último uso: {formatDateTime(client.last_seen_at)}</span>
+	                          </div>
+                            {client.oauth_redirect_uri && (
+                              <div className="mt-1 text-xs text-gray-400 truncate">
+                                Redirect OAuth: <code>{client.oauth_redirect_uri}</code>
+                              </div>
+                            )}
+	                          <div className="flex flex-wrap items-center gap-1.5 mt-2">
+	                            {(client.allowed_accounts || []).filter(a => a.is_active).length === 0 ? (
+	                              <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">Sin cuentas permitidas</span>
+	                            ) : (client.allowed_accounts || []).filter(a => a.is_active).map(account => (
+	                              <span key={account.account_id} className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-100">
+	                                {account.account_name}
+	                              </span>
+	                            ))}
+	                          </div>
+	                          {activeAccounts.length > 0 && (
+	                            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-1.5">
+	                              {activeAccounts.map(account => {
+	                                const selected = allowedAccountIds(client).includes(account.id)
+	                                return (
+	                                  <button
+	                                    key={account.id}
+	                                    type="button"
+	                                    onClick={() => updateMCPClientAccounts(client, account.id)}
+	                                    disabled={mcpBusy === client.id}
+	                                    className={`flex items-center gap-2 px-2 py-1.5 rounded border text-xs text-left transition-colors disabled:opacity-50 ${selected ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-50'}`}
+	                                  >
+	                                    {selected ? <CheckSquare className="w-3.5 h-3.5 shrink-0" /> : <Square className="w-3.5 h-3.5 shrink-0" />}
+	                                    <span className="truncate">{account.name}</span>
+	                                  </button>
+	                                )
+	                              })}
+	                            </div>
+	                          )}
+	                          {client.blocked_reason && <p className="text-xs text-red-600 mt-1">{client.blocked_reason}</p>}
+	                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button onClick={() => rotateMCPClient(client)} disabled={mcpBusy === client.id || client.status === 'revoked'} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded disabled:opacity-40" title="Rotar token Bearer legacy"><RefreshCw className="w-4 h-4" /></button>
+                          {client.status === 'active' ? (
+                            <button onClick={() => updateMCPClientStatus(client, 'blocked')} disabled={mcpBusy === client.id} className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded disabled:opacity-40" title="Bloquear"><Power className="w-4 h-4" /></button>
+                          ) : client.status === 'blocked' ? (
+                            <button onClick={() => updateMCPClientStatus(client, 'active')} disabled={mcpBusy === client.id} className="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded disabled:opacity-40" title="Reactivar"><CheckCircle2 className="w-4 h-4" /></button>
+                          ) : null}
+                          {client.status !== 'revoked' && <button onClick={() => updateMCPClientStatus(client, 'revoked')} disabled={mcpBusy === client.id} className="p-1.5 text-gray-400 hover:text-red-700 hover:bg-red-50 rounded disabled:opacity-40" title="Revocar y quitar del listado"><Trash2 className="w-4 h-4" /></button>}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 p-4 space-y-4">
+	                <div>
+	                  <h3 className="text-sm font-semibold text-gray-900">Nueva conexión ChatGPT</h3>
+	                  <p className="text-xs text-gray-500 mt-1">Usa OAuth con PKCE. Crea una conexión por usuario o punto de acceso.</p>
+	                </div>
+	                <div className="space-y-2">
+	                  <input value={newMcpName} onChange={e => setNewMcpName(e.target.value)} className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" placeholder="ChatGPT - Usuario" />
+                    <input value={newMcpRedirectUri} onChange={e => setNewMcpRedirectUri(e.target.value)} onKeyDown={e => e.key === 'Enter' && createMCPClient()} className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" placeholder="URL de retorno de ChatGPT" />
+	                  <button onClick={createMCPClient} disabled={!newMcpName.trim() || !newMcpRedirectUri.trim() || newMcpAccountIds.length === 0 || mcpBusy === 'create'} className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"><Plus className="w-4 h-4" /> Crear conexión OAuth</button>
+	                </div>
+	                <div className="space-y-2">
+	                  <div className="flex items-center justify-between">
+	                    <span className="text-xs font-medium text-gray-700">Cuentas permitidas</span>
+	                    <span className="text-xs text-gray-400">{newMcpAccountIds.length} seleccionadas</span>
+	                  </div>
+	                  <div className="max-h-44 overflow-auto rounded-lg border border-gray-200 divide-y divide-gray-100">
+	                    {activeAccounts.length === 0 ? (
+	                      <div className="p-3 text-xs text-gray-400">No hay cuentas activas disponibles</div>
+	                    ) : activeAccounts.map(account => {
+	                      const selected = newMcpAccountIds.includes(account.id)
+	                      return (
+	                        <button
+	                          key={account.id}
+	                          type="button"
+	                          onClick={() => toggleNewMcpAccount(account.id)}
+	                          className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors ${selected ? 'bg-emerald-50 text-emerald-800' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+	                        >
+	                          {selected ? <CheckSquare className="w-4 h-4 shrink-0" /> : <Square className="w-4 h-4 shrink-0" />}
+	                          <span className="truncate">{account.name}</span>
+	                          {account.slug && <span className="ml-auto text-xs text-gray-400 truncate">{account.slug}</span>}
+	                        </button>
+	                      )
+	                    })}
+	                  </div>
+	                </div>
+	                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-600 space-y-1">
+                  <p><strong>Endpoint principal:</strong> <code>https://clarin.naperu.cloud/mcp</code></p>
+                  <p><strong>Legacy SSE:</strong> <code>https://clarin.naperu.cloud/mcp/sse</code></p>
+                  <p><strong>Auth:</strong> OAuth, cliente definido por el usuario, PKCE S256.</p>
+                  <p><strong>Authorize:</strong> <code>https://clarin.naperu.cloud/oauth/authorize</code></p>
+                  <p><strong>Token:</strong> <code>https://clarin.naperu.cloud/oauth/token</code></p>
+                  <p><strong>Recurso:</strong> <code>https://clarin.naperu.cloud/mcp</code></p>
+                  <p><strong>Scopes:</strong> <code>mcp:read</code></p>
+                </div>
+                {revealedMcpClient && (
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="text-sm font-semibold text-emerald-900">Configuración OAuth</span>
+                      <button onClick={() => setRevealedMcpClient(null)} className="p-1 text-emerald-700 hover:bg-emerald-100 rounded"><X className="w-4 h-4" /></button>
+                    </div>
+                    <div className="space-y-2 text-xs text-emerald-900">
+                      <div>
+                        <span className="block font-medium mb-1">ID de cliente OAuth</span>
+                        <code className="block bg-white border border-emerald-200 rounded p-2 break-all">{revealedMcpClient.oauth_client_id || revealedMcpClient.id}</code>
+                        <button onClick={() => copyText(revealedMcpClient.oauth_client_id || revealedMcpClient.id)} className="mt-1 inline-flex items-center gap-1.5 px-2 py-1 bg-emerald-200 text-emerald-900 rounded text-xs font-medium hover:bg-emerald-300"><Copy className="w-3.5 h-3.5" /> Copiar</button>
+                      </div>
+                      <p>Secreto de cliente: dejar vacío. Método del token endpoint: none.</p>
+                    </div>
+                  </div>
+                )}
+                {revealedMcpToken && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="text-sm font-semibold text-amber-900">Token Bearer legacy</span>
+                      <button onClick={() => setRevealedMcpToken(null)} className="p-1 text-amber-700 hover:bg-amber-100 rounded"><X className="w-4 h-4" /></button>
+                    </div>
+                    <code className="block text-xs bg-white border border-amber-200 rounded p-2 break-all text-amber-900">{revealedMcpToken}</code>
+                    <button onClick={() => copyText(revealedMcpToken)} className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-200 text-amber-900 rounded-lg text-xs font-medium hover:bg-amber-300"><Copy className="w-3.5 h-3.5" /> Copiar</button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-gray-900">Sesiones recientes</h3>
+                  <span className="text-xs text-gray-400">{mcpSessions.length}</span>
+                </div>
+                <div className="divide-y divide-gray-100 max-h-[360px] overflow-auto">
+                  {mcpSessions.length === 0 ? <div className="p-8 text-center text-sm text-gray-400">Sin sesiones</div> : mcpSessions.map(session => (
+                    <div key={session.id} className="p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium text-sm text-gray-900">{session.client_name || session.client_id}</span>
+                            <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${mcpStatusClass(session.status)}`}>{mcpStatusLabel(session.status)}</span>
+                            <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{session.transport}</span>
+                          </div>
+                          <div className="text-xs text-gray-400 mt-1">Visto: {formatDateTime(session.last_seen_at)} · IP hash {session.ip_hash?.slice(0, 10) || 'n/a'}</div>
+                        </div>
+                        {session.status === 'active' ? (
+                          <button onClick={() => updateMCPSessionStatus(session, 'blocked')} className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded" title="Bloquear sesión"><Power className="w-4 h-4" /></button>
+                        ) : session.status === 'blocked' ? (
+                          <button onClick={() => updateMCPSessionStatus(session, 'active')} className="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded" title="Reactivar sesión"><CheckCircle2 className="w-4 h-4" /></button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-gray-900">Auditoría MCP</h3>
+                  <span className="text-xs text-gray-400">{mcpAudit.length}</span>
+                </div>
+                <div className="divide-y divide-gray-100 max-h-[360px] overflow-auto">
+                  {mcpAudit.length === 0 ? <div className="p-8 text-center text-sm text-gray-400">Sin eventos de auditoría</div> : mcpAudit.map(event => (
+                    <div key={event.id} className="p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${event.event_type.includes('failure') || event.event_type.includes('denied') ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>{event.event_type}</span>
+                        {event.tool_name && <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{event.tool_name}</span>}
+                        <span className="ml-auto text-xs text-gray-400">{formatDateTime(event.created_at)}</span>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">{event.client_name || 'Sin cliente'} · IP hash {event.ip_hash?.slice(0, 10) || 'n/a'}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
         ) : KOMMO_ADMIN_UI_ENABLED && tab === 'integrations' ? (
           <table className="w-full text-sm">
             <thead className="bg-gray-50 sticky top-0">
@@ -1967,20 +2423,7 @@ export default function AdminPage() {
                   />
                 </div>
               </div>
-              <div className="flex items-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setAccountForm(f => ({ ...f, mcp_enabled: !f.mcp_enabled }))}
-                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${accountForm.mcp_enabled ? 'bg-violet-600' : 'bg-gray-300'}`}
-                >
-                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${accountForm.mcp_enabled ? 'translate-x-4' : 'translate-x-1'}`} />
-                </button>
-                <div>
-                  <span className="text-sm font-medium text-gray-700">Acceso MCP</span>
-                  <p className="text-xs text-gray-400">Permitir conexión desde ChatGPT u otros clientes MCP</p>
-                </div>
-              </div>
-            </div>
+	            </div>
             <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
               <button onClick={() => setShowAccountModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
                 Cancelar

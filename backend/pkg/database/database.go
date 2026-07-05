@@ -909,9 +909,6 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_event_logbook_entries_logbook ON event_logbook_entries(logbook_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_event_logbook_entries_participant ON event_logbook_entries(participant_id)`,
 
-		// MCP access control per account
-		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS mcp_enabled BOOLEAN DEFAULT FALSE`,
-
 		// Eros AI conversation persistence
 		`CREATE TABLE IF NOT EXISTS eros_conversations (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1914,18 +1911,120 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE chats ADD CONSTRAINT chats_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE RESTRICT`,
 		`ALTER TABLE leads ADD CONSTRAINT leads_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE RESTRICT`,
 		`INSERT INTO subscriptions (account_id, plan_code, status, current_period_start, current_period_end, metadata)
-		SELECT
-			a.id,
-			CASE
-				WHEN COALESCE(NULLIF(a.plan, ''), 'enterprise') IN ('free', 'trial', 'basic', 'starter', 'pro', 'business', 'enterprise', 'internal') THEN COALESCE(NULLIF(a.plan, ''), 'enterprise')
-				ELSE 'enterprise'
-			END,
-			'active',
-			COALESCE(a.created_at, NOW()),
-			NOW() + INTERVAL '100 years',
-			jsonb_build_object('source', 'legacy_backfill', 'preserve_existing_integrations', true)
-		FROM accounts a
-		ON CONFLICT (account_id) DO NOTHING`,
+			SELECT
+				a.id,
+				CASE
+					WHEN COALESCE(NULLIF(a.plan, ''), 'enterprise') IN ('free', 'trial', 'basic', 'starter', 'pro', 'business', 'enterprise', 'internal') THEN COALESCE(NULLIF(a.plan, ''), 'enterprise')
+					ELSE 'enterprise'
+				END,
+				'active',
+				COALESCE(a.created_at, NOW()),
+				NOW() + INTERVAL '100 years',
+				jsonb_build_object('source', 'legacy_backfill', 'preserve_existing_integrations', true)
+			FROM accounts a
+			ON CONFLICT (account_id) DO NOTHING`,
+		`CREATE TABLE IF NOT EXISTS mcp_clients (
+				id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+				name TEXT NOT NULL DEFAULT '',
+				client_kind TEXT NOT NULL DEFAULT 'chatgpt',
+				scope_type TEXT NOT NULL DEFAULT 'selected_accounts',
+				status TEXT NOT NULL DEFAULT 'active',
+				token_hash TEXT NOT NULL,
+				token_prefix TEXT NOT NULL DEFAULT '',
+				oauth_redirect_uri TEXT NOT NULL DEFAULT '',
+				created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				activated_at TIMESTAMPTZ,
+				last_seen_at TIMESTAMPTZ,
+				blocked_at TIMESTAMPTZ,
+				blocked_reason TEXT NOT NULL DEFAULT ''
+			)`,
+		`ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS oauth_redirect_uri TEXT NOT NULL DEFAULT ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_clients_token_hash ON mcp_clients(token_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_clients_status ON mcp_clients(status)`,
+		`UPDATE mcp_clients SET scope_type = 'selected_accounts' WHERE scope_type = 'global_all_accounts'`,
+		`CREATE TABLE IF NOT EXISTS mcp_client_accounts (
+				client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+				account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				PRIMARY KEY (client_id, account_id)
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_client_accounts_account ON mcp_client_accounts(account_id)`,
+		`CREATE TABLE IF NOT EXISTS mcp_sessions (
+				id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+				client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+				transport TEXT NOT NULL DEFAULT 'streamable_http',
+				session_key_hash TEXT NOT NULL,
+				ip_hash TEXT NOT NULL DEFAULT '',
+				user_agent_hash TEXT NOT NULL DEFAULT '',
+				origin_hash TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'active',
+				block_reason TEXT NOT NULL DEFAULT '',
+				first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				disconnected_at TIMESTAMPTZ,
+				UNIQUE (client_id, session_key_hash)
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_sessions_client ON mcp_sessions(client_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_sessions_status ON mcp_sessions(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_sessions_last_seen ON mcp_sessions(last_seen_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mcp_audit_events (
+				id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+				client_id UUID REFERENCES mcp_clients(id) ON DELETE SET NULL,
+				session_id UUID REFERENCES mcp_sessions(id) ON DELETE SET NULL,
+				event_type TEXT NOT NULL,
+				tool_name TEXT NOT NULL DEFAULT '',
+				account_ids TEXT[] NOT NULL DEFAULT '{}',
+				result_count INTEGER NOT NULL DEFAULT 0,
+				ip_hash TEXT NOT NULL DEFAULT '',
+				user_agent_hash TEXT NOT NULL DEFAULT '',
+				metadata JSONB NOT NULL DEFAULT '{}',
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_audit_client ON mcp_audit_events(client_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_audit_type ON mcp_audit_events(event_type, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mcp_oauth_codes (
+				id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+				code_hash TEXT NOT NULL UNIQUE,
+				client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+				redirect_uri TEXT NOT NULL,
+				code_challenge TEXT NOT NULL,
+				code_challenge_method TEXT NOT NULL DEFAULT 'S256',
+				resource TEXT NOT NULL,
+				scope TEXT NOT NULL DEFAULT 'mcp:read',
+				user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				expires_at TIMESTAMPTZ NOT NULL,
+				consumed_at TIMESTAMPTZ,
+				ip_hash TEXT NOT NULL DEFAULT '',
+				user_agent_hash TEXT NOT NULL DEFAULT '',
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_oauth_codes_client ON mcp_oauth_codes(client_id, expires_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
+				id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+				token_hash TEXT NOT NULL UNIQUE,
+				client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+				resource TEXT NOT NULL,
+				scope TEXT NOT NULL DEFAULT 'mcp:read',
+				expires_at TIMESTAMPTZ NOT NULL,
+				revoked_at TIMESTAMPTZ,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				last_used_at TIMESTAMPTZ
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_oauth_tokens_client ON mcp_oauth_tokens(client_id, expires_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mcp_oauth_refresh_tokens (
+				id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+				token_hash TEXT NOT NULL UNIQUE,
+				client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+				resource TEXT NOT NULL,
+				scope TEXT NOT NULL DEFAULT 'mcp:read',
+				expires_at TIMESTAMPTZ NOT NULL,
+				revoked_at TIMESTAMPTZ,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				last_used_at TIMESTAMPTZ
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_tokens_client ON mcp_oauth_refresh_tokens(client_id, expires_at DESC)`,
 	}
 
 	for _, migration := range migrations {
@@ -2052,6 +2151,127 @@ func SeedAdmin(db *pgxpool.Pool, cfg *config.Config) error {
 	`)
 	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_api_keys_account_id ON api_keys(account_id)`)
 	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash)`)
+
+	// ─── Global MCP clients, sessions and audit trail ───
+	_, _ = db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS mcp_clients (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			name TEXT NOT NULL DEFAULT '',
+			client_kind TEXT NOT NULL DEFAULT 'chatgpt',
+			scope_type TEXT NOT NULL DEFAULT 'selected_accounts',
+			status TEXT NOT NULL DEFAULT 'active',
+			token_hash TEXT NOT NULL,
+			token_prefix TEXT NOT NULL DEFAULT '',
+			oauth_redirect_uri TEXT NOT NULL DEFAULT '',
+			created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			activated_at TIMESTAMPTZ,
+			last_seen_at TIMESTAMPTZ,
+			blocked_at TIMESTAMPTZ,
+			blocked_reason TEXT NOT NULL DEFAULT ''
+		)
+		`)
+	_, _ = db.Exec(ctx, `ALTER TABLE mcp_clients ADD COLUMN IF NOT EXISTS oauth_redirect_uri TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_clients_token_hash ON mcp_clients(token_hash)`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_clients_status ON mcp_clients(status)`)
+	_, _ = db.Exec(ctx, `UPDATE mcp_clients SET scope_type = 'selected_accounts' WHERE scope_type = 'global_all_accounts'`)
+
+	_, _ = db.Exec(ctx, `
+			CREATE TABLE IF NOT EXISTS mcp_client_accounts (
+				client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+				account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				PRIMARY KEY (client_id, account_id)
+			)
+		`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_client_accounts_account ON mcp_client_accounts(account_id)`)
+
+	_, _ = db.Exec(ctx, `
+			CREATE TABLE IF NOT EXISTS mcp_sessions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+			transport TEXT NOT NULL DEFAULT 'streamable_http',
+			session_key_hash TEXT NOT NULL,
+			ip_hash TEXT NOT NULL DEFAULT '',
+			user_agent_hash TEXT NOT NULL DEFAULT '',
+			origin_hash TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
+			block_reason TEXT NOT NULL DEFAULT '',
+			first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			disconnected_at TIMESTAMPTZ,
+			UNIQUE (client_id, session_key_hash)
+		)
+	`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_sessions_client ON mcp_sessions(client_id)`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_sessions_status ON mcp_sessions(status)`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_sessions_last_seen ON mcp_sessions(last_seen_at DESC)`)
+
+	_, _ = db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS mcp_audit_events (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			client_id UUID REFERENCES mcp_clients(id) ON DELETE SET NULL,
+			session_id UUID REFERENCES mcp_sessions(id) ON DELETE SET NULL,
+			event_type TEXT NOT NULL,
+			tool_name TEXT NOT NULL DEFAULT '',
+			account_ids TEXT[] NOT NULL DEFAULT '{}',
+			result_count INTEGER NOT NULL DEFAULT 0,
+			ip_hash TEXT NOT NULL DEFAULT '',
+			user_agent_hash TEXT NOT NULL DEFAULT '',
+			metadata JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_audit_client ON mcp_audit_events(client_id, created_at DESC)`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_audit_type ON mcp_audit_events(event_type, created_at DESC)`)
+	_, _ = db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS mcp_oauth_codes (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			code_hash TEXT NOT NULL UNIQUE,
+			client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+			redirect_uri TEXT NOT NULL,
+			code_challenge TEXT NOT NULL,
+			code_challenge_method TEXT NOT NULL DEFAULT 'S256',
+			resource TEXT NOT NULL,
+			scope TEXT NOT NULL DEFAULT 'mcp:read',
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			expires_at TIMESTAMPTZ NOT NULL,
+			consumed_at TIMESTAMPTZ,
+			ip_hash TEXT NOT NULL DEFAULT '',
+			user_agent_hash TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_oauth_codes_client ON mcp_oauth_codes(client_id, expires_at DESC)`)
+	_, _ = db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			token_hash TEXT NOT NULL UNIQUE,
+			client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+			resource TEXT NOT NULL,
+			scope TEXT NOT NULL DEFAULT 'mcp:read',
+			expires_at TIMESTAMPTZ NOT NULL,
+			revoked_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_used_at TIMESTAMPTZ
+		)
+	`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_oauth_tokens_client ON mcp_oauth_tokens(client_id, expires_at DESC)`)
+	_, _ = db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS mcp_oauth_refresh_tokens (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			token_hash TEXT NOT NULL UNIQUE,
+			client_id UUID NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
+			resource TEXT NOT NULL,
+			scope TEXT NOT NULL DEFAULT 'mcp:read',
+			expires_at TIMESTAMPTZ NOT NULL,
+			revoked_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_used_at TIMESTAMPTZ
+		)
+	`)
+	_, _ = db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_tokens_client ON mcp_oauth_refresh_tokens(client_id, expires_at DESC)`)
 
 	// ─── Automations ──────────────────────────────────────────────────────────
 	_, _ = db.Exec(ctx, `

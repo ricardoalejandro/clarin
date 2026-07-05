@@ -176,17 +176,16 @@ function APIKeysPanel() {
             <Key className="w-4 h-4 text-emerald-600" />
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-emerald-900">API Keys — MCP (Model Context Protocol)</h3>
+            <h3 className="text-sm font-semibold text-emerald-900">API Keys de cuenta</h3>
             <p className="text-xs text-emerald-700 mt-1 leading-relaxed">
-              Conecta tu CRM con ChatGPT, Claude, VS Code Copilot u otros asistentes de IA usando el protocolo MCP.
-              Las API Keys permiten acceso de <span className="font-semibold">solo lectura</span> a tus datos (leads, eventos, contactos, bitácoras, conversaciones).
+              Estas claves son para integraciones legacy de una cuenta específica. El acceso MCP seguro y global se administra desde Administración → MCP Global.
             </p>
             <div className="mt-3 flex items-center gap-2">
               <span className="text-[10px] font-mono bg-white/70 text-emerald-800 px-2 py-1 rounded border border-emerald-200">
-                https://clarin.naperu.cloud/mcp/sse
+                Administración → MCP Global
               </span>
               <button
-                onClick={() => handleCopy('https://clarin.naperu.cloud/mcp/sse')}
+                onClick={() => handleCopy('Administración → MCP Global')}
                 className="p-1 text-emerald-600 hover:text-emerald-800 transition"
                 title="Copiar URL"
               >
@@ -235,7 +234,7 @@ function APIKeysPanel() {
           <input
             value={newKeyName}
             onChange={e => setNewKeyName(e.target.value)}
-            placeholder="Nombre (ej: ChatGPT MCP)"
+	            placeholder="Nombre (ej: Integración legacy)"
             className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900 placeholder:text-slate-400"
             onKeyDown={e => e.key === 'Enter' && handleCreate()}
           />
@@ -299,34 +298,35 @@ function APIKeysPanel() {
 
       {/* Connection Instructions */}
       <div className="border-t border-slate-200 pt-6">
-        <h3 className="text-sm font-medium text-slate-900 mb-3">Cómo conectar con ChatGPT</h3>
+        <h3 className="text-sm font-medium text-slate-900 mb-3">MCP global seguro</h3>
         <div className="space-y-4 text-xs text-slate-600 leading-relaxed">
           <div className="flex items-start gap-3 bg-slate-50 rounded-xl p-3">
             <span className="w-5 h-5 bg-slate-200 text-slate-600 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 mt-0.5">1</span>
             <div>
-              <p className="font-medium text-slate-800">Abre ChatGPT → Aplicaciones → Nueva aplicación</p>
-              <p className="text-slate-500 mt-0.5">Crea una nueva aplicación MCP con los siguientes datos:</p>
+              <p className="font-medium text-slate-800">Usa Administración → MCP Global</p>
+              <p className="text-slate-500 mt-0.5">Crea una conexión única por usuario o punto de acceso de ChatGPT.</p>
             </div>
           </div>
           <div className="flex items-start gap-3 bg-slate-50 rounded-xl p-3">
             <span className="w-5 h-5 bg-slate-200 text-slate-600 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 mt-0.5">2</span>
             <div>
-              <p className="font-medium text-slate-800">Configura la conexión</p>
+              <p className="font-medium text-slate-800">Configura ChatGPT con OAuth</p>
               <div className="text-slate-500 mt-1 space-y-1">
                 <p>• <strong>Nombre:</strong> Clarin</p>
-                <p>• <strong>URL del servidor MCP:</strong> <code className="bg-white px-1 py-0.5 rounded border border-slate-200">https://clarin.naperu.cloud/mcp/sse</code></p>
-                <p>• <strong>Autenticación:</strong> OAuth</p>
-                <p>• <strong>URL de autorización:</strong> <code className="bg-white px-1 py-0.5 rounded border border-slate-200">https://clarin.naperu.cloud/mcp/authorize</code></p>
-                <p>• <strong>URL del token:</strong> <code className="bg-white px-1 py-0.5 rounded border border-slate-200">https://clarin.naperu.cloud/mcp/token</code></p>
-                <p>• <strong>Client ID / Secret:</strong> Dejar vacío (opcional)</p>
+                <p>• <strong>URL principal:</strong> <code className="bg-white px-1 py-0.5 rounded border border-slate-200">https://clarin.naperu.cloud/mcp</code></p>
+                <p>• <strong>URL legacy SSE:</strong> <code className="bg-white px-1 py-0.5 rounded border border-slate-200">https://clarin.naperu.cloud/mcp/sse</code></p>
+                <p>• <strong>Autenticación:</strong> OAuth, cliente definido por el usuario, PKCE S256.</p>
+                <p>• <strong>Authorize:</strong> <code className="bg-white px-1 py-0.5 rounded border border-slate-200">https://clarin.naperu.cloud/oauth/authorize</code></p>
+                <p>• <strong>Token:</strong> <code className="bg-white px-1 py-0.5 rounded border border-slate-200">https://clarin.naperu.cloud/oauth/token</code></p>
+                <p>• <strong>Scope:</strong> <code className="bg-white px-1 py-0.5 rounded border border-slate-200">mcp:read</code></p>
               </div>
             </div>
           </div>
           <div className="flex items-start gap-3 bg-slate-50 rounded-xl p-3">
             <span className="w-5 h-5 bg-slate-200 text-slate-600 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 mt-0.5">3</span>
             <div>
-              <p className="font-medium text-slate-800">Inicia sesión y pregunta lo que quieras</p>
-              <p className="text-slate-500 mt-0.5">Se abrirá una ventana para iniciar sesión en Clarin. Luego podrás preguntar: &quot;¿Cuántos eventos activos tengo?&quot;, &quot;Dame el resumen de la bitácora del 7 de marzo&quot;, &quot;¿Qué dice la conversación con Lucero?&quot;</p>
+              <p className="font-medium text-slate-800">Consulta primero las cuentas</p>
+              <p className="text-slate-500 mt-0.5">El MCP global expone list_accounts y exige account_id o account_slug en las herramientas con datos sensibles.</p>
             </div>
           </div>
         </div>
@@ -334,7 +334,7 @@ function APIKeysPanel() {
         {/* Also available: manual API Key */}
         <div className="mt-4 bg-slate-50 rounded-xl p-3">
           <p className="text-[11px] text-slate-500">
-            <strong>Conexión manual:</strong> También puedes usar una API Key (creada arriba) como Bearer token directamente. Útil para VS Code Copilot, Claude u otros clientes MCP que soporten Bearer auth.
+            <strong>Nota:</strong> Las API Keys de esta pantalla ya no autentican el MCP global.
           </p>
         </div>
       </div>
@@ -1953,7 +1953,7 @@ export default function SettingsPage() {
     { id: 'quick-replies', label: 'Resp. Rápidas', icon: Zap },
     ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('settings') || user?.permissions?.includes('*')) ? [{ id: 'custom-fields', label: 'Campos', icon: Tag }] : []),
     { id: 'notifications', label: 'Notificaciones', icon: Bell },
-    ...((user?.is_super_admin || user?.is_admin) ? [{ id: 'api-keys', label: 'API / MCP', icon: Key }] : []),
+    ...((user?.is_super_admin || user?.is_admin) ? [{ id: 'api-keys', label: 'API Keys', icon: Key }] : []),
     { id: 'security', label: 'Seguridad', icon: Shield },
   ]
 

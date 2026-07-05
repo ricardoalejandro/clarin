@@ -186,7 +186,7 @@ func main() {
 	// Initialize API server
 	server := api.NewServer(cfg, services, repos, hub, devicePool, store, kommoSyncSvc, kommoManager, redisCache, googleClient, Version)
 
-	// Initialize and start MCP server (Model Context Protocol) for ChatGPT/Claude/Copilot integration
+	// Initialize and start MCP server (Model Context Protocol) for external clients.
 	mcpServer := clarinMCP.New(repos, services, cfg.JWTSecret)
 	mcpServer.Start("8081")
 

@@ -18,7 +18,6 @@ type Account struct {
 	MaxUsersEffective      int        `json:"max_users_effective,omitempty"`
 	StorageLimitBytes      int64      `json:"storage_limit_bytes"`
 	IsActive               bool       `json:"is_active"`
-	MCPEnabled             bool       `json:"mcp_enabled"`
 	KommoEnabled           bool       `json:"kommo_enabled"`
 	DefaultIncomingStageID *uuid.UUID `json:"default_incoming_stage_id,omitempty"`
 	CreatedAt              time.Time  `json:"created_at"`
@@ -201,11 +200,10 @@ type UserAccount struct {
 	CreatedAt time.Time  `json:"created_at"`
 
 	// Populated on demand
-	AccountName       string   `json:"account_name,omitempty"`
-	AccountSlug       string   `json:"account_slug,omitempty"`
-	AccountMCPEnabled bool     `json:"account_mcp_enabled,omitempty"`
-	RoleName          string   `json:"role_name,omitempty"`
-	Permissions       []string `json:"permissions,omitempty"`
+	AccountName string   `json:"account_name,omitempty"`
+	AccountSlug string   `json:"account_slug,omitempty"`
+	RoleName    string   `json:"role_name,omitempty"`
+	Permissions []string `json:"permissions,omitempty"`
 }
 
 // Integration providers and scopes.
@@ -1420,6 +1418,109 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
+
+// MCPClient represents a named, global MCP connection.
+type MCPClient struct {
+	ID                uuid.UUID          `json:"id"`
+	Name              string             `json:"name"`
+	ClientKind        string             `json:"client_kind"`
+	ScopeType         string             `json:"scope_type"`
+	Status            string             `json:"status"`
+	TokenHash         string             `json:"-"`
+	TokenPrefix       string             `json:"token_prefix"`
+	OAuthRedirectURI  string             `json:"oauth_redirect_uri,omitempty"`
+	OAuthClientID     string             `json:"oauth_client_id,omitempty"`
+	CreatedByUserID   *uuid.UUID         `json:"created_by_user_id,omitempty"`
+	CreatedAt         time.Time          `json:"created_at"`
+	ActivatedAt       *time.Time         `json:"activated_at,omitempty"`
+	LastSeenAt        *time.Time         `json:"last_seen_at,omitempty"`
+	BlockedAt         *time.Time         `json:"blocked_at,omitempty"`
+	BlockedReason     string             `json:"blocked_reason,omitempty"`
+	ActiveSessions    int                `json:"active_sessions,omitempty"`
+	AllowedAccounts   []MCPClientAccount `json:"allowed_accounts,omitempty"`
+	AllowedAccountIDs []uuid.UUID        `json:"-"`
+}
+
+// MCPOAuthCode is a short-lived authorization code for MCP OAuth.
+type MCPOAuthCode struct {
+	ID                  uuid.UUID  `json:"id"`
+	CodeHash            string     `json:"-"`
+	ClientID            uuid.UUID  `json:"client_id"`
+	RedirectURI         string     `json:"redirect_uri"`
+	CodeChallenge       string     `json:"-"`
+	CodeChallengeMethod string     `json:"-"`
+	Resource            string     `json:"resource"`
+	Scope               string     `json:"scope"`
+	UserID              uuid.UUID  `json:"user_id"`
+	ExpiresAt           time.Time  `json:"expires_at"`
+	ConsumedAt          *time.Time `json:"consumed_at,omitempty"`
+	IPHash              string     `json:"ip_hash,omitempty"`
+	UserAgentHash       string     `json:"user_agent_hash,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+}
+
+// MCPOAuthRefreshToken is a long-lived, single-use refresh token for MCP OAuth.
+type MCPOAuthRefreshToken struct {
+	ID         uuid.UUID  `json:"id"`
+	TokenHash  string     `json:"-"`
+	ClientID   uuid.UUID  `json:"client_id"`
+	Resource   string     `json:"resource"`
+	Scope      string     `json:"scope"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// MCPClientAccount is an account explicitly allowed for one MCP connection.
+type MCPClientAccount struct {
+	AccountID   uuid.UUID `json:"account_id"`
+	AccountName string    `json:"account_name"`
+	AccountSlug string    `json:"account_slug,omitempty"`
+	IsActive    bool      `json:"is_active"`
+}
+
+// MCPSession represents a concrete MCP client session/endpoint.
+type MCPSession struct {
+	ID             uuid.UUID  `json:"id"`
+	ClientID       uuid.UUID  `json:"client_id"`
+	ClientName     string     `json:"client_name,omitempty"`
+	Transport      string     `json:"transport"`
+	SessionKeyHash string     `json:"-"`
+	IPHash         string     `json:"ip_hash,omitempty"`
+	UserAgentHash  string     `json:"user_agent_hash,omitempty"`
+	OriginHash     string     `json:"origin_hash,omitempty"`
+	Status         string     `json:"status"`
+	BlockReason    string     `json:"block_reason,omitempty"`
+	FirstSeenAt    time.Time  `json:"first_seen_at"`
+	LastSeenAt     time.Time  `json:"last_seen_at"`
+	DisconnectedAt *time.Time `json:"disconnected_at,omitempty"`
+}
+
+// MCPAuditEvent captures auth and tool activity for MCP security review.
+type MCPAuditEvent struct {
+	ID            uuid.UUID      `json:"id"`
+	ClientID      *uuid.UUID     `json:"client_id,omitempty"`
+	ClientName    string         `json:"client_name,omitempty"`
+	SessionID     *uuid.UUID     `json:"session_id,omitempty"`
+	EventType     string         `json:"event_type"`
+	ToolName      string         `json:"tool_name,omitempty"`
+	AccountIDs    []string       `json:"account_ids,omitempty"`
+	ResultCount   int            `json:"result_count,omitempty"`
+	IPHash        string         `json:"ip_hash,omitempty"`
+	UserAgentHash string         `json:"user_agent_hash,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+}
+
+const (
+	MCPClientKindChatGPT     = "chatgpt"
+	MCPStatusPending         = "pending"
+	MCPStatusActive          = "active"
+	MCPStatusBlocked         = "blocked"
+	MCPStatusRevoked         = "revoked"
+	MCPScopeSelectedAccounts = "selected_accounts"
+)
 
 // ErosConversation represents a persistent chat conversation with Eros AI
 type ErosConversation struct {

@@ -122,7 +122,13 @@ export default function LoginScreen() {
         return
       }
       markAuthSession()
-      router.push('/dashboard')
+      const next = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : ''
+      const safeNext = next && (next.startsWith('/oauth/authorize') || next.startsWith('https://clarin.naperu.cloud/oauth/authorize')) ? next : '/dashboard'
+      if (safeNext.startsWith('/oauth/authorize') || safeNext.startsWith('https://clarin.naperu.cloud/oauth/authorize')) {
+        window.location.assign(safeNext)
+        return
+      }
+      router.push(safeNext)
       router.refresh()
     } catch {
       setError('Error de conexión')

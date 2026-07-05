@@ -20,7 +20,7 @@ export function middleware(request: NextRequest) {
 
   if (
     isMarketingHost &&
-    (pathname.startsWith('/api') || pathname.startsWith('/ws') || pathname.startsWith('/mcp') || pathname === '/health')
+    (pathname.startsWith('/api') || pathname.startsWith('/ws') || pathname.startsWith('/mcp') || pathname.startsWith('/oauth') || pathname.startsWith('/.well-known') || pathname === '/health')
   ) {
     return new NextResponse('Not found', { status: 404 })
   }
@@ -45,5 +45,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/', '/login', '/signup', '/dashboard/:path*', '/api/:path*', '/ws/:path*', '/mcp/:path*', '/health'],
+  matcher: ['/', '/login', '/signup', '/dashboard/:path*', '/api/:path*', '/ws/:path*', '/mcp/:path*', '/oauth/:path*', '/.well-known/:path*', '/health'],
 }

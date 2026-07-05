@@ -44,6 +44,7 @@ type Repositories struct {
 	Role               *RoleRepository
 	Logbook            *LogbookRepository
 	APIKey             *APIKeyRepository
+	MCP                *MCPRepository
 	ErosConversation   *ErosConversationRepository
 	AIToken            *AITokenRepository
 	Automation         *AutomationRepository
@@ -89,6 +90,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Role:               &RoleRepository{db: db},
 		Logbook:            &LogbookRepository{db: db},
 		APIKey:             &APIKeyRepository{db: db},
+		MCP:                &MCPRepository{db: db},
 		ErosConversation:   &ErosConversationRepository{db: db},
 		AIToken:            &AITokenRepository{db: db},
 		Automation:         &AutomationRepository{db: db},
@@ -262,7 +264,7 @@ type UserAccountRepository struct {
 func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
-		       a.name, COALESCE(a.slug, ''), COALESCE(a.mcp_enabled, false),
+		       a.name, COALESCE(a.slug, ''),
 		       ua.role_id, COALESCE(ro.name, ''), COALESCE(ro.permissions, '{}')
 		FROM user_accounts ua
 		JOIN accounts a ON a.id = ua.account_id
@@ -276,12 +278,12 @@ func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUI
 	defer rows.Close()
 
 	var accounts []*domain.UserAccount
-	for rows.Next() {
-		ua := &domain.UserAccount{}
-		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
-			&ua.AccountName, &ua.AccountSlug, &ua.AccountMCPEnabled, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
-			return nil, err
-		}
+		for rows.Next() {
+			ua := &domain.UserAccount{}
+			if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
+				&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
+				return nil, err
+			}
 		accounts = append(accounts, ua)
 	}
 	return accounts, nil
@@ -290,7 +292,7 @@ func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUI
 func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.UserAccount, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
-		       a.name, COALESCE(a.slug, ''), COALESCE(a.mcp_enabled, false),
+		       a.name, COALESCE(a.slug, ''),
 		       ua.role_id, COALESCE(ro.name, ''), COALESCE(ro.permissions, '{}')
 		FROM user_accounts ua
 		JOIN accounts a ON a.id = ua.account_id
@@ -304,12 +306,12 @@ func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uu
 	defer rows.Close()
 
 	var accounts []*domain.UserAccount
-	for rows.Next() {
-		ua := &domain.UserAccount{}
-		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
-			&ua.AccountName, &ua.AccountSlug, &ua.AccountMCPEnabled, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
-			return nil, err
-		}
+		for rows.Next() {
+			ua := &domain.UserAccount{}
+			if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
+				&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
+				return nil, err
+			}
 		accounts = append(accounts, ua)
 	}
 	return accounts, nil
@@ -472,10 +474,10 @@ type AccountRepository struct {
 
 func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
-			a.max_users_override,
-			COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
-			COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
+			SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
+				a.max_users_override,
+				COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
+				COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.kommo_enabled, false), a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
 			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
@@ -491,11 +493,11 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 	defer rows.Close()
 
 	var accounts []*domain.Account
-	for rows.Next() {
-		a := &domain.Account{}
-		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
-			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
-			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
+		for rows.Next() {
+			a := &domain.Account{}
+			if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
+				&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
+				&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, a)
@@ -506,10 +508,10 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Account, error) {
 	a := &domain.Account{}
 	err := r.db.QueryRow(ctx, `
-		SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
-			a.max_users_override,
-			COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
-			COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.mcp_enabled, false), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
+			SELECT a.id, a.name, COALESCE(a.slug, ''), COALESCE(s.plan_code, a.plan), a.max_devices,
+				a.max_users_override,
+				COALESCE(a.max_users_override, NULLIF(regexp_replace(pe.value_json #>> '{}', '[^0-9-]', '', 'g'), '')::int, 0) AS max_users_effective,
+				COALESCE(a.storage_limit_bytes, 0), COALESCE(a.is_active, true), COALESCE(a.kommo_enabled, false), a.default_incoming_stage_id, a.created_at, a.updated_at,
 			COALESCE(s.status, 'active'), s.trial_ends_at, s.current_period_end, s.grace_ends_at,
 			(SELECT COUNT(*) FROM user_accounts WHERE account_id = a.id) as user_count,
 			(SELECT COUNT(*) FROM devices WHERE account_id = a.id) as device_count,
@@ -519,9 +521,9 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		LEFT JOIN subscriptions s ON s.account_id = a.id
 		LEFT JOIN plan_entitlements pe ON pe.plan_code = COALESCE(s.plan_code, a.plan) AND pe.key = 'max_users'
 		WHERE a.id = $1
-	`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.MCPEnabled, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
-		&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
-		&a.UserCount, &a.DeviceCount, &a.ChatCount,
+		`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
+			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
+			&a.UserCount, &a.DeviceCount, &a.ChatCount,
 		&a.GoogleEmail, &a.GoogleContactGroupID, &a.GoogleConnectedAt, &a.GoogleSyncLimit)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -539,9 +541,9 @@ func (r *AccountRepository) Create(ctx context.Context, a *domain.Account) error
 
 func (r *AccountRepository) Update(ctx context.Context, a *domain.Account) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, max_users_override = $6, storage_limit_bytes = $7, mcp_enabled = $8, kommo_enabled = $9, updated_at = NOW()
+		UPDATE accounts SET name = $2, slug = $3, plan = $4, max_devices = $5, max_users_override = $6, storage_limit_bytes = $7, kommo_enabled = $8, updated_at = NOW()
 		WHERE id = $1
-	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices, a.MaxUsersOverride, a.StorageLimitBytes, a.MCPEnabled, a.KommoEnabled)
+	`, a.ID, a.Name, a.Slug, a.Plan, a.MaxDevices, a.MaxUsersOverride, a.StorageLimitBytes, a.KommoEnabled)
 	return err
 }
 

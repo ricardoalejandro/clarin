@@ -116,6 +116,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const captionInputRef = useRef<WhatsAppTextInputHandle>(null)
   const optimisticIdRef = useRef(0)
   const previousChatIdRef = useRef<string | null>(chatId)
+  const activeChatIdRef = useRef<string | null>(chatId)
   const pendingMediaRef = useRef<typeof pendingMedia>(pendingMedia)
 
   useEffect(() => {
@@ -233,7 +234,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
 
   useEffect(() => {
-    if (initialChat) {
+    if (initialChat && (!chatId || initialChat.id === chatId)) {
         setChat(initialChat)
         const cached = messagesCacheRef.current.get(initialChat.id)
         if (cached) {
@@ -244,22 +245,28 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           setHasMoreMessages(true)
         }
     }
-  }, [initialChat])
+  }, [initialChat, chatId])
 
   useEffect(() => {
+    activeChatIdRef.current = chatId
     if (chatId) {
       const cached = messagesCacheRef.current.get(chatId)
       if (cached) {
         setMessages(cached.messages)
         setHasMoreMessages(cached.hasMore)
         requestAnimationFrame(scrollToBottom)
+      } else {
+        setChat(initialChat && initialChat.id === chatId ? initialChat : null)
+        setMessages([])
+        setHasMoreMessages(true)
       }
-      fetchChatDetails()
+      fetchChatDetails(chatId, deviceId)
     } else {
         setChat(null)
         setMessages([])
+        setHasMoreMessages(true)
     }
-  }, [chatId])
+  }, [chatId, deviceId, initialChat])
 
   useEffect(() => {
     if (!chatId || !deviceId) return
@@ -401,34 +408,36 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     }
   }, [chatId, deviceId, chat])
 
-  const fetchChatDetails = async () => {
-    if (!chatId) return
-    const hasCachedMessages = messagesCacheRef.current.has(chatId)
+  const fetchChatDetails = async (targetChatId: string | null = chatId, targetDeviceId: string | undefined = deviceId) => {
+    if (!targetChatId) return
+    const hasCachedMessages = messagesCacheRef.current.has(targetChatId)
     setLoading(!hasCachedMessages)
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/chats/${chatId}`, {
+      const res = await fetch(`/api/chats/${targetChatId}`, {
         headers: { Authorization: `Bearer ${token}` }
       })
       const data = await res.json()
+      if (activeChatIdRef.current !== targetChatId) return
       if (data.success) {
         setChat(data.chat)
       }
 
       // Fetch messages from dedicated endpoint
-      const msgRes = await fetch(`/api/chats/${chatId}/messages?limit=50`, {
+      const msgRes = await fetch(`/api/chats/${targetChatId}/messages?limit=50`, {
         headers: { Authorization: `Bearer ${token}` }
       })
       const msgData = await msgRes.json()
+      if (activeChatIdRef.current !== targetChatId) return
       if (msgData.success && msgData.messages) {
         const nextHasMore = msgData.messages.length >= 50
         setMessages(msgData.messages)
         setHasMoreMessages(nextHasMore)
-        cacheMessages(chatId, msgData.messages, nextHasMore)
+        cacheMessages(targetChatId, msgData.messages, nextHasMore)
         scrollToBottom()
 
         // Send read receipts for unread incoming messages
-        if (deviceId && data.chat?.jid) {
+        if (targetDeviceId && data.chat?.jid) {
           const unreadIncoming = (msgData.messages as Message[]).filter(
             (m: Message) => !m.is_from_me && !m.is_read
           )
@@ -438,7 +447,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
               body: JSON.stringify({
-                device_id: deviceId,
+                device_id: targetDeviceId,
                 chat_jid: data.chat.jid,
                 sender_jid: lastMsg.from_jid || '',
                 message_ids: unreadIncoming.map((m: Message) => m.message_id)
@@ -450,7 +459,9 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     } catch (error) {
       console.error('Failed to fetch chat', error)
     } finally {
-      setLoading(false)
+      if (activeChatIdRef.current === targetChatId) {
+        setLoading(false)
+      }
     }
   }
 

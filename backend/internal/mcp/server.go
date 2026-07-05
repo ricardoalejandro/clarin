@@ -1,313 +1,506 @@
 package mcp
 
 import (
-"context"
-"crypto/sha256"
-"encoding/hex"
-"encoding/json"
-"fmt"
-"log"
-"net/http"
-"strings"
-"time"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
 
-"github.com/google/uuid"
-"github.com/jackc/pgx/v5"
-"github.com/mark3labs/mcp-go/mcp"
-"github.com/mark3labs/mcp-go/server"
-"github.com/naperu/clarin/internal/domain"
-"github.com/naperu/clarin/internal/repository"
-"github.com/naperu/clarin/internal/service"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
+	"github.com/naperu/clarin/internal/service"
 )
 
 // MCPServer wraps the MCP SDK server and Clarin repositories.
 // Authentication is handled exclusively via API keys generated from the dashboard.
 type MCPServer struct {
-mcpServer *server.MCPServer
-repos     *repository.Repositories
-services  *service.Services
+	mcpServer *server.MCPServer
+	repos     *repository.Repositories
+	services  *service.Services
+	jwtSecret string
+	rateMu    sync.Mutex
+	rateByIP  map[string]*mcpRateWindow
+}
+
+type mcpRateWindow struct {
+	count   int
+	resetAt time.Time
+}
+
+func readOnlyTool(name string, opts ...mcp.ToolOption) mcp.Tool {
+	opts = append([]mcp.ToolOption{
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+	}, opts...)
+	return mcp.NewTool(name, opts...)
 }
 
 // New creates a new MCP server with all Clarin CRM tools registered.
 func New(repos *repository.Repositories, services *service.Services, jwtSecret string) *MCPServer {
-s := &MCPServer{
-repos:    repos,
-services: services,
+	s := &MCPServer{
+		repos:     repos,
+		services:  services,
+		jwtSecret: jwtSecret,
+		rateByIP:  make(map[string]*mcpRateWindow),
+	}
+
+	mcpSrv := server.NewMCPServer(
+		"Clarin CRM",
+		"1.0.0",
+		server.WithToolCapabilities(true),
+		server.WithToolHandlerMiddleware(s.auditToolCallMiddleware()),
+	)
+
+	// ──────────────── Category A: Data Queries ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("list_accounts",
+		mcp.WithDescription("Lista las cuentas activas disponibles para esta conexión MCP global. Usa el account_id o account_slug devuelto para consultar tools con datos sensibles."),
+	), s.toolListAccounts)
+
+	mcpSrv.AddTool(readOnlyTool("get_crm_stats",
+		mcp.WithDescription("Resumen general del CRM de una cuenta: total de leads por etapa, contactos, eventos activos, programas. Usa list_accounts primero y pasa account_id o account_slug."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+	), s.toolGetCRMStats)
+
+	mcpSrv.AddTool(readOnlyTool("list_events",
+		mcp.WithDescription("Busca y lista eventos por nombre, estado o fecha. Devuelve nombre, fecha, ubicación, total de participantes y conteos por etapa. Úsalo para encontrar un evento antes de consultar sus detalles o participantes."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("search", mcp.Description("Buscar evento por nombre, descripción o ubicación (ej: 'amistad', 'iquitos')")),
+		mcp.WithString("status", mcp.Description("Filtrar por estado: active, draft, completed, cancelled. Vacío = todos.")),
+		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 100)")),
+	), s.toolListEvents)
+
+	mcpSrv.AddTool(readOnlyTool("get_event_summary",
+		mcp.WithDescription("Resumen detallado de un evento específico: participantes por etapa (confirmados, contactados, declinados, etc.), descripción, fechas. Necesitas el event_id, obtenlo primero con list_events."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
+	), s.toolGetEventSummary)
+
+	mcpSrv.AddTool(readOnlyTool("search_leads",
+		mcp.WithDescription("Busca leads específicos con filtros precisos. Devuelve nombre, tags, etapa y fecha de creación. IMPORTANTE: Usa SIEMPRE filtros específicos (tag, etapa, fecha, nombre). Para análisis de todos los leads, usa primero get_lead_analytics o analyze_leads. Esta herramienta es para consultas puntuales como 'leads con tag matemáticas creados esta semana' o 'buscar a Juan Pérez'."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("query", mcp.Description("Texto de búsqueda (nombre, teléfono, email)")),
+		mcp.WithString("tag", mcp.Description("Filtrar por nombre de tag")),
+		mcp.WithString("stage", mcp.Description("Filtrar por nombre de etapa")),
+		mcp.WithString("created_after", mcp.Description("Fecha de creación desde (formato YYYY-MM-DD, ej: '2026-03-01'). Inclusive.")),
+		mcp.WithString("created_before", mcp.Description("Fecha de creación hasta (formato YYYY-MM-DD, ej: '2026-03-05'). Inclusive.")),
+		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 100)")),
+		mcp.WithNumber("offset", mcp.Description("Desplazamiento para paginación (default 0).")),
+	), s.toolSearchLeads)
+
+	mcpSrv.AddTool(readOnlyTool("get_lead_detail",
+		mcp.WithDescription("Información completa de un lead: datos personales, todos los tags, etapa actual, notas, fuente, campos personalizados, edad, fecha de creación. Necesitas el lead_id, obtenlo con search_leads."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("lead_id", mcp.Required(), mcp.Description("UUID del lead")),
+	), s.toolGetLeadDetail)
+
+	mcpSrv.AddTool(readOnlyTool("list_tags",
+		mcp.WithDescription("Lista todos los tags disponibles en el CRM con nombre y color. Útil para saber qué tags existen antes de filtrar leads o eventos."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+	), s.toolListTags)
+
+	mcpSrv.AddTool(readOnlyTool("list_pipelines",
+		mcp.WithDescription("Lista los pipelines de ventas con sus etapas, colores y posiciones. Útil para conocer las etapas disponibles antes de filtrar leads."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+	), s.toolListPipelines)
+
+	mcpSrv.AddTool(readOnlyTool("search_contacts",
+		mcp.WithDescription("Busca contactos de WhatsApp por nombre o teléfono. Útil para verificar si alguien tiene WhatsApp o encontrar su chat."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("query", mcp.Required(), mcp.Description("Texto de búsqueda (nombre o teléfono)")),
+		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 50)")),
+	), s.toolSearchContacts)
+
+	// ──────────────── Category A.2: Event Participants ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("list_event_participants",
+		mcp.WithDescription("Lista participantes de un evento para reportes. Por defecto devuelve datos mínimos: id, nombre, etapa, estado y fecha. Si el usuario pide explícitamente teléfonos, emails o notas, usa include_sensitive=true."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
+		mcp.WithString("status", mcp.Description("Filtrar por estado: invited, contacted, confirmed, declined, attended, no_show")),
+		mcp.WithString("stage", mcp.Description("Filtrar por nombre de etapa del evento")),
+		mcp.WithString("search", mcp.Description("Buscar participante por nombre o teléfono")),
+		mcp.WithBoolean("include_sensitive", mcp.Description("Incluir teléfono, email y notas sólo si el usuario lo pidió explícitamente. Default false.")),
+		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 50, max 200)")),
+	), s.toolListEventParticipants)
+
+	// ──────────────── Category A.3: Lead Analytics ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("get_lead_analytics",
+		mcp.WithDescription("Estadísticas agregadas de leads SIN datos personales. Devuelve: distribución por tags (top 30 con conteo), distribución por etapa, leads por mes (últimos 6), leads con/sin WhatsApp, con/sin teléfono, por fuente. ÚSALO para entender la composición de la base antes de filtrar. Ideal para '¿cuántos leads tienen tag X?', '¿tags más comunes?', '¿cuántos leads nuevos por mes?'. No devuelve datos individuales — para eso usa search_leads con filtros específicos."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("tag", mcp.Description("Filtrar análisis solo a leads con este tag")),
+		mcp.WithString("stage", mcp.Description("Filtrar análisis solo a leads en esta etapa")),
+		mcp.WithString("created_after", mcp.Description("Solo analizar leads creados desde esta fecha (YYYY-MM-DD)")),
+		mcp.WithString("created_before", mcp.Description("Solo analizar leads creados hasta esta fecha (YYYY-MM-DD)")),
+	), s.toolGetLeadAnalytics)
+
+	mcpSrv.AddTool(readOnlyTool("analyze_leads",
+		mcp.WithDescription("Análisis avanzado de leads con scoring de conversión calculado en el servidor. Puntúa cada lead según: posición en pipeline (etapas avanzadas = mayor score), actividad de WhatsApp (tiene chat activo), cantidad de mensajes recientes, presencia de notas, cantidad de tags, y antigüedad. Devuelve un ranking con score, factores explicados, etapa y tags — SIN teléfonos ni emails. Úsalo para responder preguntas como '¿cuáles leads tienen más probabilidad de convertir?', 'top 20 leads más comprometidos', 'leads que debería contactar primero'. Para ver datos de contacto de un lead específico, usa get_lead_detail con su ID."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("tag", mcp.Description("Filtrar solo leads con este tag (ej: 'matemáticas', 'iquitos')")),
+		mcp.WithString("stage", mcp.Description("Filtrar solo leads en esta etapa (ej: 'CONFIRMADO', 'PRE-INSCRITO')")),
+		mcp.WithString("created_after", mcp.Description("Solo leads creados desde esta fecha (YYYY-MM-DD)")),
+		mcp.WithString("created_before", mcp.Description("Solo leads creados hasta esta fecha (YYYY-MM-DD)")),
+		mcp.WithString("sort_by", mcp.Description("Criterio de ranking: 'score' (default, score compuesto), 'chat_activity' (más mensajes recientes), 'stage' (etapa más avanzada), 'recent' (leads más nuevos)")),
+		mcp.WithNumber("limit", mcp.Description("Top N leads a devolver (default 20, max 50)")),
+	), s.toolAnalyzeLeads)
+
+	// ──────────────── Category B: Logbooks ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("list_event_logbooks",
+		mcp.WithDescription("Lista las bitácoras de un evento con fecha, estado, notas generales y snapshot de etapas."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
+	), s.toolListEventLogbooks)
+
+	mcpSrv.AddTool(readOnlyTool("get_logbook_detail",
+		mcp.WithDescription("Detalle de una bitácora: entradas por participante con su etapa y notas de ese día."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("logbook_id", mcp.Required(), mcp.Description("UUID de la bitácora")),
+	), s.toolGetLogbookDetail)
+
+	// ──────────────── Category C: Chats ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("get_chat_history",
+		mcp.WithDescription("Obtiene los últimos mensajes de WhatsApp con un contacto o lead. Útil para analizar intención, hacer resumen de conversación o verificar último contacto."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("contact_name", mcp.Description("Nombre del contacto a buscar")),
+		mcp.WithString("phone", mcp.Description("Teléfono del contacto (con o sin código de país)")),
+		mcp.WithNumber("limit", mcp.Description("Número de mensajes a obtener (default 50, max 200)")),
+	), s.toolGetChatHistory)
+
+	mcpSrv.AddTool(readOnlyTool("get_leads_with_chats",
+		mcp.WithDescription("Obtiene un grupo PEQUEÑO de leads con sus mensajes de WhatsApp para análisis de conversación. REQUIERE al menos un filtro (evento, tag, etapa o nombre). Evalúa las conversaciones para determinar intención, interés u objeciones. Para análisis de muchos leads, usa primero analyze_leads para identificar los más relevantes y luego consulta sus chats aquí."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("event_id", mcp.Description("UUID del evento para filtrar participantes")),
+		mcp.WithString("tag", mcp.Description("Nombre de tag para filtrar leads")),
+		mcp.WithString("stage", mcp.Description("Nombre de etapa para filtrar")),
+		mcp.WithString("query", mcp.Description("Texto de búsqueda (nombre, teléfono, email)")),
+		mcp.WithNumber("messages_per_lead", mcp.Description("Mensajes por lead (default 20, max 50)")),
+		mcp.WithNumber("max_leads", mcp.Description("Máximo de leads a incluir (default 10, max 30)")),
+	), s.toolGetLeadsWithChats)
+
+	// ──────────────── Category D: Programs ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("list_programs",
+		mcp.WithDescription("Lista los programas educativos de la cuenta con nombre, estado, participantes y sesiones. Úsalo para ver los programas disponibles antes de consultar detalle."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("status", mcp.Description("Filtrar por estado: active, completed, archived. Vacío = todos.")),
+	), s.toolListPrograms)
+
+	mcpSrv.AddTool(readOnlyTool("get_program_detail",
+		mcp.WithDescription("Detalle completo de un programa educativo: descripción, horarios, participantes inscritos con estado, y sesiones programadas con estadísticas de asistencia."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("program_id", mcp.Required(), mcp.Description("UUID del programa")),
+	), s.toolGetProgramDetail)
+
+	mcpSrv.AddTool(readOnlyTool("get_program_attendance",
+		mcp.WithDescription("Asistencia detallada de una sesión de programa: lista de participantes con su estado (present, absent, late, excused) y notas."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("session_id", mcp.Required(), mcp.Description("UUID de la sesión")),
+	), s.toolGetProgramAttendance)
+
+	// ──────────────── Category E: Campaigns ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("list_campaigns",
+		mcp.WithDescription("Lista las campañas de mensajes masivos de WhatsApp con nombre, estado, totales de envío y fechas."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+	), s.toolListCampaigns)
+
+	mcpSrv.AddTool(readOnlyTool("get_campaign_detail",
+		mcp.WithDescription("Detalle de una campaña de mensajes: template, estado de cada destinatario (enviado, fallido, pendiente), adjuntos, y estadísticas."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("campaign_id", mcp.Required(), mcp.Description("UUID de la campaña")),
+		mcp.WithNumber("recipient_limit", mcp.Description("Máximo de destinatarios a devolver (default 50, max 200)")),
+	), s.toolGetCampaignDetail)
+
+	// ──────────────── Category F: Surveys ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("list_surveys",
+		mcp.WithDescription("Lista las encuestas creadas en la cuenta con nombre, estado, slug y total de respuestas."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+	), s.toolListSurveys)
+
+	mcpSrv.AddTool(readOnlyTool("get_survey_detail",
+		mcp.WithDescription("Detalle de una encuesta: preguntas con tipo, opciones y configuración. Necesitas el survey_id, obtenlo con list_surveys."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("survey_id", mcp.Required(), mcp.Description("UUID de la encuesta")),
+	), s.toolGetSurveyDetail)
+
+	mcpSrv.AddTool(readOnlyTool("get_survey_analytics",
+		mcp.WithDescription("Analytics agregado de una encuesta: total de respuestas, tasa de completado, tiempo promedio y distribución de respuestas por pregunta."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("survey_id", mcp.Required(), mcp.Description("UUID de la encuesta")),
+	), s.toolGetSurveyAnalytics)
+
+	// ──────────────── Category G: Automations ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("list_automations",
+		mcp.WithDescription("Lista las automatizaciones configuradas con nombre, tipo de trigger, estado activo/inactivo y conteo de ejecuciones."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+	), s.toolListAutomations)
+
+	mcpSrv.AddTool(readOnlyTool("get_automation_detail",
+		mcp.WithDescription("Detalle de una automatización: trigger, configuración, últimas ejecuciones con estado y estadísticas generales."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("automation_id", mcp.Required(), mcp.Description("UUID de la automatización")),
+	), s.toolGetAutomationDetail)
+
+	// ──────────────── Category H: Contacts & Chats ────────────────
+
+	mcpSrv.AddTool(readOnlyTool("get_contact_detail",
+		mcp.WithDescription("Información completa de un contacto de WhatsApp: nombre, nombre personalizado, teléfono, email, empresa, notas, tags, lead vinculado y último mensaje."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("contact_id", mcp.Description("UUID del contacto")),
+		mcp.WithString("phone", mcp.Description("Teléfono del contacto (alternativa al ID)")),
+	), s.toolGetContactDetail)
+
+	mcpSrv.AddTool(readOnlyTool("list_chats",
+		mcp.WithDescription("Lista los chats de WhatsApp activos de la cuenta: contacto, último mensaje, mensajes no leídos y fecha. Ordenados por último mensaje."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithNumber("limit", mcp.Description("Máximo de chats (default 30, max 100)")),
+	), s.toolListChats)
+
+	mcpSrv.AddTool(readOnlyTool("search_chat_messages",
+		mcp.WithDescription("Busca mensajes por texto en todas las conversaciones de la cuenta. Devuelve el mensaje, contacto y fecha. Máximo 50 resultados."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description("Slug de cuenta. Alternativa a account_id.")),
+		mcp.WithString("query", mcp.Required(), mcp.Description("Texto a buscar en los mensajes")),
+		mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 30, max 50)")),
+	), s.toolSearchChatMessages)
+
+	s.mcpServer = mcpSrv
+	return s
 }
 
-mcpSrv := server.NewMCPServer(
-"Clarin CRM",
-"1.0.0",
-server.WithToolCapabilities(true),
-)
-
-// ──────────────── Category A: Data Queries ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("get_crm_stats",
-mcp.WithDescription("Resumen general del CRM: total de leads por etapa, contactos, eventos activos, programas. Úsalo PRIMERO para dar una vista rápida del estado actual. Después usa get_lead_analytics para análisis detallado o analyze_leads para scoring de conversión."),
-), s.toolGetCRMStats)
-
-mcpSrv.AddTool(mcp.NewTool("list_events",
-mcp.WithDescription("Busca y lista eventos por nombre, estado o fecha. Devuelve nombre, fecha, ubicación, total de participantes y conteos por etapa. Úsalo para encontrar un evento antes de consultar sus detalles o participantes."),
-mcp.WithString("search", mcp.Description("Buscar evento por nombre, descripción o ubicación (ej: 'amistad', 'iquitos')")),
-mcp.WithString("status", mcp.Description("Filtrar por estado: active, draft, completed, cancelled. Vacío = todos.")),
-mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 100)")),
-), s.toolListEvents)
-
-mcpSrv.AddTool(mcp.NewTool("get_event_summary",
-mcp.WithDescription("Resumen detallado de un evento específico: participantes por etapa (confirmados, contactados, declinados, etc.), descripción, fechas. Necesitas el event_id, obtenlo primero con list_events."),
-mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
-), s.toolGetEventSummary)
-
-mcpSrv.AddTool(mcp.NewTool("search_leads",
-mcp.WithDescription("Busca leads específicos con filtros precisos. Devuelve nombre, tags, etapa y fecha de creación. IMPORTANTE: Usa SIEMPRE filtros específicos (tag, etapa, fecha, nombre). Para análisis de todos los leads, usa primero get_lead_analytics o analyze_leads. Esta herramienta es para consultas puntuales como 'leads con tag matemáticas creados esta semana' o 'buscar a Juan Pérez'."),
-mcp.WithString("query", mcp.Description("Texto de búsqueda (nombre, teléfono, email)")),
-mcp.WithString("tag", mcp.Description("Filtrar por nombre de tag")),
-mcp.WithString("stage", mcp.Description("Filtrar por nombre de etapa")),
-mcp.WithString("created_after", mcp.Description("Fecha de creación desde (formato YYYY-MM-DD, ej: '2026-03-01'). Inclusive.")),
-mcp.WithString("created_before", mcp.Description("Fecha de creación hasta (formato YYYY-MM-DD, ej: '2026-03-05'). Inclusive.")),
-mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 100)")),
-mcp.WithNumber("offset", mcp.Description("Desplazamiento para paginación (default 0).")),
-), s.toolSearchLeads)
-
-mcpSrv.AddTool(mcp.NewTool("get_lead_detail",
-mcp.WithDescription("Información completa de un lead: datos personales, todos los tags, etapa actual, notas, fuente, campos personalizados, edad, fecha de creación. Necesitas el lead_id, obtenlo con search_leads."),
-mcp.WithString("lead_id", mcp.Required(), mcp.Description("UUID del lead")),
-), s.toolGetLeadDetail)
-
-mcpSrv.AddTool(mcp.NewTool("list_tags",
-mcp.WithDescription("Lista todos los tags disponibles en el CRM con nombre y color. Útil para saber qué tags existen antes de filtrar leads o eventos."),
-), s.toolListTags)
-
-mcpSrv.AddTool(mcp.NewTool("list_pipelines",
-mcp.WithDescription("Lista los pipelines de ventas con sus etapas, colores y posiciones. Útil para conocer las etapas disponibles antes de filtrar leads."),
-), s.toolListPipelines)
-
-mcpSrv.AddTool(mcp.NewTool("search_contacts",
-mcp.WithDescription("Busca contactos de WhatsApp por nombre o teléfono. Útil para verificar si alguien tiene WhatsApp o encontrar su chat."),
-mcp.WithString("query", mcp.Required(), mcp.Description("Texto de búsqueda (nombre o teléfono)")),
-mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 20, max 50)")),
-), s.toolSearchContacts)
-
-// ──────────────── Category A.2: Event Participants ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("list_event_participants",
-mcp.WithDescription("Lista los participantes de un evento con su nombre, teléfono, etapa, estado y notas. Ideal para reportes como 'lista de confirmados del evento X' o 'participantes en etapa Y'. Necesitas el event_id, obtenlo con list_events."),
-mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
-mcp.WithString("status", mcp.Description("Filtrar por estado: invited, contacted, confirmed, declined, attended, no_show")),
-mcp.WithString("stage", mcp.Description("Filtrar por nombre de etapa del evento")),
-mcp.WithString("search", mcp.Description("Buscar participante por nombre o teléfono")),
-mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 50, max 200)")),
-), s.toolListEventParticipants)
-
-// ──────────────── Category A.3: Lead Analytics ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("get_lead_analytics",
-mcp.WithDescription("Estadísticas agregadas de leads SIN datos personales. Devuelve: distribución por tags (top 30 con conteo), distribución por etapa, leads por mes (últimos 6), leads con/sin WhatsApp, con/sin teléfono, por fuente. ÚSALO para entender la composición de la base antes de filtrar. Ideal para '¿cuántos leads tienen tag X?', '¿tags más comunes?', '¿cuántos leads nuevos por mes?'. No devuelve datos individuales — para eso usa search_leads con filtros específicos."),
-mcp.WithString("tag", mcp.Description("Filtrar análisis solo a leads con este tag")),
-mcp.WithString("stage", mcp.Description("Filtrar análisis solo a leads en esta etapa")),
-mcp.WithString("created_after", mcp.Description("Solo analizar leads creados desde esta fecha (YYYY-MM-DD)")),
-mcp.WithString("created_before", mcp.Description("Solo analizar leads creados hasta esta fecha (YYYY-MM-DD)")),
-), s.toolGetLeadAnalytics)
-
-mcpSrv.AddTool(mcp.NewTool("analyze_leads",
-mcp.WithDescription("Análisis avanzado de leads con scoring de conversión calculado en el servidor. Puntúa cada lead según: posición en pipeline (etapas avanzadas = mayor score), actividad de WhatsApp (tiene chat activo), cantidad de mensajes recientes, presencia de notas, cantidad de tags, y antigüedad. Devuelve un ranking con score, factores explicados, etapa y tags — SIN teléfonos ni emails. Úsalo para responder preguntas como '¿cuáles leads tienen más probabilidad de convertir?', 'top 20 leads más comprometidos', 'leads que debería contactar primero'. Para ver datos de contacto de un lead específico, usa get_lead_detail con su ID."),
-mcp.WithString("tag", mcp.Description("Filtrar solo leads con este tag (ej: 'matemáticas', 'iquitos')")),
-mcp.WithString("stage", mcp.Description("Filtrar solo leads en esta etapa (ej: 'CONFIRMADO', 'PRE-INSCRITO')")),
-mcp.WithString("created_after", mcp.Description("Solo leads creados desde esta fecha (YYYY-MM-DD)")),
-mcp.WithString("created_before", mcp.Description("Solo leads creados hasta esta fecha (YYYY-MM-DD)")),
-mcp.WithString("sort_by", mcp.Description("Criterio de ranking: 'score' (default, score compuesto), 'chat_activity' (más mensajes recientes), 'stage' (etapa más avanzada), 'recent' (leads más nuevos)")),
-mcp.WithNumber("limit", mcp.Description("Top N leads a devolver (default 20, max 50)")),
-), s.toolAnalyzeLeads)
-
-// ──────────────── Category B: Logbooks ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("list_event_logbooks",
-mcp.WithDescription("Lista las bitácoras de un evento con fecha, estado, notas generales y snapshot de etapas."),
-mcp.WithString("event_id", mcp.Required(), mcp.Description("UUID del evento")),
-), s.toolListEventLogbooks)
-
-mcpSrv.AddTool(mcp.NewTool("get_logbook_detail",
-mcp.WithDescription("Detalle de una bitácora: entradas por participante con su etapa y notas de ese día."),
-mcp.WithString("logbook_id", mcp.Required(), mcp.Description("UUID de la bitácora")),
-), s.toolGetLogbookDetail)
-
-// ──────────────── Category C: Chats ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("get_chat_history",
-mcp.WithDescription("Obtiene los últimos mensajes de WhatsApp con un contacto o lead. Útil para analizar intención, hacer resumen de conversación o verificar último contacto."),
-mcp.WithString("contact_name", mcp.Description("Nombre del contacto a buscar")),
-mcp.WithString("phone", mcp.Description("Teléfono del contacto (con o sin código de país)")),
-mcp.WithNumber("limit", mcp.Description("Número de mensajes a obtener (default 50, max 200)")),
-), s.toolGetChatHistory)
-
-mcpSrv.AddTool(mcp.NewTool("get_leads_with_chats",
-mcp.WithDescription("Obtiene un grupo PEQUEÑO de leads con sus mensajes de WhatsApp para análisis de conversación. REQUIERE al menos un filtro (evento, tag, etapa o nombre). Evalúa las conversaciones para determinar intención, interés u objeciones. Para análisis de muchos leads, usa primero analyze_leads para identificar los más relevantes y luego consulta sus chats aquí."),
-mcp.WithString("event_id", mcp.Description("UUID del evento para filtrar participantes")),
-mcp.WithString("tag", mcp.Description("Nombre de tag para filtrar leads")),
-mcp.WithString("stage", mcp.Description("Nombre de etapa para filtrar")),
-mcp.WithString("query", mcp.Description("Texto de búsqueda (nombre, teléfono, email)")),
-mcp.WithNumber("messages_per_lead", mcp.Description("Mensajes por lead (default 20, max 50)")),
-mcp.WithNumber("max_leads", mcp.Description("Máximo de leads a incluir (default 10, max 30)")),
-), s.toolGetLeadsWithChats)
-
-// ──────────────── Category D: Programs ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("list_programs",
-mcp.WithDescription("Lista los programas educativos de la cuenta con nombre, estado, participantes y sesiones. Úsalo para ver los programas disponibles antes de consultar detalle."),
-mcp.WithString("status", mcp.Description("Filtrar por estado: active, completed, archived. Vacío = todos.")),
-), s.toolListPrograms)
-
-mcpSrv.AddTool(mcp.NewTool("get_program_detail",
-mcp.WithDescription("Detalle completo de un programa educativo: descripción, horarios, participantes inscritos con estado, y sesiones programadas con estadísticas de asistencia."),
-mcp.WithString("program_id", mcp.Required(), mcp.Description("UUID del programa")),
-), s.toolGetProgramDetail)
-
-mcpSrv.AddTool(mcp.NewTool("get_program_attendance",
-mcp.WithDescription("Asistencia detallada de una sesión de programa: lista de participantes con su estado (present, absent, late, excused) y notas."),
-mcp.WithString("session_id", mcp.Required(), mcp.Description("UUID de la sesión")),
-), s.toolGetProgramAttendance)
-
-// ──────────────── Category E: Campaigns ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("list_campaigns",
-mcp.WithDescription("Lista las campañas de mensajes masivos de WhatsApp con nombre, estado, totales de envío y fechas."),
-), s.toolListCampaigns)
-
-mcpSrv.AddTool(mcp.NewTool("get_campaign_detail",
-mcp.WithDescription("Detalle de una campaña de mensajes: template, estado de cada destinatario (enviado, fallido, pendiente), adjuntos, y estadísticas."),
-mcp.WithString("campaign_id", mcp.Required(), mcp.Description("UUID de la campaña")),
-mcp.WithNumber("recipient_limit", mcp.Description("Máximo de destinatarios a devolver (default 50, max 200)")),
-), s.toolGetCampaignDetail)
-
-// ──────────────── Category F: Surveys ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("list_surveys",
-mcp.WithDescription("Lista las encuestas creadas en la cuenta con nombre, estado, slug y total de respuestas."),
-), s.toolListSurveys)
-
-mcpSrv.AddTool(mcp.NewTool("get_survey_detail",
-mcp.WithDescription("Detalle de una encuesta: preguntas con tipo, opciones y configuración. Necesitas el survey_id, obtenlo con list_surveys."),
-mcp.WithString("survey_id", mcp.Required(), mcp.Description("UUID de la encuesta")),
-), s.toolGetSurveyDetail)
-
-mcpSrv.AddTool(mcp.NewTool("get_survey_analytics",
-mcp.WithDescription("Analytics agregado de una encuesta: total de respuestas, tasa de completado, tiempo promedio y distribución de respuestas por pregunta."),
-mcp.WithString("survey_id", mcp.Required(), mcp.Description("UUID de la encuesta")),
-), s.toolGetSurveyAnalytics)
-
-// ──────────────── Category G: Automations ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("list_automations",
-mcp.WithDescription("Lista las automatizaciones configuradas con nombre, tipo de trigger, estado activo/inactivo y conteo de ejecuciones."),
-), s.toolListAutomations)
-
-mcpSrv.AddTool(mcp.NewTool("get_automation_detail",
-mcp.WithDescription("Detalle de una automatización: trigger, configuración, últimas ejecuciones con estado y estadísticas generales."),
-mcp.WithString("automation_id", mcp.Required(), mcp.Description("UUID de la automatización")),
-), s.toolGetAutomationDetail)
-
-// ──────────────── Category H: Contacts & Chats ────────────────
-
-mcpSrv.AddTool(mcp.NewTool("get_contact_detail",
-mcp.WithDescription("Información completa de un contacto de WhatsApp: nombre, nombre personalizado, teléfono, email, empresa, notas, tags, lead vinculado y último mensaje."),
-mcp.WithString("contact_id", mcp.Description("UUID del contacto")),
-mcp.WithString("phone", mcp.Description("Teléfono del contacto (alternativa al ID)")),
-), s.toolGetContactDetail)
-
-mcpSrv.AddTool(mcp.NewTool("list_chats",
-mcp.WithDescription("Lista los chats de WhatsApp activos de la cuenta: contacto, último mensaje, mensajes no leídos y fecha. Ordenados por último mensaje."),
-mcp.WithNumber("limit", mcp.Description("Máximo de chats (default 30, max 100)")),
-), s.toolListChats)
-
-mcpSrv.AddTool(mcp.NewTool("search_chat_messages",
-mcp.WithDescription("Busca mensajes por texto en todas las conversaciones de la cuenta. Devuelve el mensaje, contacto y fecha. Máximo 50 resultados."),
-mcp.WithString("query", mcp.Required(), mcp.Description("Texto a buscar en los mensajes")),
-mcp.WithNumber("limit", mcp.Description("Máximo de resultados (default 30, max 50)")),
-), s.toolSearchChatMessages)
-
-s.mcpServer = mcpSrv
-return s
+// streamableHTTPHandler returns an MCP Streamable HTTP handler protected by global MCP client auth.
+func (s *MCPServer) streamableHTTPHandler() http.Handler {
+	httpServer := server.NewStreamableHTTPServer(s.mcpServer,
+		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
+			if principal, ok := r.Context().Value(ctxKeyPrincipal).(*MCPPrincipal); ok {
+				ctx = context.WithValue(ctx, ctxKeyPrincipal, principal)
+			}
+			return ctx
+		}),
+	)
+	return s.authenticatedMCPHandler(httpServer, "streamable_http")
 }
 
-// sseHandler returns an http.Handler that serves MCP over SSE transport.
-// It validates the API key from the Authorization header on every request.
+// sseHandler returns an http.Handler that serves MCP over SSE transport for legacy clients.
 func (s *MCPServer) sseHandler() http.Handler {
-sseServer := server.NewSSEServer(s.mcpServer,
-server.WithBasePath("/mcp"),
-server.WithBaseURL("https://clarin.naperu.cloud"),
-)
-
-return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-authHeader := r.Header.Get("Authorization")
-if authHeader == "" {
-w.Header().Set("WWW-Authenticate", `Bearer`)
-http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
-return
-}
-token := strings.TrimPrefix(authHeader, "Bearer ")
-if token == authHeader {
-w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-http.Error(w, `{"error":"invalid Authorization format, expected: Bearer <api_key>"}`, http.StatusUnauthorized)
-return
+	sseServer := server.NewSSEServer(s.mcpServer,
+		server.WithBasePath("/mcp"),
+		server.WithBaseURL("https://clarin.naperu.cloud"),
+	)
+	return s.authenticatedMCPHandler(sseServer, "sse")
 }
 
-keyHash := hashKey(token)
-apiKey, err := s.repos.APIKey.ValidateKeyHash(r.Context(), keyHash)
-if err != nil || apiKey == nil {
-w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-http.Error(w, `{"error":"invalid or inactive API key"}`, http.StatusUnauthorized)
-return
-}
+func (s *MCPServer) authenticatedMCPHandler(next http.Handler, transport string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.allowMCPRequest(remoteIP(r)) {
+			s.recordAuthFailure(r, "rate_limited", nil)
+			http.Error(w, `{"error":"too many MCP requests"}`, http.StatusTooManyRequests)
+			return
+		}
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			setMCPAuthChallenge(w, "missing_authorization")
+			s.recordAuthFailure(r, "missing_authorization", nil)
+			http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token == authHeader {
+			setMCPAuthChallenge(w, "invalid_authorization_format")
+			s.recordAuthFailure(r, "invalid_authorization_format", nil)
+			http.Error(w, `{"error":"invalid Authorization format, expected: Bearer <api_key>"}`, http.StatusUnauthorized)
+			return
+		}
 
-go s.repos.APIKey.UpdateLastUsed(context.Background(), apiKey.ID)
+		keyHash := hashKey(token)
+		client, err := s.repos.MCP.GetClientByOAuthTokenHash(r.Context(), keyHash, mcpResourceURI)
+		if err != nil {
+			log.Printf("[MCP] oauth token lookup error: %v", err)
+		}
+		if client == nil {
+			client, err = s.repos.MCP.GetClientByTokenHash(r.Context(), keyHash)
+		}
+		if err != nil || client == nil {
+			setMCPAuthChallenge(w, "invalid_token")
+			s.recordAuthFailure(r, "invalid_token", nil)
+			http.Error(w, `{"error":"invalid MCP token"}`, http.StatusUnauthorized)
+			return
+		}
+		if client.Status == domain.MCPStatusBlocked || client.Status == domain.MCPStatusRevoked || client.Status == domain.MCPStatusPending {
+			status := http.StatusForbidden
+			s.recordAuthFailure(r, "client_"+client.Status, &client.ID)
+			http.Error(w, `{"error":"MCP client is not active"}`, status)
+			return
+		}
+		session := &domain.MCPSession{
+			ID:             uuid.New(),
+			ClientID:       client.ID,
+			Transport:      transport,
+			SessionKeyHash: hashKey(mcpSessionFingerprint(r, transport)),
+			IPHash:         hashKey(remoteIP(r)),
+			UserAgentHash:  hashKey(r.UserAgent()),
+			OriginHash:     hashKey(r.Header.Get("Origin")),
+		}
+		storedSession, err := s.repos.MCP.UpsertSession(r.Context(), session)
+		if err != nil {
+			log.Printf("[MCP] session error: %v", err)
+			http.Error(w, `{"error":"could not register MCP session"}`, http.StatusInternalServerError)
+			return
+		}
+		if storedSession.Status == domain.MCPStatusBlocked {
+			s.recordAuthFailure(r, "session_blocked", &client.ID)
+			http.Error(w, `{"error":"MCP session is blocked"}`, http.StatusForbidden)
+			return
+		}
 
-ctx := context.WithValue(r.Context(), ctxKeyAccountID, apiKey.AccountID)
-r = r.WithContext(ctx)
+		principal := &MCPPrincipal{
+			ClientID:          client.ID,
+			ClientName:        client.Name,
+			SessionID:         storedSession.ID,
+			ScopeType:         client.ScopeType,
+			ClientKind:        client.ClientKind,
+			AllowedAccountIDs: client.AllowedAccountIDs,
+			IPHash:            session.IPHash,
+			UserAgentHash:     session.UserAgentHash,
+		}
+		go s.repos.MCP.TouchClient(context.Background(), client.ID)
+		go s.repos.MCP.RecordAuditEvent(context.Background(), &domain.MCPAuditEvent{
+			ClientID:      &client.ID,
+			SessionID:     &storedSession.ID,
+			EventType:     "auth_success",
+			IPHash:        session.IPHash,
+			UserAgentHash: session.UserAgentHash,
+			Metadata:      map[string]any{"transport": transport},
+		})
 
-sseServer.ServeHTTP(w, r)
-})
+		ctx := context.WithValue(r.Context(), ctxKeyPrincipal, principal)
+		r = r.WithContext(ctx)
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start launches the MCP HTTP server on the given port in a background goroutine.
 func (s *MCPServer) Start(port string) {
-mux := http.NewServeMux()
+	mux := http.NewServeMux()
 
-// MCP SSE transport (protected by Bearer token)
-sseHandler := s.sseHandler()
-mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
-setCORSHeaders(w, r)
-if r.Method == http.MethodOptions {
-w.WriteHeader(http.StatusNoContent)
-return
-}
-sseHandler.ServeHTTP(w, r)
-})
+	// MCP Streamable HTTP transport (protected by global MCP client token)
+	httpHandler := s.streamableHTTPHandler()
+	mutexHandler := func(handler http.Handler) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !setCORSHeaders(w, r) {
+				s.recordAuthFailure(r, "origin_not_allowed", nil)
+				http.Error(w, `{"error":"origin not allowed"}`, http.StatusForbidden)
+				return
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			handler.ServeHTTP(w, r)
+		}
+	}
+	mux.HandleFunc("/.well-known/oauth-protected-resource", s.oauthProtectedResourceMetadataHandler())
+	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", s.oauthProtectedResourceMetadataHandler())
+	mux.HandleFunc("/.well-known/oauth-authorization-server", s.oauthAuthorizationServerMetadataHandler())
+	mux.HandleFunc("/.well-known/oauth-authorization-server/mcp", s.oauthAuthorizationServerMetadataHandler())
+	mux.HandleFunc("/oauth/authorize", s.oauthAuthorizeHandler())
+	mux.HandleFunc("/oauth/token", s.oauthTokenHandler())
+	mux.HandleFunc("/mcp", mutexHandler(httpHandler))
 
-srv := &http.Server{
-Addr:         ":" + port,
-Handler:      mux,
-ReadTimeout:  0,
-WriteTimeout: 0,
-}
-go func() {
-log.Printf("[MCP] ✅ MCP server starting on port %s (SSE, API key auth)", port)
-if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-log.Printf("[MCP] Server error: %v", err)
-}
-}()
+	// MCP SSE transport for legacy clients (same auth and audit)
+	sseHandler := s.sseHandler()
+	mux.HandleFunc("/mcp/", mutexHandler(sseHandler))
+
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      mux,
+		ReadTimeout:  0,
+		WriteTimeout: 0,
+	}
+	go func() {
+		log.Printf("[MCP] ✅ MCP server starting on port %s (Streamable HTTP + SSE legacy, global MCP client auth)", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[MCP] Server error: %v", err)
+		}
+	}()
 }
 
 // setCORSHeaders adds CORS headers for MCP endpoints.
-func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
-origin := r.Header.Get("Origin")
-if origin == "" {
-origin = "*"
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	if !isAllowedMCPOrigin(origin) {
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Vary", "Origin")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, MCP-Protocol-Version, Mcp-Session-Id")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+	return true
 }
-w.Header().Set("Access-Control-Allow-Origin", origin)
-w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, MCP-Protocol-Version")
-w.Header().Set("Access-Control-Max-Age", "86400")
+
+func isAllowedMCPOrigin(origin string) bool {
+	switch origin {
+	case "https://clarin.naperu.cloud",
+		"https://chatgpt.com",
+		"http://localhost:3000",
+		"http://localhost:8081",
+		"http://127.0.0.1:3000",
+		"http://127.0.0.1:8081":
+		return true
+	default:
+		return false
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -316,24 +509,202 @@ w.Header().Set("Access-Control-Max-Age", "86400")
 
 type contextKey string
 
-const ctxKeyAccountID contextKey = "mcp_account_id"
+const ctxKeyPrincipal contextKey = "mcp_principal"
 
-func (s *MCPServer) getAccountID(ctx context.Context) (uuid.UUID, error) {
-if aid, ok := ctx.Value(ctxKeyAccountID).(uuid.UUID); ok {
-return aid, nil
+type MCPPrincipal struct {
+	ClientID          uuid.UUID
+	ClientName        string
+	SessionID         uuid.UUID
+	ScopeType         string
+	ClientKind        string
+	AllowedAccountIDs []uuid.UUID
+	IPHash            string
+	UserAgentHash     string
 }
-var aid uuid.UUID
-err := s.repos.DB().QueryRow(ctx, `SELECT id FROM accounts WHERE is_active = true LIMIT 1`).Scan(&aid)
-return aid, err
+
+func (s *MCPServer) getPrincipal(ctx context.Context) (*MCPPrincipal, error) {
+	principal, ok := ctx.Value(ctxKeyPrincipal).(*MCPPrincipal)
+	if !ok || principal == nil || principal.ClientID == uuid.Nil {
+		return nil, errors.New("conexión MCP no autenticada")
+	}
+	return principal, nil
+}
+
+func (p *MCPPrincipal) allowsAccount(accountID uuid.UUID) bool {
+	for _, allowedID := range p.AllowedAccountIDs {
+		if allowedID == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *MCPServer) getAccountIDFromRequest(ctx context.Context, req mcp.CallToolRequest) (uuid.UUID, error) {
+	principal, err := s.getPrincipal(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	args := getArgs(req)
+	var accountID uuid.UUID
+	accountIDRaw := strings.TrimSpace(fmt.Sprint(args["account_id"]))
+	if accountIDRaw != "" && accountIDRaw != "<nil>" {
+		parsedID, err := uuid.Parse(accountIDRaw)
+		if err != nil {
+			return uuid.Nil, errors.New("account_id inválido; usa list_accounts para obtenerlo")
+		}
+		var exists bool
+		err = s.repos.DB().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM accounts WHERE id = $1 AND is_active = true)`, parsedID).Scan(&exists)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if !exists {
+			return uuid.Nil, errors.New("account_id no existe o la cuenta no está activa")
+		}
+		accountID = parsedID
+	} else {
+		accountSlug := strings.TrimSpace(fmt.Sprint(args["account_slug"]))
+		if accountSlug == "" || accountSlug == "<nil>" {
+			return uuid.Nil, errors.New("debes indicar account_id o account_slug; llama primero a list_accounts")
+		}
+		err := s.repos.DB().QueryRow(ctx, `SELECT id FROM accounts WHERE slug = $1 AND is_active = true`, accountSlug).Scan(&accountID)
+		if err == pgx.ErrNoRows {
+			return uuid.Nil, errors.New("account_slug no existe o la cuenta no está activa")
+		}
+		if err != nil {
+			return uuid.Nil, err
+		}
+	}
+	if !principal.allowsAccount(accountID) {
+		return uuid.Nil, errors.New("esta conexión MCP no tiene permiso para esa cuenta")
+	}
+	return accountID, nil
+}
+
+func (s *MCPServer) allowMCPRequest(remote string) bool {
+	const maxRequestsPerMinute = 120
+	now := time.Now()
+	key := hashKey(remote)
+
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+
+	window := s.rateByIP[key]
+	if window == nil || now.After(window.resetAt) {
+		s.rateByIP[key] = &mcpRateWindow{count: 1, resetAt: now.Add(time.Minute)}
+		return true
+	}
+	if window.count >= maxRequestsPerMinute {
+		return false
+	}
+	window.count++
+	return true
 }
 
 func hashKey(key string) string {
-h := sha256.Sum256([]byte(key))
-return hex.EncodeToString(h[:])
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
+}
+
+func remoteIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
+	return r.RemoteAddr
+}
+
+func mcpSessionFingerprint(r *http.Request, transport string) string {
+	sessionID := r.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		sessionID = r.URL.Query().Get("sessionId")
+	}
+	return strings.Join([]string{transport, sessionID, remoteIP(r), r.UserAgent(), r.Header.Get("Origin")}, "|")
+}
+
+func (s *MCPServer) recordAuthFailure(r *http.Request, reason string, clientID *uuid.UUID) {
+	go s.repos.MCP.RecordAuditEvent(context.Background(), &domain.MCPAuditEvent{
+		ClientID:      clientID,
+		EventType:     "auth_failure",
+		IPHash:        hashKey(remoteIP(r)),
+		UserAgentHash: hashKey(r.UserAgent()),
+		Metadata:      map[string]any{"reason": reason, "path": r.URL.Path},
+	})
+}
+
+func (s *MCPServer) auditToolCallMiddleware() server.ToolHandlerMiddleware {
+	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			principal, principalErr := s.getPrincipal(ctx)
+			result, err := next(ctx, request)
+			if principalErr == nil {
+				args := getArgs(request)
+				accountIDs := make([]string, 0, 1)
+				if raw := strings.TrimSpace(fmt.Sprint(args["account_id"])); raw != "" && raw != "<nil>" {
+					accountIDs = append(accountIDs, raw)
+				}
+				eventType := "tool_call"
+				if err != nil || (result != nil && result.IsError) {
+					eventType = "tool_denied"
+				}
+				_ = s.repos.MCP.RecordAuditEvent(context.Background(), &domain.MCPAuditEvent{
+					ClientID:      &principal.ClientID,
+					SessionID:     &principal.SessionID,
+					EventType:     eventType,
+					ToolName:      request.Params.Name,
+					AccountIDs:    accountIDs,
+					IPHash:        principal.IPHash,
+					UserAgentHash: principal.UserAgentHash,
+				})
+			}
+			return result, err
+		}
+	}
+}
+
+func (s *MCPServer) toolListAccounts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	principal, err := s.getPrincipal(ctx)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	rows, err := s.repos.DB().Query(ctx, `
+		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.is_active
+		FROM accounts a
+		JOIN mcp_client_accounts mca ON mca.account_id = a.id
+		WHERE mca.client_id = $1
+		  AND a.is_active = true
+		ORDER BY a.name ASC
+	`, principal.ClientID)
+	if err != nil {
+		return errResult("error consultando cuentas: " + err.Error()), nil
+	}
+	defer rows.Close()
+	accounts := make([]map[string]any, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		var name, slug, plan string
+		var active bool
+		if err := rows.Scan(&id, &name, &slug, &plan, &active); err != nil {
+			return errResult("error leyendo cuenta: " + err.Error()), nil
+		}
+		accounts = append(accounts, map[string]any{
+			"account_id": id,
+			"name":       name,
+			"slug":       slug,
+			"plan":       plan,
+			"is_active":  active,
+		})
+	}
+	return jsonResult(map[string]any{
+		"scope":    domain.MCPScopeSelectedAccounts,
+		"accounts": accounts,
+	}), nil
 }
 
 func (s *MCPServer) toolGetCRMStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta: " + err.Error()), nil
 	}
@@ -395,7 +766,7 @@ func (s *MCPServer) toolGetCRMStats(ctx context.Context, req mcp.CallToolRequest
 
 // ──── list_events ────
 func (s *MCPServer) toolListEvents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -450,7 +821,7 @@ func (s *MCPServer) toolListEvents(ctx context.Context, req mcp.CallToolRequest)
 
 // ──── get_event_summary ────
 func (s *MCPServer) toolGetEventSummary(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -496,10 +867,10 @@ func (s *MCPServer) toolGetEventSummary(ctx context.Context, req mcp.CallToolReq
 	}
 
 	summary := map[string]interface{}{
-		"id":                ev.ID.String(),
-		"name":              ev.Name,
-		"status":            ev.Status,
-		"total_participants": ev.TotalParticipants,
+		"id":                    ev.ID.String(),
+		"name":                  ev.Name,
+		"status":                ev.Status,
+		"total_participants":    ev.TotalParticipants,
 		"participants_by_stage": stageCounts,
 	}
 	if ev.Description != nil {
@@ -520,7 +891,7 @@ func (s *MCPServer) toolGetEventSummary(ctx context.Context, req mcp.CallToolReq
 
 // ──── search_leads ────
 func (s *MCPServer) toolSearchLeads(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -661,7 +1032,7 @@ func (s *MCPServer) toolSearchLeads(ctx context.Context, req mcp.CallToolRequest
 
 // ──── get_lead_detail ────
 func (s *MCPServer) toolGetLeadDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -728,7 +1099,7 @@ func (s *MCPServer) toolGetLeadDetail(ctx context.Context, req mcp.CallToolReque
 
 // ──── list_tags ────
 func (s *MCPServer) toolListTags(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -756,7 +1127,7 @@ func (s *MCPServer) toolListTags(ctx context.Context, req mcp.CallToolRequest) (
 
 // ──── list_pipelines ────
 func (s *MCPServer) toolListPipelines(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -772,10 +1143,10 @@ func (s *MCPServer) toolListPipelines(ctx context.Context, req mcp.CallToolReque
 		Position int    `json:"position"`
 	}
 	type pipeResult struct {
-		ID       string        `json:"id"`
-		Name     string        `json:"name"`
-		Default  bool          `json:"is_default"`
-		Stages   []stageResult `json:"stages"`
+		ID      string        `json:"id"`
+		Name    string        `json:"name"`
+		Default bool          `json:"is_default"`
+		Stages  []stageResult `json:"stages"`
 	}
 
 	result := make([]pipeResult, 0, len(pipelines))
@@ -799,7 +1170,7 @@ func (s *MCPServer) toolListPipelines(ctx context.Context, req mcp.CallToolReque
 
 // ──── search_contacts ────
 func (s *MCPServer) toolSearchContacts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -850,7 +1221,7 @@ func (s *MCPServer) toolSearchContacts(ctx context.Context, req mcp.CallToolRequ
 
 // ──── get_lead_analytics ────
 func (s *MCPServer) toolGetLeadAnalytics(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -990,7 +1361,7 @@ func (s *MCPServer) toolGetLeadAnalytics(ctx context.Context, req mcp.CallToolRe
 
 // ──── analyze_leads (server-side scoring) ────
 func (s *MCPServer) toolAnalyzeLeads(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -1248,7 +1619,7 @@ func (s *MCPServer) toolListEventLogbooks(ctx context.Context, req mcp.CallToolR
 
 // ──── get_logbook_detail ────
 func (s *MCPServer) toolGetLogbookDetail(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -1311,6 +1682,7 @@ func (s *MCPServer) toolListEventParticipants(ctx context.Context, req mcp.CallT
 	status := stringArg(req, "status")
 	stage := stringArg(req, "stage")
 	search := stringArg(req, "search")
+	includeSensitive := boolArg(req, "include_sensitive", false)
 	limit := intArg(req, "limit", 50, 200)
 
 	// Build dynamic query
@@ -1376,11 +1748,11 @@ func (s *MCPServer) toolListEventParticipants(ctx context.Context, req mcp.CallT
 		results = append(results, participantResult{
 			ID:        id.String(),
 			Name:      fullName,
-			Phone:     phone,
-			Email:     email,
+			Phone:     sensitiveString(includeSensitive, phone),
+			Email:     sensitiveString(includeSensitive, email),
 			Status:    pStatus,
 			Stage:     stageName,
-			Notes:     notes,
+			Notes:     sensitiveString(includeSensitive, notes),
 			CreatedAt: createdAt.Format("2006-01-02"),
 		})
 	}
@@ -1398,7 +1770,7 @@ func (s *MCPServer) toolListEventParticipants(ctx context.Context, req mcp.CallT
 
 // ──── get_chat_history ────
 func (s *MCPServer) toolGetChatHistory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -1499,7 +1871,7 @@ func (s *MCPServer) toolGetChatHistory(ctx context.Context, req mcp.CallToolRequ
 
 // ──── get_leads_with_chats ────
 func (s *MCPServer) toolGetLeadsWithChats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	accountID, err := s.getAccountID(ctx)
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
 	if err != nil {
 		return errResult("no se pudo determinar la cuenta"), nil
 	}
@@ -1654,64 +2026,78 @@ func (s *MCPServer) toolGetLeadsWithChats(ctx context.Context, req mcp.CallToolR
 }
 
 func jsonResult(data interface{}) *mcp.CallToolResult {
-b, err := json.MarshalIndent(data, "", "  ")
-if err != nil {
-return errResult("error al serializar resultado: " + err.Error())
-}
-return mcp.NewToolResultText(string(b))
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return errResult("error al serializar resultado: " + err.Error())
+	}
+	return mcp.NewToolResultText(string(b))
 }
 
 func errResult(msg string) *mcp.CallToolResult {
-return mcp.NewToolResultError(msg)
+	return mcp.NewToolResultError(msg)
 }
 
 func getArgs(req mcp.CallToolRequest) map[string]any {
-if m, ok := req.Params.Arguments.(map[string]any); ok {
-return m
-}
-return map[string]any{}
+	if m, ok := req.Params.Arguments.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
 }
 
 func stringArg(req mcp.CallToolRequest, key string) string {
-v, _ := getArgs(req)[key].(string)
-return v
+	v, _ := getArgs(req)[key].(string)
+	return v
 }
 
 func uuidArg(req mcp.CallToolRequest, key string) (uuid.UUID, error) {
-return uuid.Parse(stringArg(req, key))
+	return uuid.Parse(stringArg(req, key))
 }
 
 func intArg(req mcp.CallToolRequest, key string, defaultVal, maxVal int) int {
-v, ok := getArgs(req)[key].(float64)
-if !ok || int(v) <= 0 {
-return defaultVal
+	v, ok := getArgs(req)[key].(float64)
+	if !ok || int(v) <= 0 {
+		return defaultVal
+	}
+	n := int(v)
+	if n > maxVal {
+		return maxVal
+	}
+	return n
 }
-n := int(v)
-if n > maxVal {
-return maxVal
+
+func boolArg(req mcp.CallToolRequest, key string, defaultVal bool) bool {
+	v, ok := getArgs(req)[key].(bool)
+	if !ok {
+		return defaultVal
+	}
+	return v
 }
-return n
+
+func sensitiveString(include bool, value string) string {
+	if !include {
+		return ""
+	}
+	return value
 }
 
 func normalizePhone(phone string) string {
-digits := ""
-for _, c := range phone {
-if c >= '0' && c <= '9' {
-digits += string(c)
-}
-}
-if len(digits) == 9 && digits[0] == '9' {
-return "51" + digits
-}
-if len(digits) >= 11 {
-return digits
-}
-return digits
+	digits := ""
+	for _, c := range phone {
+		if c >= '0' && c <= '9' {
+			digits += string(c)
+		}
+	}
+	if len(digits) == 9 && digits[0] == '9' {
+		return "51" + digits
+	}
+	if len(digits) >= 11 {
+		return digits
+	}
+	return digits
 }
 
 func init() {
-log.Println("[MCP] Module loaded")
+	log.Println("[MCP] Module loaded")
 }
 
 var _ = pgx.ErrNoRows
-

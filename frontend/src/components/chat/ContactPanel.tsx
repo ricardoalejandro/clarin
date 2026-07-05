@@ -43,6 +43,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   const [editNameValue, setEditNameValue] = useState('')
   const [savingName, setSavingName] = useState(false)
   const nameInputRef = useRef<HTMLInputElement>(null)
+  const activeChatIdRef = useRef<string | null>(isOpen ? chatId : null)
 
   // ─── Archive / Block ───────────────────────────────────────────────────────
   const [showArchiveModal, setShowArchiveModal] = useState(false)
@@ -123,19 +124,30 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   }, [isOpen, onClose])
 
   useEffect(() => {
+    activeChatIdRef.current = isOpen ? chatId : null
     if (isOpen && chatId) {
-      fetchDetails()
+      setContact(null)
+      setLead(null)
+      setEditingName(false)
+      setShowAvatarViewer(false)
+      setLoading(true)
+      fetchDetails(chatId)
+    } else {
+      setContact(null)
+      setLead(null)
+      setLoading(false)
     }
   }, [isOpen, chatId])
 
-  const fetchDetails = async () => {
+  const fetchDetails = async (targetChatId: string = chatId) => {
     setLoading(true)
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/chats/${chatId}`, {
+      const res = await fetch(`/api/chats/${targetChatId}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
+      if (activeChatIdRef.current !== targetChatId) return
       if (data.success) {
         setContact(data.contact || null)
         setLead(data.lead || null)
@@ -143,7 +155,9 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
     } catch (err) {
       console.error('Failed to fetch chat details:', err)
     } finally {
-      setLoading(false)
+      if (activeChatIdRef.current === targetChatId) {
+        setLoading(false)
+      }
     }
   }
 

@@ -35,7 +35,7 @@ CRM SaaS multi-tenant centrado en WhatsApp, con dashboard web, automatizaciones,
 - **pgx v5** - Driver PostgreSQL nativo.
 - **Redis** - Cache, sesiones y soporte operativo.
 - **MinIO** - Almacenamiento S3-compatible para archivos y media.
-- **mcp-go** - Servidor MCP expuesto por SSE en despliegue.
+- **mcp-go** - Servidor MCP global. Endpoint principal `/mcp`; OAuth para ChatGPT en `/oauth/*` y `/.well-known/*`; `/mcp/sse` queda como compatibilidad legacy.
 
 ### Frontend (Next.js)
 - **Next.js 14** - React framework con App Router.
@@ -61,7 +61,7 @@ CRM SaaS multi-tenant centrado en WhatsApp, con dashboard web, automatizaciones,
 - **Encuestas y dinamicas publicas**: formularios publicos por slug, registros, uploads y links compartibles.
 - **Documentos y storage**: plantillas, generacion de documentos, uso de almacenamiento, deduplicacion y media proxy.
 - **Administracion SaaS**: cuentas, usuarios, roles, planes, suscripciones, integraciones y permisos por modulo.
-- **Integraciones**: Kommo multi-instancia, Google Contacts, WhatsApp Cloud API y MCP.
+- **Integraciones**: Kommo multi-instancia, Google Contacts, WhatsApp Cloud API y MCP Global.
 
 ## Inicio Rapido
 
@@ -81,7 +81,9 @@ make logs
 La aplicacion local queda disponible en:
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8080
-- MCP/SSE: http://localhost:8081/mcp cuando esta configurado por el despliegue.
+- MCP Global: http://localhost:8081/mcp cuando esta configurado por el despliegue.
+- MCP OAuth metadata: http://localhost:8081/.well-known/oauth-protected-resource
+- MCP legacy SSE: http://localhost:8081/mcp/sse solo para compatibilidad.
 
 ### Desarrollo Local
 
@@ -122,6 +124,16 @@ MINIO_USE_SSL=false
 
 El compose de produccion tambien contempla variables para Kommo, Google Contacts, WhatsApp Cloud API, URLs publicas y storage.
 
+## Instrucciones Para Codex
+
+- La fuente de verdad para agentes esta en `AGENTS.md`.
+- Las skills locales viven en `.codex/skills/clarin-*`.
+- Antes de tocar backend, frontend, base de datos, storage, Kommo, MCP o QA, revisa la skill local correspondiente.
+- Este repo ya no usa instrucciones legacy en `.github` como fuente de verdad.
+- Usa "cuenta" o "tenant" para `accounts`; evita "empresa" salvo texto literal de UI.
+- MCP Global se configura desde `Admin -> MCP Global`. Para ChatGPT usa OAuth, cliente definido por el usuario, PKCE S256, `https://clarin.naperu.cloud/mcp` como recurso y scope `mcp:read`.
+- Las API Keys de una cuenta son legacy y no autentican MCP Global.
+
 ## API
 
 Las rutas se definen principalmente en `backend/internal/api/server.go`.
@@ -132,6 +144,8 @@ Grupos principales:
 - Dashboard protegido: `/api/me`, `/api/settings`, `/api/storage`, `/api/devices`, `/api/chats`, `/api/messages`, `/api/contacts`, `/api/leads`, `/api/pipelines`, `/api/tags`, `/api/campaigns`, `/api/programs`, `/api/events`, `/api/tasks`, `/api/document-templates`, `/api/quick-replies`, `/api/bots`, `/api/automations`, `/api/surveys`, `/api/dynamics`.
 - Integraciones: `/api/kommo`, `/api/google`, `/api/google/contacts`, `/api/whatsapp-api`.
 - Admin SaaS: `/api/admin/*`.
+- Admin MCP Global: `/api/admin/mcp/*`.
+- MCP Global: `/mcp` en el servicio MCP; OAuth discovery en `/.well-known/oauth-protected-resource` y `/.well-known/oauth-authorization-server`; autorizacion en `/oauth/authorize`; token en `/oauth/token`; `/mcp/sse` queda como endpoint legacy.
 - WebSocket: `/ws?token=<jwt>`.
 
 ## Comandos Make
@@ -187,6 +201,8 @@ clarin/
 
 - Las cuentas funcionan como tenants aislados por `account_id`.
 - Los usuarios pueden pertenecer a una o mas cuentas.
+- MCP Global no se configura con API Keys de cuenta ni con `mcp_enabled`; usa conexiones globales administradas en `Admin -> MCP Global`.
+- Los conectores ChatGPT usan OAuth manual con redirect URI exacta de `https://chatgpt.com/connector/oauth/...`, codigos de autorizacion de un solo uso, PKCE S256 y access tokens de vida corta.
 - Hay roles, permisos por modulo y middleware de plan/suscripcion.
 - Las contrasenas se almacenan con bcrypt.
 - La autenticacion usa JWT y refresh tokens.
