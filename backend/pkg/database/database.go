@@ -692,6 +692,8 @@ func Migrate(db *pgxpool.Pool) error {
 		// Performance indexes for chat listing
 		`CREATE INDEX IF NOT EXISTS idx_chats_account_lastmsg ON chats(account_id, last_message_at DESC NULLS LAST) WHERE jid NOT LIKE '%@g.us' AND jid NOT LIKE '%@newsletter' AND jid NOT LIKE '%@broadcast' AND jid NOT LIKE '%@lid'`,
 		`CREATE INDEX IF NOT EXISTS idx_chats_device_id ON chats(device_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chats_account_contact ON chats(account_id, contact_id) WHERE contact_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp ON messages(chat_id, timestamp DESC, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_contacts_jid ON contacts(jid)`,
 		`CREATE INDEX IF NOT EXISTS idx_leads_jid ON leads(account_id, jid)`,
 
@@ -701,6 +703,8 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_leads_stage_created ON leads(stage_id, created_at DESC)`,
 		// Composite index for pipeline + account filtering
 		`CREATE INDEX IF NOT EXISTS idx_leads_pipeline_account ON leads(account_id, pipeline_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_campaign_recipients_contact ON campaign_recipients(contact_id) WHERE contact_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_interactions_account_lead_created ON interactions(account_id, lead_id, created_at DESC) WHERE lead_id IS NOT NULL`,
 
 		// Backfill participant_tags from contact_tags for existing participants
 		`INSERT INTO participant_tags (participant_id, tag_id)
@@ -723,6 +727,7 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Program participants: track which lead was used to add the participant
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS lead_id UUID REFERENCES leads(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_program_participants_lead ON program_participants(lead_id) WHERE lead_id IS NOT NULL`,
 
 		// RBAC: Custom roles with granular module permissions
 		`CREATE TABLE IF NOT EXISTS roles (
@@ -978,6 +983,7 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_survey_responses_survey ON survey_responses(survey_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_survey_responses_account ON survey_responses(account_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_survey_responses_lead ON survey_responses(lead_id) WHERE lead_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS survey_answers (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			response_id UUID NOT NULL REFERENCES survey_responses(id) ON DELETE CASCADE,
@@ -1329,6 +1335,8 @@ func Migrate(db *pgxpool.Pool) error {
 		// Link registrations to global contact/lead + track WA send status
 		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL`,
 		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS lead_id UUID REFERENCES leads(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_dynamic_link_registrations_contact ON dynamic_link_registrations(contact_id) WHERE contact_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_dynamic_link_registrations_lead ON dynamic_link_registrations(lead_id) WHERE lead_id IS NOT NULL`,
 		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS whatsapp_status TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS whatsapp_error TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dynamic_link_registrations ADD COLUMN IF NOT EXISTS session_token TEXT`,

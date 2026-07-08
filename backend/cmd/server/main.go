@@ -187,7 +187,7 @@ func main() {
 	server := api.NewServer(cfg, services, repos, hub, devicePool, store, kommoSyncSvc, kommoManager, redisCache, googleClient, Version)
 
 	// Initialize and start MCP server (Model Context Protocol) for external clients.
-	mcpServer := clarinMCP.New(repos, services, cfg.JWTSecret)
+	mcpServer := clarinMCP.New(repos, services, cfg.JWTSecret, Version)
 	mcpServer.Start("8081")
 
 	// Start event tag auto-sync worker
