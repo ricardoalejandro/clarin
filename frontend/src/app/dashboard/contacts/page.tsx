@@ -81,6 +81,51 @@ interface Contact {
   google_sync_error?: string | null
 }
 
+interface ContactRelationCounts {
+  leads: number
+  chats: number
+  tasks: number
+  interactions: number
+  events: number
+  programs: number
+  campaign_recipients: number
+  custom_fields: number
+  tags: number
+}
+
+interface DuplicateCandidate {
+  contact: Contact
+  counts: ContactRelationCounts
+}
+
+interface DuplicateGroup {
+  group_key: string
+  normalized_phone: string
+  confidence: string
+  reason: string
+  recommended_keep_id: string
+  contacts: DuplicateCandidate[]
+}
+
+interface MergePreview {
+  keep_id: string
+  merge_ids: string[]
+  fields: { field: string; label: string; final_value?: string | null; conflict: boolean; candidates?: string[] }[]
+  leads: {
+    id: string
+    contact_id: string
+    name?: string | null
+    phone?: string | null
+    pipeline_name?: string | null
+    stage_name?: string | null
+    is_archived: boolean
+    is_blocked: boolean
+    created_at: string
+  }[]
+  counts: ContactRelationCounts
+  warnings?: string[]
+}
+
 interface Device {
   id: string
   name: string
@@ -107,6 +152,31 @@ function getInitials(c: Contact): string {
   const parts = cleaned.split(/\s+/)
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
   return cleaned.substring(0, 2).toUpperCase()
+}
+
+function getRelationTotal(counts?: ContactRelationCounts): number {
+  if (!counts) return 0
+  return counts.leads + counts.chats + counts.tasks + counts.interactions + counts.events + counts.programs + counts.campaign_recipients + counts.custom_fields + counts.tags
+}
+
+function normalizeDuplicateGroups(raw: any[]): DuplicateGroup[] {
+  return (raw || []).map((group: any, index: number) => {
+    if (Array.isArray(group)) {
+      const contacts = group as Contact[]
+      return {
+        group_key: `legacy-${index}`,
+        normalized_phone: contacts[0]?.phone || '',
+        confidence: 'high',
+        reason: 'same_phone',
+        recommended_keep_id: contacts[0]?.id || '',
+        contacts: contacts.map(contact => ({
+          contact,
+          counts: { leads: contact.lead_count || 0, chats: 0, tasks: 0, interactions: 0, events: 0, programs: 0, campaign_recipients: 0, custom_fields: 0, tags: contact.structured_tags?.length || contact.tags?.length || 0 },
+        })),
+      }
+    }
+    return group as DuplicateGroup
+  })
 }
 
 const DATE_PRESETS = [
@@ -236,8 +306,14 @@ export default function ContactsPage() {
 
   // Duplicates
   const [showDuplicates, setShowDuplicates] = useState(false)
-  const [duplicateGroups, setDuplicateGroups] = useState<Contact[][]>([])
+  const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>([])
   const [loadingDuplicates, setLoadingDuplicates] = useState(false)
+  const [selectedDuplicateKey, setSelectedDuplicateKey] = useState<string | null>(null)
+  const [mergeKeepByGroup, setMergeKeepByGroup] = useState<Record<string, string>>({})
+  const [mergePreview, setMergePreview] = useState<MergePreview | null>(null)
+  const [loadingMergePreview, setLoadingMergePreview] = useState(false)
+  const [mergingGroupKey, setMergingGroupKey] = useState<string | null>(null)
+  const mergePreviewRequestRef = useRef(0)
 
   // Sort
   const [sortBy, setSortBy] = useState('')
@@ -865,8 +941,17 @@ export default function ContactsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        setDuplicateGroups(data.duplicates || [])
+        const groups = normalizeDuplicateGroups(data.groups || data.duplicates || [])
+        setDuplicateGroups(groups)
+        const keepMap: Record<string, string> = {}
+        groups.forEach(group => {
+          keepMap[group.group_key] = group.recommended_keep_id || group.contacts[0]?.contact.id || ''
+        })
+        setMergeKeepByGroup(keepMap)
+        setSelectedDuplicateKey(groups[0]?.group_key || null)
+        setMergePreview(null)
         setShowDuplicates(true)
+        if (groups[0]) loadMergePreview(groups[0], keepMap[groups[0].group_key])
       }
     } catch {
       alert('Error buscando duplicados')
@@ -875,8 +960,41 @@ export default function ContactsPage() {
     }
   }
 
-  const handleMerge = async (keepId: string, mergeIds: string[]) => {
-    if (!confirm(`¿Fusionar ${mergeIds.length + 1} contactos? Los duplicados se eliminarán.`)) return
+  async function loadMergePreview(group: DuplicateGroup, keepId: string) {
+    const mergeIds = group.contacts.map(c => c.contact.id).filter(id => id !== keepId)
+    if (!keepId || mergeIds.length === 0) {
+      setMergePreview(null)
+      return
+    }
+    const requestId = mergePreviewRequestRef.current + 1
+    mergePreviewRequestRef.current = requestId
+    setLoadingMergePreview(true)
+    try {
+      const res = await fetch('/api/contacts/merge/preview', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ keep_id: keepId, merge_ids: mergeIds }),
+      })
+      const data = await res.json()
+      if (requestId !== mergePreviewRequestRef.current) return
+      if (data.success) setMergePreview(data.preview)
+      else alert(data.error || 'Error al preparar la unificación')
+    } catch {
+      if (requestId === mergePreviewRequestRef.current) alert('Error al preparar la unificación')
+    } finally {
+      if (requestId === mergePreviewRequestRef.current) setLoadingMergePreview(false)
+    }
+  }
+
+  const handleMerge = async (group: DuplicateGroup) => {
+    const keepId = mergeKeepByGroup[group.group_key] || group.recommended_keep_id || group.contacts[0]?.contact.id
+    const mergeIds = group.contacts.map(c => c.contact.id).filter(id => id !== keepId)
+    if (!keepId || mergeIds.length === 0) return
+    if (!confirm(`¿Unificar ${mergeIds.length + 1} contactos?\n\nLos leads, chats, tareas e historial de los duplicados se sumarán al contacto elegido.`)) return
+    setMergingGroupKey(group.group_key)
     try {
       const res = await fetch('/api/contacts/merge', {
         method: 'POST',
@@ -889,10 +1007,18 @@ export default function ContactsPage() {
       const data = await res.json()
       if (data.success) {
         fetchContacts()
-        handleFindDuplicates() // Refresh duplicates
+        const nextGroups = duplicateGroups.filter(g => g.group_key !== group.group_key)
+        setDuplicateGroups(nextGroups)
+        setSelectedDuplicateKey(nextGroups[0]?.group_key || null)
+        setMergePreview(null)
+        if (nextGroups.length === 0) setShowDuplicates(false)
+      } else {
+        alert(data.error || 'Error al unificar')
       }
     } catch {
-      alert('Error al fusionar')
+      alert('Error al unificar')
+    } finally {
+      setMergingGroupKey(null)
     }
   }
 
@@ -1195,6 +1321,8 @@ export default function ContactsPage() {
     }
   }
 
+  const selectedDuplicateGroup = duplicateGroups.find(g => g.group_key === selectedDuplicateKey) || duplicateGroups[0] || null
+
   if (loading && contacts.length === 0) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -1211,7 +1339,7 @@ export default function ContactsPage() {
           <h1 className="text-lg font-bold text-slate-900 whitespace-nowrap">Contactos</h1>
           <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full">{total.toLocaleString()}</span>
           {duplicateLeadsCount > 0 && !duplicateLeadsDismissed && (
-            <button onClick={() => setDuplicateLeadsDismissed(true)} className="text-amber-500 hover:text-amber-600 transition-colors" title={`${duplicateLeadsCount} contacto(s) con múltiples leads activos`}>
+            <button onClick={() => setDuplicateLeadsDismissed(true)} className="text-amber-500 hover:text-amber-600 transition-colors" title={`${duplicateLeadsCount} contacto(s) con varios leads activos vinculados`}>
               <AlertTriangle className="w-4 h-4" />
             </button>
           )}
@@ -2296,59 +2424,176 @@ export default function ContactsPage() {
 
       {/* Duplicates Modal */}
       {showDuplicates && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between p-4 border-b border-slate-200">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-3">
+          <div className="bg-white rounded-xl w-full max-w-6xl h-[86vh] overflow-hidden flex flex-col border border-slate-200 shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
               <div className="flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-yellow-500" />
-                <h2 className="text-lg font-semibold text-slate-900">
-                  Contactos Duplicados ({duplicateGroups.length} grupos)
-                </h2>
+                <Merge className="w-4 h-4 text-emerald-600" />
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">Unificar contactos</h2>
+                  <p className="text-xs text-slate-500">{duplicateGroups.length} grupo{duplicateGroups.length !== 1 ? 's' : ''} con posible duplicado</p>
+                </div>
               </div>
               <button onClick={() => setShowDuplicates(false)} className="p-1 hover:bg-slate-100 rounded">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="flex-1 min-h-0 flex flex-col md:flex-row">
               {duplicateGroups.length === 0 ? (
-                <div className="text-center py-8 text-slate-500">
+                <div className="flex-1 flex items-center justify-center text-slate-500">
+                  <div className="text-center">
                   <CheckSquare className="w-12 h-12 mx-auto mb-3 text-emerald-500" />
                   <p className="font-medium">No se encontraron duplicados</p>
-                </div>
-              ) : duplicateGroups.map((group, gi) => (
-                <div key={gi} className="border border-yellow-200 rounded-lg p-4 bg-yellow-50/50">
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-sm font-medium text-slate-700">
-                      Teléfono: {group[0]?.phone || 'desconocido'} ({group.length} contactos)
-                    </p>
-                    <button
-                      onClick={() => handleMerge(group[0].id, group.slice(1).map(c => c.id))}
-                      className="flex items-center gap-1 px-3 py-1 text-sm bg-yellow-500 text-white rounded-lg hover:bg-yellow-600"
-                    >
-                      <Merge className="w-3.5 h-3.5" />
-                      Fusionar
-                    </button>
                   </div>
-                  <div className="space-y-2">
-                    {group.map((contact, ci) => (
-                      <div key={contact.id} className="flex items-center gap-3 p-2 bg-white rounded-lg">
-                        <div className="w-8 h-8 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0">
-                          <span className="text-emerald-700 text-xs font-medium">{getInitials(contact)}</span>
+                </div>
+              ) : (
+                <>
+                  <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-slate-200 bg-slate-50/60 overflow-y-auto">
+                    {duplicateGroups.map((group) => {
+                      const totalLeads = group.contacts.reduce((sum, candidate) => sum + (candidate.counts?.leads || 0), 0)
+                      const selected = selectedDuplicateKey === group.group_key
+                      return (
+                        <button
+                          key={group.group_key}
+                          onClick={() => {
+                            setSelectedDuplicateKey(group.group_key)
+                            const keep = mergeKeepByGroup[group.group_key] || group.recommended_keep_id || group.contacts[0]?.contact.id
+                            loadMergePreview(group, keep)
+                          }}
+                          className={`w-full text-left px-4 py-3 border-b border-slate-200 transition ${selected ? 'bg-white shadow-sm' : 'hover:bg-white/70'}`}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-slate-800 truncate">+{group.normalized_phone || 'sin telefono'}</p>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">{group.contacts.length}</span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-1">{totalLeads} lead{totalLeads !== 1 ? 's' : ''} vinculados</p>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <div className="flex-1 min-w-0 overflow-y-auto">
+                    {selectedDuplicateGroup && (
+                      <div className="p-4 space-y-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Grupo</p>
+                            <h3 className="text-base font-semibold text-slate-900">+{selectedDuplicateGroup.normalized_phone || 'sin telefono'}</h3>
+                            <p className="text-xs text-slate-500">El contacto elegido conservará sus datos; los leads e historial de los demás se sumarán.</p>
+                          </div>
+                          <button
+                            onClick={() => loadMergePreview(selectedDuplicateGroup, mergeKeepByGroup[selectedDuplicateGroup.group_key] || selectedDuplicateGroup.recommended_keep_id)}
+                            disabled={loadingMergePreview}
+                            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            {loadingMergePreview ? 'Revisando...' : 'Actualizar preview'}
+                          </button>
                         </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium text-slate-900 truncate">{getDisplayName(contact)}</p>
-                          <p className="text-xs text-slate-500">{contact.jid}</p>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                          {selectedDuplicateGroup.contacts.map(({ contact, counts }) => {
+                            const keepId = mergeKeepByGroup[selectedDuplicateGroup.group_key] || selectedDuplicateGroup.recommended_keep_id
+                            const isKeep = keepId === contact.id
+                            return (
+                              <label key={contact.id} className={`border rounded-lg p-3 cursor-pointer transition ${isKeep ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 hover:border-slate-300'}`}>
+                                <div className="flex items-start gap-3">
+                                  <input
+                                    type="radio"
+                                    name={`keep-${selectedDuplicateGroup.group_key}`}
+                                    checked={isKeep}
+                                    onChange={() => {
+                                      setMergeKeepByGroup(prev => ({ ...prev, [selectedDuplicateGroup.group_key]: contact.id }))
+                                      loadMergePreview(selectedDuplicateGroup, contact.id)
+                                    }}
+                                    className="mt-1 accent-emerald-600"
+                                  />
+                                  <div className="w-9 h-9 bg-white rounded-full flex items-center justify-center shrink-0 border border-slate-200">
+                                    <span className="text-emerald-700 text-xs font-bold">{getInitials(contact)}</span>
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2">
+                                      <p className="text-sm font-semibold text-slate-900 truncate">{getDisplayName(contact)}</p>
+                                      {isKeep && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-600 text-white font-semibold">Se mantiene</span>}
+                                    </div>
+                                    <p className="text-xs text-slate-500 truncate">{contact.jid}</p>
+                                    <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
+                                      <span className="px-1.5 py-0.5 bg-white border border-slate-200 rounded">{counts.leads} leads</span>
+                                      <span className="px-1.5 py-0.5 bg-white border border-slate-200 rounded">{counts.chats} chats</span>
+                                      <span className="px-1.5 py-0.5 bg-white border border-slate-200 rounded">{getRelationTotal(counts)} relaciones</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </label>
+                            )
+                          })}
                         </div>
-                        {ci === 0 && (
-                          <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs rounded font-medium">
-                            Se mantiene
-                          </span>
+
+                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                          <div className="border border-slate-200 rounded-lg overflow-hidden">
+                            <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                              <p className="text-xs font-semibold text-slate-700">Campos finales</p>
+                              {loadingMergePreview && <RefreshCw className="w-3 h-3 text-slate-400 animate-spin" />}
+                            </div>
+                            <div className="divide-y divide-slate-100 max-h-72 overflow-y-auto">
+                              {(mergePreview?.fields || []).map(field => (
+                                <div key={field.field} className="px-3 py-2 grid grid-cols-[120px_1fr_auto] gap-2 items-center text-xs">
+                                  <span className="text-slate-500">{field.label}</span>
+                                  <span className="text-slate-900 truncate">{field.final_value || '-'}</span>
+                                  {field.conflict && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold">conflicto</span>}
+                                </div>
+                              ))}
+                              {!loadingMergePreview && !mergePreview && (
+                                <p className="text-xs text-slate-400 text-center py-6">Selecciona un contacto para revisar la fusión.</p>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="border border-slate-200 rounded-lg overflow-hidden">
+                            <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
+                              <p className="text-xs font-semibold text-slate-700">Leads que quedarán vinculados</p>
+                            </div>
+                            <div className="divide-y divide-slate-100 max-h-72 overflow-y-auto">
+                              {(mergePreview?.leads || []).map(lead => (
+                                <div key={lead.id} className="px-3 py-2 text-xs">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="font-medium text-slate-900 truncate">{lead.name || lead.phone || lead.id}</p>
+                                    {(lead.is_archived || lead.is_blocked) && <span className="text-[10px] text-slate-500">{lead.is_archived ? 'Archivado' : 'Bloqueado'}</span>}
+                                  </div>
+                                  <p className="text-slate-500 truncate">{lead.pipeline_name || 'Sin pipeline'} / {lead.stage_name || 'Sin etapa'}</p>
+                                </div>
+                              ))}
+                              {!loadingMergePreview && mergePreview?.leads?.length === 0 && (
+                                <p className="text-xs text-slate-400 text-center py-6">No hay leads vinculados en este grupo.</p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {mergePreview?.warnings && mergePreview.warnings.length > 0 && (
+                          <div className="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 text-xs text-amber-800">
+                            {mergePreview.warnings.join(' ')}
+                          </div>
                         )}
+
+                        <div className="sticky bottom-0 bg-white border-t border-slate-200 -mx-4 -mb-4 px-4 py-3 flex items-center justify-between gap-3">
+                          <p className="text-xs text-slate-500">
+                            Se moverán {mergePreview?.counts.leads || 0} leads, {mergePreview?.counts.chats || 0} chats y {mergePreview?.counts.tasks || 0} tareas desde los duplicados.
+                          </p>
+                          <button
+                            onClick={() => handleMerge(selectedDuplicateGroup)}
+                            disabled={!mergePreview || mergingGroupKey === selectedDuplicateGroup.group_key || loadingMergePreview}
+                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold"
+                          >
+                            {mergingGroupKey === selectedDuplicateGroup.group_key ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Merge className="w-4 h-4" />}
+                            Unificar grupo
+                          </button>
+                        </div>
                       </div>
-                    ))}
+                    )}
                   </div>
-                </div>
-              ))}
+                </>
+              )}
             </div>
           </div>
         </div>

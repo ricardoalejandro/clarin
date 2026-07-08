@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Plus, Search, BookOpen, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, MoreHorizontal, LayoutGrid, LayoutTemplate, List, AlertCircle } from 'lucide-react';
 import { api } from '@/lib/api';
-import { Program, ProgramFolder } from '@/types/program';
+import { Program, ProgramDashboardSummary, ProgramFolder, ProgramGoal } from '@/types/program';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -37,6 +37,12 @@ export default function ProgramsPage() {
     location?: string;
   }>({ name: '', description: '', color: '#10b981', type: 'course' });
   const [pipelines, setPipelines] = useState<Array<{ id: string; name: string }>>([]);
+  const [dashboard, setDashboard] = useState<ProgramDashboardSummary | null>(null);
+  const [loadingDashboard, setLoadingDashboard] = useState(true);
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [goalForm, setGoalForm] = useState<ProgramGoal>({ attendance_goal_percent: 80, transfer_goal_percent: 70 });
+  const [savingGoals, setSavingGoals] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [editingProgram, setEditingProgram] = useState<Program | null>(null);
   const [editForm, setEditForm] = useState({ name: '', description: '', color: '#10b981', status: 'active' });
@@ -84,6 +90,10 @@ export default function ProgramsPage() {
     fetchPipelines();
   }, []);
 
+  useEffect(() => {
+    fetchDashboard();
+  }, [dateFrom, dateTo]);
+
   const fetchPipelines = async () => {
     try {
       const res = await fetch('/api/events/pipelines', { headers: { Authorization: `Bearer ${token()}` } });
@@ -115,6 +125,52 @@ export default function ProgramsPage() {
       console.error('Error fetching programs:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchDashboard = async () => {
+    setLoadingDashboard(true);
+    try {
+      const params = new URLSearchParams();
+      if (dateFrom) params.set('from', dateFrom);
+      if (dateTo) params.set('to', dateTo);
+      const response = await api<{ success: boolean; dashboard: ProgramDashboardSummary }>(`/api/programs/dashboard${params.toString() ? `?${params.toString()}` : ''}`);
+      const data = response.data;
+      if (response.success && data?.success) {
+        setDashboard(data.dashboard);
+        setGoalForm({
+          attendance_goal_percent: data.dashboard.attendance_goal_percent || 80,
+          transfer_goal_percent: data.dashboard.transfer_goal_percent || 70,
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching programs dashboard:', error);
+    } finally {
+      setLoadingDashboard(false);
+    }
+  };
+
+  const saveGlobalGoals = async () => {
+    setSavingGoals(true);
+    try {
+      const res = await api<{ success: boolean; goals: ProgramGoal }>('/api/programs/goals', {
+        method: 'PUT',
+        body: JSON.stringify({
+          attendance_goal_percent: Number(goalForm.attendance_goal_percent) || 80,
+          transfer_goal_percent: Number(goalForm.transfer_goal_percent) || 70,
+        }),
+      });
+      if (res.success) {
+        showToast('Metas actualizadas', 'success');
+        fetchDashboard();
+      } else {
+        showToast(res.error || 'Error al guardar metas', 'error');
+      }
+    } catch (error) {
+      console.error('Error saving program goals:', error);
+      showToast('Error al guardar metas', 'error');
+    } finally {
+      setSavingGoals(false);
     }
   };
 
@@ -398,6 +454,18 @@ export default function ProgramsPage() {
     totalSessions: programs.reduce((sum, p) => sum + (p.session_count || 0), 0),
   };
 
+  const formatPct = (value?: number) => `${Math.round(value || 0)}%`;
+  const healthClass = (health?: string) => {
+    if (health === 'critical') return 'bg-red-50 text-red-700 border-red-100';
+    if (health === 'watch') return 'bg-amber-50 text-amber-700 border-amber-100';
+    return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+  };
+  const healthLabel = (health?: string) => {
+    if (health === 'critical') return 'Crítico';
+    if (health === 'watch') return 'Observar';
+    return 'Saludable';
+  };
+
   // Render program card for Grid view
   const renderProgramCard = (program: Program) => {
     const status = STATUS_CONFIG[program.status] || STATUS_CONFIG.active;
@@ -601,6 +669,161 @@ export default function ProgramsPage() {
             <span className="hidden sm:inline">Nuevo Programa</span>
             <span className="sm:hidden">Nuevo</span>
           </button>
+        </div>
+      </div>
+
+      {/* General health dashboard */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 shrink-0">
+        <div className="flex flex-col xl:flex-row xl:items-start gap-4">
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-emerald-600" />
+                  Salud general de grupos
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">Metas de asistencia y traspaso para probacionistas</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="date"
+                  value={dateFrom}
+                  onChange={(e) => setDateFrom(e.target.value)}
+                  className="px-3 py-2 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                />
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => setDateTo(e.target.value)}
+                  className="px-3 py-2 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                />
+                {(dateFrom || dateTo) && (
+                  <button onClick={() => { setDateFrom(''); setDateTo(''); }} className="px-3 py-2 text-xs text-slate-500 hover:text-slate-700 hover:bg-slate-50 rounded-lg">
+                    Limpiar
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {loadingDashboard ? (
+              <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                {[1, 2, 3, 4, 5].map(i => <div key={i} className="h-20 bg-slate-50 rounded-lg animate-pulse" />)}
+              </div>
+            ) : dashboard ? (
+              <>
+                <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                  <div className="rounded-lg border border-slate-200 p-3">
+                    <p className="text-xs text-slate-500">Asistencia real</p>
+                    <div className="flex items-end gap-2 mt-1">
+                      <span className={`text-2xl font-bold ${dashboard.attendance_rate >= dashboard.attendance_goal_percent ? 'text-emerald-600' : 'text-amber-600'}`}>{formatPct(dashboard.attendance_rate)}</span>
+                      <span className="text-[11px] text-slate-400 pb-1">meta {dashboard.attendance_goal_percent}%</span>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-3">
+                    <p className="text-xs text-slate-500">Traspaso real</p>
+                    <div className="flex items-end gap-2 mt-1">
+                      <span className={`text-2xl font-bold ${dashboard.transfer_rate >= dashboard.transfer_goal_percent ? 'text-emerald-600' : 'text-amber-600'}`}>{formatPct(dashboard.transfer_rate)}</span>
+                      <span className="text-[11px] text-slate-400 pb-1">meta {dashboard.transfer_goal_percent}%</span>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-3">
+                    <p className="text-xs text-slate-500">Inscritos</p>
+                    <p className="text-2xl font-bold text-slate-800 mt-1">{dashboard.participant_count}</p>
+                    <p className="text-[11px] text-slate-400">{dashboard.active_program_count} grupos activos</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-3">
+                    <p className="text-xs text-slate-500">Finalizaron</p>
+                    <p className="text-2xl font-bold text-blue-600 mt-1">{dashboard.completed_count}</p>
+                    <p className="text-[11px] text-slate-400">{dashboard.transferred_count} traspasados</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 p-3">
+                    <p className="text-xs text-slate-500">Alertas</p>
+                    <p className="text-2xl font-bold text-red-500 mt-1">{dashboard.critical_participants}</p>
+                    <p className="text-[11px] text-slate-400">{dashboard.groups_below_goal} grupos bajo meta</p>
+                  </div>
+                </div>
+
+                {dashboard.groups.length > 0 && (
+                  <div className="mt-4 overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs text-slate-500 border-b border-slate-100">
+                          <th className="py-2 font-medium">Grupo</th>
+                          <th className="py-2 font-medium">Salud</th>
+                          <th className="py-2 font-medium">Asistencia</th>
+                          <th className="py-2 font-medium">Traspaso</th>
+                          <th className="py-2 font-medium text-right">Riesgo</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {dashboard.groups.slice(0, 6).map(group => (
+                          <tr key={group.program_id} className="hover:bg-slate-50">
+                            <td className="py-2 pr-3">
+                              <Link href={`/dashboard/programs/${group.program_id}`} className="flex items-center gap-2 min-w-0">
+                                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: group.color || '#10b981' }} />
+                                <span className="font-medium text-slate-800 truncate">{group.name}</span>
+                              </Link>
+                            </td>
+                            <td className="py-2 pr-3">
+                              <span className={`inline-flex px-2 py-0.5 rounded-full border text-xs font-medium ${healthClass(group.health)}`}>
+                                {healthLabel(group.health)}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-3 text-xs">
+                              <span className={group.attendance_rate >= group.attendance_goal_percent ? 'text-emerald-700 font-semibold' : 'text-amber-700 font-semibold'}>{formatPct(group.attendance_rate)}</span>
+                              <span className="text-slate-400 ml-1">/ {group.attendance_goal_percent}%</span>
+                            </td>
+                            <td className="py-2 pr-3 text-xs">
+                              <span className={group.transfer_rate >= group.transfer_goal_percent ? 'text-emerald-700 font-semibold' : 'text-amber-700 font-semibold'}>{formatPct(group.transfer_rate)}</span>
+                              <span className="text-slate-400 ml-1">/ {group.transfer_goal_percent}%</span>
+                            </td>
+                            <td className="py-2 text-right text-xs text-slate-600">{group.at_risk_count}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-sm text-slate-500">No se pudo cargar el dashboard general.</div>
+            )}
+          </div>
+
+          <div className="w-full xl:w-64 border border-slate-200 rounded-lg p-3 bg-slate-50/60">
+            <p className="text-xs font-semibold text-slate-700 mb-3">Metas globales</p>
+            <div className="grid grid-cols-2 xl:grid-cols-1 gap-3">
+              <label className="text-xs text-slate-500">
+                Asistencia %
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={goalForm.attendance_goal_percent}
+                  onChange={(e) => setGoalForm(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))}
+                  className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                />
+              </label>
+              <label className="text-xs text-slate-500">
+                Traspaso %
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={goalForm.transfer_goal_percent}
+                  onChange={(e) => setGoalForm(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))}
+                  className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                />
+              </label>
+            </div>
+            <button
+              onClick={saveGlobalGoals}
+              disabled={savingGoals}
+              className="mt-3 w-full px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {savingGoals ? 'Guardando...' : 'Guardar metas'}
+            </button>
+          </div>
         </div>
       </div>
 

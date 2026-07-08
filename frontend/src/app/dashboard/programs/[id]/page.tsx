@@ -5,17 +5,18 @@ import { useParams, useRouter } from 'next/navigation';
 import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
-  Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid
+  Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid, HeartPulse, Target, NotebookPen
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher';
-import { Program, ProgramParticipant, ProgramSession, ProgramAttendance } from '@/types/program';
+import { Program, ProgramParticipant, ProgramSession, ProgramAttendance, ProgramGoal, ProgramHealthSummary } from '@/types/program';
 import { Chat } from '@/types/chat';
 import { Contact } from '@/types/contact';
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector';
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal';
 import LeadDetailPanel from '@/components/LeadDetailPanel';
 import ChatPanel from '@/components/chat/ChatPanel';
+import ObservationHistoryModal, { HistoryObservation } from '@/components/ObservationHistoryModal';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 
@@ -83,7 +84,7 @@ export default function ProgramDetailPage() {
   const [stages, setStages] = useState<Array<{ id: string; name: string; color: string; position: number }>>([]);
   const [draggedParticipantID, setDraggedParticipantID] = useState<string | null>(null);
   const [dragOverStageID, setDragOverStageID] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'participants' | 'sessions' | 'stats' | 'kanban'>('participants');
+  const [activeTab, setActiveTab] = useState<'health' | 'participants' | 'sessions' | 'stats' | 'kanban'>('health');
   const [loading, setLoading] = useState(true);
   const [devices, setDevices] = useState<Device[]>([]);
 
@@ -95,13 +96,13 @@ export default function ProgramDetailPage() {
   const [isGenerateSessionsOpen, setIsGenerateSessionsOpen] = useState(false);
 
   // Form state
-  const [newSession, setNewSession] = useState({ date: new Date().toISOString().split('T')[0], topic: '', start_time: '', end_time: '', location: '' });
+  const [newSession, setNewSession] = useState({ date: new Date().toISOString().split('T')[0], topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
   const [selectedSession, setSelectedSession] = useState<ProgramSession | null>(null);
-  const [attendanceData, setAttendanceData] = useState<Record<string, { status: string, notes: string }>>({});
+  const [attendanceData, setAttendanceData] = useState<Record<string, { status: string, notes: string, instructor_status?: string, instructor_notes?: string }>>({});
 
   // Edit session state
   const [editingSession, setEditingSession] = useState<ProgramSession | null>(null);
-  const [editSessionForm, setEditSessionForm] = useState({ date: '', topic: '', start_time: '', end_time: '', location: '' });
+  const [editSessionForm, setEditSessionForm] = useState({ date: '', topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
   const [savingSession, setSavingSession] = useState(false);
 
   // Campaign state
@@ -197,6 +198,14 @@ export default function ProgramDetailPage() {
   const [statsData, setStatsData] = useState<{ session_stats: any[]; participant_stats: any[] } | null>(null);
   const [loadingStats, setLoadingStats] = useState(false);
   const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
+  const [health, setHealth] = useState<ProgramHealthSummary | null>(null);
+  const [loadingHealth, setLoadingHealth] = useState(false);
+  const [programGoals, setProgramGoals] = useState<ProgramGoal>({ attendance_goal_percent: 80, transfer_goal_percent: 70 });
+  const [savingGoals, setSavingGoals] = useState(false);
+  const [observationParticipant, setObservationParticipant] = useState<ProgramParticipant | null>(null);
+  const [observationHistory, setObservationHistory] = useState<HistoryObservation[]>([]);
+  const [outcomeParticipant, setOutcomeParticipant] = useState<ProgramParticipant | null>(null);
+  const [outcomeForm, setOutcomeForm] = useState({ status: 'completed', transferred_to_level: '', drop_reason: '', drop_notes: '' });
 
   // Toast auto-dismiss
   useEffect(() => {
@@ -222,6 +231,8 @@ export default function ProgramDetailPage() {
       if (e.key !== 'Escape') return;
       if (showDeviceSelector) { setShowDeviceSelector(false); return; }
       if (showInlineChat) { setShowInlineChat(false); return; }
+      if (observationParticipant) { setObservationParticipant(null); return; }
+      if (outcomeParticipant) { setOutcomeParticipant(null); return; }
       if (isAttendanceOpen) { setIsAttendanceOpen(false); return; }
       if (isGenerateSessionsOpen) { setIsGenerateSessionsOpen(false); return; }
       if (isCreateSessionOpen) { setIsCreateSessionOpen(false); return; }
@@ -233,20 +244,24 @@ export default function ProgramDetailPage() {
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [showDeviceSelector, showInlineChat, isAttendanceOpen, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, selectedLead]);
+  }, [showDeviceSelector, showInlineChat, observationParticipant, outcomeParticipant, isAttendanceOpen, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, selectedLead]);
 
   const fetchProgramData = async () => {
     try {
       setLoading(true);
-      const [progRes, partsRes, sessRes] = await Promise.all([
+      const [progRes, partsRes, sessRes, healthRes, goalsRes] = await Promise.all([
         api<Program>(`/api/programs/${programId}`),
         api<ProgramParticipant[]>(`/api/programs/${programId}/participants`),
-        api<ProgramSession[]>(`/api/programs/${programId}/sessions`)
+        api<ProgramSession[]>(`/api/programs/${programId}/sessions`),
+        api<{ success: boolean; health: ProgramHealthSummary }>(`/api/programs/${programId}/health`),
+        api<{ success: boolean; goals: ProgramGoal }>(`/api/programs/${programId}/goals`)
       ]);
 
       if (progRes.success) setProgram(progRes.data || null);
       if (partsRes.success) setParticipants(partsRes.data || []);
       if (sessRes.success) setSessions(sessRes.data || []);
+      if (healthRes.success && healthRes.data?.success) setHealth(healthRes.data.health);
+      if (goalsRes.success && goalsRes.data?.success) setProgramGoals(goalsRes.data.goals);
       // Load stages if event type
       const prog = progRes.success ? (progRes.data as Program | null) : null;
       if (prog && prog.type === 'event' && prog.pipeline_id) {
@@ -264,12 +279,109 @@ export default function ProgramDetailPage() {
             })));
           }
         } catch (e) { console.error('stages', e); }
-        setActiveTab(prev => (prev === 'sessions' || prev === 'stats') ? 'kanban' : prev);
+        setActiveTab(prev => (prev === 'sessions' || prev === 'stats' || prev === 'health') ? 'kanban' : prev);
+      } else {
+        setActiveTab(prev => prev === 'kanban' ? 'health' : prev);
       }
     } catch (error) {
       console.error('Error fetching program data:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchHealth = useCallback(async () => {
+    setLoadingHealth(true);
+    try {
+      const res = await api<{ success: boolean; health: ProgramHealthSummary }>(`/api/programs/${programId}/health`);
+      if (res.success && res.data?.success) setHealth(res.data.health);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoadingHealth(false);
+    }
+  }, [programId]);
+
+  const saveProgramGoals = async () => {
+    setSavingGoals(true);
+    try {
+      const res = await api<{ success: boolean; goals: ProgramGoal }>(`/api/programs/${programId}/goals`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          attendance_goal_percent: Number(programGoals.attendance_goal_percent) || 80,
+          transfer_goal_percent: Number(programGoals.transfer_goal_percent) || 70,
+        })
+      });
+      if (res.success) {
+        showToast('Metas del grupo actualizadas', 'success');
+        fetchHealth();
+      } else {
+        showToast(res.error || 'Error al guardar metas', 'error');
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('Error al guardar metas', 'error');
+    } finally {
+      setSavingGoals(false);
+    }
+  };
+
+  const openObservationHistory = async (participantId: string) => {
+    const participant = participants.find(p => p.id === participantId);
+    if (!participant) return;
+    setObservationParticipant(participant);
+    setObservationHistory([]);
+    try {
+      const res = await api<{ success: boolean; interactions: HistoryObservation[] }>(`/api/contacts/${participant.contact_id}/interactions?limit=200`);
+      if (res.success && res.data?.success) setObservationHistory(res.data.interactions || []);
+      else setObservationHistory([]);
+    } catch {
+      setObservationHistory([]);
+    }
+  };
+
+  const openOutcomeModal = (participantId: string, status: 'completed' | 'dropped') => {
+    const participant = participants.find(p => p.id === participantId);
+    if (!participant) return;
+    setOutcomeParticipant(participant);
+    setOutcomeForm({
+      status,
+      transferred_to_level: participant.transferred_to_level || '',
+      drop_reason: participant.drop_reason || '',
+      drop_notes: participant.drop_notes || '',
+    });
+  };
+
+  const saveParticipantOutcome = async () => {
+    if (!outcomeParticipant) return;
+    try {
+      const payload = outcomeForm.status === 'completed'
+        ? {
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+            transferred_to_level: outcomeForm.transferred_to_level,
+            transferred_at: outcomeForm.transferred_to_level ? new Date().toISOString() : '',
+          }
+        : {
+            status: 'dropped',
+            dropped_at: new Date().toISOString(),
+            drop_reason: outcomeForm.drop_reason,
+            drop_notes: outcomeForm.drop_notes,
+          };
+      const res = await api(`/api/programs/${programId}/participants/${outcomeParticipant.id}/outcome`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload)
+      });
+      if (res.success) {
+        showToast(outcomeForm.status === 'completed' ? 'Participante completado' : 'Desistimiento registrado', 'success');
+        setOutcomeParticipant(null);
+        fetchProgramData();
+      } else {
+        showToast(res.error || 'Error al actualizar participante', 'error');
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('Error al actualizar participante', 'error');
     }
   };
 
@@ -513,7 +625,7 @@ export default function ProgramDetailPage() {
       });
       if (res.success) {
         setIsCreateSessionOpen(false);
-        setNewSession({ date: new Date().toISOString().split('T')[0], topic: '', start_time: '', end_time: '', location: '' });
+        setNewSession({ date: new Date().toISOString().split('T')[0], topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
         showToast('Sesión creada', 'success');
         fetchProgramData();
       } else {
@@ -529,6 +641,7 @@ export default function ProgramDetailPage() {
     setEditSessionForm({
       date: session.date ? session.date.split('T')[0] : '',
       topic: session.topic || '',
+      session_type: session.session_type || 'regular',
       start_time: session.start_time || '',
       end_time: session.end_time || '',
       location: session.location || '',
@@ -590,11 +703,11 @@ export default function ProgramDetailPage() {
     setSelectedSession(session);
     try {
       const response = await api<ProgramAttendance[]>(`/api/programs/${programId}/sessions/${session.id}/attendance`);
-      const attMap: Record<string, { status: string, notes: string }> = {};
+      const attMap: Record<string, { status: string, notes: string, instructor_status?: string, instructor_notes?: string }> = {};
 
       if (response.success && response.data && Array.isArray(response.data)) {
         response.data.forEach((a: ProgramAttendance) => {
-          attMap[a.participant_id] = { status: a.status, notes: a.notes || '' };
+          attMap[a.participant_id] = { status: a.status, notes: a.notes || '', instructor_status: a.instructor_status || '', instructor_notes: a.instructor_notes || '' };
         });
       }
 
@@ -613,7 +726,9 @@ export default function ProgramDetailPage() {
         .map(([participantId, data]) => ({
           participant_id: participantId,
           status: data.status || '',
-          notes: data.notes || ''
+          notes: data.notes || '',
+          instructor_status: data.instructor_status || '',
+          instructor_notes: data.instructor_notes || ''
         }));
       const BATCH_SIZE = 100;
       for (let i = 0; i < records.length; i += BATCH_SIZE) {
@@ -625,6 +740,7 @@ export default function ProgramDetailPage() {
       }
       setIsAttendanceOpen(false);
       fetchProgramData();
+      fetchHealth();
     } catch (error) {
       console.error('Error saving attendance:', error);
     }
@@ -816,6 +932,18 @@ export default function ProgramDetailPage() {
     );
   }
 
+  const formatPct = (value?: number) => `${Math.round(value || 0)}%`;
+  const healthClass = (value?: string) => {
+    if (value === 'critical') return 'bg-red-50 text-red-700 border-red-100';
+    if (value === 'watch') return 'bg-amber-50 text-amber-700 border-amber-100';
+    return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+  };
+  const healthLabel = (value?: string) => {
+    if (value === 'critical') return 'Crítico';
+    if (value === 'watch') return 'Observar';
+    return 'Saludable';
+  };
+
   return (
     <div className="h-full flex flex-col min-h-0 overflow-hidden gap-3">
       {/* Header */}
@@ -911,17 +1039,6 @@ export default function ProgramDetailPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 bg-slate-100 rounded-xl p-1 shrink-0">
-        <button
-          onClick={() => setActiveTab('participants')}
-          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
-            activeTab === 'participants'
-              ? 'bg-white text-slate-800 shadow-sm'
-              : 'text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <Users className="w-4 h-4" />
-          Participantes ({participants.length})
-        </button>
         {program?.type === 'event' ? (
           <button
             onClick={() => setActiveTab('kanban')}
@@ -936,6 +1053,28 @@ export default function ProgramDetailPage() {
           </button>
         ) : (
           <>
+            <button
+              onClick={() => setActiveTab('health')}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
+                activeTab === 'health'
+                  ? 'bg-white text-slate-800 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <HeartPulse className="w-4 h-4" />
+              Salud
+            </button>
+            <button
+              onClick={() => setActiveTab('participants')}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
+                activeTab === 'participants'
+                  ? 'bg-white text-slate-800 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <Users className="w-4 h-4" />
+              Participantes ({participants.length})
+            </button>
             <button
               onClick={() => setActiveTab('sessions')}
               className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
@@ -960,11 +1099,184 @@ export default function ProgramDetailPage() {
             </button>
           </>
         )}
+        {program?.type === 'event' && (
+          <button
+            onClick={() => setActiveTab('participants')}
+            className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
+              activeTab === 'participants'
+                ? 'bg-white text-slate-800 shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            Participantes ({participants.length})
+          </button>
+        )}
       </div>
 
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-hidden">
-      {activeTab === 'participants' ? (
+      {activeTab === 'health' ? (
+        <div className="h-full overflow-y-auto space-y-4 pb-3">
+          {loadingHealth ? (
+            <div className="flex items-center justify-center py-20">
+              <div className="w-8 h-8 border-4 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
+            </div>
+          ) : (
+            <>
+              <div className="bg-white border border-slate-200 rounded-xl p-4">
+                <div className="flex flex-col lg:flex-row lg:items-center gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <HeartPulse className="w-4 h-4 text-emerald-600" />
+                      <h2 className="text-base font-semibold text-slate-800">Salud del grupo</h2>
+                      <span className={`inline-flex px-2 py-0.5 rounded-full border text-xs font-medium ${healthClass(health?.health)}`}>
+                        {healthLabel(health?.health)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500">{health?.reasons?.join(' · ') || 'Sin datos suficientes todavía'}</p>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 lg:w-[520px]">
+                    <label className="text-xs text-slate-500">
+                      Meta asistencia
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={programGoals.attendance_goal_percent}
+                        onChange={(e) => setProgramGoals(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))}
+                        className="mt-1 w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm"
+                      />
+                    </label>
+                    <label className="text-xs text-slate-500">
+                      Meta traspaso
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={programGoals.transfer_goal_percent}
+                        onChange={(e) => setProgramGoals(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))}
+                        className="mt-1 w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm"
+                      />
+                    </label>
+                    <button
+                      onClick={saveProgramGoals}
+                      disabled={savingGoals}
+                      className="self-end px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+                    >
+                      {savingGoals ? 'Guardando...' : 'Guardar'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setNewSession(prev => ({ ...prev, session_type: 'recovery', topic: prev.topic || 'Clase de recuperación' }));
+                        setIsCreateSessionOpen(true);
+                      }}
+                      className="self-end px-3 py-2 border border-blue-200 text-blue-700 bg-blue-50 rounded-lg text-sm font-medium hover:bg-blue-100"
+                    >
+                      Recuperación
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs text-slate-500">Asistencia</p>
+                  <p className={`text-2xl font-bold mt-1 ${(health?.attendance_rate || 0) >= (health?.attendance_goal_percent || 80) ? 'text-emerald-600' : 'text-amber-600'}`}>{formatPct(health?.attendance_rate)}</p>
+                  <p className="text-[11px] text-slate-400">meta {health?.attendance_goal_percent || 80}%</p>
+                </div>
+                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs text-slate-500">Traspaso</p>
+                  <p className={`text-2xl font-bold mt-1 ${(health?.transfer_rate || 0) >= (health?.transfer_goal_percent || 70) ? 'text-emerald-600' : 'text-amber-600'}`}>{formatPct(health?.transfer_rate)}</p>
+                  <p className="text-[11px] text-slate-400">meta {health?.transfer_goal_percent || 70}%</p>
+                </div>
+                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs text-slate-500">Activos</p>
+                  <p className="text-2xl font-bold text-slate-800 mt-1">{health?.active_count || 0}</p>
+                </div>
+                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs text-slate-500">Completaron</p>
+                  <p className="text-2xl font-bold text-blue-600 mt-1">{health?.completed_count || 0}</p>
+                </div>
+                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs text-slate-500">Traspasados</p>
+                  <p className="text-2xl font-bold text-emerald-600 mt-1">{health?.transferred_count || 0}</p>
+                </div>
+                <div className="bg-white rounded-xl border border-slate-200 p-4">
+                  <p className="text-xs text-slate-500">Recuperación</p>
+                  <p className="text-2xl font-bold text-indigo-600 mt-1">{health?.recovery_session_count || 0}</p>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-800">Termómetro de inscritos</h3>
+                  <button onClick={fetchHealth} className="text-xs text-emerald-600 hover:underline">Actualizar</button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-slate-600">
+                      <tr>
+                        <th className="px-4 py-3 font-medium">Inscrito</th>
+                        <th className="px-4 py-3 font-medium">Salud</th>
+                        <th className="px-4 py-3 font-medium">Asistencia</th>
+                        <th className="px-4 py-3 font-medium">Señales</th>
+                        <th className="px-4 py-3 font-medium text-right">Acciones</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(health?.participants || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-400">Sin inscritos para evaluar</td>
+                        </tr>
+                      ) : (
+                        (health?.participants || []).map(p => (
+                          <tr key={p.participant_id} className="hover:bg-slate-50">
+                            <td className="px-4 py-3">
+                              <div className="font-medium text-slate-800">{p.name || 'Sin nombre'}</div>
+                              <div className="text-xs text-slate-400">{p.phone || 'Sin teléfono'}</div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`inline-flex px-2 py-0.5 rounded-full border text-xs font-medium ${healthClass(p.health)}`}>
+                                {healthLabel(p.health)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="font-semibold text-slate-700">{formatPct(p.attendance_rate)}</div>
+                              <div className="text-[11px] text-slate-400">{p.present} P · {p.late} T · {p.absent} A · {p.excused} J</div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex flex-wrap gap-1">
+                                {(p.reasons || []).slice(0, 3).map(reason => (
+                                  <span key={reason} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[11px]">{reason}</span>
+                                ))}
+                              </div>
+                              {p.transferred_to_level && <div className="text-[11px] text-emerald-600 mt-1">Traspaso: {p.transferred_to_level}</div>}
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <button onClick={() => openObservationHistory(p.participant_id)} className="p-1.5 rounded-lg hover:bg-emerald-50 text-slate-400 hover:text-emerald-600" title="Abrir observaciones">
+                                  <NotebookPen className="w-4 h-4" />
+                                </button>
+                                <button onClick={() => openOutcomeModal(p.participant_id, 'completed')} className="p-1.5 rounded-lg hover:bg-blue-50 text-slate-400 hover:text-blue-600" title="Completar y traspasar">
+                                  <Target className="w-4 h-4" />
+                                </button>
+                                <button onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-600" title="Registrar desistimiento">
+                                  <XCircle className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      ) : activeTab === 'participants' ? (
         <div className="h-full flex flex-col gap-3">
           <div className="flex justify-between items-center shrink-0">
             <h2 className="text-base font-semibold text-slate-800">Lista de Participantes</h2>
@@ -1296,6 +1608,11 @@ export default function ProgramDetailPage() {
                           <h3 className="font-semibold text-slate-800 truncate">
                             {session.topic || `Sesión ${idx + 1}`}
                           </h3>
+                          {session.session_type === 'recovery' && (
+                            <span className="text-xs px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full shrink-0">
+                              Recuperación
+                            </span>
+                          )}
                           {isPast && totalAtt === 0 && (
                             <span className="text-xs px-2 py-0.5 bg-amber-50 text-amber-600 rounded-full shrink-0">
                               Sin registrar
@@ -1652,6 +1969,17 @@ export default function ProgramDetailPage() {
                     placeholder="Ej: Introducción al curso"
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Tipo de sesión</label>
+                  <select
+                    value={newSession.session_type}
+                    onChange={(e) => setNewSession({ ...newSession, session_type: e.target.value })}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                  >
+                    <option value="regular">Clase regular</option>
+                    <option value="recovery">Clase de recuperación</option>
+                  </select>
+                </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1.5">Hora inicio</label>
@@ -1735,6 +2063,17 @@ export default function ProgramDetailPage() {
                     className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                     placeholder="Ej: Introducción al curso"
                   />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Tipo de sesión</label>
+                  <select
+                    value={editSessionForm.session_type}
+                    onChange={(e) => setEditSessionForm({ ...editSessionForm, session_type: e.target.value })}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                  >
+                    <option value="regular">Clase regular</option>
+                    <option value="recovery">Clase de recuperación</option>
+                  </select>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -1952,7 +2291,7 @@ export default function ProgramDetailPage() {
       {/* Attendance Modal */}
       {isAttendanceOpen && selectedSession && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-5xl max-h-[90vh] flex flex-col shadow-2xl">
             <div className="flex justify-between items-center mb-4">
               <div>
                 <h2 className="text-xl font-bold text-slate-800">Tomar Asistencia</h2>
@@ -1973,6 +2312,7 @@ export default function ProgramDetailPage() {
                     <th className="px-4 py-3 font-medium">Participante</th>
                     <th className="px-4 py-3 font-medium">Estado</th>
                     <th className="px-4 py-3 font-medium">Notas</th>
+                    <th className="px-4 py-3 font-medium">Instructor</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -2028,6 +2368,43 @@ export default function ProgramDetailPage() {
                           className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                         />
                       </td>
+                      <td className="px-4 py-3">
+                        <div className="flex gap-1 mb-2">
+                          {[
+                            { key: 'good', label: 'Bien', color: 'emerald' },
+                            { key: 'watch', label: 'Obs.', color: 'amber' },
+                            { key: 'risk', label: 'Riesgo', color: 'red' },
+                          ].map(opt => (
+                            <button
+                              key={opt.key}
+                              type="button"
+                              onClick={() => setAttendanceData({
+                                ...attendanceData,
+                                [p.id]: { ...attendanceData[p.id], instructor_status: attendanceData[p.id]?.instructor_status === opt.key ? '' : opt.key }
+                              })}
+                              className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                                attendanceData[p.id]?.instructor_status === opt.key
+                                  ? opt.color === 'emerald' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-300'
+                                  : opt.color === 'amber' ? 'bg-amber-100 text-amber-700 ring-2 ring-amber-300'
+                                  : 'bg-red-100 text-red-700 ring-2 ring-red-300'
+                                  : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                        <input
+                          type="text"
+                          value={attendanceData[p.id]?.instructor_notes || ''}
+                          onChange={(e) => setAttendanceData({
+                            ...attendanceData,
+                            [p.id]: { ...attendanceData[p.id], instructor_notes: e.target.value }
+                          })}
+                          placeholder="Feedback..."
+                          className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -2047,6 +2424,75 @@ export default function ProgramDetailPage() {
               >
                 <Check className="w-4 h-4" />
                 Guardar Asistencia
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ObservationHistoryModal
+        isOpen={!!observationParticipant}
+        onClose={() => setObservationParticipant(null)}
+        leadId={observationParticipant?.lead_id || observationParticipant?.contact_id || ''}
+        contactId={observationParticipant?.contact_id || null}
+        name={observationParticipant?.contact_name || 'Participante sin nombre'}
+        observations={observationHistory}
+        onObservationChange={fetchHealth}
+      />
+
+      {/* Participant Outcome Modal */}
+      {outcomeParticipant && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex justify-between items-start mb-5">
+              <div>
+                <h2 className="text-xl font-bold text-slate-800">
+                  {outcomeForm.status === 'completed' ? 'Completar y traspasar' : 'Registrar desistimiento'}
+                </h2>
+                <p className="text-sm text-slate-500">{outcomeParticipant.contact_name || 'Participante sin nombre'}</p>
+              </div>
+              <button onClick={() => setOutcomeParticipant(null)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            {outcomeForm.status === 'completed' ? (
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">Siguiente nivel</label>
+                <input
+                  value={outcomeForm.transferred_to_level}
+                  onChange={(e) => setOutcomeForm(prev => ({ ...prev, transferred_to_level: e.target.value }))}
+                  placeholder="Ej: Nivel 2, grupo avanzado..."
+                  className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                />
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Motivo</label>
+                  <input
+                    value={outcomeForm.drop_reason}
+                    onChange={(e) => setOutcomeForm(prev => ({ ...prev, drop_reason: e.target.value }))}
+                    placeholder="Ej: horarios, salud, sin contacto..."
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Observación</label>
+                  <textarea
+                    value={outcomeForm.drop_notes}
+                    onChange={(e) => setOutcomeForm(prev => ({ ...prev, drop_notes: e.target.value }))}
+                    rows={3}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+            )}
+            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+              <button onClick={() => setOutcomeParticipant(null)} className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium">
+                Cancelar
+              </button>
+              <button onClick={saveParticipantOutcome} className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium">
+                Guardar
               </button>
             </div>
           </div>

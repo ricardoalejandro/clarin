@@ -278,12 +278,12 @@ func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUI
 	defer rows.Close()
 
 	var accounts []*domain.UserAccount
-		for rows.Next() {
-			ua := &domain.UserAccount{}
-			if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
-				&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
-				return nil, err
-			}
+	for rows.Next() {
+		ua := &domain.UserAccount{}
+		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
+			&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
+			return nil, err
+		}
 		accounts = append(accounts, ua)
 	}
 	return accounts, nil
@@ -306,12 +306,12 @@ func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uu
 	defer rows.Close()
 
 	var accounts []*domain.UserAccount
-		for rows.Next() {
-			ua := &domain.UserAccount{}
-			if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
-				&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
-				return nil, err
-			}
+	for rows.Next() {
+		ua := &domain.UserAccount{}
+		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
+			&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
+			return nil, err
+		}
 		accounts = append(accounts, ua)
 	}
 	return accounts, nil
@@ -493,11 +493,11 @@ func (r *AccountRepository) GetAll(ctx context.Context) ([]*domain.Account, erro
 	defer rows.Close()
 
 	var accounts []*domain.Account
-		for rows.Next() {
-			a := &domain.Account{}
-			if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
-				&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
-				&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
+	for rows.Next() {
+		a := &domain.Account{}
+		if err := rows.Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.CreatedAt, &a.UpdatedAt,
+			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
+			&a.UserCount, &a.DeviceCount, &a.ChatCount); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, a)
@@ -522,8 +522,8 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		LEFT JOIN plan_entitlements pe ON pe.plan_code = COALESCE(s.plan_code, a.plan) AND pe.key = 'max_users'
 		WHERE a.id = $1
 		`, id).Scan(&a.ID, &a.Name, &a.Slug, &a.Plan, &a.MaxDevices, &a.MaxUsersOverride, &a.MaxUsersEffective, &a.StorageLimitBytes, &a.IsActive, &a.KommoEnabled, &a.DefaultIncomingStageID, &a.CreatedAt, &a.UpdatedAt,
-			&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
-			&a.UserCount, &a.DeviceCount, &a.ChatCount,
+		&a.SubscriptionStatus, &a.TrialEndsAt, &a.CurrentPeriodEnd, &a.GraceEndsAt,
+		&a.UserCount, &a.DeviceCount, &a.ChatCount,
 		&a.GoogleEmail, &a.GoogleContactGroupID, &a.GoogleConnectedAt, &a.GoogleSyncLimit)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -740,6 +740,38 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 	}
 	phone := phoneFromJID(jid)
 	isGroup := strings.HasSuffix(jid, "@g.us")
+	if !isGroup {
+		if aliasContactID, err := findContactAliasID(ctx, r.db, accountID, jid, phone); err != nil {
+			return nil, err
+		} else if aliasContactID != nil {
+			_, _ = r.db.Exec(ctx, `
+				UPDATE contacts
+				SET device_id = COALESCE(device_id, $2),
+				    name = COALESCE(NULLIF($3, ''), name),
+				    push_name = COALESCE(NULLIF($3, ''), push_name),
+				    phone = COALESCE(NULLIF($4, ''), phone),
+				    updated_at = NOW()
+				WHERE account_id = $1 AND id = $5
+			`, accountID, deviceID, name, phone, *aliasContactID)
+			chat := &domain.Chat{}
+			err := r.db.QueryRow(ctx, `
+				INSERT INTO chats (account_id, device_id, contact_id, jid, name)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT (account_id, jid) DO UPDATE SET
+					device_id = EXCLUDED.device_id,
+					contact_id = EXCLUDED.contact_id,
+					name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name IS NOT NULL THEN EXCLUDED.name ELSE chats.name END,
+					updated_at = NOW()
+				RETURNING id, account_id, device_id, contact_id, jid, name, last_message, last_message_at,
+				          unread_count, is_archived, is_pinned, created_at, updated_at
+			`, accountID, deviceID, *aliasContactID, jid, name).Scan(
+				&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
+				&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
+				&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
+			)
+			return chat, err
+		}
+	}
 	chat := &domain.Chat{}
 	err := r.db.QueryRow(ctx, `
 		WITH contact AS (
@@ -783,6 +815,42 @@ func phoneFromJID(jid string) string {
 	return b.String()
 }
 
+func findContactAliasID(ctx context.Context, db *pgxpool.Pool, accountID uuid.UUID, jid, phone string) (*uuid.UUID, error) {
+	normalizedJID := strings.ToLower(strings.TrimSpace(jid))
+	normalizedPhone := normalizeAliasValue("phone", firstNonEmptyPlain(phone, phoneFromJID(jid)))
+	if normalizedJID == "" && normalizedPhone == "" {
+		return nil, nil
+	}
+	var contactID uuid.UUID
+	err := db.QueryRow(ctx, `
+		SELECT contact_id
+		FROM contact_aliases
+		WHERE account_id = $1
+		  AND (
+			(alias_type = 'jid' AND normalized_value = $2)
+			OR (alias_type = 'phone' AND normalized_value = $3)
+		  )
+		ORDER BY CASE WHEN alias_type = 'jid' THEN 0 ELSE 1 END
+		LIMIT 1
+	`, accountID, normalizedJID, normalizedPhone).Scan(&contactID)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &contactID, nil
+}
+
+func firstNonEmptyPlain(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (r *ChatRepository) FindByJID(ctx context.Context, accountID uuid.UUID, jid string) (*domain.Chat, error) {
 	chat := &domain.Chat{}
 	err := r.db.QueryRow(ctx, `
@@ -816,7 +884,7 @@ func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Cha
 		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
 		FROM chats c
 		LEFT JOIN devices d ON c.device_id = d.id
-		LEFT JOIN contacts ctc ON ctc.account_id = c.account_id AND ctc.jid = c.jid
+		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
 		WHERE c.id = $1
 	`, id).Scan(
 		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
@@ -839,7 +907,7 @@ func (r *ChatRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name
 		FROM chats c
 		LEFT JOIN devices d ON c.device_id = d.id
-		LEFT JOIN contacts ctc ON ctc.account_id = c.account_id AND ctc.jid = c.jid
+		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
 		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast' AND c.jid NOT LIKE '%@lid'
 		ORDER BY c.is_pinned DESC, c.last_message_at DESC NULLS LAST
 	`, accountID)
@@ -870,7 +938,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	baseQuery := `
 		FROM chats c
 		LEFT JOIN devices d ON c.device_id = d.id
-		LEFT JOIN contacts ctc ON ctc.account_id = c.account_id AND ctc.jid = c.jid
+		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
 		LEFT JOIN leads l ON l.account_id = c.account_id AND l.jid = c.jid
 		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast' AND c.jid NOT LIKE '%@lid'
 	`
@@ -1281,6 +1349,22 @@ func (r *MessageRepository) GetRecentStickers(ctx context.Context, accountID uui
 }
 
 func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID, deviceID *uuid.UUID, jid, phone, name, pushName string, isGroup bool) (*domain.Contact, error) {
+	if !isGroup {
+		if aliasContactID, err := findContactAliasID(ctx, r.db, accountID, jid, phone); err != nil {
+			return nil, err
+		} else if aliasContactID != nil {
+			_, _ = r.db.Exec(ctx, `
+				UPDATE contacts
+				SET device_id = COALESCE(device_id, $2),
+				    name = COALESCE(NULLIF($3, ''), name),
+				    push_name = COALESCE(NULLIF($4, ''), push_name),
+				    phone = COALESCE(NULLIF($5, ''), phone),
+				    updated_at = NOW()
+				WHERE account_id = $1 AND id = $6
+			`, accountID, deviceID, name, pushName, phone, *aliasContactID)
+			return r.GetByID(ctx, *aliasContactID)
+		}
+	}
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO contacts (account_id, device_id, jid, phone, name, push_name, is_group)
@@ -1869,51 +1953,119 @@ func (r *ContactRepository) deleteTree(ctx context.Context, accountID uuid.UUID,
 }
 
 func (r *ContactRepository) FindDuplicates(ctx context.Context, accountID uuid.UUID) ([][]*domain.Contact, error) {
-	// Find contacts with the same phone number
+	groups, err := r.FindDuplicateGroups(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([][]*domain.Contact, 0, len(groups))
+	for _, group := range groups {
+		contacts := make([]*domain.Contact, 0, len(group.Contacts))
+		for _, candidate := range group.Contacts {
+			contacts = append(contacts, candidate.Contact)
+		}
+		result = append(result, contacts)
+	}
+	return result, nil
+}
+
+func (r *ContactRepository) FindDuplicateGroups(ctx context.Context, accountID uuid.UUID) ([]*domain.ContactDuplicateGroup, error) {
 	rows, err := r.db.Query(ctx, `
+		WITH normalized AS (
+			SELECT c.id,
+			       regexp_replace(COALESCE(NULLIF(c.phone, ''), split_part(c.jid, '@', 1)), '[^0-9]', '', 'g') AS normalized_phone
+			FROM contacts c
+			WHERE c.account_id = $1 AND c.is_group = FALSE
+		), duplicate_keys AS (
+			SELECT normalized_phone
+			FROM normalized
+			WHERE normalized_phone <> ''
+			GROUP BY normalized_phone
+			HAVING COUNT(*) > 1
+		)
 		SELECT c.id, c.account_id, c.device_id, c.jid, c.phone, c.name, c.last_name, c.short_name, c.custom_name, c.push_name,
-		       c.avatar_url, c.email, c.company, c.age, c.dni, c.birth_date, c.address, c.distrito, c.ocupacion, c.tags, c.notes, c.source, c.is_group, c.created_at, c.updated_at
+		       c.avatar_url, c.email, c.company, c.age, c.dni, c.birth_date, c.address, c.distrito, c.ocupacion, c.tags, c.notes,
+		       c.source, c.is_group, c.created_at, c.updated_at, c.google_sync, c.google_resource_name, c.google_synced_at, c.google_sync_error,
+		       n.normalized_phone
 		FROM contacts c
-		INNER JOIN (
-			SELECT phone FROM contacts
-			WHERE account_id = $1 AND phone IS NOT NULL AND phone != '' AND is_group = FALSE
-			GROUP BY phone HAVING COUNT(*) > 1
-		) dup ON c.phone = dup.phone
+		JOIN normalized n ON n.id = c.id
+		JOIN duplicate_keys dk ON dk.normalized_phone = n.normalized_phone
 		WHERE c.account_id = $1 AND c.is_group = FALSE
-		ORDER BY c.phone, c.updated_at DESC
+		ORDER BY n.normalized_phone, c.updated_at DESC
 	`, accountID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	grouped := make(map[string][]*domain.Contact)
-	var order []string
+	grouped := map[string][]*domain.ContactDuplicateCandidate{}
+	order := []string{}
 	for rows.Next() {
 		contact := &domain.Contact{}
+		normalizedPhone := ""
 		if err := rows.Scan(
 			&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
-			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
-			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes,
+			&contact.Source, &contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt, &contact.GoogleSync, &contact.GoogleResourceName, &contact.GoogleSyncedAt, &contact.GoogleSyncError,
+			&normalizedPhone,
 		); err != nil {
 			return nil, err
 		}
-		phone := ""
-		if contact.Phone != nil {
-			phone = *contact.Phone
+		counts, _ := r.countContactRelations(ctx, accountID, []uuid.UUID{contact.ID})
+		if _, ok := grouped[normalizedPhone]; !ok {
+			order = append(order, normalizedPhone)
 		}
-		if _, exists := grouped[phone]; !exists {
-			order = append(order, phone)
-		}
-		grouped[phone] = append(grouped[phone], contact)
+		grouped[normalizedPhone] = append(grouped[normalizedPhone], &domain.ContactDuplicateCandidate{Contact: contact, Counts: counts})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
-	var result [][]*domain.Contact
+	groups := make([]*domain.ContactDuplicateGroup, 0, len(order))
 	for _, phone := range order {
-		result = append(result, grouped[phone])
+		candidates := grouped[phone]
+		groups = append(groups, &domain.ContactDuplicateGroup{
+			GroupKey:          "phone:" + phone,
+			NormalizedPhone:   phone,
+			Confidence:        "high",
+			Reason:            "same_normalized_phone",
+			RecommendedKeepID: recommendedContactToKeep(candidates),
+			Contacts:          candidates,
+		})
 	}
-	return result, nil
+	return groups, nil
+}
+
+func (r *ContactRepository) PreviewMergeContacts(ctx context.Context, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) (*domain.ContactMergePreview, error) {
+	mergeIDs = uniqueUUIDsExcluding(mergeIDs, keepID)
+	if len(mergeIDs) == 0 {
+		return nil, fmt.Errorf("provide merge_ids")
+	}
+	allIDs := append([]uuid.UUID{keepID}, mergeIDs...)
+	contacts, err := r.getContactsByIDsForAccount(ctx, accountID, allIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(contacts) != len(allIDs) {
+		return nil, fmt.Errorf("all contacts must exist in the selected account")
+	}
+	keep := contacts[keepID]
+	if keep == nil {
+		return nil, fmt.Errorf("contact to keep not found")
+	}
+	counts, _ := r.countContactRelations(ctx, accountID, mergeIDs)
+	leads, err := r.getMergeLeadPreview(ctx, accountID, allIDs)
+	if err != nil {
+		return nil, err
+	}
+	return &domain.ContactMergePreview{
+		KeepID:   keepID,
+		MergeIDs: mergeIDs,
+		Fields:   buildMergeFieldPreview(keep, contacts, mergeIDs),
+		Leads:    leads,
+		Counts:   counts,
+		Warnings: r.googleMergeWarnings(keep, contacts, mergeIDs),
+	}, nil
 }
 
 // GetContactsWithDuplicateLeads returns the count of contacts that have 2+ active (non-archived, non-blocked) leads.
@@ -1931,45 +2083,718 @@ func (r *ContactRepository) GetContactsWithDuplicateLeads(ctx context.Context, a
 	return count, err
 }
 
-func (r *ContactRepository) MergeContacts(ctx context.Context, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
-	// Update chats to point to the kept contact's JID
-	keepContact, err := r.GetByID(ctx, keepID)
-	if err != nil || keepContact == nil {
-		return fmt.Errorf("contact to keep not found")
+func (r *ContactRepository) MergeContacts(ctx context.Context, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID, mergedBy *uuid.UUID) (*domain.ContactMergeResult, error) {
+	mergeIDs = uniqueUUIDsExcluding(mergeIDs, keepID)
+	if len(mergeIDs) == 0 {
+		return nil, fmt.Errorf("provide merge_ids")
+	}
+	movedCounts, _ := r.countContactRelations(ctx, accountID, mergeIDs)
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	allIDs := append([]uuid.UUID{keepID}, mergeIDs...)
+	contacts, err := r.loadContactsForMerge(ctx, tx, accountID, allIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(contacts) != len(allIDs) {
+		return nil, fmt.Errorf("all contacts must exist in the selected account")
+	}
+	keep := contacts[keepID]
+	if keep == nil {
+		return nil, fmt.Errorf("contact to keep not found")
 	}
 
-	for _, mergeID := range mergeIDs {
-		mergeContact, err := r.GetByID(ctx, mergeID)
-		if err != nil || mergeContact == nil {
+	if err := r.mergeContactProfile(ctx, tx, keep, contacts, mergeIDs); err != nil {
+		return nil, err
+	}
+	if err := r.insertMergeAliases(ctx, tx, accountID, keepID, contacts, mergeIDs); err != nil {
+		return nil, err
+	}
+	if err := r.mergeContactTags(ctx, tx, keepID, mergeIDs); err != nil {
+		return nil, err
+	}
+	if err := r.mergeContactPhones(ctx, tx, keep, mergeIDs); err != nil {
+		return nil, err
+	}
+	if err := r.mergeContactDeviceNames(ctx, tx, keepID, mergeIDs); err != nil {
+		return nil, err
+	}
+	if err := r.mergeCustomFieldValues(ctx, tx, keepID, mergeIDs); err != nil {
+		return nil, err
+	}
+	if err := r.mergeEventParticipants(ctx, tx, accountID, keepID, mergeIDs); err != nil {
+		return nil, err
+	}
+	if err := r.mergeProgramParticipants(ctx, tx, accountID, keepID, mergeIDs); err != nil {
+		return nil, err
+	}
+	if err := r.relinkContactReferences(ctx, tx, accountID, keepID, mergeIDs); err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM contacts WHERE account_id = $1 AND id = ANY($2)`, accountID, mergeIDs); err != nil {
+		return nil, err
+	}
+
+	summary, _ := json.Marshal(map[string]interface{}{
+		"moved_counts": movedCounts,
+	})
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO contact_merge_audit (account_id, keep_contact_id, merged_contact_ids, merged_by, summary)
+		VALUES ($1, $2, $3, $4, $5)
+	`, accountID, keepID, mergeIDs, mergedBy, summary); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	mergedContact, err := r.GetByID(ctx, keepID)
+	if err != nil {
+		return nil, err
+	}
+	return &domain.ContactMergeResult{
+		MergedContact: mergedContact,
+		MovedCounts:   movedCounts,
+		Warnings:      r.googleMergeWarnings(keep, contacts, mergeIDs),
+	}, nil
+}
+
+func uniqueUUIDsExcluding(ids []uuid.UUID, exclude uuid.UUID) []uuid.UUID {
+	seen := map[uuid.UUID]bool{exclude: true}
+	result := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if id == uuid.Nil || seen[id] {
 			continue
 		}
-		// Update chats JID references
-		_, _ = r.db.Exec(ctx, `
-			UPDATE chats SET jid = $1, updated_at = NOW()
-			WHERE account_id = $2 AND jid = $3
-		`, keepContact.JID, keepContact.AccountID, mergeContact.JID)
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result
+}
 
-		// Update leads JID references
-		_, _ = r.db.Exec(ctx, `
-			UPDATE leads SET jid = $1, updated_at = NOW()
-			WHERE account_id = $2 AND jid = $3
-		`, keepContact.JID, keepContact.AccountID, mergeContact.JID)
+func recommendedContactToKeep(candidates []*domain.ContactDuplicateCandidate) uuid.UUID {
+	var best *domain.ContactDuplicateCandidate
+	bestScore := -1
+	for _, c := range candidates {
+		score := c.Counts.Leads*10 + c.Counts.Chats*8 + c.Counts.Interactions*3 + c.Counts.Tasks*2 + c.Counts.Events + c.Counts.Programs
+		if c.Contact.CustomName != nil && strings.TrimSpace(*c.Contact.CustomName) != "" {
+			score += 4
+		}
+		if c.Contact.Name != nil && strings.TrimSpace(*c.Contact.Name) != "" {
+			score += 2
+		}
+		if best == nil || score > bestScore || (score == bestScore && c.Contact.UpdatedAt.After(best.Contact.UpdatedAt)) {
+			best = c
+			bestScore = score
+		}
+	}
+	if best == nil {
+		return uuid.Nil
+	}
+	return best.Contact.ID
+}
 
-		// Move device names to the kept contact
-		// First delete any rows that would conflict (same device already has a name for keepID)
-		_, _ = r.db.Exec(ctx, `
-			DELETE FROM contact_device_names WHERE contact_id = $1
-			AND device_id IN (SELECT device_id FROM contact_device_names WHERE contact_id = $2)
-		`, mergeID, keepID)
-		// Then move remaining device names
-		_, _ = r.db.Exec(ctx, `
-			UPDATE contact_device_names SET contact_id = $1 WHERE contact_id = $2
-		`, keepID, mergeID)
+func (r *ContactRepository) countContactRelations(ctx context.Context, accountID uuid.UUID, contactIDs []uuid.UUID) (domain.ContactRelationCounts, error) {
+	var counts domain.ContactRelationCounts
+	if len(contactIDs) == 0 {
+		return counts, nil
+	}
+	err := r.db.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM leads WHERE account_id = $1 AND contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM chats WHERE account_id = $1 AND contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM tasks WHERE account_id = $1 AND contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM interactions WHERE account_id = $1 AND contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM event_participants ep JOIN events e ON e.id = ep.event_id WHERE e.account_id = $1 AND ep.contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM program_participants pp JOIN programs p ON p.id = pp.program_id WHERE p.account_id = $1 AND pp.contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM campaign_recipients cr JOIN campaigns ca ON ca.id = cr.campaign_id WHERE ca.account_id = $1 AND cr.contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM custom_field_values WHERE contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM contact_tags WHERE contact_id = ANY($2))
+	`, accountID, contactIDs).Scan(
+		&counts.Leads, &counts.Chats, &counts.Tasks, &counts.Interactions, &counts.Events,
+		&counts.Programs, &counts.CampaignRecipients, &counts.CustomFields, &counts.Tags,
+	)
+	return counts, err
+}
 
-		// Delete merged contact
-		_, _ = r.db.Exec(ctx, `DELETE FROM contacts WHERE id = $1`, mergeID)
+func (r *ContactRepository) getContactsByIDsForAccount(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]*domain.Contact, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
+		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
+		       google_sync, google_resource_name, google_synced_at, google_sync_error
+		FROM contacts
+		WHERE account_id = $1 AND id = ANY($2)
+	`, accountID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanContactMap(rows)
+}
+
+func (r *ContactRepository) loadContactsForMerge(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]*domain.Contact, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
+		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
+		       google_sync, google_resource_name, google_synced_at, google_sync_error
+		FROM contacts
+		WHERE account_id = $1 AND id = ANY($2)
+		FOR UPDATE
+	`, accountID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanContactMap(rows)
+}
+
+func scanContactMap(rows pgx.Rows) (map[uuid.UUID]*domain.Contact, error) {
+	contacts := map[uuid.UUID]*domain.Contact{}
+	for rows.Next() {
+		contact := &domain.Contact{}
+		if err := rows.Scan(
+			&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
+			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+			&contact.GoogleSync, &contact.GoogleResourceName, &contact.GoogleSyncedAt, &contact.GoogleSyncError,
+		); err != nil {
+			return nil, err
+		}
+		contacts[contact.ID] = contact
+	}
+	return contacts, rows.Err()
+}
+
+func (r *ContactRepository) getMergeLeadPreview(ctx context.Context, accountID uuid.UUID, contactIDs []uuid.UUID) ([]domain.ContactMergeLeadPreview, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT l.id, l.contact_id, COALESCE(c.custom_name, c.name, l.name), COALESCE(c.phone, l.phone),
+		       pp.name, ps.name, l.is_archived, l.is_blocked, l.created_at
+		FROM leads l
+		JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
+		LEFT JOIN pipelines pp ON pp.id = l.pipeline_id
+		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
+		WHERE l.account_id = $1 AND l.contact_id = ANY($2)
+		ORDER BY l.created_at DESC
+	`, accountID, contactIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	leads := []domain.ContactMergeLeadPreview{}
+	for rows.Next() {
+		var lead domain.ContactMergeLeadPreview
+		if err := rows.Scan(&lead.ID, &lead.ContactID, &lead.Name, &lead.Phone, &lead.PipelineName, &lead.StageName, &lead.IsArchived, &lead.IsBlocked, &lead.CreatedAt); err != nil {
+			return nil, err
+		}
+		leads = append(leads, lead)
+	}
+	return leads, rows.Err()
+}
+
+func buildMergeFieldPreview(keep *domain.Contact, contacts map[uuid.UUID]*domain.Contact, mergeIDs []uuid.UUID) []domain.ContactMergeFieldPreview {
+	type field struct {
+		key   string
+		label string
+		value func(*domain.Contact) *string
+	}
+	fields := []field{
+		{"custom_name", "Nombre visible", func(c *domain.Contact) *string { return c.CustomName }},
+		{"name", "Nombre WhatsApp", func(c *domain.Contact) *string { return c.Name }},
+		{"last_name", "Apellido", func(c *domain.Contact) *string { return c.LastName }},
+		{"short_name", "Nombre corto", func(c *domain.Contact) *string { return c.ShortName }},
+		{"phone", "Telefono", func(c *domain.Contact) *string { return c.Phone }},
+		{"email", "Email", func(c *domain.Contact) *string { return c.Email }},
+		{"company", "Cuenta/organizacion", func(c *domain.Contact) *string { return c.Company }},
+		{"dni", "DNI", func(c *domain.Contact) *string { return c.DNI }},
+		{"address", "Direccion", func(c *domain.Contact) *string { return c.Address }},
+		{"distrito", "Distrito", func(c *domain.Contact) *string { return c.Distrito }},
+		{"ocupacion", "Ocupacion", func(c *domain.Contact) *string { return c.Ocupacion }},
+		{"notes", "Notas", func(c *domain.Contact) *string { return c.Notes }},
+	}
+	result := make([]domain.ContactMergeFieldPreview, 0, len(fields))
+	for _, f := range fields {
+		finalValue, sourceID := firstNonEmptyString(keep.ID, f.value(keep), contacts, mergeIDs, f.value)
+		seen := map[string]bool{}
+		candidates := []string{}
+		for _, id := range append([]uuid.UUID{keep.ID}, mergeIDs...) {
+			if c := contacts[id]; c != nil {
+				if v := cleanStringPtr(f.value(c)); v != "" && !seen[strings.ToLower(v)] {
+					seen[strings.ToLower(v)] = true
+					candidates = append(candidates, v)
+				}
+			}
+		}
+		result = append(result, domain.ContactMergeFieldPreview{
+			Field:      f.key,
+			Label:      f.label,
+			FinalValue: finalValue,
+			Conflict:   len(candidates) > 1,
+			Candidates: candidates,
+			SourceID:   sourceID,
+		})
+	}
+	return result
+}
+
+func firstNonEmptyString(keepID uuid.UUID, keepValue *string, contacts map[uuid.UUID]*domain.Contact, mergeIDs []uuid.UUID, getter func(*domain.Contact) *string) (*string, *uuid.UUID) {
+	if v := cleanStringPtr(keepValue); v != "" {
+		return &v, &keepID
+	}
+	for _, id := range mergeIDs {
+		if c := contacts[id]; c != nil {
+			if v := cleanStringPtr(getter(c)); v != "" {
+				return &v, &id
+			}
+		}
+	}
+	return nil, nil
+}
+
+func cleanStringPtr(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(*v)
+}
+
+func firstStringPtr(current *string, contacts map[uuid.UUID]*domain.Contact, mergeIDs []uuid.UUID, getter func(*domain.Contact) *string) *string {
+	if cleanStringPtr(current) != "" {
+		return current
+	}
+	for _, id := range mergeIDs {
+		if c := contacts[id]; c != nil {
+			if v := cleanStringPtr(getter(c)); v != "" {
+				return &v
+			}
+		}
+	}
+	return current
+}
+
+func firstIntPtr(current *int, contacts map[uuid.UUID]*domain.Contact, mergeIDs []uuid.UUID) *int {
+	if current != nil {
+		return current
+	}
+	for _, id := range mergeIDs {
+		if c := contacts[id]; c != nil && c.Age != nil {
+			v := *c.Age
+			return &v
+		}
+	}
+	return current
+}
+
+func firstTimePtr(current *time.Time, contacts map[uuid.UUID]*domain.Contact, mergeIDs []uuid.UUID, getter func(*domain.Contact) *time.Time) *time.Time {
+	if current != nil {
+		return current
+	}
+	for _, id := range mergeIDs {
+		if c := contacts[id]; c != nil {
+			if v := getter(c); v != nil {
+				t := *v
+				return &t
+			}
+		}
+	}
+	return current
+}
+
+func (r *ContactRepository) mergeContactProfile(ctx context.Context, tx pgx.Tx, keep *domain.Contact, contacts map[uuid.UUID]*domain.Contact, mergeIDs []uuid.UUID) error {
+	tags := append([]string{}, keep.Tags...)
+	seenTags := map[string]bool{}
+	for _, tag := range tags {
+		seenTags[strings.ToLower(strings.TrimSpace(tag))] = true
+	}
+	for _, id := range mergeIDs {
+		if c := contacts[id]; c != nil {
+			for _, tag := range c.Tags {
+				key := strings.ToLower(strings.TrimSpace(tag))
+				if key != "" && !seenTags[key] {
+					seenTags[key] = true
+					tags = append(tags, tag)
+				}
+			}
+			if keep.GoogleResourceName == nil && c.GoogleResourceName != nil {
+				keep.GoogleResourceName = c.GoogleResourceName
+				keep.GoogleSyncedAt = c.GoogleSyncedAt
+				keep.GoogleSyncError = c.GoogleSyncError
+			}
+			keep.GoogleSync = keep.GoogleSync || c.GoogleSync
+		}
+	}
+	keep.Name = firstStringPtr(keep.Name, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Name })
+	keep.LastName = firstStringPtr(keep.LastName, contacts, mergeIDs, func(c *domain.Contact) *string { return c.LastName })
+	keep.ShortName = firstStringPtr(keep.ShortName, contacts, mergeIDs, func(c *domain.Contact) *string { return c.ShortName })
+	keep.CustomName = firstStringPtr(keep.CustomName, contacts, mergeIDs, func(c *domain.Contact) *string { return c.CustomName })
+	keep.PushName = firstStringPtr(keep.PushName, contacts, mergeIDs, func(c *domain.Contact) *string { return c.PushName })
+	keep.AvatarURL = firstStringPtr(keep.AvatarURL, contacts, mergeIDs, func(c *domain.Contact) *string { return c.AvatarURL })
+	keep.Phone = firstStringPtr(keep.Phone, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Phone })
+	keep.Email = firstStringPtr(keep.Email, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Email })
+	keep.Company = firstStringPtr(keep.Company, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Company })
+	keep.DNI = firstStringPtr(keep.DNI, contacts, mergeIDs, func(c *domain.Contact) *string { return c.DNI })
+	keep.Address = firstStringPtr(keep.Address, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Address })
+	keep.Distrito = firstStringPtr(keep.Distrito, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Distrito })
+	keep.Ocupacion = firstStringPtr(keep.Ocupacion, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Ocupacion })
+	keep.Notes = firstStringPtr(keep.Notes, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Notes })
+	keep.Source = firstStringPtr(keep.Source, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Source })
+	keep.Age = firstIntPtr(keep.Age, contacts, mergeIDs)
+	keep.BirthDate = firstTimePtr(keep.BirthDate, contacts, mergeIDs, func(c *domain.Contact) *time.Time { return c.BirthDate })
+	keep.AvatarCheckedAt = firstTimePtr(keep.AvatarCheckedAt, contacts, mergeIDs, func(c *domain.Contact) *time.Time { return c.AvatarCheckedAt })
+	keep.Tags = tags
+
+	_, err := tx.Exec(ctx, `
+		UPDATE contacts SET
+			name = $1, last_name = $2, short_name = $3, custom_name = $4, push_name = $5,
+			avatar_url = $6, avatar_checked_at = $7, phone = $8, email = $9, company = $10,
+			age = $11, dni = $12, birth_date = $13, address = $14, distrito = $15, ocupacion = $16,
+			tags = $17, notes = $18, source = $19, google_sync = $20, google_resource_name = $21,
+			google_synced_at = $22, google_sync_error = $23, updated_at = NOW()
+		WHERE id = $24 AND account_id = $25
+	`, keep.Name, keep.LastName, keep.ShortName, keep.CustomName, keep.PushName, keep.AvatarURL, keep.AvatarCheckedAt,
+		keep.Phone, keep.Email, keep.Company, keep.Age, keep.DNI, keep.BirthDate, keep.Address, keep.Distrito, keep.Ocupacion,
+		keep.Tags, keep.Notes, keep.Source, keep.GoogleSync, keep.GoogleResourceName, keep.GoogleSyncedAt, keep.GoogleSyncError,
+		keep.ID, keep.AccountID)
+	return err
+}
+
+func (r *ContactRepository) insertMergeAliases(ctx context.Context, tx pgx.Tx, accountID, keepID uuid.UUID, contacts map[uuid.UUID]*domain.Contact, mergeIDs []uuid.UUID) error {
+	for _, id := range mergeIDs {
+		c := contacts[id]
+		if c == nil {
+			continue
+		}
+		if strings.TrimSpace(c.JID) != "" {
+			if err := insertContactAlias(ctx, tx, accountID, keepID, "jid", c.JID, normalizeAliasValue("jid", c.JID), id); err != nil {
+				return err
+			}
+		}
+		if c.Phone != nil && strings.TrimSpace(*c.Phone) != "" {
+			if err := insertContactAlias(ctx, tx, accountID, keepID, "phone", *c.Phone, normalizeAliasValue("phone", *c.Phone), id); err != nil {
+				return err
+			}
+		}
+	}
+	rows, err := tx.Query(ctx, `SELECT contact_id, phone FROM contact_phones WHERE contact_id = ANY($1)`, mergeIDs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sourceID uuid.UUID
+		var phone string
+		if err := rows.Scan(&sourceID, &phone); err != nil {
+			return err
+		}
+		if err := insertContactAlias(ctx, tx, accountID, keepID, "phone", phone, normalizeAliasValue("phone", phone), sourceID); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func insertContactAlias(ctx context.Context, tx pgx.Tx, accountID, keepID uuid.UUID, aliasType, aliasValue, normalized string, sourceID uuid.UUID) error {
+	if strings.TrimSpace(normalized) == "" {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO contact_aliases (account_id, contact_id, alias_type, alias_value, normalized_value, source_contact_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (account_id, alias_type, normalized_value) DO UPDATE SET
+			contact_id = EXCLUDED.contact_id,
+			alias_value = EXCLUDED.alias_value,
+			source_contact_id = EXCLUDED.source_contact_id
+	`, accountID, keepID, aliasType, aliasValue, normalized, sourceID)
+	return err
+}
+
+func normalizeAliasValue(aliasType, value string) string {
+	value = strings.TrimSpace(value)
+	if aliasType == "jid" {
+		return strings.ToLower(value)
+	}
+	digits := phoneFromJID(value)
+	if len(digits) == 9 && strings.HasPrefix(digits, "9") {
+		return "51" + digits
+	}
+	return digits
+}
+
+func (r *ContactRepository) mergeContactTags(ctx context.Context, tx pgx.Tx, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO contact_tags (contact_id, tag_id)
+		SELECT DISTINCT $1::uuid, tag_id
+		FROM contact_tags
+		WHERE contact_id = ANY($2::uuid[])
+		ON CONFLICT DO NOTHING
+	`, keepID, mergeIDs); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id = ANY($1::uuid[])`, mergeIDs)
+	return err
+}
+
+func (r *ContactRepository) mergeContactPhones(ctx context.Context, tx pgx.Tx, keep *domain.Contact, mergeIDs []uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO contact_phones (contact_id, phone, label)
+		SELECT $1::uuid, cp.phone, cp.label
+		FROM contact_phones cp
+		WHERE cp.contact_id = ANY($2::uuid[])
+		  AND NOT EXISTS (
+			SELECT 1 FROM contact_phones existing
+			WHERE existing.contact_id = $1::uuid AND regexp_replace(existing.phone, '[^0-9]', '', 'g') = regexp_replace(cp.phone, '[^0-9]', '', 'g')
+		  )
+	`, keep.ID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO contact_phones (contact_id, phone, label)
+		SELECT $1::uuid, c.phone, 'fusionado'
+		FROM contacts c
+		WHERE c.id = ANY($2::uuid[])
+		  AND c.phone IS NOT NULL AND c.phone <> ''
+		  AND regexp_replace(c.phone, '[^0-9]', '', 'g') <> regexp_replace(COALESCE($3, ''), '[^0-9]', '', 'g')
+		  AND NOT EXISTS (
+			SELECT 1 FROM contact_phones existing
+			WHERE existing.contact_id = $1::uuid AND regexp_replace(existing.phone, '[^0-9]', '', 'g') = regexp_replace(c.phone, '[^0-9]', '', 'g')
+		  )
+	`, keep.ID, mergeIDs, keep.Phone); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM contact_phones WHERE contact_id = ANY($1::uuid[])`, mergeIDs)
+	return err
+}
+
+func (r *ContactRepository) mergeContactDeviceNames(ctx context.Context, tx pgx.Tx, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE contact_device_names keep
+		SET name = COALESCE(keep.name, src.name),
+		    push_name = COALESCE(keep.push_name, src.push_name),
+		    business_name = COALESCE(keep.business_name, src.business_name),
+		    synced_at = GREATEST(keep.synced_at, src.synced_at)
+		FROM contact_device_names src
+		WHERE keep.contact_id = $1::uuid
+		  AND src.contact_id = ANY($2::uuid[])
+		  AND keep.device_id = src.device_id
+	`, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM contact_device_names src
+		WHERE src.contact_id = ANY($2::uuid[])
+		  AND EXISTS (
+			SELECT 1 FROM contact_device_names keep
+			WHERE keep.contact_id = $1::uuid AND keep.device_id = src.device_id
+		  )
+	`, keepID, mergeIDs); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE contact_device_names SET contact_id = $1::uuid WHERE contact_id = ANY($2::uuid[])`, keepID, mergeIDs)
+	return err
+}
+
+func (r *ContactRepository) mergeCustomFieldValues(ctx context.Context, tx pgx.Tx, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO custom_field_values (field_id, contact_id, value_text, value_number, value_date, value_bool, value_json, created_at, updated_at)
+		SELECT src.field_id, $1::uuid, src.value_text, src.value_number, src.value_date, src.value_bool, src.value_json, src.created_at, NOW()
+		FROM custom_field_values src
+		WHERE src.contact_id = ANY($2::uuid[])
+		  AND NOT EXISTS (
+			SELECT 1 FROM custom_field_values keep
+			WHERE keep.field_id = src.field_id AND keep.contact_id = $1::uuid
+		  )
+	`, keepID, mergeIDs); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM custom_field_values WHERE contact_id = ANY($1::uuid[])`, mergeIDs)
+	return err
+}
+
+func (r *ContactRepository) mergeEventParticipants(ctx context.Context, tx pgx.Tx, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
+	pairs := `
+		WITH pairs AS (
+			SELECT src.id AS src_id, dst.id AS dst_id
+			FROM event_participants src
+			JOIN events e ON e.id = src.event_id AND e.account_id = $1
+			JOIN event_participants dst ON dst.event_id = src.event_id AND dst.contact_id = $2::uuid
+			WHERE src.contact_id = ANY($3::uuid[])
+		)
+	`
+	if _, err := tx.Exec(ctx, pairs+`
+		UPDATE interactions i
+		SET participant_id = pairs.dst_id, contact_id = $2::uuid
+		FROM pairs
+		WHERE i.account_id = $1 AND i.participant_id = pairs.src_id
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`
+		INSERT INTO participant_tags (participant_id, tag_id)
+		SELECT DISTINCT pairs.dst_id, pt.tag_id
+		FROM participant_tags pt
+		JOIN pairs ON pairs.src_id = pt.participant_id
+		ON CONFLICT DO NOTHING
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`
+		INSERT INTO event_logbook_entries (logbook_id, participant_id, stage_id, stage_name, stage_color, notes, created_at)
+		SELECT ele.logbook_id, pairs.dst_id, ele.stage_id, ele.stage_name, ele.stage_color, ele.notes, ele.created_at
+		FROM event_logbook_entries ele
+		JOIN pairs ON pairs.src_id = ele.participant_id
+		WHERE NOT EXISTS (
+			SELECT 1 FROM event_logbook_entries existing
+			WHERE existing.logbook_id = ele.logbook_id AND existing.participant_id = pairs.dst_id
+		)
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`DELETE FROM participant_tags pt USING pairs WHERE pt.participant_id = pairs.src_id`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`DELETE FROM event_logbook_entries ele USING pairs WHERE ele.participant_id = pairs.src_id`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`
+		UPDATE event_participants dst
+		SET lead_id = COALESCE(dst.lead_id, src.lead_id),
+		    stage_id = COALESCE(dst.stage_id, src.stage_id),
+		    notes = COALESCE(NULLIF(dst.notes, ''), src.notes),
+		    updated_at = NOW()
+		FROM event_participants src
+		JOIN pairs ON pairs.src_id = src.id
+		WHERE dst.id = pairs.dst_id
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`DELETE FROM event_participants src USING pairs WHERE src.id = pairs.src_id`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE event_participants ep
+		SET contact_id = $2::uuid, updated_at = NOW()
+		FROM events e
+		WHERE ep.event_id = e.id AND e.account_id = $1 AND ep.contact_id = ANY($3::uuid[])
+	`, accountID, keepID, mergeIDs)
+	return err
+}
+
+func (r *ContactRepository) mergeProgramParticipants(ctx context.Context, tx pgx.Tx, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
+	pairs := `
+		WITH pairs AS (
+			SELECT src.id AS src_id, dst.id AS dst_id
+			FROM program_participants src
+			JOIN programs p ON p.id = src.program_id AND p.account_id = $1
+			JOIN program_participants dst ON dst.program_id = src.program_id AND dst.contact_id = $2::uuid
+			WHERE src.contact_id = ANY($3::uuid[])
+		)
+	`
+	if _, err := tx.Exec(ctx, pairs+`
+		UPDATE program_participant_notes pn
+		SET participant_id = pairs.dst_id, contact_id = $2::uuid, updated_at = NOW()
+		FROM pairs
+		WHERE pn.account_id = $1 AND pn.participant_id = pairs.src_id
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`
+		UPDATE program_attendance dst
+		SET notes = COALESCE(NULLIF(dst.notes, ''), src.notes),
+		    instructor_notes = COALESCE(NULLIF(dst.instructor_notes, ''), src.instructor_notes),
+		    instructor_status = COALESCE(NULLIF(dst.instructor_status, ''), src.instructor_status),
+		    updated_at = NOW()
+		FROM program_attendance src
+		JOIN pairs ON pairs.src_id = src.participant_id
+		WHERE dst.participant_id = pairs.dst_id AND dst.session_id = src.session_id
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`
+		DELETE FROM program_attendance src
+		USING pairs
+		WHERE src.participant_id = pairs.src_id
+		  AND EXISTS (
+			SELECT 1 FROM program_attendance dst
+			WHERE dst.participant_id = pairs.dst_id AND dst.session_id = src.session_id
+		  )
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`
+		UPDATE program_attendance pa
+		SET participant_id = pairs.dst_id, updated_at = NOW()
+		FROM pairs
+		WHERE pa.participant_id = pairs.src_id
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`
+		UPDATE program_participants dst
+		SET lead_id = COALESCE(dst.lead_id, src.lead_id),
+		    stage_id = COALESCE(dst.stage_id, src.stage_id),
+		    auto_tag_sync = COALESCE(dst.auto_tag_sync, FALSE) OR COALESCE(src.auto_tag_sync, FALSE)
+		FROM program_participants src
+		JOIN pairs ON pairs.src_id = src.id
+		WHERE dst.id = pairs.dst_id
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, pairs+`DELETE FROM program_participants src USING pairs WHERE src.id = pairs.src_id`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE program_participant_notes
+		SET contact_id = $2::uuid, updated_at = NOW()
+		WHERE account_id = $1 AND contact_id = ANY($3::uuid[])
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE program_participants pp
+		SET contact_id = $2::uuid
+		FROM programs p
+		WHERE pp.program_id = p.id AND p.account_id = $1 AND pp.contact_id = ANY($3::uuid[])
+	`, accountID, keepID, mergeIDs)
+	return err
+}
+
+func (r *ContactRepository) relinkContactReferences(ctx context.Context, tx pgx.Tx, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
+	statements := []string{
+		`UPDATE leads SET contact_id = $2::uuid, updated_at = NOW() WHERE account_id = $1 AND contact_id = ANY($3::uuid[])`,
+		`UPDATE chats SET contact_id = $2::uuid, updated_at = NOW() WHERE account_id = $1 AND contact_id = ANY($3::uuid[])`,
+		`UPDATE tasks SET contact_id = $2::uuid, updated_at = NOW() WHERE account_id = $1 AND contact_id = ANY($3::uuid[])`,
+		`UPDATE interactions SET contact_id = $2::uuid WHERE account_id = $1 AND contact_id = ANY($3::uuid[])`,
+		`UPDATE dynamic_link_registrations dlr SET contact_id = $2::uuid FROM dynamic_links dl JOIN dynamics d ON d.id = dl.dynamic_id WHERE dl.id = dlr.link_id AND d.account_id = $1 AND dlr.contact_id = ANY($3::uuid[])`,
+		`UPDATE bot_sessions SET contact_id = $2::uuid, updated_at = NOW() WHERE account_id = $1 AND contact_id = ANY($3::uuid[])`,
+		`UPDATE campaign_recipients cr SET contact_id = $2::uuid FROM campaigns ca WHERE ca.id = cr.campaign_id AND ca.account_id = $1 AND cr.contact_id = ANY($3::uuid[])`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.Exec(ctx, stmt, accountID, keepID, mergeIDs); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (r *ContactRepository) googleMergeWarnings(keep *domain.Contact, contacts map[uuid.UUID]*domain.Contact, mergeIDs []uuid.UUID) []string {
+	warnings := []string{}
+	for _, id := range mergeIDs {
+		c := contacts[id]
+		if c == nil {
+			continue
+		}
+		if c.GoogleResourceName != nil && keep.GoogleResourceName != nil && *c.GoogleResourceName != *keep.GoogleResourceName {
+			warnings = append(warnings, "Uno o mas contactos fusionados tenian registros distintos en Google Contacts; se conserva el registro del contacto elegido.")
+			break
+		}
+	}
+	return warnings
 }
 
 // ContactDeviceNameRepository handles per-device contact names

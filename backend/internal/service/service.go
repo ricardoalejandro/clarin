@@ -1116,8 +1116,16 @@ func (s *ContactService) GetDuplicateLeadsCount(ctx context.Context, accountID u
 	return s.repos.Contact.GetContactsWithDuplicateLeads(ctx, accountID)
 }
 
-func (s *ContactService) MergeContacts(ctx context.Context, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
-	return s.repos.Contact.MergeContacts(ctx, keepID, mergeIDs)
+func (s *ContactService) FindDuplicateGroups(ctx context.Context, accountID uuid.UUID) ([]*domain.ContactDuplicateGroup, error) {
+	return s.repos.Contact.FindDuplicateGroups(ctx, accountID)
+}
+
+func (s *ContactService) PreviewMergeContacts(ctx context.Context, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) (*domain.ContactMergePreview, error) {
+	return s.repos.Contact.PreviewMergeContacts(ctx, accountID, keepID, mergeIDs)
+}
+
+func (s *ContactService) MergeContacts(ctx context.Context, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID, mergedBy *uuid.UUID) (*domain.ContactMergeResult, error) {
+	return s.repos.Contact.MergeContacts(ctx, accountID, keepID, mergeIDs, mergedBy)
 }
 
 func (s *ContactService) ResetFromDevice(ctx context.Context, contactID uuid.UUID) error {

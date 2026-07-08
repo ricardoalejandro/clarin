@@ -1,51 +1,52 @@
 package api
 
 import (
-"encoding/json"
-"fmt"
-"strings"
-"time"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
 
-"github.com/gofiber/fiber/v2"
-"github.com/google/uuid"
-"github.com/naperu/clarin/internal/domain"
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/naperu/clarin/internal/domain"
 )
 
 // --- Programs ---
 
 func (s *Server) handleCreateProgram(c *fiber.Ctx) error {
-accountID := c.Locals("account_id").(uuid.UUID)
-userID := c.Locals("user_id").(uuid.UUID)
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 
-var req struct {
-Name              string     `json:"name"`
-Description       string     `json:"description"`
-Color             string     `json:"color"`
-Type              string     `json:"type"`
-ScheduleStartDate *string    `json:"schedule_start_date"`
-ScheduleEndDate   *string    `json:"schedule_end_date"`
-ScheduleDays      []int      `json:"schedule_days"`
-ScheduleStartTime *string    `json:"schedule_start_time"`
-ScheduleEndTime   *string    `json:"schedule_end_time"`
-PipelineID        *uuid.UUID `json:"pipeline_id"`
-TagFormula        string     `json:"tag_formula"`
-TagFormulaMode    string     `json:"tag_formula_mode"`
-TagFormulaType    string     `json:"tag_formula_type"`
-EventDate         *string    `json:"event_date"`
-EventEnd          *string    `json:"event_end"`
-Location          *string    `json:"location"`
-FolderID          *uuid.UUID `json:"folder_id"`
-}
-if err := c.BodyParser(&req); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-}
+	var req struct {
+		Name              string     `json:"name"`
+		Description       string     `json:"description"`
+		Color             string     `json:"color"`
+		Type              string     `json:"type"`
+		ScheduleStartDate *string    `json:"schedule_start_date"`
+		ScheduleEndDate   *string    `json:"schedule_end_date"`
+		ScheduleDays      []int      `json:"schedule_days"`
+		ScheduleStartTime *string    `json:"schedule_start_time"`
+		ScheduleEndTime   *string    `json:"schedule_end_time"`
+		PipelineID        *uuid.UUID `json:"pipeline_id"`
+		TagFormula        string     `json:"tag_formula"`
+		TagFormulaMode    string     `json:"tag_formula_mode"`
+		TagFormulaType    string     `json:"tag_formula_type"`
+		EventDate         *string    `json:"event_date"`
+		EventEnd          *string    `json:"event_end"`
+		Location          *string    `json:"location"`
+		FolderID          *uuid.UUID `json:"folder_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
 
-program := &domain.Program{
-AccountID:         accountID,
-Type:              req.Type,
-Name:              req.Name,
-Description:       &req.Description,
-Color:             req.Color,
+	program := &domain.Program{
+		AccountID:         accountID,
+		Type:              req.Type,
+		Name:              req.Name,
+		Description:       &req.Description,
+		Color:             req.Color,
 		CreatedBy:         &userID,
 		FolderID:          req.FolderID,
 		ScheduleDays:      req.ScheduleDays,
@@ -88,404 +89,511 @@ Color:             req.Color,
 	}
 
 	s.invalidateProgramsCache(accountID)
-return c.Status(fiber.StatusCreated).JSON(program)
+	return c.Status(fiber.StatusCreated).JSON(program)
 }
 
 func (s *Server) handleListPrograms(c *fiber.Ctx) error {
-accountID := c.Locals("account_id").(uuid.UUID)
+	accountID := c.Locals("account_id").(uuid.UUID)
 
-// Redis cache — 30s TTL
-programsCacheKey := ""
-if s.cache != nil {
-programsCacheKey = fmt.Sprintf("programs:%s:all", accountID.String())
-if cached, err := s.cache.Get(c.Context(), programsCacheKey); err == nil && cached != nil {
-c.Set("Content-Type", "application/json")
-return c.Send(cached)
-}
-}
+	// Redis cache — 30s TTL
+	programsCacheKey := ""
+	if s.cache != nil {
+		programsCacheKey = fmt.Sprintf("programs:%s:all", accountID.String())
+		if cached, err := s.cache.Get(c.Context(), programsCacheKey); err == nil && cached != nil {
+			c.Set("Content-Type", "application/json")
+			return c.Send(cached)
+		}
+	}
 
-programs, err := s.services.Program.ListPrograms(c.Context(), accountID)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	programs, err := s.services.Program.ListPrograms(c.Context(), accountID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-if programsCacheKey != "" && s.cache != nil {
-if data, err := json.Marshal(programs); err == nil {
-_ = s.cache.Set(c.Context(), programsCacheKey, data, 30*time.Second)
-}
-}
+	if programsCacheKey != "" && s.cache != nil {
+		if data, err := json.Marshal(programs); err == nil {
+			_ = s.cache.Set(c.Context(), programsCacheKey, data, 30*time.Second)
+		}
+	}
 
-return c.JSON(programs)
+	return c.JSON(programs)
 }
 
 func (s *Server) handleGetProgram(c *fiber.Ctx) error {
-accountID := c.Locals("account_id").(uuid.UUID)
+	accountID := c.Locals("account_id").(uuid.UUID)
 
-id, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
 
-program, err := s.services.Program.GetProgram(c.Context(), accountID, id)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
-if program == nil {
-return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
-}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
 
-return c.JSON(program)
+	return c.JSON(program)
 }
 
 func (s *Server) handleUpdateProgram(c *fiber.Ctx) error {
-accountID := c.Locals("account_id").(uuid.UUID)
+	accountID := c.Locals("account_id").(uuid.UUID)
 
-id, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
-
-var req struct {
-Name              string     `json:"name"`
-Description       string     `json:"description"`
-Status            string     `json:"status"`
-Color             string     `json:"color"`
-Type              string     `json:"type"`
-ScheduleStartDate *string    `json:"schedule_start_date"`
-ScheduleEndDate   *string    `json:"schedule_end_date"`
-ScheduleDays      []int      `json:"schedule_days"`
-ScheduleStartTime *string    `json:"schedule_start_time"`
-ScheduleEndTime   *string    `json:"schedule_end_time"`
-PipelineID        *uuid.UUID `json:"pipeline_id"`
-TagFormula        string     `json:"tag_formula"`
-TagFormulaMode    string     `json:"tag_formula_mode"`
-TagFormulaType    string     `json:"tag_formula_type"`
-EventDate         *string    `json:"event_date"`
-EventEnd          *string    `json:"event_end"`
-Location          *string    `json:"location"`
-}
-if err := c.BodyParser(&req); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-}
-
-// Load existing to preserve type/folder when not provided
-existing, err := s.services.Program.GetProgram(c.Context(), accountID, id)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
-if existing == nil {
-return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
-}
-programType := req.Type
-if programType == "" {
-programType = existing.Type
-}
-if programType == "" {
-programType = "course"
-}
-
-program := &domain.Program{
-ID:                id,
-AccountID:         accountID,
-Type:              programType,
-FolderID:          existing.FolderID,
-Name:              req.Name,
-Description:       &req.Description,
-Status:            req.Status,
-Color:             req.Color,
-ScheduleDays:      req.ScheduleDays,
-ScheduleStartTime: req.ScheduleStartTime,
-ScheduleEndTime:   req.ScheduleEndTime,
-PipelineID:        req.PipelineID,
-TagFormula:        req.TagFormula,
-TagFormulaMode:    req.TagFormulaMode,
-TagFormulaType:    req.TagFormulaType,
-Location:          req.Location,
-}
-if program.PipelineID == nil {
-program.PipelineID = existing.PipelineID
-}
-if program.TagFormulaMode == "" {
-program.TagFormulaMode = existing.TagFormulaMode
-}
-if program.TagFormulaType == "" {
-program.TagFormulaType = existing.TagFormulaType
-}
-
-if req.ScheduleStartDate != nil {
-	if t, err := time.Parse("2006-01-02", *req.ScheduleStartDate); err == nil {
-		program.ScheduleStartDate = &t
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
 	}
-}
-if req.ScheduleEndDate != nil {
-	if t, err := time.Parse("2006-01-02", *req.ScheduleEndDate); err == nil {
-		program.ScheduleEndDate = &t
-	}
-}
-if req.EventDate != nil && *req.EventDate != "" {
-	if t, err := time.Parse(time.RFC3339, *req.EventDate); err == nil {
-		program.EventDate = &t
-	} else if t2, err2 := time.Parse("2006-01-02", *req.EventDate); err2 == nil {
-		program.EventDate = &t2
-	}
-}
-if req.EventEnd != nil && *req.EventEnd != "" {
-	if t, err := time.Parse(time.RFC3339, *req.EventEnd); err == nil {
-		program.EventEnd = &t
-	} else if t2, err2 := time.Parse("2006-01-02", *req.EventEnd); err2 == nil {
-		program.EventEnd = &t2
-	}
-}
 
-if err := s.services.Program.UpdateProgram(c.Context(), program); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-}
+	var req struct {
+		Name              string     `json:"name"`
+		Description       string     `json:"description"`
+		Status            string     `json:"status"`
+		Color             string     `json:"color"`
+		Type              string     `json:"type"`
+		ScheduleStartDate *string    `json:"schedule_start_date"`
+		ScheduleEndDate   *string    `json:"schedule_end_date"`
+		ScheduleDays      []int      `json:"schedule_days"`
+		ScheduleStartTime *string    `json:"schedule_start_time"`
+		ScheduleEndTime   *string    `json:"schedule_end_time"`
+		PipelineID        *uuid.UUID `json:"pipeline_id"`
+		TagFormula        string     `json:"tag_formula"`
+		TagFormulaMode    string     `json:"tag_formula_mode"`
+		TagFormulaType    string     `json:"tag_formula_type"`
+		EventDate         *string    `json:"event_date"`
+		EventEnd          *string    `json:"event_end"`
+		Location          *string    `json:"location"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
 
-s.invalidateProgramsCache(accountID)
-return c.JSON(program)
+	// Load existing to preserve type/folder when not provided
+	existing, err := s.services.Program.GetProgram(c.Context(), accountID, id)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if existing == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
+	programType := req.Type
+	if programType == "" {
+		programType = existing.Type
+	}
+	if programType == "" {
+		programType = "course"
+	}
+
+	program := &domain.Program{
+		ID:                id,
+		AccountID:         accountID,
+		Type:              programType,
+		FolderID:          existing.FolderID,
+		Name:              req.Name,
+		Description:       &req.Description,
+		Status:            req.Status,
+		Color:             req.Color,
+		ScheduleDays:      req.ScheduleDays,
+		ScheduleStartTime: req.ScheduleStartTime,
+		ScheduleEndTime:   req.ScheduleEndTime,
+		PipelineID:        req.PipelineID,
+		TagFormula:        req.TagFormula,
+		TagFormulaMode:    req.TagFormulaMode,
+		TagFormulaType:    req.TagFormulaType,
+		Location:          req.Location,
+	}
+	if program.PipelineID == nil {
+		program.PipelineID = existing.PipelineID
+	}
+	if program.TagFormulaMode == "" {
+		program.TagFormulaMode = existing.TagFormulaMode
+	}
+	if program.TagFormulaType == "" {
+		program.TagFormulaType = existing.TagFormulaType
+	}
+
+	if req.ScheduleStartDate != nil {
+		if t, err := time.Parse("2006-01-02", *req.ScheduleStartDate); err == nil {
+			program.ScheduleStartDate = &t
+		}
+	}
+	if req.ScheduleEndDate != nil {
+		if t, err := time.Parse("2006-01-02", *req.ScheduleEndDate); err == nil {
+			program.ScheduleEndDate = &t
+		}
+	}
+	if req.EventDate != nil && *req.EventDate != "" {
+		if t, err := time.Parse(time.RFC3339, *req.EventDate); err == nil {
+			program.EventDate = &t
+		} else if t2, err2 := time.Parse("2006-01-02", *req.EventDate); err2 == nil {
+			program.EventDate = &t2
+		}
+	}
+	if req.EventEnd != nil && *req.EventEnd != "" {
+		if t, err := time.Parse(time.RFC3339, *req.EventEnd); err == nil {
+			program.EventEnd = &t
+		} else if t2, err2 := time.Parse("2006-01-02", *req.EventEnd); err2 == nil {
+			program.EventEnd = &t2
+		}
+	}
+
+	if err := s.services.Program.UpdateProgram(c.Context(), program); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	s.invalidateProgramsCache(accountID)
+	return c.JSON(program)
 }
 
 func (s *Server) handleDeleteProgram(c *fiber.Ctx) error {
-accountID := c.Locals("account_id").(uuid.UUID)
+	accountID := c.Locals("account_id").(uuid.UUID)
 
-id, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
 
-if err := s.services.Program.DeleteProgram(c.Context(), accountID, id); err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	if err := s.services.Program.DeleteProgram(c.Context(), accountID, id); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-s.invalidateProgramsCache(accountID)
-return c.SendStatus(fiber.StatusNoContent)
+	s.invalidateProgramsCache(accountID)
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // --- Participants ---
 
 func (s *Server) handleAddParticipant(c *fiber.Ctx) error {
-programID, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
 
-var req struct {
-	ContactID uuid.UUID  `json:"contact_id"`
-	Status    string     `json:"status"`
-	StageID   *uuid.UUID `json:"stage_id"`
-}
-if err := c.BodyParser(&req); err != nil {
-	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-}
+	var req struct {
+		ContactID uuid.UUID  `json:"contact_id"`
+		Status    string     `json:"status"`
+		StageID   *uuid.UUID `json:"stage_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
 
-if req.ContactID == uuid.Nil {
-	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Se requiere contact_id"})
-}
+	if req.ContactID == uuid.Nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Se requiere contact_id"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
+	contact, err := s.services.Contact.GetByID(c.Context(), req.ContactID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if contact == nil || contact.AccountID != accountID {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Contact not found"})
+	}
 
-participant := &domain.ProgramParticipant{
-	ProgramID: programID,
-	ContactID: req.ContactID,
-	StageID:   req.StageID,
-	Status:    "active",
-}
+	participant := &domain.ProgramParticipant{
+		ProgramID: programID,
+		ContactID: req.ContactID,
+		StageID:   req.StageID,
+		Status:    "active",
+	}
 
-if err := s.services.Program.AddParticipant(c.Context(), participant); err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	if err := s.services.Program.AddParticipant(c.Context(), participant); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-return c.Status(fiber.StatusCreated).JSON(participant)
+	return c.Status(fiber.StatusCreated).JSON(participant)
 }
 
 func (s *Server) handleListParticipants(c *fiber.Ctx) error {
-programID, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
 
-participants, err := s.services.Program.ListParticipants(c.Context(), programID)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	participants, err := s.services.Program.ListParticipants(c.Context(), programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-return c.JSON(participants)
+	return c.JSON(participants)
 }
 
 func (s *Server) handleRemoveParticipant(c *fiber.Ctx) error {
-programID, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
 
-participantID, err := uuid.Parse(c.Params("participantId"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid participant ID"})
-}
+	participantID, err := uuid.Parse(c.Params("participantId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid participant ID"})
+	}
 
-if err := s.services.Program.RemoveParticipant(c.Context(), programID, participantID); err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	if err := s.services.Program.RemoveParticipant(c.Context(), programID, participantID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-return c.SendStatus(fiber.StatusNoContent)
+	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // --- Sessions ---
 
 func (s *Server) handleCreateSession(c *fiber.Ctx) error {
-programID, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
 
-var req struct {
-Date      string  `json:"date"`
-Topic     string  `json:"topic"`
-StartTime *string `json:"start_time"`
-EndTime   *string `json:"end_time"`
-Location  *string `json:"location"`
-}
-if err := c.BodyParser(&req); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-}
+	var req struct {
+		Date        string  `json:"date"`
+		Topic       string  `json:"topic"`
+		SessionType string  `json:"session_type"`
+		StartTime   *string `json:"start_time"`
+		EndTime     *string `json:"end_time"`
+		Location    *string `json:"location"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
 
-parsedDate, err := time.Parse("2006-01-02", req.Date)
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid date format, expected YYYY-MM-DD"})
-}
+	parsedDate, err := time.Parse("2006-01-02", req.Date)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid date format, expected YYYY-MM-DD"})
+	}
 
-session := &domain.ProgramSession{
-ProgramID: programID,
-Date:      parsedDate,
-Topic:     &req.Topic,
-StartTime: req.StartTime,
-EndTime:   req.EndTime,
-Location:  req.Location,
-}
+	session := &domain.ProgramSession{
+		ProgramID:   programID,
+		Date:        parsedDate,
+		Topic:       &req.Topic,
+		SessionType: req.SessionType,
+		StartTime:   req.StartTime,
+		EndTime:     req.EndTime,
+		Location:    req.Location,
+	}
 
-if err := s.services.Program.CreateSession(c.Context(), session); err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	if err := s.services.Program.CreateSession(c.Context(), session); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-return c.Status(fiber.StatusCreated).JSON(session)
+	return c.Status(fiber.StatusCreated).JSON(session)
 }
 
 func (s *Server) handleListSessions(c *fiber.Ctx) error {
-programID, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
 
-sessions, err := s.services.Program.ListSessions(c.Context(), programID)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	sessions, err := s.services.Program.ListSessions(c.Context(), programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-return c.JSON(sessions)
+	return c.JSON(sessions)
 }
 
 func (s *Server) handleUpdateSession(c *fiber.Ctx) error {
-programID, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
 
-sessionID, err := uuid.Parse(c.Params("sessionId"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
-}
-
-var req struct {
-Date      string  `json:"date"`
-Topic     string  `json:"topic"`
-StartTime *string `json:"start_time"`
-EndTime   *string `json:"end_time"`
-Location  *string `json:"location"`
-}
-if err := c.BodyParser(&req); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-}
-
-parsedDate, err := time.Parse("2006-01-02", req.Date)
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid date format, expected YYYY-MM-DD"})
-}
-
-session := &domain.ProgramSession{
-ID:        sessionID,
-ProgramID: programID,
-Date:      parsedDate,
-Topic:     &req.Topic,
-StartTime: req.StartTime,
-EndTime:   req.EndTime,
-Location:  req.Location,
-}
-
-if err := s.services.Program.UpdateSession(c.Context(), session); err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
-
-return c.JSON(session)
-}
-
-func (s *Server) handleDeleteSession(c *fiber.Ctx) error {
-programID, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
-
-sessionID, err := uuid.Parse(c.Params("sessionId"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
-}
-
-if err := s.services.Program.DeleteSession(c.Context(), programID, sessionID); err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
-
-return c.SendStatus(fiber.StatusNoContent)
-}
-
-// --- Attendance ---
-
-func (s *Server) handleMarkAttendance(c *fiber.Ctx) error {
-sessionID, err := uuid.Parse(c.Params("sessionId"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
-}
-
-var req struct {
-ParticipantID uuid.UUID `json:"participant_id"`
-Status        string    `json:"status"`
-Notes         string    `json:"notes"`
-}
-if err := c.BodyParser(&req); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-}
-
-attendance := &domain.ProgramAttendance{
-SessionID:     sessionID,
-ParticipantID: req.ParticipantID,
-Status:        req.Status,
-Notes:         &req.Notes,
-}
-
-if err := s.services.Program.MarkAttendance(c.Context(), attendance); err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
-
-return c.JSON(attendance)
-}
-
-func (s *Server) handleBatchMarkAttendance(c *fiber.Ctx) error {
 	sessionID, err := uuid.Parse(c.Params("sessionId"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
 	}
 
 	var req struct {
+		Date        string  `json:"date"`
+		Topic       string  `json:"topic"`
+		SessionType string  `json:"session_type"`
+		StartTime   *string `json:"start_time"`
+		EndTime     *string `json:"end_time"`
+		Location    *string `json:"location"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	parsedDate, err := time.Parse("2006-01-02", req.Date)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid date format, expected YYYY-MM-DD"})
+	}
+
+	session := &domain.ProgramSession{
+		ID:          sessionID,
+		ProgramID:   programID,
+		Date:        parsedDate,
+		Topic:       &req.Topic,
+		SessionType: req.SessionType,
+		StartTime:   req.StartTime,
+		EndTime:     req.EndTime,
+		Location:    req.Location,
+	}
+
+	if err := s.services.Program.UpdateSession(c.Context(), session); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(session)
+}
+
+func (s *Server) handleDeleteSession(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
+
+	sessionID, err := uuid.Parse(c.Params("sessionId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
+	}
+
+	if err := s.services.Program.DeleteSession(c.Context(), programID, sessionID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// --- Attendance ---
+
+func (s *Server) handleMarkAttendance(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	sessionID, err := uuid.Parse(c.Params("sessionId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
+	}
+	var sessionOK bool
+	if err := s.repos.DB().QueryRow(c.Context(), `
+SELECT EXISTS(
+  SELECT 1 FROM program_sessions ps
+  JOIN programs p ON p.id = ps.program_id
+  WHERE p.account_id = $1 AND ps.program_id = $2 AND ps.id = $3
+)`, accountID, programID, sessionID).Scan(&sessionOK); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if !sessionOK {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Session not found"})
+	}
+
+	var req struct {
+		ParticipantID    uuid.UUID `json:"participant_id"`
+		Status           string    `json:"status"`
+		Notes            string    `json:"notes"`
+		InstructorStatus string    `json:"instructor_status"`
+		InstructorNotes  string    `json:"instructor_notes"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	attendance := &domain.ProgramAttendance{
+		SessionID:        sessionID,
+		ParticipantID:    req.ParticipantID,
+		Status:           req.Status,
+		Notes:            &req.Notes,
+		InstructorStatus: req.InstructorStatus,
+		InstructorNotes:  req.InstructorNotes,
+	}
+
+	if err := s.services.Program.MarkAttendance(c.Context(), attendance); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(attendance)
+}
+
+func (s *Server) handleBatchMarkAttendance(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	sessionID, err := uuid.Parse(c.Params("sessionId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
+	}
+	var sessionOK bool
+	if err := s.repos.DB().QueryRow(c.Context(), `
+SELECT EXISTS(
+  SELECT 1 FROM program_sessions ps
+  JOIN programs p ON p.id = ps.program_id
+  WHERE p.account_id = $1 AND ps.program_id = $2 AND ps.id = $3
+)`, accountID, programID, sessionID).Scan(&sessionOK); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if !sessionOK {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Session not found"})
+	}
+
+	var req struct {
 		Records []struct {
-			ParticipantID uuid.UUID `json:"participant_id"`
-			Status        string    `json:"status"`
-			Notes         string    `json:"notes"`
+			ParticipantID    uuid.UUID `json:"participant_id"`
+			Status           string    `json:"status"`
+			Notes            string    `json:"notes"`
+			InstructorStatus string    `json:"instructor_status"`
+			InstructorNotes  string    `json:"instructor_notes"`
 		} `json:"records"`
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -499,10 +607,12 @@ func (s *Server) handleBatchMarkAttendance(c *fiber.Ctx) error {
 	for _, r := range req.Records {
 		notes := r.Notes
 		attendances = append(attendances, &domain.ProgramAttendance{
-			SessionID:     sessionID,
-			ParticipantID: r.ParticipantID,
-			Status:        r.Status,
-			Notes:         &notes,
+			SessionID:        sessionID,
+			ParticipantID:    r.ParticipantID,
+			Status:           r.Status,
+			Notes:            &notes,
+			InstructorStatus: r.InstructorStatus,
+			InstructorNotes:  r.InstructorNotes,
 		})
 	}
 
@@ -514,24 +624,49 @@ func (s *Server) handleBatchMarkAttendance(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetAttendance(c *fiber.Ctx) error {
-sessionID, err := uuid.Parse(c.Params("sessionId"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
-}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	sessionID, err := uuid.Parse(c.Params("sessionId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid session ID"})
+	}
+	var sessionOK bool
+	if err := s.repos.DB().QueryRow(c.Context(), `
+SELECT EXISTS(
+  SELECT 1 FROM program_sessions ps
+  JOIN programs p ON p.id = ps.program_id
+  WHERE p.account_id = $1 AND ps.program_id = $2 AND ps.id = $3
+)`, accountID, programID, sessionID).Scan(&sessionOK); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if !sessionOK {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Session not found"})
+	}
 
-attendance, err := s.services.Program.GetAttendanceBySession(c.Context(), sessionID)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	attendance, err := s.services.Program.GetAttendanceBySession(c.Context(), sessionID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-return c.JSON(attendance)
+	return c.JSON(attendance)
 }
 
 // handleGenerateSessions generates recurring sessions based on schedule config
 func (s *Server) handleGenerateSessions(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	programID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
 	}
 
 	var req struct {
@@ -581,6 +716,13 @@ func (s *Server) handleCreateCampaignFromProgram(c *fiber.Ctx) error {
 	programID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Program not found"})
 	}
 
 	var req struct {
@@ -811,9 +953,17 @@ func (s *Server) handleMoveProgramToFolder(c *fiber.Ctx) error {
 // =================== Attendance Stats ===================
 
 func (s *Server) handleGetAttendanceStats(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	programID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Program not found"})
 	}
 	months := c.Query("months", "") // comma-separated YYYY-MM
 	sessionStats, participantStats, err := s.services.Program.GetAttendanceStats(c.Context(), programID, months)
@@ -833,42 +983,297 @@ func (s *Server) handleGetAttendanceStats(c *fiber.Ctx) error {
 	})
 }
 
+func parseProgramOptionalTime(value string) (*time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return &t, nil
+	}
+	t, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *Server) handleGetProgramsDashboard(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	from, err := parseProgramOptionalTime(c.Query("from", ""))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid from date"})
+	}
+	to, err := parseProgramOptionalTime(c.Query("to", ""))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid to date"})
+	}
+	dashboard, err := s.services.Program.GetProgramsDashboard(c.Context(), accountID, from, to)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "dashboard": dashboard})
+}
+
+func (s *Server) handleGetGlobalProgramGoals(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	goals, err := s.services.Program.GetProgramGoals(c.Context(), accountID, nil)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "goals": goals})
+}
+
+func (s *Server) handleUpsertGlobalProgramGoals(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	var req struct {
+		AttendanceGoalPercent int `json:"attendance_goal_percent"`
+		TransferGoalPercent   int `json:"transfer_goal_percent"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	goals := &domain.ProgramGoal{
+		AccountID:             accountID,
+		AttendanceGoalPercent: req.AttendanceGoalPercent,
+		TransferGoalPercent:   req.TransferGoalPercent,
+	}
+	if err := s.services.Program.UpsertProgramGoals(c.Context(), goals); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "goals": goals})
+}
+
+func (s *Server) handleGetProgramGoals(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Program not found"})
+	}
+	goals, err := s.services.Program.GetProgramGoals(c.Context(), accountID, &programID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "goals": goals})
+}
+
+func (s *Server) handleUpsertProgramGoals(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	var req struct {
+		AttendanceGoalPercent int `json:"attendance_goal_percent"`
+		TransferGoalPercent   int `json:"transfer_goal_percent"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	goals := &domain.ProgramGoal{
+		AccountID:             accountID,
+		ProgramID:             &programID,
+		AttendanceGoalPercent: req.AttendanceGoalPercent,
+		TransferGoalPercent:   req.TransferGoalPercent,
+	}
+	if err := s.services.Program.UpsertProgramGoals(c.Context(), goals); err != nil {
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Program not found"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "goals": goals})
+}
+
+func (s *Server) handleGetProgramHealth(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	health, err := s.services.Program.GetProgramHealth(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if health == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Program not found"})
+	}
+	return c.JSON(fiber.Map{"success": true, "health": health})
+}
+
+func (s *Server) handleUpdateProgramParticipantOutcome(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	participantID, err := uuid.Parse(c.Params("participantId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
+	}
+	var req struct {
+		Status             string `json:"status"`
+		DroppedAt          string `json:"dropped_at"`
+		DropReason         string `json:"drop_reason"`
+		DropNotes          string `json:"drop_notes"`
+		CompletedAt        string `json:"completed_at"`
+		TransferredToLevel string `json:"transferred_to_level"`
+		TransferredAt      string `json:"transferred_at"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	droppedAt, err := parseProgramOptionalTime(req.DroppedAt)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid dropped_at"})
+	}
+	completedAt, err := parseProgramOptionalTime(req.CompletedAt)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid completed_at"})
+	}
+	transferredAt, err := parseProgramOptionalTime(req.TransferredAt)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid transferred_at"})
+	}
+	if err := s.services.Program.UpdateParticipantOutcome(c.Context(), accountID, programID, participantID, req.Status, droppedAt, req.DropReason, req.DropNotes, completedAt, req.TransferredToLevel, transferredAt); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleListProgramParticipantNotes(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	participantID, err := uuid.Parse(c.Params("participantId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Program not found"})
+	}
+	notes, err := s.services.Program.ListParticipantNotes(c.Context(), accountID, programID, &participantID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if notes == nil {
+		notes = make([]*domain.ProgramParticipantNote, 0)
+	}
+	return c.JSON(fiber.Map{"success": true, "notes": notes})
+}
+
+func (s *Server) handleCreateProgramParticipantNote(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+	}
+	participantID, err := uuid.Parse(c.Params("participantId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
+	}
+	var req struct {
+		SessionID  *uuid.UUID `json:"session_id"`
+		Type       string     `json:"type"`
+		Note       string     `json:"note"`
+		Outcome    string     `json:"outcome"`
+		FollowUpAt string     `json:"follow_up_at"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Program not found"})
+	}
+	participants, err := s.services.Program.ListParticipants(c.Context(), programID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	var participant *domain.ProgramParticipant
+	for _, p := range participants {
+		if p.ID == participantID {
+			participant = p
+			break
+		}
+	}
+	if participant == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
+	}
+	followUpAt, err := parseProgramOptionalTime(req.FollowUpAt)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid follow_up_at"})
+	}
+	note := &domain.ProgramParticipantNote{
+		AccountID:     accountID,
+		ProgramID:     programID,
+		ParticipantID: participantID,
+		ContactID:     participant.ContactID,
+		SessionID:     req.SessionID,
+		Type:          req.Type,
+		Note:          req.Note,
+		Outcome:       req.Outcome,
+		FollowUpAt:    followUpAt,
+		CreatedBy:     &userID,
+	}
+	if err := s.services.Program.CreateParticipantNote(c.Context(), note); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "note": note})
+}
+
 // --- Participant Stage (Kanban drag) ---
 
 func (s *Server) handleUpdateProgramParticipantStage(c *fiber.Ctx) error {
-accountID := c.Locals("account_id").(uuid.UUID)
+	accountID := c.Locals("account_id").(uuid.UUID)
 
-programID, err := uuid.Parse(c.Params("id"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
-}
-participantID, err := uuid.Parse(c.Params("participantId"))
-if err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid participant ID"})
-}
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid program ID"})
+	}
+	participantID, err := uuid.Parse(c.Params("participantId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid participant ID"})
+	}
 
-// Verify the program belongs to this account and is of type 'event'
-program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
-if err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
-if program == nil {
-return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
-}
-if program.Type != "event" {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Stages only apply to event-type programs"})
-}
+	// Verify the program belongs to this account and is of type 'event'
+	program, err := s.services.Program.GetProgram(c.Context(), accountID, programID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if program == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+	}
+	if program.Type != "event" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Stages only apply to event-type programs"})
+	}
 
-var req struct {
-StageID *uuid.UUID `json:"stage_id"`
-}
-if err := c.BodyParser(&req); err != nil {
-return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
-}
+	var req struct {
+		StageID *uuid.UUID `json:"stage_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
 
-if err := s.services.Program.UpdateParticipantStage(c.Context(), programID, participantID, req.StageID); err != nil {
-return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-}
+	if err := s.services.Program.UpdateParticipantStage(c.Context(), programID, participantID, req.StageID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
 
-return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true})
 }

@@ -1403,6 +1403,31 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_contact_phones_contact_id ON contact_phones(contact_id)`,
 
+		// Contact merge aliases keep old JIDs/phones resolvable after a manual unification.
+		`CREATE TABLE IF NOT EXISTS contact_aliases (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+			alias_type VARCHAR(32) NOT NULL,
+			alias_value TEXT NOT NULL,
+			normalized_value TEXT NOT NULL,
+			source_contact_id UUID,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(account_id, alias_type, normalized_value)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_aliases_lookup ON contact_aliases(account_id, alias_type, normalized_value)`,
+		`CREATE TABLE IF NOT EXISTS contact_merge_audit (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			keep_contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE RESTRICT,
+			merged_contact_ids UUID[] NOT NULL DEFAULT '{}',
+			merged_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			summary JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_merge_audit_account_created ON contact_merge_audit(account_id, created_at DESC)`,
+
 		// ─── Tasks & Reminders ──
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1606,6 +1631,53 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS stage_id UUID REFERENCES event_pipeline_stages(id) ON DELETE SET NULL`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS auto_tag_sync BOOLEAN DEFAULT FALSE`,
 		`CREATE INDEX IF NOT EXISTS idx_program_participants_stage ON program_participants(stage_id)`,
+
+		// ─── Programs: course health, goals, transfer and bitacora ─────────
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS dropped_at TIMESTAMPTZ`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS drop_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS drop_notes TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS transferred_to_level TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS transferred_at TIMESTAMPTZ`,
+		`CREATE INDEX IF NOT EXISTS idx_program_participants_status ON program_participants(program_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_participants_transfer ON program_participants(program_id) WHERE transferred_to_level <> ''`,
+		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS session_type TEXT NOT NULL DEFAULT 'regular'`,
+		`CREATE INDEX IF NOT EXISTS idx_program_sessions_type ON program_sessions(program_id, session_type)`,
+		`ALTER TABLE program_attendance ADD COLUMN IF NOT EXISTS instructor_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE program_attendance ADD COLUMN IF NOT EXISTS instructor_notes TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_program_attendance_status ON program_attendance(session_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_attendance_instructor_status ON program_attendance(session_id, instructor_status) WHERE instructor_status <> ''`,
+		`CREATE TABLE IF NOT EXISTS program_goals (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			program_id UUID REFERENCES programs(id) ON DELETE CASCADE,
+			attendance_goal_percent INT NOT NULL DEFAULT 80,
+			transfer_goal_percent INT NOT NULL DEFAULT 70,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_program_goals_global ON program_goals(account_id) WHERE program_id IS NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_program_goals_program ON program_goals(account_id, program_id) WHERE program_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_program_goals_program ON program_goals(program_id) WHERE program_id IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS program_participant_notes (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			program_id UUID NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+			participant_id UUID NOT NULL REFERENCES program_participants(id) ON DELETE CASCADE,
+			contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+			session_id UUID REFERENCES program_sessions(id) ON DELETE SET NULL,
+			type TEXT NOT NULL DEFAULT 'note',
+			note TEXT NOT NULL DEFAULT '',
+			outcome TEXT NOT NULL DEFAULT '',
+			follow_up_at TIMESTAMPTZ,
+			created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_notes_account_created ON program_participant_notes(account_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_notes_program_created ON program_participant_notes(program_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_notes_participant_created ON program_participant_notes(participant_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_notes_session ON program_participant_notes(session_id) WHERE session_id IS NOT NULL`,
 
 		// ─── Kommo Push Outbox: batched, coalesced push worker ─────────────
 		// Enables bulk PATCH to Kommo (up to 250 items/req) with coalescing

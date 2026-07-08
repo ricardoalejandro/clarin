@@ -50,6 +50,12 @@ export interface ProgramParticipant {
   lead_id?: string;
   status: 'active' | 'dropped' | 'completed';
   enrolled_at: string;
+  dropped_at?: string;
+  drop_reason?: string;
+  drop_notes?: string;
+  completed_at?: string;
+  transferred_to_level?: string;
+  transferred_at?: string;
   contact_name?: string;
   contact_phone?: string;
   stage_id?: string;
@@ -63,6 +69,7 @@ export interface ProgramSession {
   program_id: string;
   date: string;
   topic: string;
+  session_type?: 'regular' | 'recovery';
   start_time?: string; // "HH:MM"
   end_time?: string;   // "HH:MM"
   location?: string;
@@ -77,8 +84,113 @@ export interface ProgramAttendance {
   participant_id: string;
   status: 'present' | 'absent' | 'late' | 'excused';
   notes: string;
+  instructor_status?: 'good' | 'watch' | 'risk' | '';
+  instructor_notes?: string;
   created_at: string;
   updated_at: string;
   participant_name?: string;
   participant_phone?: string;
+}
+
+export interface ProgramGoal {
+  id?: string;
+  account_id?: string;
+  program_id?: string;
+  attendance_goal_percent: number;
+  transfer_goal_percent: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ProgramParticipantNote {
+  id: string;
+  account_id: string;
+  program_id: string;
+  participant_id: string;
+  contact_id: string;
+  session_id?: string;
+  type: string;
+  note: string;
+  outcome?: string;
+  follow_up_at?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  participant_name?: string;
+  created_by_name?: string;
+}
+
+export interface ProgramHealthParticipant {
+  participant_id: string;
+  contact_id: string;
+  name: string;
+  phone?: string;
+  status: 'active' | 'dropped' | 'completed';
+  health: 'healthy' | 'watch' | 'critical';
+  attendance_rate: number;
+  present: number;
+  late: number;
+  absent: number;
+  excused: number;
+  recovery_sessions: number;
+  instructor_risk_count: number;
+  notes_count: number;
+  last_note_at?: string;
+  transferred_to_level?: string;
+  reasons: string[];
+}
+
+export interface ProgramHealthSummary {
+  program_id: string;
+  attendance_goal_percent: number;
+  transfer_goal_percent: number;
+  participant_count: number;
+  active_count: number;
+  completed_count: number;
+  dropped_count: number;
+  transferred_count: number;
+  session_count: number;
+  recovery_session_count: number;
+  attendance_rate: number;
+  transfer_rate: number;
+  health: 'healthy' | 'watch' | 'critical';
+  reasons: string[];
+  participants: ProgramHealthParticipant[];
+}
+
+export interface ProgramDashboardGroup {
+  program_id: string;
+  name: string;
+  status: string;
+  color: string;
+  participant_count: number;
+  active_count: number;
+  completed_count: number;
+  dropped_count: number;
+  transferred_count: number;
+  session_count: number;
+  attendance_rate: number;
+  transfer_rate: number;
+  attendance_goal_percent: number;
+  transfer_goal_percent: number;
+  at_risk_count: number;
+  health: 'healthy' | 'watch' | 'critical';
+}
+
+export interface ProgramDashboardSummary {
+  from?: string;
+  to?: string;
+  attendance_goal_percent: number;
+  transfer_goal_percent: number;
+  program_count: number;
+  active_program_count: number;
+  participant_count: number;
+  completed_count: number;
+  dropped_count: number;
+  transferred_count: number;
+  attendance_rate: number;
+  transfer_rate: number;
+  groups_below_goal: number;
+  critical_participants: number;
+  groups: ProgramDashboardGroup[];
 }

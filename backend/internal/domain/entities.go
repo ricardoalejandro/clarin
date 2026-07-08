@@ -348,6 +348,68 @@ type ContactPhone struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type ContactRelationCounts struct {
+	Leads              int `json:"leads"`
+	Chats              int `json:"chats"`
+	Tasks              int `json:"tasks"`
+	Interactions       int `json:"interactions"`
+	Events             int `json:"events"`
+	Programs           int `json:"programs"`
+	CampaignRecipients int `json:"campaign_recipients"`
+	CustomFields       int `json:"custom_fields"`
+	Tags               int `json:"tags"`
+}
+
+type ContactDuplicateCandidate struct {
+	Contact *Contact              `json:"contact"`
+	Counts  ContactRelationCounts `json:"counts"`
+}
+
+type ContactDuplicateGroup struct {
+	GroupKey          string                       `json:"group_key"`
+	NormalizedPhone   string                       `json:"normalized_phone"`
+	Confidence        string                       `json:"confidence"`
+	Reason            string                       `json:"reason"`
+	RecommendedKeepID uuid.UUID                    `json:"recommended_keep_id"`
+	Contacts          []*ContactDuplicateCandidate `json:"contacts"`
+}
+
+type ContactMergeFieldPreview struct {
+	Field      string     `json:"field"`
+	Label      string     `json:"label"`
+	FinalValue *string    `json:"final_value,omitempty"`
+	Conflict   bool       `json:"conflict"`
+	Candidates []string   `json:"candidates,omitempty"`
+	SourceID   *uuid.UUID `json:"source_id,omitempty"`
+}
+
+type ContactMergeLeadPreview struct {
+	ID           uuid.UUID `json:"id"`
+	ContactID    uuid.UUID `json:"contact_id"`
+	Name         *string   `json:"name,omitempty"`
+	Phone        *string   `json:"phone,omitempty"`
+	PipelineName *string   `json:"pipeline_name,omitempty"`
+	StageName    *string   `json:"stage_name,omitempty"`
+	IsArchived   bool      `json:"is_archived"`
+	IsBlocked    bool      `json:"is_blocked"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type ContactMergePreview struct {
+	KeepID   uuid.UUID                  `json:"keep_id"`
+	MergeIDs []uuid.UUID                `json:"merge_ids"`
+	Fields   []ContactMergeFieldPreview `json:"fields"`
+	Leads    []ContactMergeLeadPreview  `json:"leads"`
+	Counts   ContactRelationCounts      `json:"counts"`
+	Warnings []string                   `json:"warnings"`
+}
+
+type ContactMergeResult struct {
+	MergedContact *Contact              `json:"merged_contact"`
+	MovedCounts   ContactRelationCounts `json:"moved_counts"`
+	Warnings      []string              `json:"warnings"`
+}
+
 // DisplayName returns the best available name for the contact
 func (c *Contact) DisplayName() string {
 	if c.CustomName != nil && *c.CustomName != "" {
@@ -1297,14 +1359,20 @@ type Program struct {
 
 // ProgramParticipant represents a contact enrolled in a program
 type ProgramParticipant struct {
-	ID          uuid.UUID  `json:"id"`
-	ProgramID   uuid.UUID  `json:"program_id"`
-	ContactID   uuid.UUID  `json:"contact_id"`
-	LeadID      *uuid.UUID `json:"lead_id,omitempty"`
-	StageID     *uuid.UUID `json:"stage_id,omitempty"`
-	Status      string     `json:"status"` // active, dropped, completed
-	EnrolledAt  time.Time  `json:"enrolled_at"`
-	AutoTagSync bool       `json:"auto_tag_sync"`
+	ID                 uuid.UUID  `json:"id"`
+	ProgramID          uuid.UUID  `json:"program_id"`
+	ContactID          uuid.UUID  `json:"contact_id"`
+	LeadID             *uuid.UUID `json:"lead_id,omitempty"`
+	StageID            *uuid.UUID `json:"stage_id,omitempty"`
+	Status             string     `json:"status"` // active, dropped, completed
+	EnrolledAt         time.Time  `json:"enrolled_at"`
+	DroppedAt          *time.Time `json:"dropped_at,omitempty"`
+	DropReason         string     `json:"drop_reason,omitempty"`
+	DropNotes          string     `json:"drop_notes,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	TransferredToLevel string     `json:"transferred_to_level,omitempty"`
+	TransferredAt      *time.Time `json:"transferred_at,omitempty"`
+	AutoTagSync        bool       `json:"auto_tag_sync"`
 
 	// Populated on demand
 	ContactName  string  `json:"contact_name,omitempty"`
@@ -1315,15 +1383,16 @@ type ProgramParticipant struct {
 
 // ProgramSession represents a single class or session within a program
 type ProgramSession struct {
-	ID        uuid.UUID `json:"id"`
-	ProgramID uuid.UUID `json:"program_id"`
-	Date      time.Time `json:"date"`
-	Topic     *string   `json:"topic,omitempty"`
-	StartTime *string   `json:"start_time,omitempty"` // "HH:MM" format
-	EndTime   *string   `json:"end_time,omitempty"`   // "HH:MM" format
-	Location  *string   `json:"location,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          uuid.UUID `json:"id"`
+	ProgramID   uuid.UUID `json:"program_id"`
+	Date        time.Time `json:"date"`
+	Topic       *string   `json:"topic,omitempty"`
+	SessionType string    `json:"session_type"`         // regular | recovery
+	StartTime   *string   `json:"start_time,omitempty"` // "HH:MM" format
+	EndTime     *string   `json:"end_time,omitempty"`   // "HH:MM" format
+	Location    *string   `json:"location,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 
 	// Populated on demand
 	AttendanceStats map[string]int `json:"attendance_stats,omitempty"`
@@ -1331,13 +1400,15 @@ type ProgramSession struct {
 
 // ProgramAttendance represents a participant's attendance record for a session
 type ProgramAttendance struct {
-	ID            uuid.UUID `json:"id"`
-	SessionID     uuid.UUID `json:"session_id"`
-	ParticipantID uuid.UUID `json:"participant_id"`
-	Status        string    `json:"status"` // present, absent, late, excused
-	Notes         *string   `json:"notes,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID               uuid.UUID `json:"id"`
+	SessionID        uuid.UUID `json:"session_id"`
+	ParticipantID    uuid.UUID `json:"participant_id"`
+	Status           string    `json:"status"` // present, absent, late, excused
+	Notes            *string   `json:"notes,omitempty"`
+	InstructorStatus string    `json:"instructor_status,omitempty"` // good | watch | risk
+	InstructorNotes  string    `json:"instructor_notes,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 
 	// Populated on demand
 	ParticipantName  string  `json:"participant_name,omitempty"`
@@ -1351,6 +1422,112 @@ const (
 	AttendanceStatusLate    = "late"
 	AttendanceStatusExcused = "excused"
 )
+
+// ProgramGoal stores attendance and transfer targets for a cuenta or one group.
+type ProgramGoal struct {
+	ID                    uuid.UUID  `json:"id"`
+	AccountID             uuid.UUID  `json:"account_id"`
+	ProgramID             *uuid.UUID `json:"program_id,omitempty"`
+	AttendanceGoalPercent int        `json:"attendance_goal_percent"`
+	TransferGoalPercent   int        `json:"transfer_goal_percent"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+}
+
+// ProgramParticipantNote is the course bitacora for a contact inside a group.
+type ProgramParticipantNote struct {
+	ID            uuid.UUID  `json:"id"`
+	AccountID     uuid.UUID  `json:"account_id"`
+	ProgramID     uuid.UUID  `json:"program_id"`
+	ParticipantID uuid.UUID  `json:"participant_id"`
+	ContactID     uuid.UUID  `json:"contact_id"`
+	SessionID     *uuid.UUID `json:"session_id,omitempty"`
+	Type          string     `json:"type"`
+	Note          string     `json:"note"`
+	Outcome       string     `json:"outcome,omitempty"`
+	FollowUpAt    *time.Time `json:"follow_up_at,omitempty"`
+	CreatedBy     *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+
+	ParticipantName string `json:"participant_name,omitempty"`
+	CreatedByName   string `json:"created_by_name,omitempty"`
+}
+
+type ProgramHealthParticipant struct {
+	ParticipantID       uuid.UUID  `json:"participant_id"`
+	ContactID           uuid.UUID  `json:"contact_id"`
+	Name                string     `json:"name"`
+	Phone               *string    `json:"phone,omitempty"`
+	Status              string     `json:"status"`
+	Health              string     `json:"health"`
+	AttendanceRate      float64    `json:"attendance_rate"`
+	Present             int        `json:"present"`
+	Late                int        `json:"late"`
+	Absent              int        `json:"absent"`
+	Excused             int        `json:"excused"`
+	RecoverySessions    int        `json:"recovery_sessions"`
+	InstructorRiskCount int        `json:"instructor_risk_count"`
+	NotesCount          int        `json:"notes_count"`
+	LastNoteAt          *time.Time `json:"last_note_at,omitempty"`
+	TransferredToLevel  string     `json:"transferred_to_level,omitempty"`
+	Reasons             []string   `json:"reasons"`
+}
+
+type ProgramHealthSummary struct {
+	ProgramID             uuid.UUID                   `json:"program_id"`
+	AttendanceGoalPercent int                         `json:"attendance_goal_percent"`
+	TransferGoalPercent   int                         `json:"transfer_goal_percent"`
+	ParticipantCount      int                         `json:"participant_count"`
+	ActiveCount           int                         `json:"active_count"`
+	CompletedCount        int                         `json:"completed_count"`
+	DroppedCount          int                         `json:"dropped_count"`
+	TransferredCount      int                         `json:"transferred_count"`
+	SessionCount          int                         `json:"session_count"`
+	RecoverySessionCount  int                         `json:"recovery_session_count"`
+	AttendanceRate        float64                     `json:"attendance_rate"`
+	TransferRate          float64                     `json:"transfer_rate"`
+	Health                string                      `json:"health"`
+	Reasons               []string                    `json:"reasons"`
+	Participants          []*ProgramHealthParticipant `json:"participants"`
+}
+
+type ProgramDashboardGroup struct {
+	ProgramID             uuid.UUID `json:"program_id"`
+	Name                  string    `json:"name"`
+	Status                string    `json:"status"`
+	Color                 string    `json:"color"`
+	ParticipantCount      int       `json:"participant_count"`
+	ActiveCount           int       `json:"active_count"`
+	CompletedCount        int       `json:"completed_count"`
+	DroppedCount          int       `json:"dropped_count"`
+	TransferredCount      int       `json:"transferred_count"`
+	SessionCount          int       `json:"session_count"`
+	AttendanceRate        float64   `json:"attendance_rate"`
+	TransferRate          float64   `json:"transfer_rate"`
+	AttendanceGoalPercent int       `json:"attendance_goal_percent"`
+	TransferGoalPercent   int       `json:"transfer_goal_percent"`
+	AtRiskCount           int       `json:"at_risk_count"`
+	Health                string    `json:"health"`
+}
+
+type ProgramDashboardSummary struct {
+	From                  *time.Time               `json:"from,omitempty"`
+	To                    *time.Time               `json:"to,omitempty"`
+	AttendanceGoalPercent int                      `json:"attendance_goal_percent"`
+	TransferGoalPercent   int                      `json:"transfer_goal_percent"`
+	ProgramCount          int                      `json:"program_count"`
+	ActiveProgramCount    int                      `json:"active_program_count"`
+	ParticipantCount      int                      `json:"participant_count"`
+	CompletedCount        int                      `json:"completed_count"`
+	DroppedCount          int                      `json:"dropped_count"`
+	TransferredCount      int                      `json:"transferred_count"`
+	AttendanceRate        float64                  `json:"attendance_rate"`
+	TransferRate          float64                  `json:"transfer_rate"`
+	GroupsBelowGoal       int                      `json:"groups_below_goal"`
+	CriticalParticipants  int                      `json:"critical_participants"`
+	Groups                []*ProgramDashboardGroup `json:"groups"`
+}
 
 // WhatsAppCheckResult represents the result of checking if a phone is on WhatsApp
 type WhatsAppCheckResult struct {

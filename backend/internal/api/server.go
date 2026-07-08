@@ -421,6 +421,9 @@ func (s *Server) setupRoutes() {
 	programs := protected.Group("/programs", s.requirePermission(domain.PermPrograms))
 	programs.Get("/", s.handleListPrograms)
 	programs.Post("/", s.handleCreateProgram)
+	programs.Get("/dashboard", s.handleGetProgramsDashboard)
+	programs.Get("/goals", s.handleGetGlobalProgramGoals)
+	programs.Put("/goals", s.handleUpsertGlobalProgramGoals)
 	// Folder routes — must be declared BEFORE /:id to avoid param collision
 	programs.Get("/folders", s.handleGetProgramFolders)
 	programs.Post("/folders", s.handleCreateProgramFolder)
@@ -430,11 +433,17 @@ func (s *Server) setupRoutes() {
 	programs.Put("/:id", s.handleUpdateProgram)
 	programs.Delete("/:id", s.handleDeleteProgram)
 	programs.Patch("/:id/move-folder", s.handleMoveProgramToFolder)
+	programs.Get("/:id/health", s.handleGetProgramHealth)
+	programs.Get("/:id/goals", s.handleGetProgramGoals)
+	programs.Put("/:id/goals", s.handleUpsertProgramGoals)
 	programs.Get("/:id/attendance-stats", s.handleGetAttendanceStats)
 
 	programs.Get("/:id/participants", s.handleListParticipants)
 	programs.Post("/:id/participants", s.handleAddParticipant)
 	programs.Delete("/:id/participants/:participantId", s.handleRemoveParticipant)
+	programs.Patch("/:id/participants/:participantId/outcome", s.handleUpdateProgramParticipantOutcome)
+	programs.Get("/:id/participants/:participantId/notes", s.handleListProgramParticipantNotes)
+	programs.Post("/:id/participants/:participantId/notes", s.handleCreateProgramParticipantNote)
 	programs.Patch("/:id/participants/:participantId/stage", s.handleUpdateProgramParticipantStage)
 
 	programs.Get("/:id/sessions", s.handleListSessions)
@@ -474,6 +483,7 @@ func (s *Server) setupRoutes() {
 	contacts.Post("/bulk", s.handleCreateContactsBulk)
 	contacts.Get("/duplicates", s.handleGetContactDuplicates)
 	contacts.Get("/lead-duplicates", s.handleGetContactLeadDuplicates)
+	contacts.Post("/merge/preview", s.handlePreviewMergeContacts)
 	contacts.Post("/merge", s.handleMergeContacts)
 	contacts.Delete("/batch", s.handleDeleteContactsBatch)
 	contacts.Get("/:id", s.handleGetContact)
@@ -8295,11 +8305,11 @@ func (s *Server) handleDeleteContactsBatch(c *fiber.Ctx) error {
 
 func (s *Server) handleGetContactDuplicates(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-	groups, err := s.services.Contact.FindDuplicates(c.Context(), accountID)
+	groups, err := s.services.Contact.FindDuplicateGroups(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"success": true, "duplicates": groups})
+	return c.JSON(fiber.Map{"success": true, "groups": groups, "duplicates": groups})
 }
 
 func (s *Server) handleGetContactLeadDuplicates(c *fiber.Ctx) error {
@@ -8311,7 +8321,8 @@ func (s *Server) handleGetContactLeadDuplicates(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "count": count})
 }
 
-func (s *Server) handleMergeContacts(c *fiber.Ctx) error {
+func (s *Server) handlePreviewMergeContacts(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var body struct {
 		KeepID   uuid.UUID   `json:"keep_id"`
 		MergeIDs []uuid.UUID `json:"merge_ids"`
@@ -8319,14 +8330,42 @@ func (s *Server) handleMergeContacts(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
 	}
-	if len(body.MergeIDs) == 0 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "provide merge_ids"})
+	if body.KeepID == uuid.Nil || len(body.MergeIDs) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "provide keep_id and merge_ids"})
+	}
+	preview, err := s.services.Contact.PreviewMergeContacts(c.Context(), accountID, body.KeepID, body.MergeIDs)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "preview": preview})
+}
+
+func (s *Server) handleMergeContacts(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	var body struct {
+		KeepID   uuid.UUID   `json:"keep_id"`
+		MergeIDs []uuid.UUID `json:"merge_ids"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
+	}
+	if body.KeepID == uuid.Nil || len(body.MergeIDs) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "provide keep_id and merge_ids"})
 	}
 
-	if err := s.services.Contact.MergeContacts(c.Context(), body.KeepID, body.MergeIDs); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	result, err := s.services.Contact.MergeContacts(c.Context(), accountID, body.KeepID, body.MergeIDs, &userID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"success": true})
+	s.invalidateContactTreeCaches(accountID)
+	s.invalidateTasksCache(accountID)
+	s.hub.BroadcastToAccount(accountID, ws.EventContactUpdate, map[string]interface{}{
+		"action":     "merged",
+		"contact_id": body.KeepID.String(),
+		"merge_ids":  body.MergeIDs,
+	})
+	return c.JSON(fiber.Map{"success": true, "result": result, "contact": result.MergedContact})
 }
 
 func (s *Server) handleSyncDeviceContacts(c *fiber.Ctx) error {
@@ -13378,11 +13417,11 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		Name              string `json:"name"`
 		Slug              string `json:"slug"`
 		Plan              string `json:"plan"`
-			MaxDevices        int    `json:"max_devices"`
-			MaxUsersOverride  *int   `json:"max_users_override"`
-			StorageLimitBytes int64  `json:"storage_limit_bytes"`
-			KommoEnabled      bool   `json:"kommo_enabled"`
-		}
+		MaxDevices        int    `json:"max_devices"`
+		MaxUsersOverride  *int   `json:"max_users_override"`
+		StorageLimitBytes int64  `json:"storage_limit_bytes"`
+		KommoEnabled      bool   `json:"kommo_enabled"`
+	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
@@ -13405,11 +13444,11 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		Name:              req.Name,
 		Slug:              req.Slug,
 		Plan:              req.Plan,
-			MaxDevices:        req.MaxDevices,
-			MaxUsersOverride:  req.MaxUsersOverride,
-			StorageLimitBytes: req.StorageLimitBytes,
-			KommoEnabled:      req.KommoEnabled,
-		}
+		MaxDevices:        req.MaxDevices,
+		MaxUsersOverride:  req.MaxUsersOverride,
+		StorageLimitBytes: req.StorageLimitBytes,
+		KommoEnabled:      req.KommoEnabled,
+	}
 
 	if err := s.services.Account.Update(c.Context(), account); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
