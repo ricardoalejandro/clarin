@@ -2,13 +2,34 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { usePathname } from 'next/navigation'
-import { Send, X, Minimize2, Maximize2, Sparkles, MessageSquarePlus, Trash2, FileSpreadsheet, FileText, Settings, Key, ExternalLink, Loader2, CheckCircle2, XCircle, Menu, BarChart3, Download, ChevronsUpDown } from 'lucide-react'
+import { Send, X, Minimize2, Maximize2, Sparkles, MessageSquarePlus, Trash2, FileSpreadsheet, FileText, Menu, BarChart3, Download, ChevronsUpDown, Copy } from 'lucide-react'
 import ErosCat, { CatMood } from './ErosCat'
 import ErosChart, { parseChartBlocks, type ChartConfig } from './ErosChart'
 
+interface ErosFileAttachment {
+  id: string
+  filename: string
+  format: string
+  content_type: string
+  status: string
+  size_bytes?: number
+  expires_at: string
+  delivered_at?: string
+  created_at?: string
+}
+
 interface ChatMessage {
+  id?: string
+  conversation_id?: string
   role: 'user' | 'assistant'
   content: string
+  codex_model?: string
+  reasoning_effort?: string
+  duration_ms?: number
+  metadata?: Record<string, unknown> | null
+  tool_calls?: unknown[]
+  attachments?: ErosFileAttachment[]
+  created_at?: string
 }
 
 interface Conversation {
@@ -17,6 +38,41 @@ interface Conversation {
   created_at: string
   updated_at: string
   messages?: ChatMessage[]
+}
+
+interface ErosStatus {
+  success?: boolean
+  enabled: boolean
+  user_enabled: boolean
+  available: boolean
+  provider: string
+  auth_mode: string
+  codex_model?: string
+  default_reasoning_effort?: string
+  allowed_reasoning_efforts?: string[]
+  allow_user_reasoning_override?: boolean
+  bridge_configured: boolean
+  credential_configured: boolean
+  mcp_configured: boolean
+}
+
+const REASONING_STORAGE_KEY = 'clarin:eros:reasoning_effort'
+const EROS_FILE_DB_NAME = 'clarin-eros-files'
+const EROS_FILE_DB_VERSION = 1
+const EROS_FILE_STORE = 'files'
+
+const reasoningOptions = [
+  { value: 'low', label: 'Rápido' },
+  { value: 'medium', label: 'Normal' },
+  { value: 'high', label: 'Profundo' },
+  { value: 'xhigh', label: 'Máximo' },
+]
+
+const reasoningLabelByValue: Record<string, string> = {
+  low: 'Rápido',
+  medium: 'Normal',
+  high: 'Profundo',
+  xhigh: 'Máximo',
 }
 
 const waitingMoods: CatMood[] = [
@@ -56,6 +112,130 @@ const progressTexts = [
   'Un momento...', 'Casi listo...',
 ]
 
+const normalizeChatMessage = (raw: any): ChatMessage => ({
+  id: typeof raw?.id === 'string' ? raw.id : undefined,
+  conversation_id: typeof raw?.conversation_id === 'string' ? raw.conversation_id : undefined,
+  role: raw?.role === 'assistant' ? 'assistant' : 'user',
+  content: typeof raw?.content === 'string' ? raw.content : '',
+  codex_model: typeof raw?.codex_model === 'string' ? raw.codex_model : undefined,
+  reasoning_effort: typeof raw?.reasoning_effort === 'string' ? raw.reasoning_effort : undefined,
+  duration_ms: typeof raw?.duration_ms === 'number' ? raw.duration_ms : undefined,
+  metadata: raw?.metadata && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata) ? raw.metadata : null,
+  tool_calls: Array.isArray(raw?.tool_calls) ? raw.tool_calls : undefined,
+  attachments: Array.isArray(raw?.attachments) ? raw.attachments.map(normalizeErosAttachment).filter(Boolean) : undefined,
+  created_at: typeof raw?.created_at === 'string' ? raw.created_at : undefined,
+})
+
+const normalizeErosAttachment = (raw: any): ErosFileAttachment | null => {
+  if (!raw || typeof raw?.id !== 'string') return null
+  return {
+    id: raw.id,
+    filename: typeof raw.filename === 'string' ? raw.filename : 'eros_archivo.txt',
+    format: typeof raw.format === 'string' ? raw.format : 'txt',
+    content_type: typeof raw.content_type === 'string' ? raw.content_type : 'text/plain; charset=utf-8',
+    status: typeof raw.status === 'string' ? raw.status : 'ready',
+    size_bytes: typeof raw.size_bytes === 'number' ? raw.size_bytes : undefined,
+    expires_at: typeof raw.expires_at === 'string' ? raw.expires_at : '',
+    delivered_at: typeof raw.delivered_at === 'string' ? raw.delivered_at : undefined,
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : undefined,
+  }
+}
+
+const metadataString = (metadata: Record<string, unknown> | null | undefined, key: string) => {
+  const value = metadata?.[key]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+const metadataNumber = (metadata: Record<string, unknown> | null | undefined, key: string) => {
+  const value = metadata?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+const formatErosDuration = (ms?: number) => {
+  if (!ms || ms <= 0) return ''
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  const seconds = ms / 1000
+  return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`
+}
+
+const openErosFileDB = () => new Promise<IDBDatabase | null>((resolve) => {
+  if (typeof window === 'undefined' || !('indexedDB' in window)) {
+    resolve(null)
+    return
+  }
+  const req = window.indexedDB.open(EROS_FILE_DB_NAME, EROS_FILE_DB_VERSION)
+  req.onupgradeneeded = () => {
+    const db = req.result
+    if (!db.objectStoreNames.contains(EROS_FILE_STORE)) db.createObjectStore(EROS_FILE_STORE, { keyPath: 'id' })
+  }
+  req.onerror = () => resolve(null)
+  req.onsuccess = () => resolve(req.result)
+})
+
+const getCachedErosFile = async (id: string): Promise<{ blob: Blob; filename: string; contentType: string; expiresAt: string } | null> => {
+  const db = await openErosFileDB()
+  if (!db) return null
+  return new Promise(resolve => {
+    const tx = db.transaction(EROS_FILE_STORE, 'readonly')
+    const req = tx.objectStore(EROS_FILE_STORE).get(id)
+    req.onerror = () => resolve(null)
+    req.onsuccess = () => {
+      const row = req.result
+      if (!row?.blob || !row?.expiresAt || new Date(row.expiresAt).getTime() <= Date.now()) {
+        resolve(null)
+        return
+      }
+      resolve(row)
+    }
+  })
+}
+
+const putCachedErosFile = async (id: string, blob: Blob, filename: string, contentType: string, expiresAt: string) => {
+  const db = await openErosFileDB()
+  if (!db) return
+  await new Promise<void>(resolve => {
+    const tx = db.transaction(EROS_FILE_STORE, 'readwrite')
+    tx.objectStore(EROS_FILE_STORE).put({ id, blob, filename, contentType, expiresAt, savedAt: new Date().toISOString() })
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => resolve()
+  })
+}
+
+const deleteCachedErosFile = async (id: string) => {
+  const db = await openErosFileDB()
+  if (!db) return
+  await new Promise<void>(resolve => {
+    const tx = db.transaction(EROS_FILE_STORE, 'readwrite')
+    tx.objectStore(EROS_FILE_STORE).delete(id)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => resolve()
+  })
+}
+
+const downloadBlob = (blob: Blob, filename: string) => {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+const formatBytes = (bytes?: number) => {
+  if (!bytes || bytes <= 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+const fileFormatLabel = (format: string) => {
+  const value = format.toLowerCase()
+  if (value === 'xlsx') return 'Excel'
+  if (value === 'docx') return 'Word'
+  if (value === 'pptx') return 'PowerPoint'
+  return value.toUpperCase()
+}
+
 export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenProp?: boolean; onClose?: () => void }) {
   const [isMobile, setIsMobile] = useState(false)
   const [isOpen, setIsOpen] = useState(false)
@@ -71,21 +251,13 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [showSidebar, setShowSidebar] = useState(false)
   const [erosConfigured, setErosConfigured] = useState<boolean | null>(null) // null = loading
-  const [showConfig, setShowConfig] = useState(false)
-  const [apiKeyInput, setApiKeyInput] = useState('')
-  const [configLoading, setConfigLoading] = useState(false)
-  const [configError, setConfigError] = useState('')
-  const [configSuccess, setConfigSuccess] = useState(false)
-  const [configStep, setConfigStep] = useState<'key' | 'model' | 'custom'>('key')
-  const [availableModels, setAvailableModels] = useState<string[]>([])
-  const [selectedModel, setSelectedModel] = useState('')
-  const [customRole, setCustomRole] = useState('')
-  const [customInstructions, setCustomInstructions] = useState('')
-  const [modelsLoading, setModelsLoading] = useState(false)
+  const [erosStatus, setErosStatus] = useState<ErosStatus | null>(null)
+  const [reasoningEffort, setReasoningEffort] = useState('medium')
   const [mobileVH, setMobileVH] = useState<number | null>(null)
   const [maximizedChart, setMaximizedChart] = useState<ChartConfig | null>(null)
   const [isInputExpanded, setIsInputExpanded] = useState(false)
   const [inputHistory, setInputHistory] = useState<string[]>([])
+  const [cachedFileIds, setCachedFileIds] = useState<Set<string>>(new Set())
   const inputHistoryIndex = useRef<number>(-1)
   const inputDraft = useRef<string>('')
   const headerMoods: CatMood[] = ['idle', 'winking', 'playing_ball', 'curious', 'dancing', 'jumping', 'love', 'pawing', 'walking']
@@ -142,6 +314,20 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
   // Scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  useEffect(() => {
+    const ids = messages.flatMap(m => m.attachments?.map(file => file.id) || [])
+    if (ids.length === 0) {
+      setCachedFileIds(new Set())
+      return
+    }
+    let active = true
+    Promise.all(ids.map(async id => [id, Boolean(await getCachedErosFile(id))] as const)).then(results => {
+      if (!active) return
+      setCachedFileIds(new Set(results.filter(([, cached]) => cached).map(([id]) => id)))
+    })
+    return () => { active = false }
   }, [messages])
 
   // Focus input when panel opens
@@ -225,26 +411,52 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
     }
   }
 
-  // Check if user has configured their API key
-  useEffect(() => {
-    const checkConfig = async () => {
-      try {
-        const res = await fetch('/api/ai/config', { headers: getAuthHeaders() })
-        const data = await res.json()
-        setErosConfigured(data.success && data.has_key)
-        if (data.model) setSelectedModel(data.model)
-        if (data.role) setCustomRole(data.role)
-        if (data.instructions) setCustomInstructions(data.instructions)
-      } catch {
-        setErosConfigured(false)
-      }
+  const checkErosStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/eros/status', { headers: getAuthHeaders() })
+      const data = await res.json()
+      setErosStatus(data)
+      setErosConfigured(Boolean(data.success && data.available))
+    } catch {
+      setErosStatus(null)
+      setErosConfigured(false)
     }
-    checkConfig()
   }, [])
+
+  // Check if Eros is available for this user.
+  useEffect(() => {
+    checkErosStatus()
+  }, [checkErosStatus])
+
+  useEffect(() => {
+    if (isOpen) checkErosStatus()
+  }, [isOpen, checkErosStatus])
+
+  useEffect(() => {
+    const onFocus = () => checkErosStatus()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [checkErosStatus])
+
+  useEffect(() => {
+    if (!erosStatus) return
+    const allowed = erosStatus.allowed_reasoning_efforts?.length
+      ? erosStatus.allowed_reasoning_efforts
+      : ['low', 'medium', 'high', 'xhigh']
+    const fallback = allowed.includes(erosStatus.default_reasoning_effort || '')
+      ? String(erosStatus.default_reasoning_effort)
+      : allowed[0] || 'medium'
+    setReasoningEffort(prev => {
+      const saved = window.localStorage.getItem(REASONING_STORAGE_KEY) || ''
+      const next = allowed.includes(prev) ? prev : allowed.includes(saved) ? saved : fallback
+      if (next !== saved) window.localStorage.setItem(REASONING_STORAGE_KEY, next)
+      return next
+    })
+  }, [erosStatus])
 
   const loadConversations = async () => {
     try {
-      const res = await fetch('/api/ai/conversations', { headers: getAuthHeaders() })
+      const res = await fetch('/api/eros/conversations', { headers: getAuthHeaders() })
       const data = await res.json()
       if (data.success) setConversations(data.conversations || [])
     } catch { /* ignore */ }
@@ -252,14 +464,11 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
 
   const loadConversation = async (id: string) => {
     try {
-      const res = await fetch(`/api/ai/conversations/${id}`, { headers: getAuthHeaders() })
+      const res = await fetch(`/api/eros/conversations/${id}`, { headers: getAuthHeaders() })
       const data = await res.json()
       if (data.success && data.conversation) {
         setConversationId(id)
-        setMessages(data.conversation.messages?.map((m: { role: string; content: string }) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        })) || [])
+        setMessages(data.conversation.messages?.map(normalizeChatMessage) || [])
         setShowSidebar(false)
       }
     } catch { /* ignore */ }
@@ -267,7 +476,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
 
   const deleteConversation = async (id: string) => {
     try {
-      await fetch(`/api/ai/conversations/${id}`, { method: 'DELETE', headers: getAuthHeaders() })
+      await fetch(`/api/eros/conversations/${id}`, { method: 'DELETE', headers: getAuthHeaders() })
       setConversations(prev => prev.filter(c => c.id !== id))
       if (conversationId === id) {
         setConversationId(null)
@@ -280,138 +489,67 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
     setConversationId(null)
     setMessages([])
     setShowSidebar(false)
-    setShowConfig(false)
     setCatMood('greeting')
     setTimeout(() => setCatMood('idle'), 2000)
     setTimeout(() => inputRef.current?.focus(), 100)
   }
 
-  const handleSaveApiKey = async () => {
-    const key = apiKeyInput.trim()
-    if (!key) return
-    if (!key.startsWith('sk-')) {
-      setConfigError('La API key debe comenzar con sk-')
+  const selectReasoningEffort = (value: string) => {
+    const allowed = erosStatus?.allowed_reasoning_efforts?.length
+      ? erosStatus.allowed_reasoning_efforts
+      : ['low', 'medium', 'high', 'xhigh']
+    if (!allowed.includes(value)) return
+    setReasoningEffort(value)
+    window.localStorage.setItem(REASONING_STORAGE_KEY, value)
+  }
+
+  const downloadErosAttachment = async (file: ErosFileAttachment) => {
+    if (file.expires_at && new Date(file.expires_at).getTime() <= Date.now()) {
+      alert('Este archivo ya no está disponible. Puedes pedirme que lo genere otra vez.')
       return
     }
-    setConfigLoading(true)
-    setConfigError('')
-    setConfigSuccess(false)
+    const cached = await getCachedErosFile(file.id)
+    if (cached) {
+      setCachedFileIds(prev => new Set(prev).add(file.id))
+      downloadBlob(cached.blob, cached.filename)
+      return
+    }
     try {
-      // Validate first
-      const valRes = await fetch('/api/ai/config/validate', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ groq_api_key: key }),
-      })
-      const valData = await valRes.json()
-      if (!valData.valid) {
-        setConfigError(valData.error || 'API key inválida. Verifica que sea correcta.')
+      const res = await fetch(`/api/eros/files/${file.id}/download`, { headers: getAuthHeaders() })
+      if (res.status === 410) {
+        alert('Este archivo ya no está disponible. Puedes pedirme que lo genere otra vez.')
         return
       }
-      // Key valid — fetch available models
-      setModelsLoading(true)
-      const modelsRes = await fetch('/api/ai/models', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ api_key: key }),
-      })
-      const modelsData = await modelsRes.json()
-      if (modelsData.success && modelsData.models?.length > 0) {
-        setAvailableModels(modelsData.models)
-        if (!selectedModel || !modelsData.models.includes(selectedModel)) {
-          setSelectedModel(modelsData.models.includes('gpt-4.1-nano') ? 'gpt-4.1-nano' : modelsData.models[0])
-        }
+      if (!res.ok) {
+        alert('No pude descargar el archivo. Intenta de nuevo.')
+        return
       }
-      setModelsLoading(false)
-      // Save the key immediately
-      await fetch('/api/ai/config', {
-        method: 'PUT',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ groq_api_key: key, model: selectedModel, role: customRole, instructions: customInstructions }),
-      })
-      setErosConfigured(true)
-      setConfigStep('model')
+      const blob = await res.blob()
+      const filename = file.filename || `eros_archivo.${file.format || 'txt'}`
+      await putCachedErosFile(file.id, blob, filename, file.content_type, file.expires_at)
+      setCachedFileIds(prev => new Set(prev).add(file.id))
+      downloadBlob(blob, filename)
     } catch {
-      setConfigError('Error de conexión. Intenta de nuevo.')
-    } finally {
-      setConfigLoading(false)
-      setModelsLoading(false)
+      alert('No pude descargar el archivo. Intenta de nuevo.')
     }
   }
 
-  const handleSaveConfig = async () => {
-    setConfigLoading(true)
-    setConfigError('')
+  const copyErosAttachmentLink = async (file: ErosFileAttachment) => {
     try {
-      const key = apiKeyInput.trim() || undefined
-      const res = await fetch('/api/ai/config', {
-        method: 'PUT',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          groq_api_key: key ?? '',
-          model: selectedModel,
-          role: customRole,
-          instructions: customInstructions,
-        }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setConfigSuccess(true)
-        setTimeout(() => {
-          setShowConfig(false)
-          setConfigSuccess(false)
-          setConfigStep('key')
-          setCatMood('greeting')
-          setTimeout(() => setCatMood('idle'), 2000)
-        }, 1000)
-      } else {
-        setConfigError('No se pudo guardar la configuración.')
-      }
+      const link = `${window.location.origin}/api/eros/files/${file.id}/download`
+      await navigator.clipboard.writeText(link)
     } catch {
-      setConfigError('Error de conexión.')
-    } finally {
-      setConfigLoading(false)
+      alert('No pude copiar el enlace.')
     }
   }
 
-  const handleOpenConfigPanel = async () => {
-    setShowConfig(true)
-    setConfigError('')
-    setConfigSuccess(false)
-    if (erosConfigured) {
-      setConfigStep('model')
-      // Load models if not already loaded
-      if (availableModels.length === 0) {
-        try {
-          const keyRes = await fetch('/api/ai/config', { headers: getAuthHeaders() })
-          const keyData = await keyRes.json()
-          if (keyData.has_key) {
-            // We need to pass the key to fetch models — but we don't expose it
-            // Instead try fetching with the stored key by loading from backend
-            setModelsLoading(true)
-            // The stored key is used server-side, we need a different approach
-            // Let's use the current stored key indirectly — we'll call handleSaveApiKey with empty
-            setModelsLoading(false)
-          }
-        } catch { /* ignore */ }
-      }
-    } else {
-      setConfigStep('key')
-    }
-  }
-
-  const handleDisconnectKey = async () => {
-    try {
-      await fetch('/api/ai/config', {
-        method: 'PUT',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ groq_api_key: '' }),
-      })
-      setErosConfigured(false)
-      setShowConfig(false)
-      setConversationId(null)
-      setMessages([])
-    } catch { /* ignore */ }
+  const removeCachedErosAttachment = async (file: ErosFileAttachment) => {
+    await deleteCachedErosFile(file.id)
+    setCachedFileIds(prev => {
+      const next = new Set(prev)
+      next.delete(file.id)
+      return next
+    })
   }
 
   const sendMessage = useCallback(async () => {
@@ -429,13 +567,13 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
 
     try {
       const history = [...messages, userMsg].slice(-20).map(m => ({
-        ...m,
+        role: m.role,
         content: m.role === 'assistant'
           ? m.content.replace(/<chart>[\s\S]*?<\/chart>/g, '[gráfico]').replace(/^\|.*\|$/gm, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 800)
           : m.content.slice(0, 800)
       }))
 
-      const res = await fetch('/api/ai/chat', {
+      const res = await fetch('/api/eros/chat', {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({
@@ -443,6 +581,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
           history,
           current_page: pathname,
           conversation_id: conversationId || '',
+          reasoning_effort: reasoningEffort,
         }),
       })
 
@@ -451,16 +590,38 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
       if (data.success && data.response) {
         setCatMood('happy')
         setLastFailedMessage(null)
-        setMessages(prev => [...prev, { role: 'assistant', content: data.response }])
+        setMessages(prev => [...prev, normalizeChatMessage(data.message || {
+          role: 'assistant',
+          content: data.response,
+          codex_model: data.codex_model,
+          reasoning_effort: data.reasoning_effort,
+          duration_ms: data.duration_ms,
+          metadata: data.metadata,
+          tool_calls: data.tool_calls,
+        })])
         // Save conversation_id from response (auto-created if new)
         if (data.conversation_id && !conversationId) {
           setConversationId(data.conversation_id)
           loadConversations()
         }
-      } else if (data.error === 'no_key_configured') {
+      } else if (data.error === 'eros_user_disabled' || data.error === 'eros_disabled') {
         setErosConfigured(false)
         setCatMood('sleeping')
         setMessages(prev => prev.slice(0, -1)) // Remove the user message
+      } else if (data.error === 'bridge_not_configured') {
+        setCatMood('idle')
+        setLastFailedMessage(msg)
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: 'Eros aún no tiene el Codex Bridge configurado. Un admin debe completar la configuración global.',
+        }])
+      } else if (data.error === 'eros_bridge_unavailable' || data.error === 'eros_bridge_error') {
+        setCatMood('idle')
+        setLastFailedMessage(msg)
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: 'No pude conectar con el Codex Bridge en este momento. Revisa el estado desde Admin > Eros.',
+        }])
       } else if (data.error === 'chat_limit_reached') {
         setCatMood('idle')
         setMessages(prev => [...prev, {
@@ -498,7 +659,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
       }, 3000)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
-  }, [input, isLoading, messages, pathname, conversationId])
+  }, [input, isLoading, messages, pathname, conversationId, reasoningEffort])
 
   const retryLastMessage = useCallback(() => {
     if (!lastFailedMessage || isLoading) return
@@ -887,6 +1048,91 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
     })
   }
 
+  const renderErosAttachment = (file: ErosFileAttachment) => {
+    const cached = cachedFileIds.has(file.id)
+    const expired = Boolean(file.expires_at && new Date(file.expires_at).getTime() <= Date.now())
+    const size = formatBytes(file.size_bytes)
+    const label = expired
+      ? 'Expirado'
+      : cached
+        ? 'Disponible en este navegador'
+        : 'Generable durante 4h'
+    const isSheet = ['xlsx', 'csv'].includes(file.format?.toLowerCase())
+    const Icon = isSheet ? FileSpreadsheet : FileText
+    return (
+      <div
+        key={file.id}
+        className={`mt-1.5 ml-1 flex max-w-full items-center gap-2 rounded-xl border bg-white/95 px-2.5 py-2 text-xs shadow-sm ${
+          expired ? 'border-slate-200 opacity-70' : 'border-emerald-100'
+        }`}
+      >
+        <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${isSheet ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>
+          <Icon size={16} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium text-slate-700" title={file.filename}>{file.filename}</div>
+          <div className="truncate text-[10px] text-slate-400">
+            {fileFormatLabel(file.format)}{size ? ` · ${size}` : ''} · {label}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => downloadErosAttachment(file)}
+          disabled={expired}
+          className="shrink-0 rounded-lg bg-emerald-500 px-2.5 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500"
+          title="Descargar"
+        >
+          Descargar
+        </button>
+        <button
+          type="button"
+          onClick={() => copyErosAttachmentLink(file)}
+          className="shrink-0 rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-50 hover:text-slate-600"
+          title="Copiar enlace interno"
+        >
+          <Copy size={13} />
+        </button>
+        {cached && (
+          <button
+            type="button"
+            onClick={() => removeCachedErosAttachment(file)}
+            className="shrink-0 rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
+            title="Eliminar de este navegador"
+          >
+            <Trash2 size={13} />
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  const getAssistantExecutionLabel = (msg: ChatMessage) => {
+    if (msg.role !== 'assistant') return null
+    const model = (msg.codex_model || metadataString(msg.metadata, 'model')).trim()
+    const effort = (msg.reasoning_effort || metadataString(msg.metadata, 'reasoning_effort')).trim()
+    const duration = msg.duration_ms || metadataNumber(msg.metadata, 'backend_bridge_duration_ms') || metadataNumber(msg.metadata, 'duration_ms')
+    const toolCount = Array.isArray(msg.tool_calls)
+      ? msg.tool_calls.length
+      : metadataNumber(msg.metadata, 'tool_call_count')
+
+    if (!model && !effort && !duration) return null
+
+    const effortLabel = effort ? reasoningLabelByValue[effort] || effort : ''
+    const durationLabel = formatErosDuration(duration)
+    const parts = [model, effortLabel, durationLabel].filter(Boolean)
+    const detail = [
+      model ? `Modelo: ${model}` : '',
+      effortLabel ? `Pensamiento: ${effortLabel}` : '',
+      durationLabel ? `Duración: ${durationLabel}` : '',
+      toolCount ? `Tools MCP: ${toolCount}` : 'Tools MCP: 0',
+    ].filter(Boolean).join(' · ')
+
+    return {
+      label: parts.join(' · '),
+      title: detail,
+    }
+  }
+
   const formatDate = (dateStr: string) => {
     const d = new Date(dateStr)
     const now = new Date()
@@ -906,6 +1152,14 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
   // Determine container style based on mode
   const isFullscreen = isMobile && !isMaximized
   const isMaximizedView = isMaximized
+  const allowedReasoningEfforts = erosStatus?.allowed_reasoning_efforts?.length
+    ? erosStatus.allowed_reasoning_efforts
+    : ['low', 'medium', 'high', 'xhigh']
+  const canChooseReasoning = Boolean(
+    erosConfigured &&
+    erosStatus?.allow_user_reasoning_override &&
+    allowedReasoningEfforts.length > 0
+  )
 
   return (
     <>
@@ -1026,15 +1280,6 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                 </div>
               </div>
             )}
-            {erosConfigured && (
-              <button
-                onClick={handleOpenConfigPanel}
-                className="p-1.5 hover:bg-white/20 rounded-lg transition-colors"
-                title="Configuración"
-              >
-                <Settings size={14} className="text-white/80" />
-              </button>
-            )}
             <button
               onClick={startNewChat}
               className="p-1.5 hover:bg-white/20 rounded-lg transition-colors"
@@ -1076,180 +1321,32 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto p-3 space-y-3 min-h-0 eros-dot-bg eros-scroll-area bg-gradient-to-b from-slate-50 to-slate-100/80">
-          {/* Not configured */}
-          {erosConfigured === false && !showConfig && (
+          {/* Not available */}
+          {erosConfigured === false && (
             <div className="flex flex-col items-center justify-center h-full text-center py-6 gap-3">
               <ErosCat mood="sleeping" size={isMaximizedView || isFullscreen ? 100 : 72} />
               <div>
                 <p className="text-slate-700 font-medium text-sm">Eros está dormido 😴</p>
                 <p className="text-slate-500 text-xs mt-1.5 max-w-[250px] leading-relaxed">
-                  Para despertar a Eros necesitas una API key de OpenAI.
+                  Tu acceso se controla desde Admin. Si ya estás habilitado, revisa que el Codex Bridge esté conectado.
                 </p>
               </div>
-              <button
-                onClick={() => { setShowConfig(true); setConfigError(''); setConfigSuccess(false); setConfigStep('key') }}
-                className="mt-2 flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white text-sm font-medium rounded-xl hover:bg-emerald-600 transition-all active:scale-95 shadow-sm"
-              >
-                <Key size={14} /> Despertar a Eros
-              </button>
-            </div>
-          )}
-
-          {/* Config screen */}
-          {showConfig && (
-            <div className="flex flex-col h-full py-4 gap-3 px-3 overflow-y-auto">
-              <div className="flex flex-col items-center gap-2 shrink-0">
-                <ErosCat mood={configSuccess ? 'happy' : 'curious'} size={isMaximizedView || isFullscreen ? 70 : 48} />
+              <div className="mt-1 grid grid-cols-1 gap-1.5 text-[11px] text-slate-500">
+                <span className={erosStatus?.user_enabled ? 'text-emerald-600' : 'text-slate-500'}>
+                  Usuario {erosStatus?.user_enabled ? 'habilitado' : 'sin acceso'}
+                </span>
+                <span className={erosStatus?.bridge_configured ? 'text-emerald-600' : 'text-slate-500'}>
+                  Bridge {erosStatus?.bridge_configured ? 'configurado' : 'pendiente'}
+                </span>
+                <span className={erosStatus?.mcp_configured ? 'text-emerald-600' : 'text-slate-500'}>
+                  MCP {erosStatus?.mcp_configured ? 'listo' : 'pendiente'}
+                </span>
               </div>
-
-              {/* Step: API Key */}
-              {configStep === 'key' && (
-                <div className="flex flex-col items-center gap-3">
-                  <div className="text-center">
-                    <p className="text-slate-700 font-medium text-sm">Configurar API Key</p>
-                    <p className="text-slate-500 text-xs mt-1 max-w-[280px] leading-relaxed">
-                      Ingresa tu key de{' '}
-                      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
-                        className="text-emerald-600 hover:text-emerald-700 underline inline-flex items-center gap-0.5">
-                        OpenAI <ExternalLink size={10} />
-                      </a>
-                    </p>
-                  </div>
-                  <div className="w-full max-w-[300px] space-y-2">
-                    <input
-                      type="password"
-                      value={apiKeyInput}
-                      onChange={(e) => { setApiKeyInput(e.target.value); setConfigError('') }}
-                      placeholder="sk-..."
-                      className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all"
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleSaveApiKey() }}
-                      disabled={configLoading}
-                    />
-                    {configError && (
-                      <div className="flex items-start gap-1.5 text-red-600 text-xs bg-red-50 px-2.5 py-2 rounded-lg">
-                        <XCircle size={12} className="shrink-0 mt-0.5" /><span>{configError}</span>
-                      </div>
-                    )}
-                    <button
-                      onClick={handleSaveApiKey}
-                      disabled={!apiKeyInput.trim() || configLoading}
-                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-500 text-white text-sm font-medium rounded-xl hover:bg-emerald-600 disabled:opacity-40 transition-all active:scale-[0.98] shadow-sm"
-                    >
-                      {configLoading ? <><Loader2 size={14} className="animate-spin" /> Validando...</> : <><Key size={14} /> Validar y conectar</>}
-                    </button>
-                    <button
-                      onClick={() => { setShowConfig(false); setConfigError(''); setApiKeyInput('') }}
-                      className="w-full px-3 py-2 text-xs text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
-                    >
-                      Cancelar
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Step: Model + Custom Config */}
-              {configStep === 'model' && (
-                <div className="flex flex-col gap-3 w-full">
-                  <div className="text-center">
-                    <p className="text-slate-700 font-medium text-sm">Configuración de Eros</p>
-                    <p className="text-slate-500 text-[11px] mt-0.5">Modelo, personalidad e instrucciones</p>
-                  </div>
-
-                  {/* Model selector */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-slate-600">Modelo OpenAI</label>
-                    {modelsLoading ? (
-                      <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-slate-400 bg-slate-50 rounded-xl border border-slate-200">
-                        <Loader2 size={12} className="animate-spin" /> Cargando modelos...
-                      </div>
-                    ) : availableModels.length > 0 ? (
-                      <select
-                        value={selectedModel}
-                        onChange={(e) => setSelectedModel(e.target.value)}
-                        className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 bg-white transition-all"
-                      >
-                        {availableModels.map(m => (
-                          <option key={m} value={m}>{m}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        value={selectedModel}
-                        onChange={(e) => setSelectedModel(e.target.value)}
-                        placeholder="gpt-4.1-nano"
-                        className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all"
-                      />
-                    )}
-                  </div>
-
-                  {/* Custom Role */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-slate-600">Rol / Personalidad <span className="text-slate-400 font-normal">(opcional)</span></label>
-                    <textarea
-                      value={customRole}
-                      onChange={(e) => setCustomRole(e.target.value)}
-                      placeholder="Ej: Eres un experto en marketing digital especializado en redes sociales..."
-                      rows={2}
-                      className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all resize-none"
-                    />
-                  </div>
-
-                  {/* Custom Instructions */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-slate-600">Instrucciones adicionales <span className="text-slate-400 font-normal">(opcional)</span></label>
-                    <textarea
-                      value={customInstructions}
-                      onChange={(e) => setCustomInstructions(e.target.value)}
-                      placeholder="Ej: Siempre responde en formato de lista, prioriza datos de ventas..."
-                      rows={3}
-                      className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all resize-none"
-                    />
-                  </div>
-
-                  {configError && (
-                    <div className="flex items-start gap-1.5 text-red-600 text-xs bg-red-50 px-2.5 py-2 rounded-lg">
-                      <XCircle size={12} className="shrink-0 mt-0.5" /><span>{configError}</span>
-                    </div>
-                  )}
-                  {configSuccess && (
-                    <div className="flex items-center gap-1.5 text-emerald-600 text-xs bg-emerald-50 px-2.5 py-2 rounded-lg">
-                      <CheckCircle2 size={12} /><span>¡Configuración guardada! 🎉</span>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={handleSaveConfig}
-                    disabled={configLoading || configSuccess}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-500 text-white text-sm font-medium rounded-xl hover:bg-emerald-600 disabled:opacity-40 transition-all active:scale-[0.98] shadow-sm"
-                  >
-                    {configLoading ? <><Loader2 size={14} className="animate-spin" /> Guardando...</> : <><CheckCircle2 size={14} /> Guardar configuración</>}
-                  </button>
-
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setConfigStep('key')}
-                      className="flex-1 px-3 py-2 text-xs text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
-                    >
-                      Cambiar key
-                    </button>
-                    <button onClick={handleDisconnectKey} className="flex-1 px-3 py-2 text-xs text-red-600 bg-red-50 rounded-xl hover:bg-red-100 transition-colors">
-                      Desconectar
-                    </button>
-                    <button
-                      onClick={() => { setShowConfig(false); setConfigError(''); setConfigStep('key') }}
-                      className="flex-1 px-3 py-2 text-xs text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
-                    >
-                      Volver
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
           {/* Chat area */}
-          {erosConfigured && !showConfig && (<>
+          {erosConfigured && (<>
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center h-full text-center py-8 gap-3">
                 <ErosCat mood="greeting" size={isMaximizedView || isFullscreen ? 100 : 64} />
@@ -1262,38 +1359,50 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
               </div>
             )}
 
-            {messages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`flex flex-col ${isMaximizedView || isFullscreen ? 'max-w-[75%]' : 'max-w-[85%]'}`}>
-                  <div
-                    className={`px-3 py-2 rounded-2xl leading-relaxed text-[13px] ${
-                      msg.role === 'user'
-                        ? 'bg-emerald-500 text-white rounded-br-sm'
-                        : 'bg-white text-slate-800 rounded-bl-sm shadow-sm border border-slate-100'
-                    }`}
-                    style={{ animation: 'eros-slide-in 0.2s ease-out both' }}
-                  >
-                    {msg.role === 'assistant' ? renderAssistantMessage(msg.content, i) : msg.content}
-                  </div>
-                  {msg.role === 'assistant' && hasTableData(msg.content) && (
-                    <div className="flex gap-1.5 mt-1.5 ml-1">
-                      <button
-                        onClick={() => handleExport('excel', msg.content)}
-                        className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors"
-                      >
-                        <FileSpreadsheet size={12} /> Excel
-                      </button>
-                      <button
-                        onClick={() => handleExport('word', msg.content)}
-                        className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors"
-                      >
-                        <FileText size={12} /> Word
-                      </button>
+            {messages.map((msg, i) => {
+              const execution = getAssistantExecutionLabel(msg)
+              return (
+                <div key={msg.id || i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`group/message flex flex-col ${isMaximizedView || isFullscreen ? 'max-w-[75%]' : 'max-w-[85%]'}`}>
+                    <div
+                      className={`px-3 py-2 rounded-2xl leading-relaxed text-[13px] ${
+                        msg.role === 'user'
+                          ? 'bg-emerald-500 text-white rounded-br-sm'
+                          : 'bg-white text-slate-800 rounded-bl-sm shadow-sm border border-slate-100'
+                      }`}
+                      style={{ animation: 'eros-slide-in 0.2s ease-out both' }}
+                    >
+                      {msg.role === 'assistant' ? renderAssistantMessage(msg.content, i) : msg.content}
                     </div>
-                  )}
+                    {msg.role === 'assistant' && msg.attachments?.map(renderErosAttachment)}
+                    {execution && (
+                      <div
+                        className="mt-1 ml-1 text-[10px] leading-none text-slate-400 transition-opacity sm:opacity-0 sm:group-hover/message:opacity-100 sm:group-focus-within/message:opacity-100"
+                        title={execution.title}
+                      >
+                        {execution.label}
+                      </div>
+                    )}
+                    {msg.role === 'assistant' && hasTableData(msg.content) && (
+                      <div className="flex gap-1.5 mt-1.5 ml-1">
+                        <button
+                          onClick={() => handleExport('excel', msg.content)}
+                          className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors"
+                        >
+                          <FileSpreadsheet size={12} /> Excel
+                        </button>
+                        <button
+                          onClick={() => handleExport('word', msg.content)}
+                          className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors"
+                        >
+                          <FileText size={12} /> Word
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
 
             {isLoading && (
               <div className="flex justify-start">
@@ -1342,6 +1451,33 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
         <div className={`border-t border-slate-200 p-2.5 bg-white shrink-0 ${
           isFullscreen ? 'pb-[max(0.625rem,env(safe-area-inset-bottom))]' : ''
         } ${!isFullscreen && !isMaximizedView ? 'rounded-b-2xl' : ''}`}>
+          {canChooseReasoning && (
+            <div className="mb-2 flex items-center gap-1.5 overflow-x-auto pb-0.5">
+              <span className="shrink-0 text-[10px] font-medium uppercase tracking-normal text-slate-400">
+                Pensamiento
+              </span>
+              {reasoningOptions
+                .filter(option => allowedReasoningEfforts.includes(option.value))
+                .map(option => {
+                  const active = reasoningEffort === option.value
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => selectReasoningEffort(option.value)}
+                      disabled={isLoading}
+                      className={`shrink-0 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                        active
+                          ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                          : 'border-slate-200 bg-white text-slate-500 hover:border-emerald-200 hover:text-emerald-700'
+                      } disabled:cursor-not-allowed disabled:opacity-60`}
+                    >
+                      {option.label}
+                    </button>
+                  )
+                })}
+            </div>
+          )}
           <div className="flex gap-2 items-end">
             <div className="flex-1 min-w-0 relative">
               <textarea
@@ -1360,11 +1496,11 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                     setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 350)
                   }
                 }}
-                placeholder={erosConfigured ? "Escribe tu pregunta..." : "Configura tu API key..."}
+                placeholder={erosConfigured ? "Escribe tu pregunta..." : "Eros no está disponible"}
                 rows={isInputExpanded ? 4 : 1}
                 className={`w-full resize-none rounded-xl border border-slate-200 px-3 py-2 pr-8 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all ${isInputExpanded ? 'max-h-[200px]' : 'max-h-[80px]'}`}
                 style={{ minHeight: isInputExpanded ? '100px' : '38px' }}
-                disabled={isLoading || !erosConfigured || showConfig}
+                disabled={isLoading || !erosConfigured}
               />
               <button
                 onClick={() => {
@@ -1389,7 +1525,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
             <button
               onClick={sendMessage}
               data-eros-send
-              disabled={!input.trim() || isLoading}
+              disabled={!input.trim() || isLoading || !erosConfigured}
               className="p-2 rounded-xl bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-500 transition-all shrink-0 active:scale-95"
             >
               <Send size={16} />

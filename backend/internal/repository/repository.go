@@ -45,7 +45,9 @@ type Repositories struct {
 	Logbook            *LogbookRepository
 	APIKey             *APIKeyRepository
 	MCP                *MCPRepository
+	ErosSettings       *ErosSettingsRepository
 	ErosConversation   *ErosConversationRepository
+	ErosFile           *ErosFileRepository
 	AIToken            *AITokenRepository
 	Automation         *AutomationRepository
 	Survey             *SurveyRepository
@@ -91,7 +93,9 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Logbook:            &LogbookRepository{db: db},
 		APIKey:             &APIKeyRepository{db: db},
 		MCP:                &MCPRepository{db: db},
+		ErosSettings:       &ErosSettingsRepository{db: db},
 		ErosConversation:   &ErosConversationRepository{db: db},
+		ErosFile:           &ErosFileRepository{db: db},
 		AIToken:            &AITokenRepository{db: db},
 		Automation:         &AutomationRepository{db: db},
 		Survey:             &SurveyRepository{db: db},
@@ -119,12 +123,12 @@ type UserRepository struct {
 func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*domain.User, error) {
 	user := &domain.User{}
 	err := r.db.QueryRow(ctx, `
-		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, u.created_at, u.updated_at, a.name
+		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, COALESCE(u.eros_enabled, false), u.created_at, u.updated_at, a.name
 		FROM users u JOIN accounts a ON a.id = u.account_id
 		WHERE u.username = $1 AND u.is_active = TRUE
 	`, username).Scan(
 		&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
+		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.ErosEnabled, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -135,12 +139,12 @@ func (r *UserRepository) GetByUsername(ctx context.Context, username string) (*d
 func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
 	user := &domain.User{}
 	err := r.db.QueryRow(ctx, `
-		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, u.created_at, u.updated_at, a.name
+		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, COALESCE(u.eros_enabled, false), u.created_at, u.updated_at, a.name
 		FROM users u JOIN accounts a ON a.id = u.account_id
 		WHERE u.id = $1
 	`, id).Scan(
 		&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
+		&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.ErosEnabled, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -151,7 +155,7 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Use
 func (r *UserRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.User, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin,
-		       COALESCE(ua.role, u.role), u.created_at, u.updated_at, a.name
+		       COALESCE(ua.role, u.role), COALESCE(u.eros_enabled, false), u.created_at, u.updated_at, a.name
 		FROM user_accounts ua
 		JOIN users u ON u.id = ua.user_id
 		JOIN accounts a ON a.id = ua.account_id
@@ -168,7 +172,7 @@ func (r *UserRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 		user := &domain.User{}
 		if err := rows.Scan(
 			&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
-			&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
+			&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.ErosEnabled, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
 		); err != nil {
 			return nil, err
 		}
@@ -179,7 +183,7 @@ func (r *UserRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 
 func (r *UserRepository) GetAll(ctx context.Context) ([]*domain.User, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, u.created_at, u.updated_at, a.name
+		SELECT u.id, u.account_id, u.username, u.email, u.password_hash, u.display_name, u.is_admin, u.is_active, u.is_super_admin, u.role, COALESCE(u.eros_enabled, false), u.created_at, u.updated_at, a.name
 		FROM users u JOIN accounts a ON a.id = u.account_id
 		ORDER BY u.created_at DESC
 	`)
@@ -193,7 +197,7 @@ func (r *UserRepository) GetAll(ctx context.Context) ([]*domain.User, error) {
 		user := &domain.User{}
 		if err := rows.Scan(
 			&user.ID, &user.AccountID, &user.Username, &user.Email, &user.PasswordHash,
-			&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
+			&user.DisplayName, &user.IsAdmin, &user.IsActive, &user.IsSuperAdmin, &user.Role, &user.ErosEnabled, &user.CreatedAt, &user.UpdatedAt, &user.AccountName,
 		); err != nil {
 			return nil, err
 		}
@@ -228,6 +232,17 @@ func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, p
 func (r *UserRepository) ToggleActive(ctx context.Context, userID uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `UPDATE users SET is_active = NOT is_active, updated_at = NOW() WHERE id = $1`, userID)
 	return err
+}
+
+func (r *UserRepository) SetErosEnabled(ctx context.Context, userID uuid.UUID, enabled bool) error {
+	_, err := r.db.Exec(ctx, `UPDATE users SET eros_enabled = $2, updated_at = NOW() WHERE id = $1`, userID, enabled)
+	return err
+}
+
+func (r *UserRepository) IsErosEnabled(ctx context.Context, userID uuid.UUID) (bool, error) {
+	var enabled bool
+	err := r.db.QueryRow(ctx, `SELECT COALESCE(eros_enabled, false) FROM users WHERE id = $1`, userID).Scan(&enabled)
+	return enabled, err
 }
 
 func (r *UserRepository) Delete(ctx context.Context, userID uuid.UUID) error {

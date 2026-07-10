@@ -1,0 +1,11 @@
+{
+  "name": "clarin-codex-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Private Clarin Eros bridge for Codex app-server and Clarin MCP tools.",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  }
+}

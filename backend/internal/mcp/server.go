@@ -220,7 +220,7 @@ func New(repos *repository.Repositories, services *service.Services, jwtSecret s
 	}
 
 	mcpSrv.AddTool(readOnlyTool("count_leads",
-		mcp.WithDescription("Cuenta leads con filtros ligeros y devuelve total_found, filters_applied y la herramienta recomendada para el siguiente paso. Úsalo antes de listar datos cuando el usuario pregunte 'cuántos leads hay' o 'cuántos con tag X'. El MCP es sólo lectura JSON: no genera archivos, no crea CSV/Excel/PDF y no devuelve links de descarga."),
+		mcp.WithDescription("Cuenta leads con filtros ligeros y devuelve total_found, filters_applied y la herramienta recomendada para el siguiente paso. Úsalo antes de listar datos cuando el usuario pregunte 'cuántos leads hay' o 'cuántos con tag X'. Si el usuario pide un archivo, usa prepare_file_export/render_file_export para que Clarin adjunte la descarga en el chat."),
 		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
 		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
 		mcp.WithString("query", mcp.Description("Buscar por nombre, teléfono o email.")),
@@ -237,7 +237,7 @@ func New(repos *repository.Repositories, services *service.Services, jwtSecret s
 	), s.toolCountLeads)
 
 	mcpSrv.AddTool(readOnlyTool("list_leads",
-		mcp.WithDescription("Lista leads en JSON paginado y predecible. Siempre devuelve items/leads, returned, total, has_more, next_cursor y filters_applied. Ideal para revisar datos simples sin chat, scoring ni reportes pesados. Si el usuario pide CSV, Excel, PDF, descarga o lista para difusión, usa esta herramienta por páginas y transforma el JSON en la app cliente. No sugieras ni esperes herramientas de CSV/descarga en el MCP."),
+		mcp.WithDescription("Lista leads en JSON paginado y predecible. Siempre devuelve items/leads, returned, total, has_more, next_cursor y filters_applied. Ideal para revisar datos simples sin chat, scoring ni reportes pesados. Si el usuario pide CSV, Excel, Word, PowerPoint o descarga, usa esta herramienta por páginas y luego prepare_file_export/render_file_export para que Clarin adjunte el archivo en el chat."),
 		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
 		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
 		mcp.WithString("query", mcp.Description("Buscar por nombre, teléfono o email.")),
@@ -255,6 +255,25 @@ func New(repos *repository.Repositories, services *service.Services, jwtSecret s
 		mcp.WithNumber("limit", mcp.Description("Leads por página (default 500, max 1000).")),
 		mcp.WithString("cursor", mcp.Description("Cursor devuelto por la llamada anterior. No reutilices el mismo cursor si has_more=true; usa next_cursor.")),
 	), s.toolListLeads)
+
+	mcpSrv.AddTool(readOnlyTool("prepare_file_export",
+		mcp.WithDescription("Prepara un adjunto descargable de Eros sin guardar binarios en MinIO ni devolver URL pública. Úsalo cuando el usuario pida crear un archivo, fichero, Excel, CSV, Word, PowerPoint o TXT. Devuelve metadata segura para que Clarin pinte el adjunto en el chat."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
+		mcp.WithString("format", mcp.Required(), mcp.Description("Formato: txt, csv, xlsx, docx o pptx.")),
+		mcp.WithString("filename", mcp.Description("Nombre sugerido del archivo. Se sanitiza y se ajusta la extensión.")),
+		mcp.WithString("title", mcp.Description("Título humano del archivo.")),
+	), s.toolPrepareFileExport)
+
+	mcpSrv.AddTool(readOnlyTool("render_file_export",
+		mcp.WithDescription("Confirma el adjunto descargable de Eros. No escribe archivos, no usa MinIO y no devuelve base64; devuelve sólo metadata para que el backend de Clarin genere el binario bajo demanda desde el mensaje de Eros."),
+		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
+		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
+		mcp.WithString("format", mcp.Required(), mcp.Description("Formato: txt, csv, xlsx, docx o pptx.")),
+		mcp.WithString("filename", mcp.Description("Nombre sugerido del archivo. Se sanitiza y se ajusta la extensión.")),
+		mcp.WithString("title", mcp.Description("Título humano del archivo.")),
+		mcp.WithString("source", mcp.Description("Fuente del contenido. Default assistant_response.")),
+	), s.toolRenderFileExport)
 
 	// ──────────────── Category A.5: Deep Lead Analysis Exports ────────────────
 

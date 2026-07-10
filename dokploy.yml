@@ -28,6 +28,7 @@ healthCheck:
 build:
   # Build all services
   services:
+    - codex-bridge
     - backend
     - frontend
 
@@ -37,12 +38,26 @@ envExample:
   - JWT_SECRET
   - ADMIN_PASSWORD
   - REDIS_PASSWORD
+  - EROS_ENABLED
+  - EROS_CODEX_BRIDGE_URL
+  - EROS_CODEX_BRIDGE_TOKEN
+  - EROS_CODEX_ACCESS_TOKEN
+  - EROS_CODEX_AUTH_FILE
+  - EROS_CODEX_AUTH_FILE_HOST
+  - EROS_CODEX_AUTH_MODE
+  - EROS_CODEX_MODEL
+  - EROS_CODEX_REASONING_EFFORT
+  - EROS_CODEX_REQUEST_TIMEOUT_MS
+  - EROS_CODEX_BRIDGE_TIMEOUT
+  - EROS_MCP_BASE_URL
+  - EROS_MCP_ACCESS_TOKEN
 
 # Volumes (persistent storage)
 volumes:
   - postgres_data
   - redis_data
   - whatsapp_sessions
+  - codex_bridge_home
 
 # Resources (optional - configure in Dokploy UI)
 # resources:

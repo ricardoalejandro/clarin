@@ -5,7 +5,7 @@ import {
   Building2, Users, Plus, Pencil, Trash2, Power, KeyRound,
   Search, X, Shield, ChevronDown, Link2, Lock, CheckSquare, Square, Bot,
   Plug, RefreshCw, AlertTriangle, HardDrive, Database, CheckCircle2,
-  Activity, Eye, Send, Clock, Copy
+  Activity, Eye, Send, Clock, Copy, Sparkles
 } from 'lucide-react'
 import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 
@@ -50,6 +50,7 @@ interface User {
   is_admin: boolean
   is_super_admin: boolean
   is_active: boolean
+  eros_enabled?: boolean
   account_name: string
   accounts?: UserAccountAssignment[]
   created_at: string
@@ -229,6 +230,44 @@ interface MCPAuditEvent {
   created_at: string
 }
 
+interface ErosSettings {
+  id: number
+  enabled: boolean
+  provider: string
+  bridge_url: string
+  auth_mode: string
+  mcp_base_url: string
+  codex_model: string
+  default_reasoning_effort: string
+  allowed_reasoning_efforts: string[]
+  allow_user_reasoning_override: boolean
+  global_instructions: string
+  max_history_messages: number
+  updated_at: string
+}
+
+interface ErosEnvironment {
+  project_enabled: boolean
+  bridge_url_from_env: boolean
+  mcp_base_url_from_env: boolean
+  credential_configured: boolean
+  auth_file_configured: boolean
+  bridge_token_configured: boolean
+  mcp_access_token_configured: boolean
+  bridge_timeout_seconds: number
+  secrets_visible_in_admin: boolean
+  subscription_auth_mode_hint?: string
+  codex_model_from_env?: boolean
+  reasoning_effort_from_env?: boolean
+}
+
+interface ErosHealth {
+  bridge?: Record<string, unknown>
+  mcp?: Record<string, unknown>
+  env?: Record<string, unknown>
+  checked_at?: string
+}
+
 interface NewUserAssignment {
   account_id: string
   role: string
@@ -253,9 +292,25 @@ const ALL_MODULES = [
   { key: 'dynamics', label: 'Dinámicas', color: 'rose' },
   { key: 'tasks', label: 'Tareas', color: 'lime' },
   { key: 'documents', label: 'Plantillas', color: 'purple' },
+  { key: 'shared_browser', label: 'Navegador', color: 'cyan' },
 ]
 
 const KOMMO_ADMIN_UI_ENABLED = false
+
+const EROS_MODEL_OPTIONS = [
+  { value: 'gpt-5.4-mini', label: 'Económico', hint: 'gpt-5.4-mini' },
+  { value: 'gpt-5.4', label: 'Balance', hint: 'gpt-5.4' },
+  { value: 'gpt-5.5', label: 'Calidad', hint: 'gpt-5.5' },
+  { value: 'gpt-5.3-codex-spark', label: 'Spark preview', hint: 'gpt-5.3-codex-spark' },
+  { value: 'custom', label: 'Personalizado', hint: 'slug propio' },
+]
+
+const EROS_REASONING_OPTIONS = [
+  { value: 'low', label: 'Rápido' },
+  { value: 'medium', label: 'Normal' },
+  { value: 'high', label: 'Profundo' },
+  { value: 'xhigh', label: 'Máximo' },
+]
 
 function formatBytes(bytes?: number) {
   const value = bytes || 0
@@ -284,7 +339,7 @@ function bytesToGb(value?: number) {
   return value && value > 0 ? Math.round((value / 1024 / 1024 / 1024) * 10) / 10 : 0
 }
 
-type Tab = 'accounts' | 'users' | 'roles' | 'mcp' | 'integrations'
+type Tab = 'accounts' | 'users' | 'roles' | 'eros' | 'mcp' | 'integrations'
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>('accounts')
@@ -295,6 +350,23 @@ export default function AdminPage() {
   const [mcpClients, setMcpClients] = useState<MCPClient[]>([])
   const [mcpSessions, setMcpSessions] = useState<MCPSession[]>([])
   const [mcpAudit, setMcpAudit] = useState<MCPAuditEvent[]>([])
+  const [erosSettings, setErosSettings] = useState<ErosSettings | null>(null)
+  const [erosEnv, setErosEnv] = useState<ErosEnvironment | null>(null)
+  const [erosHealth, setErosHealth] = useState<ErosHealth | null>(null)
+  const [erosBusy, setErosBusy] = useState<string | null>(null)
+  const [erosForm, setErosForm] = useState({
+    enabled: true,
+    provider: 'codex_bridge',
+    bridge_url: '',
+    auth_mode: 'chatgpt_subscription',
+    mcp_base_url: '',
+    codex_model: 'gpt-5.4-mini',
+    default_reasoning_effort: 'medium',
+    allowed_reasoning_efforts: ['low', 'medium', 'high', 'xhigh'],
+    allow_user_reasoning_override: true,
+    global_instructions: '',
+    max_history_messages: 20,
+  })
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [filterAccountId, setFilterAccountId] = useState('')
@@ -449,6 +521,92 @@ export default function AdminPage() {
     }
   }
 
+  async function fetchErosSettings() {
+    try {
+      const res = await fetch('/api/admin/eros/settings', { headers })
+      const data = await res.json()
+      if (data.success) {
+        const settings = data.settings as ErosSettings
+        setErosSettings(settings)
+        setErosEnv(data.environment || null)
+        setErosForm({
+          enabled: settings.enabled,
+          provider: settings.provider || 'codex_bridge',
+          bridge_url: settings.bridge_url || '',
+          auth_mode: settings.auth_mode || 'chatgpt_subscription',
+          mcp_base_url: settings.mcp_base_url || '',
+          codex_model: settings.codex_model || 'gpt-5.4-mini',
+          default_reasoning_effort: settings.default_reasoning_effort || 'medium',
+          allowed_reasoning_efforts: settings.allowed_reasoning_efforts?.length ? settings.allowed_reasoning_efforts : ['low', 'medium', 'high', 'xhigh'],
+          allow_user_reasoning_override: settings.allow_user_reasoning_override ?? true,
+          global_instructions: settings.global_instructions || '',
+          max_history_messages: settings.max_history_messages || 20,
+        })
+      }
+    } catch (e) {
+      console.error('Failed to fetch Eros settings:', e)
+    }
+  }
+
+  async function saveErosSettings() {
+    if (erosBusy) return
+    setErosBusy('settings')
+    try {
+      const res = await fetch('/api/admin/eros/settings', {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(erosForm),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'No se pudo guardar Eros')
+        return
+      }
+      await fetchErosSettings()
+    } finally {
+      setErosBusy(null)
+    }
+  }
+
+  async function runErosHealthcheck() {
+    if (erosBusy) return
+    setErosBusy('health')
+    try {
+      const res = await fetch('/api/admin/eros/healthcheck', { method: 'POST', headers })
+      const data = await res.json()
+      if (!data.success) {
+        alert(data.error || 'No se pudo probar Eros')
+        return
+      }
+      setErosHealth(data.health || null)
+    } finally {
+      setErosBusy(null)
+    }
+  }
+
+  async function updateErosUserAccess(user: User, enabled: boolean) {
+    if (erosBusy === user.id) return
+    setErosBusy(user.id)
+    setUsers(prev => prev.map(u => u.id === user.id ? { ...u, eros_enabled: enabled } : u))
+    try {
+      const res = await fetch(`/api/admin/eros/users/${user.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ eros_enabled: enabled }),
+      })
+      const data = await res.json()
+      if (!data.success) {
+        setUsers(prev => prev.map(u => u.id === user.id ? { ...u, eros_enabled: user.eros_enabled } : u))
+        alert(data.error || 'No se pudo actualizar el acceso a Eros')
+      }
+    } catch {
+      setUsers(prev => prev.map(u => u.id === user.id ? { ...u, eros_enabled: user.eros_enabled } : u))
+      alert('No se pudo actualizar el acceso a Eros')
+    } finally {
+      setErosBusy(null)
+    }
+  }
+
   async function fetchStorageOrphans(minAgeDays = storageActiveMinAgeDays) {
     setStorageOrphansLoading(true)
     try {
@@ -523,6 +681,7 @@ export default function AdminPage() {
       fetchRoles(),
       fetchStorageOrphans(),
       fetchMCPData(),
+      fetchErosSettings(),
       ...(KOMMO_ADMIN_UI_ENABLED ? [fetchIntegrations()] : []),
     ]).finally(() => setLoading(false))
   }, [])
@@ -856,6 +1015,10 @@ export default function AdminPage() {
     u.email.toLowerCase().includes(search.toLowerCase()) ||
     (u.display_name || '').toLowerCase().includes(search.toLowerCase())
   )
+  const erosEnabledUsers = users.filter(u => Boolean(u.eros_enabled)).length
+  const selectedErosModelPreset = EROS_MODEL_OPTIONS.some(option => option.value === erosForm.codex_model)
+    ? erosForm.codex_model
+    : 'custom'
 
   const filteredRoles = roles.filter(r =>
     r.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -876,6 +1039,33 @@ export default function AdminPage() {
   )
 
   const activeAccounts = accounts.filter(a => a.is_active)
+
+  function healthBool(value: unknown) {
+    return value === true
+  }
+
+  function healthText(value: unknown) {
+    if (typeof value === 'boolean') return value ? 'OK' : 'Pendiente'
+    if (typeof value === 'number') return String(value)
+    if (typeof value === 'string' && value) return value
+    return 'Sin datos'
+  }
+
+  function healthPill(ok: boolean) {
+    return ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+  }
+
+  function toggleAllowedReasoningEffort(value: string) {
+    setErosForm(f => {
+      const exists = f.allowed_reasoning_efforts.includes(value)
+      const next = exists
+        ? f.allowed_reasoning_efforts.filter(effort => effort !== value)
+        : [...f.allowed_reasoning_efforts, value]
+      const allowed = next.length ? next : [f.default_reasoning_effort || 'medium']
+      const defaultEffort = allowed.includes(f.default_reasoning_effort) ? f.default_reasoning_effort : allowed[0]
+      return { ...f, allowed_reasoning_efforts: allowed, default_reasoning_effort: defaultEffort }
+    })
+  }
 
   function toggleNewMcpAccount(accountId: string) {
     setNewMcpAccountIds(prev =>
@@ -1413,6 +1603,15 @@ export default function AdminPage() {
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{roles.length}</span>
         </button>
         <button
+          onClick={() => { setTab('eros'); setSearch(''); setFilterAccountId('') }}
+          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            tab === 'eros' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Sparkles className="w-4 h-4" /> Eros
+          <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{erosEnabledUsers}</span>
+        </button>
+        <button
           onClick={() => { setTab('mcp'); setSearch('') }}
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
             tab === 'mcp' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
@@ -1440,7 +1639,7 @@ export default function AdminPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder={tab === 'accounts' ? 'Buscar cuentas...' : tab === 'users' ? 'Buscar usuarios...' : tab === 'roles' ? 'Buscar roles...' : tab === 'mcp' ? 'Buscar conexiones MCP...' : 'Buscar...'}
+            placeholder={tab === 'accounts' ? 'Buscar cuentas...' : tab === 'users' ? 'Buscar usuarios...' : tab === 'roles' ? 'Buscar roles...' : tab === 'eros' ? 'Buscar usuarios con Eros...' : tab === 'mcp' ? 'Buscar conexiones MCP...' : 'Buscar...'}
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent"
@@ -1465,7 +1664,30 @@ export default function AdminPage() {
           </select>
         )}
 
-        {tab === 'mcp' ? (
+        {tab === 'eros' ? (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={fetchErosSettings}
+              className="flex items-center gap-2 px-3 py-2 bg-slate-700 text-slate-100 rounded-lg hover:bg-slate-600 transition-colors text-sm font-medium whitespace-nowrap"
+            >
+              <RefreshCw className="w-4 h-4" /> Actualizar
+            </button>
+            <button
+              onClick={runErosHealthcheck}
+              disabled={erosBusy === 'health'}
+              className="flex items-center gap-2 px-3 py-2 bg-white text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors text-sm font-medium whitespace-nowrap disabled:opacity-50"
+            >
+              <Activity className="w-4 h-4" /> Probar
+            </button>
+            <button
+              onClick={saveErosSettings}
+              disabled={erosBusy === 'settings'}
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm font-medium whitespace-nowrap disabled:opacity-50"
+            >
+              <CheckCircle2 className="w-4 h-4" /> Guardar
+            </button>
+          </div>
+        ) : tab === 'mcp' ? (
           <div className="flex items-center gap-2">
             <button
               onClick={fetchMCPData}
@@ -1784,6 +2006,182 @@ export default function AdminPage() {
               ))}
             </tbody>
           </table>
+        ) : tab === 'eros' ? (
+          <div className="p-5 space-y-5">
+            <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-5">
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2"><Sparkles className="w-4 h-4 text-emerald-600" /> Eros Global</h3>
+                    <p className="text-xs text-gray-500 mt-0.5">Chat de Clarin vía Codex Bridge y herramientas MCP compartidas.</p>
+                  </div>
+                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${erosForm.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{erosForm.enabled ? 'Habilitado' : 'Pausado'}</span>
+                </div>
+                <div className="p-4 space-y-4">
+                  <label className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 px-3 py-2.5">
+                    <div>
+                      <span className="block text-sm font-medium text-gray-900">Eros activo</span>
+                      <span className="block text-xs text-gray-500">El uso también depende del check por usuario.</span>
+                    </div>
+                    <button type="button" onClick={() => setErosForm(f => ({ ...f, enabled: !f.enabled }))} className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${erosForm.enabled ? 'bg-emerald-600' : 'bg-gray-300'}`}>
+                      <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${erosForm.enabled ? 'translate-x-5' : 'translate-x-1'}`} />
+                    </button>
+                  </label>
+                  <div className="rounded-lg border border-gray-200 p-3 space-y-3">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <span className="block text-sm font-medium text-gray-900">Modelo de Eros</span>
+                        <span className="block text-xs text-gray-500">Solo Admin define capacidad y coste base.</span>
+                      </div>
+                      <span className="max-w-full truncate text-xs font-medium text-slate-500">{erosForm.codex_model}</span>
+                    </div>
+                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+                      {EROS_MODEL_OPTIONS.map(option => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => {
+                            if (option.value === 'custom') {
+                              setErosForm(f => ({ ...f, codex_model: selectedErosModelPreset === 'custom' ? f.codex_model : '' }))
+                              return
+                            }
+                            setErosForm(f => ({ ...f, codex_model: option.value }))
+                          }}
+                          className={`min-h-[58px] rounded-lg border px-2 py-2 text-left transition-colors ${selectedErosModelPreset === option.value ? 'border-emerald-300 bg-emerald-50 text-emerald-900' : 'border-gray-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                        >
+                          <span className="block text-xs font-semibold">{option.label}</span>
+                          <span className="block text-[11px] text-slate-500 truncate">{option.hint}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      value={erosForm.codex_model}
+                      onChange={e => setErosForm(f => ({ ...f, codex_model: e.target.value }))}
+                      placeholder="Modelo personalizado"
+                      className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                  <div className="rounded-lg border border-gray-200 p-3 space-y-3">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <span className="block text-sm font-medium text-gray-900">Razonamiento del chat</span>
+                        <span className="block text-xs text-gray-500">Admin define el default y qué niveles aparecen para usuarios.</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-500">Usuarios eligen</span>
+                        <button type="button" onClick={() => setErosForm(f => ({ ...f, allow_user_reasoning_override: !f.allow_user_reasoning_override }))} className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${erosForm.allow_user_reasoning_override ? 'bg-emerald-600' : 'bg-gray-300'}`}>
+                          <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${erosForm.allow_user_reasoning_override ? 'translate-x-5' : 'translate-x-1'}`} />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                      {EROS_REASONING_OPTIONS.map(option => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => setErosForm(f => ({
+                            ...f,
+                            default_reasoning_effort: option.value,
+                            allowed_reasoning_efforts: f.allowed_reasoning_efforts.includes(option.value)
+                              ? f.allowed_reasoning_efforts
+                              : [...f.allowed_reasoning_efforts, option.value],
+                          }))}
+                          className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${erosForm.default_reasoning_effort === option.value ? 'border-emerald-300 bg-emerald-50 text-emerald-900' : 'border-gray-200 bg-white text-slate-700 hover:bg-slate-50'}`}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {EROS_REASONING_OPTIONS.map(option => {
+                        const enabled = erosForm.allowed_reasoning_efforts.includes(option.value)
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => toggleAllowedReasoningEffort(option.value)}
+                            className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-gray-200 bg-white text-slate-500 hover:bg-slate-50'}`}
+                          >
+                            {enabled ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
+                            {option.label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    <input value={erosForm.bridge_url} onChange={e => setErosForm(f => ({ ...f, bridge_url: e.target.value }))} placeholder="Bridge URL" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
+                    <input value={erosForm.mcp_base_url} onChange={e => setErosForm(f => ({ ...f, mcp_base_url: e.target.value }))} placeholder="MCP Base URL" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
+                    <input value={erosForm.auth_mode} onChange={e => setErosForm(f => ({ ...f, auth_mode: e.target.value }))} placeholder="chatgpt_subscription" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
+                    <input type="number" min={1} max={50} value={erosForm.max_history_messages} onChange={e => setErosForm(f => ({ ...f, max_history_messages: Math.max(1, Math.min(50, Number(e.target.value) || 20)) }))} className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
+                  </div>
+                  <textarea value={erosForm.global_instructions} onChange={e => setErosForm(f => ({ ...f, global_instructions: e.target.value }))} rows={5} placeholder="Instrucciones globales de Eros" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 resize-y" />
+                  <div className="text-xs text-gray-500">Proveedor: <code className="bg-gray-100 px-1.5 py-0.5 rounded">{erosForm.provider}</code> · Actualizado: {formatDateTime(erosSettings?.updated_at)}</div>
+                </div>
+              </div>
+              <div className="space-y-5">
+                <div className="rounded-lg border border-gray-200 p-4">
+                  <h3 className="text-sm font-semibold text-gray-900">Entorno</h3>
+                  <p className="text-xs text-gray-500 mt-1">Los secretos viven en `.env` y no se muestran.</p>
+                  <div className="space-y-2 mt-3 text-sm">
+                    {[
+                      ['Proyecto', erosEnv?.project_enabled],
+                      ['Credencial Codex', erosEnv?.credential_configured],
+                      ['Bridge token', erosEnv?.bridge_token_configured],
+                      ['Token MCP', erosEnv?.mcp_access_token_configured],
+                      ['Bridge URL env', erosEnv?.bridge_url_from_env],
+                      ['MCP URL env', erosEnv?.mcp_base_url_from_env],
+                      ['Modelo env', erosEnv?.codex_model_from_env],
+                      ['Razonamiento env', erosEnv?.reasoning_effort_from_env],
+                    ].map(([label, value]) => (
+                      <div key={String(label)} className="flex items-center justify-between gap-3">
+                        <span className="text-gray-600">{String(label)}</span>
+                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${value === true ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{value === true ? 'Listo' : 'Pendiente'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-gray-200 p-4">
+                  <h3 className="text-sm font-semibold text-gray-900">Healthcheck</h3>
+                  {!erosHealth ? <div className="mt-3 text-xs text-gray-400">Sin prueba reciente</div> : (
+                    <div className="mt-3 space-y-2 text-sm">
+                      <div className="flex items-center justify-between"><span className="text-gray-600">Bridge</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.bridge?.ok))}`}>{healthText(erosHealth?.bridge?.ok)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">Codex auth</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.bridge?.codex_authenticated))}`}>{healthText(erosHealth?.bridge?.codex_authenticated)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">MCP protegido</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.mcp?.protected))}`}>{healthText(erosHealth?.mcp?.protected)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">MCP accesible</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.mcp?.authorized))}`}>{healthText(erosHealth?.mcp?.authorized)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">Tools MCP</span><span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{healthText(erosHealth?.bridge?.mcp_tools_count)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">Modelo</span><span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{String(erosHealth?.env?.codex_model || erosForm.codex_model)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">Razonamiento</span><span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{String(erosHealth?.env?.default_reasoning_effort || erosForm.default_reasoning_effort)}</span></div>
+                      <div className="text-xs text-gray-400">Última prueba: {formatDateTime(erosHealth?.checked_at)}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="rounded-lg border border-gray-200 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2"><Users className="w-4 h-4 text-emerald-600" /> Acceso de usuarios</h3>
+                <span className="text-xs text-gray-400">{erosEnabledUsers}/{users.length} habilitados</span>
+              </div>
+              <div className="divide-y divide-gray-100 max-h-[520px] overflow-auto">
+                {filteredUsers.length === 0 ? <div className="p-8 text-center text-sm text-gray-400">No se encontraron usuarios</div> : filteredUsers.map(user => {
+                  const enabled = Boolean(user.eros_enabled)
+                  return (
+                    <div key={user.id} className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 hover:bg-gray-50">
+                      <div className="min-w-0">
+                        <div className="font-medium text-gray-900">{user.display_name || user.username}</div>
+                        <div className="text-xs text-gray-400 truncate">@{user.username} · {user.email}</div>
+                      </div>
+                      <button type="button" onClick={() => updateErosUserAccess(user, !enabled)} disabled={erosBusy === user.id} className={`inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-colors disabled:opacity-50 ${enabled ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100' : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-50'}`}>
+                        {enabled ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                        {enabled ? 'Con acceso' : 'Sin acceso'}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
         ) : tab === 'mcp' ? (
           <div className="p-5 space-y-6">
             <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-5">

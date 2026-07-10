@@ -45,6 +45,22 @@ type Config struct {
 	// AI Assistant
 	GeminiAPIKey string
 	GroqAPIKey   string
+	// Eros Codex Bridge
+	ErosEnabled          bool
+	ErosProvider         string
+	ErosCodexBridgeURL   string
+	ErosCodexBridgeToken string
+	ErosCodexAuthMode    string
+	ErosCodexAccessToken string
+	ErosCodexAuthFile    string
+	ErosCodexModel       string
+	ErosCodexReasoning   string
+	ErosMCPBaseURL       string
+	ErosMCPAccessToken   string
+	ErosBridgeTimeout    time.Duration
+	// Shared Browser
+	SharedBrowserGatewayURL string
+	SharedBrowserTimeout    time.Duration
 	// Google Contacts OAuth
 	GoogleClientID     string
 	GoogleClientSecret string
@@ -90,6 +106,20 @@ func Load() *Config {
 		PublicURL:                getEnv("PUBLIC_URL", ""),
 		GeminiAPIKey:             getEnv("GEMINI_API_KEY", ""),
 		GroqAPIKey:               getEnv("GROQ_API_KEY", ""),
+		ErosEnabled:              getEnvBool("EROS_ENABLED", true),
+		ErosProvider:             getEnv("EROS_PROVIDER", "codex_bridge"),
+		ErosCodexBridgeURL:       strings.TrimRight(getEnv("EROS_CODEX_BRIDGE_URL", ""), "/"),
+		ErosCodexBridgeToken:     getEnv("EROS_CODEX_BRIDGE_TOKEN", ""),
+		ErosCodexAuthMode:        getEnv("EROS_CODEX_AUTH_MODE", "chatgpt_subscription"),
+		ErosCodexAccessToken:     getEnv("EROS_CODEX_ACCESS_TOKEN", ""),
+		ErosCodexAuthFile:        getEnv("EROS_CODEX_AUTH_FILE", ""),
+		ErosCodexModel:           getEnv("EROS_CODEX_MODEL", "gpt-5.4-mini"),
+		ErosCodexReasoning:       getEnv("EROS_CODEX_REASONING_EFFORT", "medium"),
+		ErosMCPBaseURL:           strings.TrimRight(getEnv("EROS_MCP_BASE_URL", ""), "/"),
+		ErosMCPAccessToken:       getEnv("EROS_MCP_ACCESS_TOKEN", ""),
+		ErosBridgeTimeout:        getEnvDuration("EROS_CODEX_BRIDGE_TIMEOUT", 45*time.Second),
+		SharedBrowserGatewayURL:  strings.TrimRight(getEnv("SHARED_BROWSER_GATEWAY_URL", "http://clarin-shared-browser:8791"), "/"),
+		SharedBrowserTimeout:     getEnvDuration("SHARED_BROWSER_TIMEOUT", 30*time.Second),
 		GoogleClientID:           getEnv("GOOGLE_CLIENT_ID", ""),
 		GoogleClientSecret:       getEnv("GOOGLE_CLIENT_SECRET", ""),
 		GoogleRedirectURI:        getEnv("GOOGLE_REDIRECT_URI", ""),

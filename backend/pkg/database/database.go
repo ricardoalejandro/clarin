@@ -749,6 +749,7 @@ func Migrate(db *pgxpool.Pool) error {
 		 ON CONFLICT (name) DO NOTHING`,
 		// Ensure existing 'Administrador' role gets the new 'integrations' permission
 		`UPDATE roles SET permissions = array_append(permissions, 'integrations') WHERE name = 'Administrador' AND NOT ('integrations' = ANY(permissions))`,
+		`UPDATE roles SET permissions = array_append(permissions, 'shared_browser') WHERE name = 'Administrador' AND NOT ('shared_browser' = ANY(permissions))`,
 		`INSERT INTO roles (name, description, is_system, permissions) VALUES
 			('Supervisor', 'Acceso a chats, leads, contactos y eventos', TRUE, ARRAY['chats','contacts','leads','events','tags'])
 		 ON CONFLICT (name) DO NOTHING`,
@@ -915,23 +916,125 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_event_logbook_entries_participant ON event_logbook_entries(participant_id)`,
 
 		// Eros AI conversation persistence
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS eros_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
 		`CREATE TABLE IF NOT EXISTS eros_conversations (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			title TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT 'codex_bridge',
+			codex_thread_id TEXT NOT NULL DEFAULT '',
+			last_status TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`ALTER TABLE eros_conversations ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'codex_bridge'`,
+		`ALTER TABLE eros_conversations ADD COLUMN IF NOT EXISTS codex_thread_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE eros_conversations ADD COLUMN IF NOT EXISTS last_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE eros_conversations ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_eros_conversations_user ON eros_conversations (user_id, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_eros_conversations_codex_thread ON eros_conversations (codex_thread_id) WHERE codex_thread_id <> ''`,
 		`CREATE TABLE IF NOT EXISTS eros_messages (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			conversation_id UUID NOT NULL REFERENCES eros_conversations(id) ON DELETE CASCADE,
 			role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
 			content TEXT NOT NULL DEFAULT '',
+			codex_model TEXT NOT NULL DEFAULT '',
+			reasoning_effort TEXT NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+			tool_calls JSONB NOT NULL DEFAULT '[]'::jsonb,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`ALTER TABLE eros_messages ADD COLUMN IF NOT EXISTS codex_model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE eros_messages ADD COLUMN IF NOT EXISTS reasoning_effort TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE eros_messages ADD COLUMN IF NOT EXISTS duration_ms INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE eros_messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE eros_messages ADD COLUMN IF NOT EXISTS tool_calls JSONB NOT NULL DEFAULT '[]'::jsonb`,
 		`CREATE INDEX IF NOT EXISTS idx_eros_messages_conv ON eros_messages (conversation_id, created_at ASC)`,
+		`CREATE TABLE IF NOT EXISTS eros_files (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			conversation_id UUID NOT NULL REFERENCES eros_conversations(id) ON DELETE CASCADE,
+			message_id UUID NOT NULL REFERENCES eros_messages(id) ON DELETE CASCADE,
+			filename TEXT NOT NULL DEFAULT '',
+			format TEXT NOT NULL DEFAULT 'txt',
+			content_type TEXT NOT NULL DEFAULT 'text/plain; charset=utf-8',
+			status TEXT NOT NULL DEFAULT 'ready',
+			size_bytes BIGINT NOT NULL DEFAULT 0,
+			checksum TEXT NOT NULL DEFAULT '',
+			generation_spec JSONB NOT NULL DEFAULT '{}'::jsonb,
+			expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '4 hours',
+			delivered_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`ALTER TABLE eros_files ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE eros_files ADD COLUMN IF NOT EXISTS checksum TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE eros_files ADD COLUMN IF NOT EXISTS generation_spec JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`CREATE INDEX IF NOT EXISTS idx_eros_files_user_expires ON eros_files (account_id, user_id, expires_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_eros_files_message ON eros_files (message_id)`,
+		`CREATE TABLE IF NOT EXISTS shared_browser_allowed_domains (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			domain TEXT NOT NULL,
+			is_active BOOLEAN NOT NULL DEFAULT TRUE,
+			created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE (account_id, domain)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_shared_browser_domains_account ON shared_browser_allowed_domains (account_id, is_active, domain)`,
+		`CREATE TABLE IF NOT EXISTS shared_browser_sessions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE UNIQUE,
+			status TEXT NOT NULL DEFAULT 'idle',
+			current_url TEXT NOT NULL DEFAULT '',
+			current_domain TEXT NOT NULL DEFAULT '',
+			controller_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			control_expires_at TIMESTAMPTZ,
+			gateway_session_id TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT '',
+			last_activity_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_shared_browser_sessions_account ON shared_browser_sessions (account_id, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS shared_browser_audit_events (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			event_type TEXT NOT NULL,
+			url TEXT NOT NULL DEFAULT '',
+			domain TEXT NOT NULL DEFAULT '',
+			metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_shared_browser_audit_account_created ON shared_browser_audit_events (account_id, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS eros_settings (
+			id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			provider TEXT NOT NULL DEFAULT 'codex_bridge',
+			bridge_url TEXT NOT NULL DEFAULT '',
+			auth_mode TEXT NOT NULL DEFAULT 'chatgpt_subscription',
+			mcp_base_url TEXT NOT NULL DEFAULT '',
+			codex_model TEXT NOT NULL DEFAULT 'gpt-5.4-mini',
+			default_reasoning_effort TEXT NOT NULL DEFAULT 'medium',
+			allowed_reasoning_efforts TEXT[] NOT NULL DEFAULT ARRAY['low','medium','high','xhigh']::TEXT[],
+			allow_user_reasoning_override BOOLEAN NOT NULL DEFAULT TRUE,
+			global_instructions TEXT NOT NULL DEFAULT '',
+			max_history_messages INT NOT NULL DEFAULT 20,
+			updated_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`ALTER TABLE eros_settings ADD COLUMN IF NOT EXISTS codex_model TEXT NOT NULL DEFAULT 'gpt-5.4-mini'`,
+		`ALTER TABLE eros_settings ADD COLUMN IF NOT EXISTS default_reasoning_effort TEXT NOT NULL DEFAULT 'medium'`,
+		`ALTER TABLE eros_settings ADD COLUMN IF NOT EXISTS allowed_reasoning_efforts TEXT[] NOT NULL DEFAULT ARRAY['low','medium','high','xhigh']::TEXT[]`,
+		`ALTER TABLE eros_settings ADD COLUMN IF NOT EXISTS allow_user_reasoning_override BOOLEAN NOT NULL DEFAULT TRUE`,
+		`INSERT INTO eros_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
 
 		// ─── Surveys / Forms ──────────────────────────────────────────────────────
 		`CREATE TABLE IF NOT EXISTS surveys (
@@ -997,6 +1100,7 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Add surveys permission to Administrador role
 		`UPDATE roles SET permissions = array_append(permissions, 'surveys') WHERE name = 'Administrador' AND NOT ('surveys' = ANY(permissions))`,
+		`UPDATE roles SET permissions = array_append(permissions, 'shared_browser') WHERE name = 'Administrador' AND NOT ('shared_browser' = ANY(permissions))`,
 
 		// Add is_template column to surveys
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS is_template BOOLEAN NOT NULL DEFAULT FALSE`,

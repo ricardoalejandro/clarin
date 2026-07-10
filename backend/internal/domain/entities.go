@@ -130,6 +130,7 @@ type User struct {
 	IsAdmin          bool      `json:"is_admin"`
 	IsSuperAdmin     bool      `json:"is_super_admin"`
 	IsActive         bool      `json:"is_active"`
+	ErosEnabled      bool      `json:"eros_enabled"`
 	GroqAPIKey       string    `json:"-"`
 	ErosModel        string    `json:"eros_model,omitempty"`
 	ErosRole         string    `json:"eros_role,omitempty"`
@@ -151,23 +152,24 @@ const (
 
 // Permission module constants
 const (
-	PermChats        = "chats"
-	PermContacts     = "contacts"
-	PermPrograms     = "programs"
-	PermDevices      = "devices"
-	PermLeads        = "leads"
-	PermEvents       = "events"
-	PermBroadcasts   = "broadcasts"
-	PermTags         = "tags"
-	PermSettings     = "settings"
-	PermIntegrations = "integrations"
-	PermAutomations  = "automations"
-	PermBots         = "bots"
-	PermSurveys      = "surveys"
-	PermDynamics     = "dynamics"
-	PermTasks        = "tasks"
-	PermDocuments    = "documents"
-	PermAll          = "*"
+	PermChats         = "chats"
+	PermContacts      = "contacts"
+	PermPrograms      = "programs"
+	PermDevices       = "devices"
+	PermLeads         = "leads"
+	PermEvents        = "events"
+	PermBroadcasts    = "broadcasts"
+	PermTags          = "tags"
+	PermSettings      = "settings"
+	PermIntegrations  = "integrations"
+	PermAutomations   = "automations"
+	PermBots          = "bots"
+	PermSurveys       = "surveys"
+	PermDynamics      = "dynamics"
+	PermTasks         = "tasks"
+	PermDocuments     = "documents"
+	PermSharedBrowser = "shared_browser"
+	PermAll           = "*"
 )
 
 // AllPermissions contains all available permission modules in display order
@@ -175,7 +177,7 @@ var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
 	PermAutomations, PermBots, PermDevices, PermEvents,
 	PermBroadcasts, PermSurveys, PermTasks, PermDynamics,
-	PermDocuments, PermTags, PermSettings, PermIntegrations,
+	PermDocuments, PermSharedBrowser, PermTags, PermSettings, PermIntegrations,
 }
 
 // Role represents a named set of module permissions
@@ -1701,23 +1703,72 @@ const (
 
 // ErosConversation represents a persistent chat conversation with Eros AI
 type ErosConversation struct {
-	ID        uuid.UUID `json:"id"`
-	AccountID uuid.UUID `json:"account_id"`
-	UserID    uuid.UUID `json:"user_id"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID            uuid.UUID `json:"id"`
+	AccountID     uuid.UUID `json:"account_id"`
+	UserID        uuid.UUID `json:"user_id"`
+	Title         string    `json:"title"`
+	Provider      string    `json:"provider"`
+	CodexThreadID string    `json:"codex_thread_id,omitempty"`
+	LastStatus    string    `json:"last_status,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 	// Populated on demand
 	Messages []ErosMessage `json:"messages,omitempty"`
 }
 
 // ErosMessage represents a single message in an Eros conversation
 type ErosMessage struct {
-	ID             uuid.UUID `json:"id"`
-	ConversationID uuid.UUID `json:"conversation_id"`
-	Role           string    `json:"role"` // "user" or "assistant"
-	Content        string    `json:"content"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID              uuid.UUID       `json:"id"`
+	ConversationID  uuid.UUID       `json:"conversation_id"`
+	Role            string          `json:"role"` // "user" or "assistant"
+	Content         string          `json:"content"`
+	CodexModel      string          `json:"codex_model,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	DurationMS      int64           `json:"duration_ms,omitempty"`
+	Metadata        json.RawMessage `json:"metadata,omitempty"`
+	ToolCalls       json.RawMessage `json:"tool_calls,omitempty"`
+	Attachments     []ErosFile      `json:"attachments,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+}
+
+// ErosFile is a downloadable attachment descriptor. The binary is rendered on demand.
+type ErosFile struct {
+	ID             uuid.UUID       `json:"id"`
+	AccountID      uuid.UUID       `json:"account_id,omitempty"`
+	UserID         uuid.UUID       `json:"user_id,omitempty"`
+	ConversationID uuid.UUID       `json:"conversation_id,omitempty"`
+	MessageID      uuid.UUID       `json:"message_id,omitempty"`
+	Filename       string          `json:"filename"`
+	Format         string          `json:"format"`
+	ContentType    string          `json:"content_type"`
+	Status         string          `json:"status"`
+	SizeBytes      int64           `json:"size_bytes,omitempty"`
+	Checksum       string          `json:"checksum,omitempty"`
+	GenerationSpec json.RawMessage `json:"generation_spec,omitempty"`
+	ExpiresAt      time.Time       `json:"expires_at"`
+	DeliveredAt    *time.Time      `json:"delivered_at,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+// ErosSettings stores non-secret global Eros configuration. Secrets stay in env.
+type ErosSettings struct {
+	ID                         int        `json:"id"`
+	Enabled                    bool       `json:"enabled"`
+	Provider                   string     `json:"provider"`
+	BridgeURL                  string     `json:"bridge_url"`
+	AuthMode                   string     `json:"auth_mode"`
+	MCPBaseURL                 string     `json:"mcp_base_url"`
+	CodexModel                 string     `json:"codex_model"`
+	DefaultReasoningEffort     string     `json:"default_reasoning_effort"`
+	AllowedReasoningEfforts    []string   `json:"allowed_reasoning_efforts"`
+	AllowUserReasoningOverride bool       `json:"allow_user_reasoning_override"`
+	GlobalInstructions         string     `json:"global_instructions"`
+	MaxHistoryMessages         int        `json:"max_history_messages"`
+	UpdatedByUserID            *uuid.UUID `json:"updated_by_user_id,omitempty"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
 }
 
 // AITokenLog represents a log of AI tokens consumed by a user

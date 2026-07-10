@@ -740,6 +740,24 @@ func (s *Server) setupRoutes() {
 	dynamics.Get("/:id/links/:linkId/registrations/export", s.handleExportLinkRegistrations)
 	dynamics.Delete("/:id/links/:linkId/registrations/:regId", s.handleDeleteLinkRegistration)
 
+	// Shared browser: one controlled internal Chromium session per cuenta.
+	sharedBrowser := protected.Group("/shared-browser", s.requirePermission(domain.PermSharedBrowser))
+	sharedBrowser.Get("/status", s.handleSharedBrowserStatus)
+	sharedBrowser.Get("/allowed-domains", s.handleSharedBrowserAllowedDomains)
+	sharedBrowser.Post("/allowed-domains", s.handleSharedBrowserAddAllowedDomain)
+	sharedBrowser.Post("/open", s.handleSharedBrowserOpen)
+	sharedBrowser.Post("/request-control", s.handleSharedBrowserRequestControl)
+	sharedBrowser.Post("/release-control", s.handleSharedBrowserReleaseControl)
+	sharedBrowser.Post("/reload", s.handleSharedBrowserReload)
+	sharedBrowser.Post("/restart", s.handleSharedBrowserRestart)
+	sharedBrowser.Use("/vnc", s.wsUpgrade)
+	sharedBrowser.Get("/vnc", websocket.New(s.handleSharedBrowserVNC))
+	sharedBrowser.Get("/stream", s.handleSharedBrowserStream)
+	sharedBrowser.Get("/screenshot", s.handleSharedBrowserScreenshot)
+	sharedBrowser.Post("/click", s.handleSharedBrowserClick)
+	sharedBrowser.Post("/key", s.handleSharedBrowserKey)
+	sharedBrowser.Post("/scroll", s.handleSharedBrowserScroll)
+
 	// WebSocket route
 	s.app.Use("/ws", s.wsUpgrade)
 	s.app.Get("/ws", websocket.New(s.handleWebSocket))
@@ -747,12 +765,19 @@ func (s *Server) setupRoutes() {
 	// Stats
 	protected.Get("/stats", s.handleGetStats)
 
-	// AI Assistant (Eros)
-	protected.Get("/ai/config", s.handleGetAIConfig)
-	protected.Put("/ai/config", s.handleSetAIConfig)
-	protected.Post("/ai/config/validate", s.handleValidateAIConfig)
-	protected.Post("/ai/models", s.handleListAIModels)
-	protected.Post("/ai/chat", s.handleAIChat)
+	// Eros Assistant (Codex Bridge + MCP shared tools)
+	protected.Get("/eros/status", s.handleErosStatus)
+	protected.Post("/eros/chat", s.handleErosChat)
+	protected.Get("/eros/files/:id/download", s.handleDownloadErosFile)
+	protected.Get("/eros/conversations", s.handleListErosConversations)
+	protected.Get("/eros/conversations/:id", s.handleGetErosConversation)
+	protected.Delete("/eros/conversations/:id", s.handleDeleteErosConversation)
+	// Legacy /ai aliases kept for older frontend bundles; configuration writes are disabled.
+	protected.Get("/ai/config", s.handleErosLegacyConfig)
+	protected.Put("/ai/config", s.handleErosLegacyConfigWrite)
+	protected.Post("/ai/config/validate", s.handleErosLegacyConfigWrite)
+	protected.Post("/ai/models", s.handleErosLegacyConfigWrite)
+	protected.Post("/ai/chat", s.handleErosChat)
 	protected.Get("/ai/conversations", s.handleListErosConversations)
 	protected.Get("/ai/conversations/:id", s.handleGetErosConversation)
 	protected.Delete("/ai/conversations/:id", s.handleDeleteErosConversation)
@@ -787,6 +812,13 @@ func (s *Server) setupRoutes() {
 	adminUsers.Patch("/:id/toggle", s.handleAdminToggleUser)
 	adminUsers.Patch("/:id/password", s.handleAdminResetPassword)
 	adminUsers.Delete("/:id", s.handleAdminDeleteUser)
+
+	// Global Eros management
+	adminEros := admin.Group("/eros")
+	adminEros.Get("/settings", s.handleAdminGetErosSettings)
+	adminEros.Put("/settings", s.handleAdminUpdateErosSettings)
+	adminEros.Patch("/users/:userId", s.handleAdminUpdateErosUser)
+	adminEros.Post("/healthcheck", s.handleAdminErosHealthcheck)
 
 	// User-Account assignments
 	adminUsers.Get("/:id/accounts", s.handleAdminGetUserAccounts)

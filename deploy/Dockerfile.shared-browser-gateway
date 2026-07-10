@@ -1,0 +1,23 @@
+FROM mcr.microsoft.com/playwright:v1.58.2-jammy
+
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends xvfb x11vnc openbox \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY package.json ./
+RUN npm install --omit=dev
+
+COPY server.js ./
+
+ENV NODE_ENV=production
+ENV PORT=8791
+ENV PROFILE_ROOT=/data/profiles
+
+EXPOSE 8791
+
+CMD ["node", "server.js"]

@@ -37,6 +37,7 @@ import {
   AlertTriangle,
   CreditCard,
   Smartphone,
+  Monitor,
 } from 'lucide-react'
 
 interface User {
@@ -313,6 +314,7 @@ export default function DashboardLayout({
     '/dashboard/dynamics': 'dynamics',
     '/dashboard/tasks': 'tasks',
     '/dashboard/documents': 'documents',
+    '/dashboard/browser': 'shared_browser',
     '/dashboard/tags': 'tags',
     '/dashboard/settings': 'settings',
   }
@@ -342,6 +344,7 @@ export default function DashboardLayout({
     { href: '/dashboard/tasks', icon: ListChecks, label: 'Tareas', desc: 'Pendientes y seguimiento' },
     { href: '/dashboard/dynamics', icon: Sparkles, label: 'Dinámicas', desc: 'Actividades interactivas' },
     { href: '/dashboard/documents', icon: Files, label: 'Plantillas', desc: 'Editor de plantillas' },
+    { href: '/dashboard/browser', icon: Monitor, label: 'Navegador', desc: 'Sesión compartida' },
     { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas', desc: 'Organización por etiquetas' },
     { href: '/dashboard/storage', icon: Database, label: 'Almacenamiento', desc: 'Archivos y espacio' },
     { href: '/dashboard/settings', icon: Settings, label: 'Configuración', desc: 'Ajustes del sistema' },

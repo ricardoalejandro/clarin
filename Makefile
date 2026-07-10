@@ -1,4 +1,4 @@
-.PHONY: build up down logs restart migrate seed test clean install deploy
+.PHONY: build build-backend build-frontend build-codex-bridge up down logs logs-backend logs-frontend logs-codex-bridge restart restart-backend migrate seed test clean install deploy
 
 # ===================
 # Docker Compose (single file: docker-compose.yml)
@@ -11,6 +11,9 @@ build-backend:
 
 build-frontend:
 	docker compose build frontend
+
+build-codex-bridge:
+	docker compose build codex-bridge
 
 up:
 	docker compose up -d
@@ -26,6 +29,9 @@ logs-backend:
 
 logs-frontend:
 	docker compose logs -f frontend
+
+logs-codex-bridge:
+	docker compose logs -f codex-bridge
 
 restart:
 	docker compose restart
@@ -64,9 +70,10 @@ deploy:
 	@cp CHANGELOG.md backend/CHANGELOG.md
 	@BUILD_VERSION=$$(./version.sh) && \
 	echo "🚀 Deploying Clarin CRM v$$BUILD_VERSION" && \
+	docker compose build codex-bridge && \
 	docker compose build --build-arg BUILD_VERSION=$$BUILD_VERSION backend && \
 	docker compose build --build-arg BUILD_VERSION=$$BUILD_VERSION frontend && \
-	docker compose up -d backend frontend && \
+	docker compose up -d codex-bridge backend frontend && \
 	echo "✅ Deployed v$$BUILD_VERSION"
 
 # Install dependencies

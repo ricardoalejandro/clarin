@@ -32,6 +32,31 @@ services:
     networks:
       - clarin-internal
 
+  shared-browser:
+    build:
+      context: ./shared-browser-gateway
+      dockerfile: ../deploy/Dockerfile.shared-browser-gateway
+    container_name: clarin-shared-browser
+    restart: unless-stopped
+    environment:
+      PORT: 8791
+      PROFILE_ROOT: /data/profiles
+      BROWSER_VIEWPORT_WIDTH: ${SHARED_BROWSER_VIEWPORT_WIDTH:-1365}
+      BROWSER_VIEWPORT_HEIGHT: ${SHARED_BROWSER_VIEWPORT_HEIGHT:-768}
+    volumes:
+      - shared_browser_profiles:/data/profiles
+    shm_size: "1gb"
+    mem_limit: 1536m
+    cpus: 1.5
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8791/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    networks:
+      - clarin-internal
+
   minio:
     image: minio/minio:latest
     container_name: clarin-minio
@@ -64,6 +89,36 @@ services:
       - "traefik.http.routers.clarin-minio-console.tls.certresolver=letsencrypt"
       - "traefik.http.routers.clarin-minio-console.service=clarin-minio-console"
       - "traefik.http.services.clarin-minio-console.loadbalancer.server.port=9001"
+
+  codex-bridge:
+    build:
+      context: ./codex-bridge
+      dockerfile: ../deploy/Dockerfile.codex-bridge
+    container_name: clarin-codex-bridge
+    restart: unless-stopped
+    environment:
+      PORT: 8787
+      CODEX_HOME: /var/lib/codex
+      EROS_CODEX_AUTH_MODE: ${EROS_CODEX_AUTH_MODE:-chatgpt_subscription}
+      EROS_CODEX_AUTH_FILE: /run/secrets/codex-auth.json
+      EROS_CODEX_ACCESS_TOKEN: ${EROS_CODEX_ACCESS_TOKEN:-}
+      EROS_CODEX_BRIDGE_TOKEN: ${EROS_CODEX_BRIDGE_TOKEN:-}
+      EROS_CODEX_MODEL: ${EROS_CODEX_MODEL:-}
+      EROS_CODEX_REASONING_EFFORT: ${EROS_CODEX_REASONING_EFFORT:-}
+      EROS_CODEX_REQUEST_TIMEOUT_MS: ${EROS_CODEX_REQUEST_TIMEOUT_MS:-120000}
+      EROS_MCP_BASE_URL: ${EROS_MCP_BASE_URL:-http://clarin-backend:8081/mcp}
+      EROS_MCP_ACCESS_TOKEN: ${EROS_MCP_ACCESS_TOKEN:-}
+    volumes:
+      - codex_bridge_home:/var/lib/codex
+      - ${EROS_CODEX_AUTH_FILE_HOST:-/root/.codex/auth.json}:/run/secrets/codex-auth.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$${EROS_CODEX_BRIDGE_TOKEN}\" ]; then wget -q --spider --header=\"Authorization: Bearer $${EROS_CODEX_BRIDGE_TOKEN}\" http://127.0.0.1:8787/health; else wget -q --spider http://127.0.0.1:8787/health; fi"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    networks:
+      - clarin-internal
 
   backend:
     build:
@@ -100,6 +155,20 @@ services:
       # AI Assistant (Eros)
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      EROS_ENABLED: ${EROS_ENABLED:-true}
+      EROS_PROVIDER: ${EROS_PROVIDER:-codex_bridge}
+      EROS_CODEX_BRIDGE_URL: ${EROS_CODEX_BRIDGE_URL:-http://clarin-codex-bridge:8787}
+      EROS_CODEX_BRIDGE_TOKEN: ${EROS_CODEX_BRIDGE_TOKEN:-}
+      EROS_CODEX_AUTH_MODE: ${EROS_CODEX_AUTH_MODE:-chatgpt_subscription}
+      EROS_CODEX_ACCESS_TOKEN: ${EROS_CODEX_ACCESS_TOKEN:-}
+      EROS_CODEX_AUTH_FILE: ${EROS_CODEX_AUTH_FILE:-/run/secrets/codex-auth.json}
+      EROS_CODEX_MODEL: ${EROS_CODEX_MODEL:-gpt-5.4-mini}
+      EROS_CODEX_REASONING_EFFORT: ${EROS_CODEX_REASONING_EFFORT:-medium}
+      EROS_MCP_BASE_URL: ${EROS_MCP_BASE_URL:-http://clarin-backend:8081/mcp}
+      EROS_MCP_ACCESS_TOKEN: ${EROS_MCP_ACCESS_TOKEN:-}
+      EROS_CODEX_BRIDGE_TIMEOUT: ${EROS_CODEX_BRIDGE_TIMEOUT:-120s}
+      SHARED_BROWSER_GATEWAY_URL: ${SHARED_BROWSER_GATEWAY_URL:-http://clarin-shared-browser:8791}
+      SHARED_BROWSER_TIMEOUT: ${SHARED_BROWSER_TIMEOUT:-30s}
       # Google Contacts sync
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -118,6 +187,10 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      codex-bridge:
+        condition: service_started
+      shared-browser:
+        condition: service_started
     volumes:
       - whatsapp_sessions:/app/sessions
     mem_limit: 1536m
@@ -221,6 +294,8 @@ volumes:
   redis_data:
   whatsapp_sessions:
   minio_data:
+  codex_bridge_home:
+  shared_browser_profiles:
 networks:
   clarin-internal:
     driver: bridge
