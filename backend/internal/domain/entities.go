@@ -1745,7 +1745,7 @@ type ErosFile struct {
 	Status         string          `json:"status"`
 	SizeBytes      int64           `json:"size_bytes,omitempty"`
 	Checksum       string          `json:"checksum,omitempty"`
-	GenerationSpec json.RawMessage `json:"generation_spec,omitempty"`
+	GenerationSpec json.RawMessage `json:"-"`
 	ExpiresAt      time.Time       `json:"expires_at"`
 	DeliveredAt    *time.Time      `json:"delivered_at,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`

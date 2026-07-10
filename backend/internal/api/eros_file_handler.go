@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -79,6 +80,7 @@ func renderErosFile(file *domain.ErosFile, source string) ([]byte, string, strin
 	filename := ensureErosFileExtension(safeErosFilename(file.Filename), format)
 	contentType := erosFileContentType(format)
 	title := erosFileTitle(file, filename)
+	source = erosFileSourceContent(file, source)
 	clean := strings.TrimSpace(stripErosChartBlocks(source))
 	if clean == "" {
 		clean = "Sin contenido disponible."
@@ -99,13 +101,16 @@ func renderErosFile(file *domain.ErosFile, source string) ([]byte, string, strin
 	case "pptx":
 		payload, err := renderErosPPTX(title, clean)
 		return payload, contentType, filename, err
+	case "pdf":
+		payload, err := renderErosPDF(title, clean)
+		return payload, contentType, filename, err
 	default:
 		return nil, "", "", fmt.Errorf("formato no soportado")
 	}
 }
 
 func buildErosFileDescriptor(accountID, userID, convID, messageID uuid.UUID, requestedMessage, assistantText string, hints []erosFileExportHint) *domain.ErosFile {
-	format, filename, title := inferErosFileRequest(requestedMessage, assistantText, hints)
+	format, filename, title, content := inferErosFileRequest(requestedMessage, assistantText, hints)
 	if format == "" {
 		return nil
 	}
@@ -113,15 +118,24 @@ func buildErosFileDescriptor(accountID, userID, convID, messageID uuid.UUID, req
 		filename = fmt.Sprintf("eros_%s.%s", time.Now().UTC().Format("20060102_150405"), format)
 	}
 	filename = ensureErosFileExtension(safeErosFilename(filename), format)
-	spec, _ := json.Marshal(map[string]any{
+	contentSource := "assistant_message"
+	if strings.TrimSpace(content) != "" {
+		contentSource = "mcp_tool_content"
+	}
+	specMap := map[string]any{
 		"source":             "assistant_message",
+		"content_source":     contentSource,
 		"source_message_id":  messageID.String(),
 		"requested_format":   format,
 		"requested_filename": filename,
 		"title":              title,
 		"retention_hours":    4,
 		"storage":            "ephemeral_render",
-	})
+	}
+	if strings.TrimSpace(content) != "" {
+		specMap["content"] = strings.TrimSpace(content)
+	}
+	spec, _ := json.Marshal(specMap)
 	return &domain.ErosFile{
 		AccountID:      accountID,
 		UserID:         userID,
@@ -136,18 +150,48 @@ func buildErosFileDescriptor(accountID, userID, convID, messageID uuid.UUID, req
 	}
 }
 
-func inferErosFileRequest(requestedMessage, assistantText string, hints []erosFileExportHint) (format, filename, title string) {
+func displayErosFileExportResponse(response string, hints []erosFileExportHint) string {
+	filenames := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		if strings.TrimSpace(hint.Content) == "" {
+			continue
+		}
+		format := normalizeErosFileFormat(hint.Format)
+		if format == "" {
+			continue
+		}
+		filename := strings.TrimSpace(hint.Filename)
+		if filename == "" {
+			filename = fmt.Sprintf("eros_%s.%s", time.Now().UTC().Format("20060102_150405"), format)
+		}
+		filenames = append(filenames, ensureErosFileExtension(safeErosFilename(filename), format))
+	}
+	if len(filenames) == 0 {
+		return response
+	}
+	if len(filenames) == 1 {
+		return fmt.Sprintf("He preparado el adjunto **%s** con el contenido solicitado.", filenames[0])
+	}
+	if len(filenames) > 3 {
+		filenames = filenames[:3]
+	}
+	return fmt.Sprintf("He preparado %d adjuntos con el contenido solicitado: **%s**.", len(filenames), strings.Join(filenames, "**, **"))
+}
+
+func inferErosFileRequest(requestedMessage, assistantText string, hints []erosFileExportHint) (format, filename, title, content string) {
 	for _, hint := range hints {
 		format = normalizeErosFileFormat(hint.Format)
 		if format != "" {
-			return format, strings.TrimSpace(hint.Filename), strings.TrimSpace(hint.Title)
+			return format, strings.TrimSpace(hint.Filename), strings.TrimSpace(hint.Title), strings.TrimSpace(hint.Content)
 		}
 	}
 	normalized := normalizeErosText(requestedMessage)
 	if !looksLikeErosFileRequest(normalized) {
-		return "", "", ""
+		return "", "", "", ""
 	}
 	switch {
+	case strings.Contains(normalized, "pdf"):
+		format = "pdf"
 	case strings.Contains(normalized, "excel") || strings.Contains(normalized, "xlsx"):
 		format = "xlsx"
 	case strings.Contains(normalized, "csv"):
@@ -165,7 +209,7 @@ func inferErosFileRequest(requestedMessage, assistantText string, hints []erosFi
 			format = "docx"
 		}
 	}
-	return format, "", ""
+	return format, "", "", ""
 }
 
 func looksLikeErosFileRequest(normalized string) bool {
@@ -177,6 +221,7 @@ func looksLikeErosFileRequest(normalized string) bool {
 		strings.Contains(normalized, "exportar") ||
 		strings.Contains(normalized, "excel") ||
 		strings.Contains(normalized, "csv") ||
+		strings.Contains(normalized, "pdf") ||
 		strings.Contains(normalized, "word") ||
 		strings.Contains(normalized, "docx") ||
 		strings.Contains(normalized, "ppt") ||
@@ -197,6 +242,8 @@ func normalizeErosFileFormat(raw string) string {
 		return "docx"
 	case "pptx", "ppt", "powerpoint":
 		return "pptx"
+	case "pdf":
+		return "pdf"
 	default:
 		return ""
 	}
@@ -212,6 +259,8 @@ func erosFileContentType(format string) string {
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	case "pptx":
 		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case "pdf":
+		return "application/pdf"
 	default:
 		return "text/plain; charset=utf-8"
 	}
@@ -264,6 +313,17 @@ func erosFileTitle(file *domain.ErosFile, filename string) string {
 		return strings.TrimSpace(title)
 	}
 	return strings.TrimSuffix(filename, filepath.Ext(filename))
+}
+
+func erosFileSourceContent(file *domain.ErosFile, fallback string) string {
+	spec := map[string]any{}
+	if len(file.GenerationSpec) > 0 && json.Valid(file.GenerationSpec) {
+		_ = json.Unmarshal(file.GenerationSpec, &spec)
+	}
+	if content, ok := spec["content"].(string); ok && strings.TrimSpace(content) != "" {
+		return content
+	}
+	return fallback
 }
 
 func stripErosChartBlocks(text string) string {
@@ -378,6 +438,176 @@ func renderErosPPTX(title, content string) ([]byte, error) {
 		"ppt/slideLayouts/_rels/slideLayout1.xml.rels": pptxSlideLayoutRelsXML,
 		"ppt/theme/theme1.xml":                         pptxThemeXML,
 	})
+}
+
+func renderErosPDF(title, content string) ([]byte, error) {
+	lines := splitErosPDFLines(title, content)
+	pageWidth := 595.0
+	pageHeight := 842.0
+	margin := 48.0
+	lineHeight := 14.0
+	maxLines := int((pageHeight - margin*2 - 22) / lineHeight)
+	if maxLines < 1 {
+		maxLines = 50
+	}
+	var pages [][]string
+	for len(lines) > 0 {
+		n := maxLines
+		if len(lines) < n {
+			n = len(lines)
+		}
+		pages = append(pages, lines[:n])
+		lines = lines[n:]
+	}
+	if len(pages) == 0 {
+		pages = [][]string{{"Sin contenido disponible."}}
+	}
+
+	objects := []string{"", ""}
+	fontRef := len(objects) + 1
+	objects = append(objects, `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>`)
+	pageRefs := make([]int, 0, len(pages))
+	for _, pageLines := range pages {
+		stream := strings.Builder{}
+		stream.WriteString("BT\n")
+		stream.WriteString("/F1 16 Tf\n")
+		stream.WriteString(fmt.Sprintf("%.0f %.0f Td\n", margin, pageHeight-margin))
+		if len(pageLines) > 0 {
+			stream.WriteString(fmt.Sprintf("(%s) Tj\n", pdfEscapeText(pageLines[0])))
+		}
+		stream.WriteString("/F1 10 Tf\n")
+		stream.WriteString(fmt.Sprintf("0 -%.0f Td\n", lineHeight+8))
+		for _, line := range pageLines[1:] {
+			stream.WriteString(fmt.Sprintf("(%s) Tj\n", pdfEscapeText(line)))
+			stream.WriteString(fmt.Sprintf("0 -%.0f Td\n", lineHeight))
+		}
+		stream.WriteString("ET\n")
+
+		contentRef := len(objects) + 1
+		streamText := stream.String()
+		objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len([]byte(streamText)), streamText))
+		pageRef := len(objects) + 1
+		pageRefs = append(pageRefs, pageRef)
+		objects = append(objects, fmt.Sprintf(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.0f %.0f] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>`, pageWidth, pageHeight, fontRef, contentRef))
+	}
+
+	kids := strings.Builder{}
+	for _, ref := range pageRefs {
+		kids.WriteString(fmt.Sprintf("%d 0 R ", ref))
+	}
+	objects[0] = `<< /Type /Catalog /Pages 2 0 R >>`
+	objects[1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.TrimSpace(kids.String()), len(pageRefs))
+
+	buf := &bytes.Buffer{}
+	buf.WriteString("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")
+	offsets := make([]int, len(objects)+1)
+	for i, obj := range objects {
+		ref := i + 1
+		offsets[ref] = buf.Len()
+		buf.WriteString(fmt.Sprintf("%d 0 obj\n%s\nendobj\n", ref, obj))
+	}
+	xref := buf.Len()
+	buf.WriteString(fmt.Sprintf("xref\n0 %d\n", len(objects)+1))
+	buf.WriteString("0000000000 65535 f \n")
+	for i := 1; i <= len(objects); i++ {
+		buf.WriteString(fmt.Sprintf("%010d 00000 n \n", offsets[i]))
+	}
+	buf.WriteString(fmt.Sprintf("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref))
+	return buf.Bytes(), nil
+}
+
+func splitErosPDFLines(title, content string) []string {
+	lines := []string{}
+	if strings.TrimSpace(title) != "" {
+		lines = append(lines, strings.TrimSpace(title), "")
+	}
+	for _, paragraph := range splitErosParagraphs(content, 900) {
+		lines = append(lines, wrapPDFLine(paragraph, 92)...)
+	}
+	if len(lines) == 0 {
+		return []string{"Sin contenido disponible."}
+	}
+	return lines
+}
+
+func wrapPDFLine(text string, maxRunes int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var out []string
+	current := ""
+	for _, word := range words {
+		if utf8.RuneCountInString(word) > maxRunes {
+			if current != "" {
+				out = append(out, current)
+				current = ""
+			}
+			runes := []rune(word)
+			for len(runes) > maxRunes {
+				out = append(out, string(runes[:maxRunes]))
+				runes = runes[maxRunes:]
+			}
+			current = string(runes)
+			continue
+		}
+		next := word
+		if current != "" {
+			next = current + " " + word
+		}
+		if utf8.RuneCountInString(next) > maxRunes {
+			out = append(out, current)
+			current = word
+		} else {
+			current = next
+		}
+	}
+	if current != "" {
+		out = append(out, current)
+	}
+	return out
+}
+
+func pdfEscapeText(value string) string {
+	buf := &strings.Builder{}
+	for _, r := range value {
+		b := pdfWinAnsiByte(r)
+		switch b {
+		case '\\', '(', ')':
+			buf.WriteByte('\\')
+			buf.WriteByte(b)
+		case '\n', '\r', '\t':
+			buf.WriteByte(' ')
+		default:
+			if b < 32 || b > 126 {
+				buf.WriteString(fmt.Sprintf("\\%03o", b))
+			} else {
+				buf.WriteByte(b)
+			}
+		}
+	}
+	return buf.String()
+}
+
+func pdfWinAnsiByte(r rune) byte {
+	if r >= 32 && r <= 126 {
+		return byte(r)
+	}
+	if r >= 160 && r <= 255 {
+		return byte(r)
+	}
+	switch r {
+	case '€':
+		return 128
+	case '‘', '’':
+		return '\''
+	case '“', '”':
+		return '"'
+	case '–', '—':
+		return '-'
+	default:
+		return '?'
+	}
 }
 
 func extractMarkdownTable(content string) ([]string, [][]string, bool) {

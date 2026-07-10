@@ -20,7 +20,7 @@ func (s *MCPServer) toolPrepareFileExport(ctx context.Context, req mcp.CallToolR
 	}
 	format := mcpNormalizeExportFormat(stringArg(req, "format"))
 	if format == "" {
-		return mcpStructuredError("UNSUPPORTED_FORMAT", "formato no soportado; usa txt, csv, xlsx, docx o pptx", nil), nil
+		return mcpStructuredError("UNSUPPORTED_FORMAT", "formato no soportado; usa txt, csv, xlsx, docx, pptx o pdf", nil), nil
 	}
 	title := strings.TrimSpace(stringArg(req, "title"))
 	filename := mcpExportFilename(stringArg(req, "filename"), format)
@@ -36,7 +36,7 @@ func (s *MCPServer) toolPrepareFileExport(ctx context.Context, req mcp.CallToolR
 		"storage":           "no_minio_ephemeral_render",
 		"retention_hours":   4,
 		"ready_for_render":  true,
-		"note":              "Clarin adjuntará el archivo en el chat. No devuelvas base64 ni URL pública.",
+		"note":              "Clarin adjuntará el archivo en el chat. No devuelvas base64, URL pública ni pegues el contenido completo en la respuesta final.",
 	}), nil
 }
 
@@ -47,7 +47,7 @@ func (s *MCPServer) toolRenderFileExport(ctx context.Context, req mcp.CallToolRe
 	}
 	format := mcpNormalizeExportFormat(stringArg(req, "format"))
 	if format == "" {
-		return mcpStructuredError("UNSUPPORTED_FORMAT", "formato no soportado; usa txt, csv, xlsx, docx o pptx", nil), nil
+		return mcpStructuredError("UNSUPPORTED_FORMAT", "formato no soportado; usa txt, csv, xlsx, docx, pptx o pdf", nil), nil
 	}
 	title := strings.TrimSpace(stringArg(req, "title"))
 	filename := mcpExportFilename(stringArg(req, "filename"), format)
@@ -55,6 +55,7 @@ func (s *MCPServer) toolRenderFileExport(ctx context.Context, req mcp.CallToolRe
 	if source == "" {
 		source = "assistant_response"
 	}
+	content := strings.TrimSpace(stringArg(req, "content"))
 	return jsonResult(map[string]any{
 		"eros_file_export":  true,
 		"tool":              "render_file_export",
@@ -63,12 +64,13 @@ func (s *MCPServer) toolRenderFileExport(ctx context.Context, req mcp.CallToolRe
 		"filename":          filename,
 		"title":             title,
 		"source":            source,
+		"content":           content,
 		"content_type":      mcpExportContentType(format),
 		"download_delivery": "clarin_chat_attachment",
 		"storage":           "no_minio_ephemeral_render",
 		"retention_hours":   4,
 		"expires_hint":      time.Now().Add(4 * time.Hour).UTC().Format(time.RFC3339),
-		"note":              "El backend de Clarin generará el binario bajo demanda desde el mensaje de Eros y lo adjuntará al chat.",
+		"note":              "El backend de Clarin generará el binario bajo demanda desde content y lo adjuntará al chat. No pegues content en la respuesta final.",
 	}), nil
 }
 
@@ -86,6 +88,8 @@ func mcpNormalizeExportFormat(raw string) string {
 		return "docx"
 	case "pptx", "ppt", "powerpoint":
 		return "pptx"
+	case "pdf":
+		return "pdf"
 	default:
 		return ""
 	}
@@ -121,6 +125,8 @@ func mcpExportContentType(format string) string {
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	case "pptx":
 		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case "pdf":
+		return "application/pdf"
 	default:
 		return "text/plain; charset=utf-8"
 	}

@@ -274,7 +274,7 @@ func (s *MCPServer) toolGetAnalysisCapabilities(ctx context.Context, req mcp.Cal
 		"account_id": accountID.String(),
 		"counts":     counts,
 		"recommended_workflow": []string{
-			"1. Si el usuario pide CSV, Excel, Word, PowerPoint, descargar leads, nombre y celular o lista para difusión, usa list_leads con fields y cursor y luego prepare_file_export/render_file_export para que Clarin adjunte el archivo en el chat.",
+			"1. Si el usuario pide CSV, Excel, Word, PowerPoint, PDF, descargar leads, nombre y celular o lista para difusión, usa list_leads con fields y cursor y luego prepare_file_export/render_file_export con content para que Clarin adjunte el archivo en el chat sin pegar el fichero en la respuesta.",
 			"2. Si el usuario sólo necesita contar o revisar una muestra ligera, usa count_leads y luego list_leads con fields.",
 			"3. Usa get_lead_analysis_overview para entender la base completa sin descargar todo.",
 			"4. Usa get_lead_analysis_report para obtener prioridades A+/A/B/C/D/E y acciones recomendadas.",
@@ -286,7 +286,7 @@ func (s *MCPServer) toolGetAnalysisCapabilities(ctx context.Context, req mcp.Cal
 			"simple_lead_list_default_page": 500,
 			"simple_lead_list_max_page":     1000,
 			"simple_data_delivery":          "json_paginated_for_chat_attachment; no usa MinIO ni devuelve URL pública",
-			"client_format_policy":          "CSV, Excel, Word, PowerPoint y TXT se adjuntan en Eros mediante prepare_file_export/render_file_export y render bajo demanda del backend.",
+			"client_format_policy":          "CSV, Excel, Word, PowerPoint, PDF y TXT se adjuntan en Eros mediante prepare_file_export/render_file_export y render bajo demanda del backend.",
 			"lead_export_default_page":      500,
 			"lead_export_max_page":          1000,
 			"message_export_default_page":   1000,

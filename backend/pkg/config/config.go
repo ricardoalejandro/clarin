@@ -51,8 +51,6 @@ type Config struct {
 	ErosCodexBridgeURL   string
 	ErosCodexBridgeToken string
 	ErosCodexAuthMode    string
-	ErosCodexAccessToken string
-	ErosCodexAuthFile    string
 	ErosCodexModel       string
 	ErosCodexReasoning   string
 	ErosMCPBaseURL       string
@@ -111,8 +109,6 @@ func Load() *Config {
 		ErosCodexBridgeURL:       strings.TrimRight(getEnv("EROS_CODEX_BRIDGE_URL", ""), "/"),
 		ErosCodexBridgeToken:     getEnv("EROS_CODEX_BRIDGE_TOKEN", ""),
 		ErosCodexAuthMode:        getEnv("EROS_CODEX_AUTH_MODE", "chatgpt_subscription"),
-		ErosCodexAccessToken:     getEnv("EROS_CODEX_ACCESS_TOKEN", ""),
-		ErosCodexAuthFile:        getEnv("EROS_CODEX_AUTH_FILE", ""),
 		ErosCodexModel:           getEnv("EROS_CODEX_MODEL", "gpt-5.4-mini"),
 		ErosCodexReasoning:       getEnv("EROS_CODEX_REASONING_EFFORT", "medium"),
 		ErosMCPBaseURL:           strings.TrimRight(getEnv("EROS_MCP_BASE_URL", ""), "/"),

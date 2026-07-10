@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -53,6 +54,58 @@ type erosFileExportHint struct {
 	Filename string `json:"filename,omitempty"`
 	Format   string `json:"format,omitempty"`
 	Title    string `json:"title,omitempty"`
+	Content  string `json:"content,omitempty"`
+}
+
+type erosBridgeHTTPError struct {
+	StatusCode int
+	Code       string
+	Detail     string
+}
+
+func (e *erosBridgeHTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	detail := strings.TrimSpace(e.Detail)
+	if len(detail) > 1200 {
+		detail = detail[:1200]
+	}
+	if e.Code != "" && detail != "" {
+		return fmt.Sprintf("bridge returned %d (%s): %s", e.StatusCode, e.Code, detail)
+	}
+	if detail != "" {
+		return fmt.Sprintf("bridge returned %d: %s", e.StatusCode, detail)
+	}
+	return fmt.Sprintf("bridge returned %d", e.StatusCode)
+}
+
+func erosBridgeErrorIsCodexAuth(value string) bool {
+	text := strings.ToLower(value)
+	return strings.Contains(text, "codex_auth_revoked") ||
+		strings.Contains(text, "codex_auth_required") ||
+		strings.Contains(text, "token_revoked") ||
+		strings.Contains(text, "token_invalidated") ||
+		strings.Contains(text, "token has been invalidated") ||
+		strings.Contains(text, "invalidated oauth token") ||
+		strings.Contains(text, "codex chatgpt auth") ||
+		strings.Contains(text, "openai connection")
+}
+
+func erosBridgeCodexAuthDetail(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	var bridgeErr *erosBridgeHTTPError
+	if errors.As(err, &bridgeErr) {
+		if erosBridgeErrorIsCodexAuth(bridgeErr.Code) || erosBridgeErrorIsCodexAuth(bridgeErr.Detail) {
+			return "Eros está temporalmente sin conexión. Inténtalo nuevamente más tarde o contacta a un administrador si el problema continúa.", true
+		}
+	}
+	if erosBridgeErrorIsCodexAuth(err.Error()) {
+		return "Eros está temporalmente sin conexión. Inténtalo nuevamente más tarde o contacta a un administrador si el problema continúa.", true
+	}
+	return "", false
 }
 
 func (s *Server) effectiveErosSettings(ctx context.Context) (*domain.ErosSettings, error) {
@@ -99,7 +152,7 @@ func (s *Server) effectiveErosSettings(ctx context.Context) (*domain.ErosSetting
 }
 
 func (s *Server) erosCredentialConfigured() bool {
-	return strings.TrimSpace(s.cfg.ErosCodexAccessToken) != "" || strings.TrimSpace(s.cfg.ErosCodexAuthFile) != ""
+	return strings.TrimSpace(s.cfg.ErosCodexBridgeToken) != ""
 }
 
 func (s *Server) erosStatusPayload(ctx context.Context, userID uuid.UUID) (fiber.Map, error) {
@@ -229,10 +282,15 @@ func (s *Server) handleErosChat(c *fiber.Ctx) error {
 	if err != nil {
 		_ = s.repos.ErosConversation.UpdateBridgeState(c.Context(), accountID, userID, conv.ID, "", "bridge_error", err.Error())
 		log.Printf("[Eros] bridge error account=%s user=%s conversation=%s: %v", accountID, userID, conv.ID, err)
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+		resp := fiber.Map{
 			"success": false,
 			"error":   "eros_bridge_unavailable",
-		})
+		}
+		if detail, ok := erosBridgeCodexAuthDetail(err); ok {
+			resp["error"] = "eros_openai_connection_required"
+			resp["detail"] = detail
+		}
+		return c.Status(fiber.StatusBadGateway).JSON(resp)
 	}
 	if !bridgeResp.Success || strings.TrimSpace(bridgeResp.Response) == "" {
 		errMsg := strings.TrimSpace(bridgeResp.Error)
@@ -240,14 +298,19 @@ func (s *Server) handleErosChat(c *fiber.Ctx) error {
 			errMsg = "empty bridge response"
 		}
 		_ = s.repos.ErosConversation.UpdateBridgeState(c.Context(), accountID, userID, conv.ID, bridgeResp.CodexThreadID, "bridge_error", errMsg)
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+		resp := fiber.Map{
 			"success": false,
 			"error":   "eros_bridge_error",
 			"detail":  errMsg,
-		})
+		}
+		if erosBridgeErrorIsCodexAuth(errMsg) {
+			resp["error"] = "eros_openai_connection_required"
+			resp["detail"] = "Eros está temporalmente sin conexión. Inténtalo nuevamente más tarde o contacta a un administrador si el problema continúa."
+		}
+		return c.Status(fiber.StatusBadGateway).JSON(resp)
 	}
 
-	response := strings.TrimSpace(bridgeResp.Response)
+	response := displayErosFileExportResponse(strings.TrimSpace(bridgeResp.Response), bridgeResp.FileExports)
 	metadata, codexModel, savedReasoningEffort := buildErosExecutionSnapshot(
 		bridgeResp.Metadata,
 		settings.CodexModel,
@@ -516,7 +579,18 @@ func (s *Server) callErosBridge(ctx context.Context, settings *domain.ErosSettin
 	defer resp.Body.Close()
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("bridge returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
+		bridgeErr := &erosBridgeHTTPError{StatusCode: resp.StatusCode, Detail: strings.TrimSpace(string(respBytes))}
+		var errBody struct {
+			Error  string `json:"error"`
+			Detail string `json:"detail"`
+		}
+		if json.Unmarshal(respBytes, &errBody) == nil {
+			bridgeErr.Code = strings.TrimSpace(errBody.Error)
+			if strings.TrimSpace(errBody.Detail) != "" {
+				bridgeErr.Detail = strings.TrimSpace(errBody.Detail)
+			}
+		}
+		return nil, bridgeErr
 	}
 
 	var bridgeResp erosBridgeChatResponse

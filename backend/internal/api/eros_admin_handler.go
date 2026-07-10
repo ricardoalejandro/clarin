@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +15,34 @@ import (
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
 )
+
+type erosOpenAILoginState struct {
+	Status          string     `json:"status"`
+	LoginID         string     `json:"login_id,omitempty"`
+	VerificationURL string     `json:"verification_url,omitempty"`
+	UserCode        string     `json:"user_code,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	Error           string     `json:"error,omitempty"`
+}
+
+type erosOpenAIConnection struct {
+	Connected          bool                 `json:"connected"`
+	AuthMode           string               `json:"auth_mode,omitempty"`
+	Email              string               `json:"email,omitempty"`
+	PlanType           string               `json:"plan_type,omitempty"`
+	RequiresOpenAIAuth bool                 `json:"requires_openai_auth"`
+	Error              string               `json:"error,omitempty"`
+	Login              erosOpenAILoginState `json:"login"`
+}
+
+type erosBridgeAuthResponse struct {
+	Success    bool                  `json:"success"`
+	Error      string                `json:"error,omitempty"`
+	Detail     string                `json:"detail,omitempty"`
+	Connection *erosOpenAIConnection `json:"connection,omitempty"`
+	Login      *erosOpenAILoginState `json:"login,omitempty"`
+}
 
 func (s *Server) handleAdminGetErosSettings(c *fiber.Ctx) error {
 	settings, err := s.effectiveErosSettings(c.Context())
@@ -26,7 +57,6 @@ func (s *Server) handleAdminGetErosSettings(c *fiber.Ctx) error {
 			"bridge_url_from_env":         s.cfg.ErosCodexBridgeURL != "",
 			"mcp_base_url_from_env":       s.cfg.ErosMCPBaseURL != "",
 			"credential_configured":       s.erosCredentialConfigured(),
-			"auth_file_configured":        s.cfg.ErosCodexAuthFile != "",
 			"bridge_token_configured":     s.cfg.ErosCodexBridgeToken != "",
 			"mcp_access_token_configured": strings.TrimSpace(s.cfg.ErosMCPAccessToken) != "",
 			"bridge_timeout_seconds":      int(s.cfg.ErosBridgeTimeout.Seconds()),
@@ -124,7 +154,7 @@ func (s *Server) handleAdminErosHealthcheck(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "could not load Eros settings"})
 	}
-	timeout := 8 * time.Second
+	timeout := 25 * time.Second
 	ctx, cancel := context.WithTimeout(c.Context(), timeout)
 	defer cancel()
 
@@ -147,6 +177,132 @@ func (s *Server) handleAdminErosHealthcheck(c *fiber.Ctx) error {
 			},
 			"checked_at": time.Now().UTC(),
 		},
+	})
+}
+
+func (s *Server) handleAdminGetErosOpenAIStatus(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderCacheControl, "no-store")
+	settings, err := s.effectiveErosSettings(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "could_not_load_eros_settings"})
+	}
+	response, err := s.callErosBridgeAuth(c.Context(), settings, http.MethodGet, "/auth/status", nil)
+	if err != nil {
+		return erosOpenAIAdminError(c, err)
+	}
+	if response.Connection == nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": "invalid_openai_connection_status"})
+	}
+	return c.JSON(fiber.Map{"success": true, "connection": response.Connection})
+}
+
+func (s *Server) handleAdminStartErosOpenAIConnection(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderCacheControl, "no-store")
+	settings, err := s.effectiveErosSettings(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "could_not_load_eros_settings"})
+	}
+	response, err := s.callErosBridgeAuth(c.Context(), settings, http.MethodPost, "/auth/device/start", struct{}{})
+	if err != nil {
+		return erosOpenAIAdminError(c, err)
+	}
+	if response.Login == nil || response.Login.LoginID == "" || response.Login.VerificationURL == "" || response.Login.UserCode == "" {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": "invalid_openai_connection_challenge"})
+	}
+	log.Printf("[EROS-AUTH] super_admin=%v action=openai_connection_started", c.Locals("user_id"))
+	return c.JSON(fiber.Map{"success": true, "login": response.Login})
+}
+
+func (s *Server) handleAdminCancelErosOpenAIConnection(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderCacheControl, "no-store")
+	var body struct {
+		LoginID string `json:"login_id"`
+	}
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&body); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "invalid_body"})
+		}
+	}
+	settings, err := s.effectiveErosSettings(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "could_not_load_eros_settings"})
+	}
+	response, err := s.callErosBridgeAuth(c.Context(), settings, http.MethodPost, "/auth/device/cancel", fiber.Map{"login_id": strings.TrimSpace(body.LoginID)})
+	if err != nil {
+		return erosOpenAIAdminError(c, err)
+	}
+	log.Printf("[EROS-AUTH] super_admin=%v action=openai_connection_cancelled", c.Locals("user_id"))
+	return c.JSON(fiber.Map{"success": true, "login": response.Login})
+}
+
+func (s *Server) handleAdminDisconnectErosOpenAI(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderCacheControl, "no-store")
+	settings, err := s.effectiveErosSettings(c.Context())
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "could_not_load_eros_settings"})
+	}
+	if _, err := s.callErosBridgeAuth(c.Context(), settings, http.MethodPost, "/auth/logout", struct{}{}); err != nil {
+		return erosOpenAIAdminError(c, err)
+	}
+	log.Printf("[EROS-AUTH] super_admin=%v action=openai_disconnected", c.Locals("user_id"))
+	return c.JSON(fiber.Map{"success": true, "connection": fiber.Map{"connected": false}})
+}
+
+func (s *Server) callErosBridgeAuth(ctx context.Context, settings *domain.ErosSettings, method, endpoint string, payload any) (*erosBridgeAuthResponse, error) {
+	if settings == nil || strings.TrimSpace(settings.BridgeURL) == "" {
+		return nil, fmt.Errorf("eros bridge is not configured")
+	}
+	var body io.Reader
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("encode bridge auth request: %w", err)
+		}
+		body = bytes.NewReader(encoded)
+	}
+	timeout := 25 * time.Second
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, method, strings.TrimRight(settings.BridgeURL, "/")+endpoint, body)
+	if err != nil {
+		return nil, fmt.Errorf("create bridge auth request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token := strings.TrimSpace(s.cfg.ErosCodexBridgeToken); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call bridge auth endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read bridge auth response: %w", err)
+	}
+	var decoded erosBridgeAuthResponse
+	if err := json.Unmarshal(responseBody, &decoded); err != nil {
+		return nil, fmt.Errorf("decode bridge auth response: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices || !decoded.Success {
+		code := strings.TrimSpace(decoded.Error)
+		if code == "" {
+			code = fmt.Sprintf("http_%d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("bridge auth request failed: %s", code)
+	}
+	return &decoded, nil
+}
+
+func erosOpenAIAdminError(c *fiber.Ctx, err error) error {
+	log.Printf("[EROS-AUTH] request failed: %v", err)
+	return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+		"success": false,
+		"error":   "openai_connection_unavailable",
+		"detail":  "No se pudo completar la conexión con OpenAI en este momento.",
 	})
 }
 
@@ -184,6 +340,24 @@ func (s *Server) checkErosBridge(ctx context.Context, settings *domain.ErosSetti
 		}
 		if authenticated, ok := bridgeBody["codex_authenticated"].(bool); ok {
 			result["codex_authenticated"] = authenticated
+		}
+		if rejected, ok := bridgeBody["codex_auth_rejected"].(bool); ok {
+			result["codex_auth_rejected"] = rejected
+		}
+		if authError, ok := bridgeBody["codex_auth_error"].(string); ok {
+			result["codex_auth_error"] = authError
+		}
+		if authMode, ok := bridgeBody["codex_auth_mode"].(string); ok {
+			result["codex_auth_mode"] = authMode
+		}
+		if email, ok := bridgeBody["codex_account_email"].(string); ok {
+			result["codex_account_email"] = email
+		}
+		if planType, ok := bridgeBody["codex_plan_type"].(string); ok {
+			result["codex_plan_type"] = planType
+		}
+		if loginStatus, ok := bridgeBody["device_login_status"].(string); ok {
+			result["device_login_status"] = loginStatus
 		}
 		if tokenValid, ok := bridgeBody["codex_auth_token_valid"].(bool); ok {
 			result["codex_auth_token_valid"] = tokenValid

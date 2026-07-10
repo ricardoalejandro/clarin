@@ -233,6 +233,7 @@ const fileFormatLabel = (format: string) => {
   if (value === 'xlsx') return 'Excel'
   if (value === 'docx') return 'Word'
   if (value === 'pptx') return 'PowerPoint'
+  if (value === 'pdf') return 'PDF'
   return value.toUpperCase()
 }
 
@@ -613,14 +614,21 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
         setLastFailedMessage(msg)
         setMessages(prev => [...prev, {
           role: 'assistant',
-          content: 'Eros aún no tiene el Codex Bridge configurado. Un admin debe completar la configuración global.',
+          content: 'Eros aún no está configurado. Un administrador debe completar la configuración global.',
+        }])
+      } else if (data.error === 'eros_openai_connection_required' || data.error === 'eros_codex_auth_revoked') {
+        setCatMood('idle')
+        setLastFailedMessage(msg)
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: 'Eros está temporalmente sin conexión. Inténtalo nuevamente más tarde o contacta a un administrador si el problema continúa.',
         }])
       } else if (data.error === 'eros_bridge_unavailable' || data.error === 'eros_bridge_error') {
         setCatMood('idle')
         setLastFailedMessage(msg)
         setMessages(prev => [...prev, {
           role: 'assistant',
-          content: 'No pude conectar con el Codex Bridge en este momento. Revisa el estado desde Admin > Eros.',
+          content: 'Eros no está disponible en este momento. Inténtalo nuevamente en unos minutos.',
         }])
       } else if (data.error === 'chat_limit_reached') {
         setCatMood('idle')
@@ -648,7 +656,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
       setLastFailedMessage(msg)
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: 'No pude conectarme al servidor. Intenta de nuevo 😿',
+        content: 'Eros no está disponible en este momento. Inténtalo nuevamente en unos minutos.',
       }])
     } finally {
       setIsLoading(false)
@@ -1124,7 +1132,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
       model ? `Modelo: ${model}` : '',
       effortLabel ? `Pensamiento: ${effortLabel}` : '',
       durationLabel ? `Duración: ${durationLabel}` : '',
-      toolCount ? `Tools MCP: ${toolCount}` : 'Tools MCP: 0',
+      toolCount ? `Herramientas: ${toolCount}` : 'Herramientas: 0',
     ].filter(Boolean).join(' · ')
 
     return {
@@ -1328,7 +1336,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
               <div>
                 <p className="text-slate-700 font-medium text-sm">Eros está dormido 😴</p>
                 <p className="text-slate-500 text-xs mt-1.5 max-w-[250px] leading-relaxed">
-                  Tu acceso se controla desde Admin. Si ya estás habilitado, revisa que el Codex Bridge esté conectado.
+                  Tu acceso se controla desde Administración. Si ya estás habilitado, revisa que el servicio de Eros esté disponible.
                 </p>
               </div>
               <div className="mt-1 grid grid-cols-1 gap-1.5 text-[11px] text-slate-500">
@@ -1336,10 +1344,10 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                   Usuario {erosStatus?.user_enabled ? 'habilitado' : 'sin acceso'}
                 </span>
                 <span className={erosStatus?.bridge_configured ? 'text-emerald-600' : 'text-slate-500'}>
-                  Bridge {erosStatus?.bridge_configured ? 'configurado' : 'pendiente'}
+                  Servicio {erosStatus?.bridge_configured ? 'configurado' : 'pendiente'}
                 </span>
                 <span className={erosStatus?.mcp_configured ? 'text-emerald-600' : 'text-slate-500'}>
-                  MCP {erosStatus?.mcp_configured ? 'listo' : 'pendiente'}
+                  Datos {erosStatus?.mcp_configured ? 'listos' : 'pendientes'}
                 </span>
               </div>
             </div>

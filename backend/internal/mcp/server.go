@@ -237,7 +237,7 @@ func New(repos *repository.Repositories, services *service.Services, jwtSecret s
 	), s.toolCountLeads)
 
 	mcpSrv.AddTool(readOnlyTool("list_leads",
-		mcp.WithDescription("Lista leads en JSON paginado y predecible. Siempre devuelve items/leads, returned, total, has_more, next_cursor y filters_applied. Ideal para revisar datos simples sin chat, scoring ni reportes pesados. Si el usuario pide CSV, Excel, Word, PowerPoint o descarga, usa esta herramienta por páginas y luego prepare_file_export/render_file_export para que Clarin adjunte el archivo en el chat."),
+		mcp.WithDescription("Lista leads en JSON paginado y predecible. Siempre devuelve items/leads, returned, total, has_more, next_cursor y filters_applied. Ideal para revisar datos simples sin chat, scoring ni reportes pesados. Si el usuario pide CSV, Excel, Word, PowerPoint, PDF o descarga, usa esta herramienta por páginas y luego prepare_file_export/render_file_export con content para que Clarin adjunte el archivo sin pegarlo en el chat."),
 		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
 		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
 		mcp.WithString("query", mcp.Description("Buscar por nombre, teléfono o email.")),
@@ -257,22 +257,23 @@ func New(repos *repository.Repositories, services *service.Services, jwtSecret s
 	), s.toolListLeads)
 
 	mcpSrv.AddTool(readOnlyTool("prepare_file_export",
-		mcp.WithDescription("Prepara un adjunto descargable de Eros sin guardar binarios en MinIO ni devolver URL pública. Úsalo cuando el usuario pida crear un archivo, fichero, Excel, CSV, Word, PowerPoint o TXT. Devuelve metadata segura para que Clarin pinte el adjunto en el chat."),
+		mcp.WithDescription("Prepara un adjunto descargable de Eros sin guardar binarios en MinIO ni devolver URL pública. Úsalo cuando el usuario pida crear un archivo, fichero, Excel, CSV, Word, PowerPoint, PDF o TXT. Devuelve metadata segura para que Clarin pinte el adjunto en el chat."),
 		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
 		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
-		mcp.WithString("format", mcp.Required(), mcp.Description("Formato: txt, csv, xlsx, docx o pptx.")),
+		mcp.WithString("format", mcp.Required(), mcp.Description("Formato: txt, csv, xlsx, docx, pptx o pdf.")),
 		mcp.WithString("filename", mcp.Description("Nombre sugerido del archivo. Se sanitiza y se ajusta la extensión.")),
 		mcp.WithString("title", mcp.Description("Título humano del archivo.")),
 	), s.toolPrepareFileExport)
 
 	mcpSrv.AddTool(readOnlyTool("render_file_export",
-		mcp.WithDescription("Confirma el adjunto descargable de Eros. No escribe archivos, no usa MinIO y no devuelve base64; devuelve sólo metadata para que el backend de Clarin genere el binario bajo demanda desde el mensaje de Eros."),
+		mcp.WithDescription("Confirma el adjunto descargable de Eros. No escribe archivos, no usa MinIO y no devuelve base64; envía el contenido completo en content para que el backend genere el binario bajo demanda sin pegarlo en el chat."),
 		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
 		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
-		mcp.WithString("format", mcp.Required(), mcp.Description("Formato: txt, csv, xlsx, docx o pptx.")),
+		mcp.WithString("format", mcp.Required(), mcp.Description("Formato: txt, csv, xlsx, docx, pptx o pdf.")),
 		mcp.WithString("filename", mcp.Description("Nombre sugerido del archivo. Se sanitiza y se ajusta la extensión.")),
 		mcp.WithString("title", mcp.Description("Título humano del archivo.")),
 		mcp.WithString("source", mcp.Description("Fuente del contenido. Default assistant_response.")),
+		mcp.WithString("content", mcp.Description("Contenido completo del archivo en texto/Markdown/CSV. Clarin lo guarda oculto en el descriptor temporal; no lo pegues en la respuesta final.")),
 	), s.toolRenderFileExport)
 
 	// ──────────────── Category A.5: Deep Lead Analysis Exports ────────────────

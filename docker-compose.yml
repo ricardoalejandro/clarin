@@ -99,9 +99,6 @@ services:
     environment:
       PORT: 8787
       CODEX_HOME: /var/lib/codex
-      EROS_CODEX_AUTH_MODE: ${EROS_CODEX_AUTH_MODE:-chatgpt_subscription}
-      EROS_CODEX_AUTH_FILE: /run/secrets/codex-auth.json
-      EROS_CODEX_ACCESS_TOKEN: ${EROS_CODEX_ACCESS_TOKEN:-}
       EROS_CODEX_BRIDGE_TOKEN: ${EROS_CODEX_BRIDGE_TOKEN:-}
       EROS_CODEX_MODEL: ${EROS_CODEX_MODEL:-}
       EROS_CODEX_REASONING_EFFORT: ${EROS_CODEX_REASONING_EFFORT:-}
@@ -110,9 +107,8 @@ services:
       EROS_MCP_ACCESS_TOKEN: ${EROS_MCP_ACCESS_TOKEN:-}
     volumes:
       - codex_bridge_home:/var/lib/codex
-      - ${EROS_CODEX_AUTH_FILE_HOST:-/root/.codex/auth.json}:/run/secrets/codex-auth.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "if [ -n \"$${EROS_CODEX_BRIDGE_TOKEN}\" ]; then wget -q --spider --header=\"Authorization: Bearer $${EROS_CODEX_BRIDGE_TOKEN}\" http://127.0.0.1:8787/health; else wget -q --spider http://127.0.0.1:8787/health; fi"]
+      test: ["CMD-SHELL", "if [ -n \"$${EROS_CODEX_BRIDGE_TOKEN}\" ]; then wget -q --spider --header=\"Authorization: Bearer $${EROS_CODEX_BRIDGE_TOKEN}\" http://127.0.0.1:8787/live; else wget -q --spider http://127.0.0.1:8787/live; fi"]
       interval: 30s
       timeout: 15s
       retries: 3
@@ -160,8 +156,6 @@ services:
       EROS_CODEX_BRIDGE_URL: ${EROS_CODEX_BRIDGE_URL:-http://clarin-codex-bridge:8787}
       EROS_CODEX_BRIDGE_TOKEN: ${EROS_CODEX_BRIDGE_TOKEN:-}
       EROS_CODEX_AUTH_MODE: ${EROS_CODEX_AUTH_MODE:-chatgpt_subscription}
-      EROS_CODEX_ACCESS_TOKEN: ${EROS_CODEX_ACCESS_TOKEN:-}
-      EROS_CODEX_AUTH_FILE: ${EROS_CODEX_AUTH_FILE:-/run/secrets/codex-auth.json}
       EROS_CODEX_MODEL: ${EROS_CODEX_MODEL:-gpt-5.4-mini}
       EROS_CODEX_REASONING_EFFORT: ${EROS_CODEX_REASONING_EFFORT:-medium}
       EROS_MCP_BASE_URL: ${EROS_MCP_BASE_URL:-http://clarin-backend:8081/mcp}

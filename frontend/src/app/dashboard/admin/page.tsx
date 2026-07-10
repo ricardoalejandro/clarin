@@ -5,7 +5,8 @@ import {
   Building2, Users, Plus, Pencil, Trash2, Power, KeyRound,
   Search, X, Shield, ChevronDown, Link2, Lock, CheckSquare, Square, Bot,
   Plug, RefreshCw, AlertTriangle, HardDrive, Database, CheckCircle2,
-  Activity, Eye, Send, Clock, Copy, Sparkles
+  Activity, Eye, Send, Clock, Copy, Sparkles, ExternalLink, LogOut,
+  Loader2, Wifi, WifiOff
 } from 'lucide-react'
 import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 
@@ -246,26 +247,33 @@ interface ErosSettings {
   updated_at: string
 }
 
-interface ErosEnvironment {
-  project_enabled: boolean
-  bridge_url_from_env: boolean
-  mcp_base_url_from_env: boolean
-  credential_configured: boolean
-  auth_file_configured: boolean
-  bridge_token_configured: boolean
-  mcp_access_token_configured: boolean
-  bridge_timeout_seconds: number
-  secrets_visible_in_admin: boolean
-  subscription_auth_mode_hint?: string
-  codex_model_from_env?: boolean
-  reasoning_effort_from_env?: boolean
-}
-
 interface ErosHealth {
   bridge?: Record<string, unknown>
   mcp?: Record<string, unknown>
   env?: Record<string, unknown>
   checked_at?: string
+}
+
+type ErosOpenAILoginStatus = 'idle' | 'pending' | 'completed' | 'failed' | 'cancelled'
+
+interface ErosOpenAILoginState {
+  status: ErosOpenAILoginStatus
+  login_id?: string
+  verification_url?: string
+  user_code?: string
+  started_at?: string | null
+  completed_at?: string | null
+  error?: string
+}
+
+interface ErosOpenAIConnection {
+  connected: boolean
+  auth_mode?: string
+  email?: string
+  plan_type?: string
+  requires_openai_auth?: boolean
+  error?: string
+  login: ErosOpenAILoginState
 }
 
 interface NewUserAssignment {
@@ -312,6 +320,24 @@ const EROS_REASONING_OPTIONS = [
   { value: 'xhigh', label: 'Máximo' },
 ]
 
+const OPENAI_PLAN_LABELS: Record<string, string> = {
+  free: 'Free',
+  go: 'Go',
+  plus: 'Plus',
+  pro: 'Pro',
+  prolite: 'Pro',
+  team: 'Team',
+  business: 'Business',
+  self_serve_business_usage_based: 'Business',
+  enterprise: 'Enterprise',
+  enterprise_cbp_usage_based: 'Enterprise',
+  edu: 'Edu',
+}
+
+function openAIPlanLabel(plan?: string) {
+  return plan ? OPENAI_PLAN_LABELS[plan] || plan : ''
+}
+
 function formatBytes(bytes?: number) {
   const value = bytes || 0
   if (value <= 0) return 'Ilimitado'
@@ -351,9 +377,13 @@ export default function AdminPage() {
   const [mcpSessions, setMcpSessions] = useState<MCPSession[]>([])
   const [mcpAudit, setMcpAudit] = useState<MCPAuditEvent[]>([])
   const [erosSettings, setErosSettings] = useState<ErosSettings | null>(null)
-  const [erosEnv, setErosEnv] = useState<ErosEnvironment | null>(null)
   const [erosHealth, setErosHealth] = useState<ErosHealth | null>(null)
   const [erosBusy, setErosBusy] = useState<string | null>(null)
+  const [erosOpenAI, setErosOpenAI] = useState<ErosOpenAIConnection | null>(null)
+  const [erosOpenAIError, setErosOpenAIError] = useState('')
+  const [erosOpenAIBusy, setErosOpenAIBusy] = useState<'connect' | 'cancel' | 'disconnect' | null>(null)
+  const [showErosOpenAIModal, setShowErosOpenAIModal] = useState(false)
+  const [erosCodeCopied, setErosCodeCopied] = useState(false)
   const [erosForm, setErosForm] = useState({
     enabled: true,
     provider: 'codex_bridge',
@@ -528,7 +558,6 @@ export default function AdminPage() {
       if (data.success) {
         const settings = data.settings as ErosSettings
         setErosSettings(settings)
-        setErosEnv(data.environment || null)
         setErosForm({
           enabled: settings.enabled,
           provider: settings.provider || 'codex_bridge',
@@ -545,6 +574,112 @@ export default function AdminPage() {
       }
     } catch (e) {
       console.error('Failed to fetch Eros settings:', e)
+    }
+  }
+
+  async function fetchErosOpenAIStatus(silent = false) {
+    try {
+      const res = await fetch('/api/admin/eros/openai/status', { headers, cache: 'no-store' })
+      const data = await res.json()
+      if (!res.ok || !data.success || !data.connection) {
+        if (!silent) setErosOpenAIError(data.detail || 'No se pudo comprobar la conexión con OpenAI.')
+        return null
+      }
+      const connection = data.connection as ErosOpenAIConnection
+      setErosOpenAI(current => current?.login?.status === 'pending' && connection.login?.status === 'idle' ? current : connection)
+      setErosOpenAIError('')
+      return connection
+    } catch {
+      if (!silent) setErosOpenAIError('No se pudo comprobar la conexión con OpenAI.')
+      return null
+    }
+  }
+
+  async function startErosOpenAIConnection() {
+    if (erosOpenAIBusy) return
+    if (erosOpenAI?.login?.status === 'pending' && erosOpenAI.login.user_code) {
+      setShowErosOpenAIModal(true)
+      return
+    }
+    setErosOpenAIBusy('connect')
+    setErosOpenAIError('')
+    setErosCodeCopied(false)
+    try {
+      const res = await fetch('/api/admin/eros/openai/connect', { method: 'POST', headers, body: '{}' })
+      const data = await res.json()
+      if (!res.ok || !data.success || !data.login) {
+        setErosOpenAIError(data.detail || 'No se pudo iniciar la conexión con OpenAI.')
+        return
+      }
+      setErosOpenAI(current => ({
+        connected: current?.connected || false,
+        auth_mode: current?.auth_mode,
+        email: current?.email,
+        plan_type: current?.plan_type,
+        requires_openai_auth: current?.requires_openai_auth,
+        error: current?.error,
+        login: data.login as ErosOpenAILoginState,
+      }))
+      setShowErosOpenAIModal(true)
+    } catch {
+      setErosOpenAIError('No se pudo iniciar la conexión con OpenAI.')
+    } finally {
+      setErosOpenAIBusy(null)
+    }
+  }
+
+  async function cancelErosOpenAIConnection() {
+    if (erosOpenAIBusy) return
+    setErosOpenAIBusy('cancel')
+    try {
+      const res = await fetch('/api/admin/eros/openai/cancel', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ login_id: erosOpenAI?.login?.login_id || '' }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) {
+        setErosOpenAIError(data.detail || 'No se pudo cancelar la conexión.')
+        return
+      }
+      setShowErosOpenAIModal(false)
+      await fetchErosOpenAIStatus(true)
+    } catch {
+      setErosOpenAIError('No se pudo cancelar la conexión.')
+    } finally {
+      setErosOpenAIBusy(null)
+    }
+  }
+
+  async function disconnectErosOpenAI() {
+    if (erosOpenAIBusy || !erosOpenAI?.connected) return
+    if (!window.confirm('Eros dejará de responder hasta que vuelvas a conectar OpenAI. ¿Deseas continuar?')) return
+    setErosOpenAIBusy('disconnect')
+    setErosOpenAIError('')
+    try {
+      const res = await fetch('/api/admin/eros/openai/disconnect', { method: 'POST', headers, body: '{}' })
+      const data = await res.json()
+      if (!res.ok || !data.success) {
+        setErosOpenAIError(data.detail || 'No se pudo desconectar OpenAI.')
+        return
+      }
+      setErosOpenAI({ connected: false, requires_openai_auth: true, login: { status: 'idle' } })
+    } catch {
+      setErosOpenAIError('No se pudo desconectar OpenAI.')
+    } finally {
+      setErosOpenAIBusy(null)
+    }
+  }
+
+  async function copyErosOpenAICode() {
+    const code = erosOpenAI?.login?.user_code
+    if (!code) return
+    try {
+      await navigator.clipboard.writeText(code)
+      setErosCodeCopied(true)
+      window.setTimeout(() => setErosCodeCopied(false), 1800)
+    } catch {
+      setErosOpenAIError('No se pudo copiar el código. Puedes seleccionarlo manualmente.')
     }
   }
 
@@ -579,6 +714,7 @@ export default function AdminPage() {
         return
       }
       setErosHealth(data.health || null)
+      await fetchErosOpenAIStatus(true)
     } finally {
       setErosBusy(null)
     }
@@ -674,6 +810,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     setLoading(true)
+    void fetchErosOpenAIStatus()
     Promise.all([
       fetchAccounts(),
       fetchUsers(),
@@ -690,10 +827,42 @@ export default function AdminPage() {
     fetchUsers()
   }, [filterAccountId])
 
+  useEffect(() => {
+    if (!showErosOpenAIModal || erosOpenAI?.login?.status !== 'pending') return
+    let active = true
+    let timer: number | undefined
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/admin/eros/openai/status', {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          cache: 'no-store',
+        })
+        const data = await res.json()
+        if (active && res.ok && data.success && data.connection) {
+          const connection = data.connection as ErosOpenAIConnection
+          setErosOpenAI(current => current?.login?.status === 'pending' && connection.login?.status === 'idle' ? current : connection)
+          setErosOpenAIError('')
+        }
+      } catch {
+        // A later poll can recover from a transient network interruption.
+      }
+      if (active) timer = window.setTimeout(poll, 2500)
+    }
+    timer = window.setTimeout(poll, 1200)
+    return () => {
+      active = false
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [showErosOpenAIModal, erosOpenAI?.login?.status, erosOpenAI?.login?.login_id, token])
+
   // Close modals on Escape (topmost first)
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (showErosOpenAIModal) { setShowErosOpenAIModal(false); return }
       if (showIntegrationMonitor) { setShowIntegrationMonitor(false); return }
       if (showPasswordModal) { setShowPasswordModal(false); return }
       if (showPurgeModal) { setShowPurgeModal(false); return }
@@ -705,7 +874,7 @@ export default function AdminPage() {
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showIntegrationMonitor, showPasswordModal, showPurgeModal, showIntegrationModal, showRoleModal, showAssignModal, showUserModal, showAccountModal])
+  }, [showErosOpenAIModal, showIntegrationMonitor, showPasswordModal, showPurgeModal, showIntegrationModal, showRoleModal, showAssignModal, showUserModal, showAccountModal])
 
   // Account CRUD
 	  function openCreateAccount() {
@@ -1019,6 +1188,20 @@ export default function AdminPage() {
   const selectedErosModelPreset = EROS_MODEL_OPTIONS.some(option => option.value === erosForm.codex_model)
     ? erosForm.codex_model
     : 'custom'
+  const erosOpenAIPending = erosOpenAI?.login?.status === 'pending'
+  const erosOpenAIConnected = Boolean(erosOpenAI?.connected)
+  const erosOpenAIStatusLabel = !erosOpenAI
+    ? 'Comprobando'
+    : erosOpenAIPending
+      ? 'Conectando'
+      : erosOpenAIConnected
+        ? 'Conectado'
+        : 'Requiere conexión'
+  const erosOpenAIStatusClass = erosOpenAIPending
+    ? 'bg-blue-100 text-blue-700'
+    : erosOpenAIConnected
+      ? 'bg-emerald-100 text-emerald-700'
+      : 'bg-amber-100 text-amber-700'
 
   const filteredRoles = roles.filter(r =>
     r.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -1667,7 +1850,7 @@ export default function AdminPage() {
         {tab === 'eros' ? (
           <div className="flex items-center gap-2">
             <button
-              onClick={fetchErosSettings}
+              onClick={() => { void Promise.all([fetchErosSettings(), fetchErosOpenAIStatus()]) }}
               className="flex items-center gap-2 px-3 py-2 bg-slate-700 text-slate-100 rounded-lg hover:bg-slate-600 transition-colors text-sm font-medium whitespace-nowrap"
             >
               <RefreshCw className="w-4 h-4" /> Actualizar
@@ -2013,7 +2196,7 @@ export default function AdminPage() {
                 <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
                   <div>
                     <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2"><Sparkles className="w-4 h-4 text-emerald-600" /> Eros Global</h3>
-                    <p className="text-xs text-gray-500 mt-0.5">Chat de Clarin vía Codex Bridge y herramientas MCP compartidas.</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Configuración global del asistente de IA de Clarin.</p>
                   </div>
                   <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${erosForm.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{erosForm.enabled ? 'Habilitado' : 'Pausado'}</span>
                 </div>
@@ -2021,13 +2204,13 @@ export default function AdminPage() {
                   <label className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 px-3 py-2.5">
                     <div>
                       <span className="block text-sm font-medium text-gray-900">Eros activo</span>
-                      <span className="block text-xs text-gray-500">El uso también depende del check por usuario.</span>
+                      <span className="block text-xs text-gray-500">Disponible para los usuarios habilitados más abajo.</span>
                     </div>
                     <button type="button" onClick={() => setErosForm(f => ({ ...f, enabled: !f.enabled }))} className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${erosForm.enabled ? 'bg-emerald-600' : 'bg-gray-300'}`}>
                       <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${erosForm.enabled ? 'translate-x-5' : 'translate-x-1'}`} />
                     </button>
                   </label>
-                  <div className="rounded-lg border border-gray-200 p-3 space-y-3">
+                  <div className="border-b border-gray-200 pb-5 space-y-3">
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                       <div>
                         <span className="block text-sm font-medium text-gray-900">Modelo de Eros</span>
@@ -2061,7 +2244,7 @@ export default function AdminPage() {
                       className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500"
                     />
                   </div>
-                  <div className="rounded-lg border border-gray-200 p-3 space-y-3">
+                  <div className="border-b border-gray-200 pb-5 space-y-3">
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                       <div>
                         <span className="block text-sm font-medium text-gray-900">Razonamiento del chat</span>
@@ -2109,47 +2292,87 @@ export default function AdminPage() {
                       })}
                     </div>
                   </div>
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                    <input value={erosForm.bridge_url} onChange={e => setErosForm(f => ({ ...f, bridge_url: e.target.value }))} placeholder="Bridge URL" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
-                    <input value={erosForm.mcp_base_url} onChange={e => setErosForm(f => ({ ...f, mcp_base_url: e.target.value }))} placeholder="MCP Base URL" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
-                    <input value={erosForm.auth_mode} onChange={e => setErosForm(f => ({ ...f, auth_mode: e.target.value }))} placeholder="chatgpt_subscription" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
-                    <input type="number" min={1} max={50} value={erosForm.max_history_messages} onChange={e => setErosForm(f => ({ ...f, max_history_messages: Math.max(1, Math.min(50, Number(e.target.value) || 20)) }))} className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
-                  </div>
-                  <textarea value={erosForm.global_instructions} onChange={e => setErosForm(f => ({ ...f, global_instructions: e.target.value }))} rows={5} placeholder="Instrucciones globales de Eros" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 resize-y" />
-                  <div className="text-xs text-gray-500">Proveedor: <code className="bg-gray-100 px-1.5 py-0.5 rounded">{erosForm.provider}</code> · Actualizado: {formatDateTime(erosSettings?.updated_at)}</div>
+                  <label className="block space-y-1.5">
+                    <span className="text-sm font-medium text-gray-900">Instrucciones globales</span>
+                    <textarea value={erosForm.global_instructions} onChange={e => setErosForm(f => ({ ...f, global_instructions: e.target.value }))} rows={5} placeholder="Instrucciones globales de Eros" className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 resize-y" />
+                  </label>
+                  <details className="border-t border-gray-200 pt-3">
+                    <summary className="cursor-pointer text-sm font-medium text-slate-700">Configuración avanzada</summary>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+                      <label className="space-y-1">
+                        <span className="block text-xs text-gray-500">Servicio interno</span>
+                        <input value={erosForm.bridge_url} onChange={e => setErosForm(f => ({ ...f, bridge_url: e.target.value }))} className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="block text-xs text-gray-500">Acceso a datos</span>
+                        <input value={erosForm.mcp_base_url} onChange={e => setErosForm(f => ({ ...f, mcp_base_url: e.target.value }))} className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="block text-xs text-gray-500">Mensajes de contexto</span>
+                        <input type="number" min={1} max={50} value={erosForm.max_history_messages} onChange={e => setErosForm(f => ({ ...f, max_history_messages: Math.max(1, Math.min(50, Number(e.target.value) || 20)) }))} className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500" />
+                      </label>
+                    </div>
+                  </details>
+                  <div className="text-xs text-gray-500">Actualizado: {formatDateTime(erosSettings?.updated_at)}</div>
                 </div>
               </div>
               <div className="space-y-5">
-                <div className="rounded-lg border border-gray-200 p-4">
-                  <h3 className="text-sm font-semibold text-gray-900">Entorno</h3>
-                  <p className="text-xs text-gray-500 mt-1">Los secretos viven en `.env` y no se muestran.</p>
-                  <div className="space-y-2 mt-3 text-sm">
-                    {[
-                      ['Proyecto', erosEnv?.project_enabled],
-                      ['Credencial Codex', erosEnv?.credential_configured],
-                      ['Bridge token', erosEnv?.bridge_token_configured],
-                      ['Token MCP', erosEnv?.mcp_access_token_configured],
-                      ['Bridge URL env', erosEnv?.bridge_url_from_env],
-                      ['MCP URL env', erosEnv?.mcp_base_url_from_env],
-                      ['Modelo env', erosEnv?.codex_model_from_env],
-                      ['Razonamiento env', erosEnv?.reasoning_effort_from_env],
-                    ].map(([label, value]) => (
-                      <div key={String(label)} className="flex items-center justify-between gap-3">
-                        <span className="text-gray-600">{String(label)}</span>
-                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${value === true ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{value === true ? 'Listo' : 'Pendiente'}</span>
+                <div className={`rounded-lg border p-4 ${erosOpenAIConnected ? 'border-emerald-200 bg-emerald-50/40' : erosOpenAIPending ? 'border-blue-200 bg-blue-50/40' : 'border-amber-200 bg-amber-50/40'}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${erosOpenAIConnected ? 'bg-emerald-100 text-emerald-700' : erosOpenAIPending ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700'}`}>
+                        {erosOpenAIBusy === 'connect' || erosOpenAIPending ? <Loader2 className="h-4 w-4 animate-spin" /> : erosOpenAIConnected ? <Wifi className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
                       </div>
-                    ))}
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-semibold text-gray-900">Conexión con OpenAI</h3>
+                        <p className="mt-0.5 truncate text-xs text-gray-500">
+                          {erosOpenAIConnected
+                            ? [erosOpenAI?.email, openAIPlanLabel(erosOpenAI?.plan_type)].filter(Boolean).join(' · ') || 'Cuenta conectada'
+                            : erosOpenAIPending
+                              ? 'Esperando confirmación'
+                              : 'Necesaria para que Eros pueda responder'}
+                        </p>
+                      </div>
+                    </div>
+                    <span className={`inline-flex shrink-0 px-2 py-0.5 rounded-full text-xs font-medium ${erosOpenAIStatusClass}`}>{erosOpenAIStatusLabel}</span>
+                  </div>
+                  {erosOpenAIError && (
+                    <div className="mt-3 flex items-start gap-2 text-xs text-red-700">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{erosOpenAIError}</span>
+                    </div>
+                  )}
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={startErosOpenAIConnection}
+                      disabled={Boolean(erosOpenAIBusy)}
+                      className="inline-flex min-h-9 flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {erosOpenAIBusy === 'connect' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                      {erosOpenAIPending ? 'Ver código' : erosOpenAIConnected ? 'Reconectar' : 'Conectar'}
+                    </button>
+                    {erosOpenAIConnected && (
+                      <button
+                        type="button"
+                        onClick={disconnectErosOpenAI}
+                        disabled={Boolean(erosOpenAIBusy)}
+                        className="inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {erosOpenAIBusy === 'disconnect' ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
+                        Desconectar
+                      </button>
+                    )}
                   </div>
                 </div>
                 <div className="rounded-lg border border-gray-200 p-4">
-                  <h3 className="text-sm font-semibold text-gray-900">Healthcheck</h3>
+                  <h3 className="text-sm font-semibold text-gray-900">Estado del servicio</h3>
                   {!erosHealth ? <div className="mt-3 text-xs text-gray-400">Sin prueba reciente</div> : (
                     <div className="mt-3 space-y-2 text-sm">
-                      <div className="flex items-center justify-between"><span className="text-gray-600">Bridge</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.bridge?.ok))}`}>{healthText(erosHealth?.bridge?.ok)}</span></div>
-                      <div className="flex items-center justify-between"><span className="text-gray-600">Codex auth</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.bridge?.codex_authenticated))}`}>{healthText(erosHealth?.bridge?.codex_authenticated)}</span></div>
-                      <div className="flex items-center justify-between"><span className="text-gray-600">MCP protegido</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.mcp?.protected))}`}>{healthText(erosHealth?.mcp?.protected)}</span></div>
-                      <div className="flex items-center justify-between"><span className="text-gray-600">MCP accesible</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.mcp?.authorized))}`}>{healthText(erosHealth?.mcp?.authorized)}</span></div>
-                      <div className="flex items-center justify-between"><span className="text-gray-600">Tools MCP</span><span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{healthText(erosHealth?.bridge?.mcp_tools_count)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">Eros</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.bridge?.ok))}`}>{healthText(erosHealth?.bridge?.ok)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">OpenAI</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(erosOpenAIConnected)}`}>{erosOpenAIConnected ? 'Conectado' : 'Pendiente'}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">Acceso a datos</span><span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${healthPill(healthBool(erosHealth?.mcp?.authorized))}`}>{healthText(erosHealth?.mcp?.authorized)}</span></div>
+                      <div className="flex items-center justify-between"><span className="text-gray-600">Herramientas</span><span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{healthText(erosHealth?.bridge?.mcp_tools_count)}</span></div>
                       <div className="flex items-center justify-between"><span className="text-gray-600">Modelo</span><span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{String(erosHealth?.env?.codex_model || erosForm.codex_model)}</span></div>
                       <div className="flex items-center justify-between"><span className="text-gray-600">Razonamiento</span><span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">{String(erosHealth?.env?.default_reasoning_effort || erosForm.default_reasoning_effort)}</span></div>
                       <div className="text-xs text-gray-400">Última prueba: {formatDateTime(erosHealth?.checked_at)}</div>
@@ -2442,6 +2665,92 @@ export default function AdminPage() {
           </table>
         ) : null}
       </div>
+
+      {showErosOpenAIModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="eros-openai-title">
+          <div className="w-full max-w-lg overflow-hidden rounded-lg bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4">
+              <div className="flex min-w-0 items-center gap-3">
+                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${erosOpenAIPending ? 'bg-blue-100 text-blue-700' : erosOpenAI?.login?.status === 'failed' ? 'bg-red-100 text-red-700' : erosOpenAIConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'}`}>
+                  {erosOpenAIPending ? <Link2 className="h-5 w-5" /> : erosOpenAI?.login?.status === 'failed' ? <AlertTriangle className="h-5 w-5" /> : erosOpenAIConnected ? <CheckCircle2 className="h-5 w-5" /> : <Link2 className="h-5 w-5" />}
+                </div>
+                <div className="min-w-0">
+                  <h2 id="eros-openai-title" className="text-base font-semibold text-gray-900">
+                    {erosOpenAIPending ? 'Conectar Eros con OpenAI' : erosOpenAI?.login?.status === 'failed' ? 'No se pudo conectar' : erosOpenAIConnected ? 'OpenAI conectado' : 'Conectar Eros con OpenAI'}
+                  </h2>
+                  <p className="mt-0.5 text-xs text-gray-500">Esta conexión se usa para que Eros pueda responder.</p>
+                </div>
+              </div>
+              <button type="button" onClick={() => setShowErosOpenAIModal(false)} className="rounded p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700" title="Cerrar">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="px-5 py-5">
+              {erosOpenAI?.login?.status === 'pending' && erosOpenAI.login.verification_url && erosOpenAI.login.user_code ? (
+                <div className="space-y-5">
+                  <div className="grid grid-cols-[28px_1fr] gap-x-3 gap-y-4 text-sm">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-700">1</span>
+                    <div className="flex min-w-0 flex-col items-start gap-2">
+                      <span className="text-gray-700">Abre la página segura de OpenAI.</span>
+                      <a href={erosOpenAI.login.verification_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+                        <ExternalLink className="h-4 w-4" /> Abrir OpenAI
+                      </a>
+                    </div>
+                    <span className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-700">2</span>
+                    <div className="min-w-0">
+                      <span className="text-gray-700">Inicia sesión e introduce este código:</span>
+                      <div className="mt-2 flex min-h-14 items-center justify-between gap-3 rounded-lg border border-gray-200 bg-slate-50 px-4 py-3">
+                        <code className="min-w-0 break-all text-lg font-semibold text-gray-900">{erosOpenAI.login.user_code}</code>
+                        <button type="button" onClick={copyErosOpenAICode} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50">
+                          <Copy className="h-3.5 w-3.5" /> {erosCodeCopied ? 'Copiado' : 'Copiar'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-center gap-2 border-t border-gray-100 pt-4 text-xs text-gray-500" aria-live="polite">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" /> Esperando confirmación de OpenAI
+                  </div>
+                </div>
+              ) : erosOpenAIConnected && erosOpenAI?.login?.status !== 'failed' ? (
+                <div className="space-y-4 text-center">
+                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+                    <CheckCircle2 className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-gray-900">La conexión se completó correctamente.</p>
+                    {(erosOpenAI?.email || erosOpenAI?.plan_type) && (
+                      <p className="mt-1 text-xs text-gray-500">{[erosOpenAI?.email, openAIPlanLabel(erosOpenAI?.plan_type)].filter(Boolean).join(' · ')}</p>
+                    )}
+                  </div>
+                </div>
+              ) : erosOpenAI?.login?.status === 'failed' ? (
+                <div className="space-y-4 text-center">
+                  <p className="text-sm text-red-700">{erosOpenAI.login.error || 'No se pudo completar la conexión.'}</p>
+                  <button type="button" onClick={startErosOpenAIConnection} disabled={Boolean(erosOpenAIBusy)} className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50">
+                    {erosOpenAIBusy === 'connect' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Generar otro código
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center gap-2 py-6 text-sm text-gray-500">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Preparando conexión
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-gray-200 bg-gray-50 px-5 py-3">
+              {erosOpenAI?.login?.status === 'pending' && (
+                <button type="button" onClick={cancelErosOpenAIConnection} disabled={Boolean(erosOpenAIBusy)} className="px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 disabled:opacity-50">
+                  {erosOpenAIBusy === 'cancel' ? 'Cancelando...' : 'Cancelar conexión'}
+                </button>
+              )}
+              <button type="button" onClick={() => setShowErosOpenAIModal(false)} className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+                {erosOpenAIConnected && erosOpenAI?.login?.status !== 'failed' ? 'Listo' : 'Cerrar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Integration Monitor Modal */}
       {KOMMO_ADMIN_UI_ENABLED && showIntegrationMonitor && monitorIntegration && (

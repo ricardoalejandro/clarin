@@ -86,7 +86,7 @@ func (s *MCPServer) toolCountLeads(ctx context.Context, req mcp.CallToolRequest)
 	nextTool := "list_leads"
 	nextReason := "Usa list_leads para revisar una página ligera con los campos que necesites."
 	if total > 0 {
-		nextReason = "Usa list_leads con fields y cursor. Si el usuario pidió archivo, después usa prepare_file_export/render_file_export para que Clarin adjunte la descarga en el chat."
+		nextReason = "Usa list_leads con fields y cursor. Si el usuario pidió archivo, después usa prepare_file_export/render_file_export con content para que Clarin adjunte la descarga en el chat sin pegar el fichero en la respuesta."
 	}
 
 	return jsonResult(map[string]any{
@@ -151,7 +151,7 @@ func (s *MCPServer) toolListLeads(ctx context.Context, req mcp.CallToolRequest) 
 		"filters_applied":              filters.appliedMap(),
 		"query_hash":                   queryHash,
 		"delivery":                     "json_paginated_for_chat_attachment",
-		"client_format_responsibility": "Si el usuario pide CSV, Excel, Word, PowerPoint o descarga, usa prepare_file_export/render_file_export para que Clarin adjunte el archivo en el chat.",
+		"client_format_responsibility": "Si el usuario pide CSV, Excel, Word, PowerPoint, PDF o descarga, usa prepare_file_export/render_file_export con content para que Clarin adjunte el archivo en el chat sin pegar el fichero en la respuesta.",
 		"pagination_note":              "Si has_more=true, llama otra vez con next_cursor. No repitas el cursor anterior.",
 	}), nil
 }

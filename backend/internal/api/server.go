@@ -819,6 +819,10 @@ func (s *Server) setupRoutes() {
 	adminEros.Put("/settings", s.handleAdminUpdateErosSettings)
 	adminEros.Patch("/users/:userId", s.handleAdminUpdateErosUser)
 	adminEros.Post("/healthcheck", s.handleAdminErosHealthcheck)
+	adminEros.Get("/openai/status", s.handleAdminGetErosOpenAIStatus)
+	adminEros.Post("/openai/connect", s.handleAdminStartErosOpenAIConnection)
+	adminEros.Post("/openai/cancel", s.handleAdminCancelErosOpenAIConnection)
+	adminEros.Post("/openai/disconnect", s.handleAdminDisconnectErosOpenAI)
 
 	// User-Account assignments
 	adminUsers.Get("/:id/accounts", s.handleAdminGetUserAccounts)

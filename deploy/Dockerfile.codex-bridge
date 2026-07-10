@@ -6,7 +6,7 @@ ENV NODE_ENV=production
 ENV CODEX_HOME=/var/lib/codex
 
 RUN apk add --no-cache ca-certificates git \
-  && npm install -g @openai/codex@0.141.0
+  && npm install -g @openai/codex@0.144.1
 
 COPY package.json ./
 COPY server.js ./
