@@ -22,10 +22,81 @@ import ForwardMessageModal from './ForwardMessageModal'
 import QuickReplyPicker from './QuickReplyPicker'
 import ContactSelector, { SelectedPerson } from '../ContactSelector'
 import { compressImageStandard } from '@/utils/imageCompression'
+import { applyReactionMutation, dedupeReactions, hasOwnReaction, SELF_REACTION_ACTOR } from '@/utils/chatReactions'
+import { ChatMediaType, validateChatAttachment } from '@/utils/chatAttachments'
 
 type CachedChatMessages = {
   messages: Message[]
   hasMore: boolean
+}
+
+type AttachmentDraft = {
+  file: File
+  type: ChatMediaType
+  previewUrl: string
+  caption: string
+}
+
+type OutgoingMediaType = ChatMediaType | 'sticker'
+
+type RetryableMedia = {
+  file: File
+  type: OutgoingMediaType
+  caption: string
+  previewUrl: string
+  uploadedMediaUrl?: string
+}
+
+type ComposerFeedback = {
+  kind: 'error' | 'info'
+  message: string
+}
+
+function hasSameMessageIdentity(message: Message, candidate: Message): boolean {
+  return message.id === candidate.id || (!!candidate.message_id && message.message_id === candidate.message_id)
+}
+
+function isCompatibleOptimisticMessage(message: Message, actualMessage: Message): boolean {
+  if (!message.is_from_me || !message.id.startsWith('optimistic-')) return false
+  if (message.status !== 'sending' && message.status !== 'sent') return false
+  if ((message.message_type || 'text') !== (actualMessage.message_type || 'text')) return false
+  if ((message.body || '') !== (actualMessage.body || '')) return false
+  if (message.media_filename && actualMessage.media_filename && message.media_filename !== actualMessage.media_filename) return false
+  return true
+}
+
+function findCompatibleOptimisticIndex(messages: Message[], actualMessage: Message): number {
+  const candidates = messages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => isCompatibleOptimisticMessage(message, actualMessage))
+  if (candidates.length === 0) return -1
+
+  const actualTimestamp = new Date(actualMessage.timestamp).getTime()
+  if (!Number.isFinite(actualTimestamp)) return candidates[candidates.length - 1].index
+
+  return candidates.reduce((closest, candidate) => {
+    const closestDistance = Math.abs(new Date(closest.message.timestamp).getTime() - actualTimestamp)
+    const candidateDistance = Math.abs(new Date(candidate.message.timestamp).getTime() - actualTimestamp)
+    return candidateDistance < closestDistance ? candidate : closest
+  }).index
+}
+
+function reconcileOptimisticMessage(messages: Message[], tempId: string, realMessage: Message): Message[] {
+  const normalizedMessage = { ...realMessage, is_from_me: true }
+  const realAlreadyExists = messages.some(message => hasSameMessageIdentity(message, normalizedMessage))
+
+  if (realAlreadyExists) {
+    return messages
+      .filter(message => message.id !== tempId)
+      .map(message => hasSameMessageIdentity(message, normalizedMessage) ? normalizedMessage : message)
+  }
+
+  const tempExists = messages.some(message => message.id === tempId)
+  if (tempExists) {
+    return messages.map(message => message.id === tempId ? normalizedMessage : message)
+  }
+
+  return [...messages, normalizedMessage]
 }
 
 interface ChatPanelProps {
@@ -45,9 +116,12 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const messagesCacheRef = useRef<Map<string, CachedChatMessages>>(new Map())
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  const loadingMoreRef = useRef(false)
   const [hasMoreMessages, setHasMoreMessages] = useState(true)
   const [messageText, setMessageText] = useState('')
   const [sendingMessage, setSendingMessage] = useState(false)
+  const messageSendSequenceRef = useRef(0)
+  const activeMessageSendRef = useRef<number | null>(null)
   const [replyingTo, setReplyingTo] = useState<Message | null>(null)
 
   // Attachments
@@ -57,8 +131,9 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const [showContactPicker, setShowContactPicker] = useState(false)
 
   // Media preview with caption
-  const [pendingMedia, setPendingMedia] = useState<{ file: File; type: string; previewUrl: string } | null>(null)
-  const [mediaCaption, setMediaCaption] = useState('')
+  const [attachmentDraft, setAttachmentDraft] = useState<AttachmentDraft | null>(null)
+  const [sendingAttachment, setSendingAttachment] = useState(false)
+  const [composerFeedback, setComposerFeedback] = useState<ComposerFeedback | null>(null)
 
   // Modals & Viewers
   const [viewImage, setViewImage] = useState<string | null>(null)
@@ -117,11 +192,50 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   const optimisticIdRef = useRef(0)
   const previousChatIdRef = useRef<string | null>(chatId)
   const activeChatIdRef = useRef<string | null>(chatId)
-  const pendingMediaRef = useRef<typeof pendingMedia>(pendingMedia)
+  const attachmentDraftRef = useRef<AttachmentDraft | null>(attachmentDraft)
+  const attachmentSendingRef = useRef(false)
+  const mediaRetryRef = useRef<Map<string, RetryableMedia>>(new Map())
+  const reactionRequestSeqRef = useRef<Map<string, number>>(new Map())
+
+  const releaseRetryableMedia = useCallback((tempId: string) => {
+    const media = mediaRetryRef.current.get(tempId)
+    if (media?.previewUrl) URL.revokeObjectURL(media.previewUrl)
+    mediaRetryRef.current.delete(tempId)
+  }, [])
+
+  const updateMessagesForChat = useCallback((targetChatId: string, updater: (prev: Message[]) => Message[]) => {
+    if (activeChatIdRef.current === targetChatId) {
+      updateMessages(updater, targetChatId)
+      return
+    }
+
+    const cached = messagesCacheRef.current.get(targetChatId)
+    if (!cached) return
+    messagesCacheRef.current.set(targetChatId, {
+      ...cached,
+      messages: updater(cached.messages),
+    })
+  }, [updateMessages])
 
   useEffect(() => {
-    pendingMediaRef.current = pendingMedia
-  }, [pendingMedia])
+    attachmentDraftRef.current = attachmentDraft
+  }, [attachmentDraft])
+
+  useEffect(() => {
+    if (!composerFeedback) return
+    const timer = window.setTimeout(() => setComposerFeedback(null), 6000)
+    return () => window.clearTimeout(timer)
+  }, [composerFeedback])
+
+  useEffect(() => () => {
+    if (attachmentDraftRef.current?.previewUrl) {
+      URL.revokeObjectURL(attachmentDraftRef.current.previewUrl)
+    }
+    mediaRetryRef.current.forEach(media => {
+      if (media.previewUrl) URL.revokeObjectURL(media.previewUrl)
+    })
+    mediaRetryRef.current.clear()
+  }, [])
 
   // Helper: send typing/composing presence to recipient
   const sendPresence = useCallback((composing: boolean, media: string = '') => {
@@ -139,8 +253,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     previousChatIdRef.current = chatId
 
     if (typingPauseTimeoutRef.current) clearTimeout(typingPauseTimeoutRef.current)
-    if (pendingMediaRef.current?.previewUrl) {
-      URL.revokeObjectURL(pendingMediaRef.current.previewUrl)
+    if (attachmentDraftRef.current?.previewUrl) {
+      URL.revokeObjectURL(attachmentDraftRef.current.previewUrl)
     }
 
     sendPresence(false)
@@ -152,8 +266,13 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     setQuickReplyFilter('')
     setActivePopup(null)
     setShowAttachments(false)
-    setPendingMedia(null)
-    setMediaCaption('')
+    setAttachmentDraft(null)
+    setSendingAttachment(false)
+    setSendingMessage(false)
+    setComposerFeedback(null)
+    attachmentSendingRef.current = false
+    messageSendSequenceRef.current += 1
+    activeMessageSendRef.current = null
     inputRef.current?.clear()
     captionInputRef.current?.clear()
   }, [chatId, sendPresence])
@@ -249,6 +368,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
   useEffect(() => {
     activeChatIdRef.current = chatId
+    loadingMoreRef.current = false
+    setLoadingMore(false)
     if (chatId) {
       const cached = messagesCacheRef.current.get(chatId)
       if (cached) {
@@ -286,25 +407,28 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
               (chat && actualMsg.from_jid === chat?.jid) ||
               (chat && actualMsg.to === chat?.jid)) {
             updateMessages(prev => {
-              // Already in list by real ID → update in place (no duplicate)
-              if (prev.some(m => m.id === actualMsg.id)) {
-                return prev.map(m => m.id === actualMsg.id ? (actualMsg as Message) : m)
-              }
-              // Outgoing message (is_from_me) → replace the most recent optimistic
-              // message that is still in 'sending' state to avoid duplicates
-              if (actualMsg.is_from_me) {
-                const sendingIdx = [...prev].reverse().findIndex(m => m.status === 'sending' && m.is_from_me)
-                if (sendingIdx !== -1) {
-                  const realIdx = prev.length - 1 - sendingIdx
-                  const next = [...prev]
-                  next[realIdx] = actualMsg as Message
-                  return next
+              const actualMessage = actualMsg as Message
+              const realAlreadyExists = prev.some(message => hasSameMessageIdentity(message, actualMessage))
+
+              if (actualMessage.is_from_me) {
+                const optimisticIndex = findCompatibleOptimisticIndex(prev, actualMessage)
+                if (optimisticIndex >= 0) {
+                  const tempId = prev[optimisticIndex].id
+                  releaseRetryableMedia(tempId)
+                  return reconcileOptimisticMessage(prev, tempId, actualMessage)
+                }
+                if (realAlreadyExists) {
+                  return prev.map(message => hasSameMessageIdentity(message, actualMessage) ? actualMessage : message)
                 }
                 // No optimistic message pending → safe to add (e.g. sent from another device)
-                return [...prev, actualMsg as Message]
+                return [...prev, actualMessage]
+              }
+
+              if (realAlreadyExists) {
+                return prev.map(message => hasSameMessageIdentity(message, actualMessage) ? actualMessage : message)
               }
               // Incoming message → always add
-              return [...prev, actualMsg as Message]
+              return [...prev, actualMessage]
             })
             scrollToBottom()
           }
@@ -372,24 +496,14 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
 
             updateMessages(prev => prev.map(m => {
               if (m.message_id !== targetMsgId) return m
-              const reactions = [...(m.reactions || [])]
-              if (removed) {
-                // Remove reaction from this sender
-                const idx = reactions.findIndex(r => r.sender_jid === senderJid)
-                if (idx >= 0) reactions.splice(idx, 1)
-              } else {
-                // Upsert: remove previous reaction from same sender, add new
-                const idx = reactions.findIndex(r => r.sender_jid === senderJid)
-                if (idx >= 0) reactions.splice(idx, 1)
-                reactions.push({
-                  id: '',
-                  target_message_id: targetMsgId,
-                  sender_jid: senderJid,
-                  sender_name: senderName,
-                  emoji,
-                  is_from_me: isFromMe
-                })
-              }
+              const reactions = applyReactionMutation(m.reactions, {
+                targetMessageId: targetMsgId,
+                senderJid,
+                senderName,
+                emoji,
+                isFromMe,
+                removed,
+              })
               return { ...m, reactions }
             }))
           }
@@ -474,15 +588,19 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   }
 
   const loadOlderMessages = async () => {
-    if (loadingMore || !hasMoreMessages || !chatId) return
+    if (loadingMoreRef.current || loadingMore || !hasMoreMessages || !chatId) return
+    const targetChatId = chatId
+    const targetMessages = messagesCacheRef.current.get(targetChatId)?.messages || messages
+    const offset = targetMessages.filter(message => !message.id.startsWith('optimistic-')).length
+    loadingMoreRef.current = true
     setLoadingMore(true)
     const token = localStorage.getItem('token')
     try {
-      const offset = messages.length
-      const res = await fetch(`/api/chats/${chatId}/messages?limit=50&offset=${offset}`, {
+      const res = await fetch(`/api/chats/${targetChatId}/messages?limit=50&offset=${offset}`, {
         headers: { Authorization: `Bearer ${token}` }
       })
       const data = await res.json()
+      if (activeChatIdRef.current !== targetChatId) return
       if (data.success && data.messages) {
         if (data.messages.length === 0) {
           setHasMoreMessages(false)
@@ -492,10 +610,14 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           const prevHeight = container?.scrollHeight || 0
           const nextHasMore = data.messages.length >= 50
           updateMessages(prev => {
-            const nextMessages = [...data.messages, ...prev]
-            cacheMessages(chatId, nextMessages, nextHasMore)
+            const existingKeys = new Set(prev.flatMap(message => [message.id, message.message_id].filter(Boolean)))
+            const olderMessages = (data.messages as Message[]).filter(message =>
+              !existingKeys.has(message.id) && !existingKeys.has(message.message_id)
+            )
+            const nextMessages = [...olderMessages, ...prev]
+            cacheMessages(targetChatId, nextMessages, nextHasMore)
             return nextMessages
-          })
+          }, targetChatId)
           setHasMoreMessages(nextHasMore)
           // Restore scroll position after prepending
           requestAnimationFrame(() => {
@@ -508,14 +630,17 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     } catch (err) {
       console.error('Failed to load older messages', err)
     } finally {
-      setLoadingMore(false)
+      if (activeChatIdRef.current === targetChatId) {
+        loadingMoreRef.current = false
+        setLoadingMore(false)
+      }
     }
   }
 
   const handleMessagesScroll = () => {
     const container = messagesContainerRef.current
     if (!container) return
-    if (container.scrollTop < 80 && hasMoreMessages && !loadingMore) {
+    if (container.scrollTop < 80 && hasMoreMessages && !loadingMore && !loadingMoreRef.current) {
       loadOlderMessages()
     }
   }
@@ -524,10 +649,30 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     if ((!messageText.trim() && !forwardingMsg) || !chat || !deviceId) return
 
     const text = messageText.trim()
+    if (editingMsg && !text) return
+    if (activeMessageSendRef.current !== null) return
+
+    const targetChatId = chatId
+    const requestSequence = ++messageSendSequenceRef.current
+    activeMessageSendRef.current = requestSequence
+    setSendingMessage(true)
+
+    const updateTargetMessages = (updater: (prev: Message[]) => Message[]) => {
+      if (targetChatId) updateMessagesForChat(targetChatId, updater)
+      else updateMessages(updater)
+    }
+
+    const finishMessageSend = () => {
+      if (
+        activeChatIdRef.current !== targetChatId ||
+        activeMessageSendRef.current !== requestSequence
+      ) return
+      activeMessageSendRef.current = null
+      setSendingMessage(false)
+    }
 
     // Handle edit mode
     if (editingMsg) {
-      if (!text) return
       const token = localStorage.getItem('token')
       try {
         const res = await fetch('/api/messages/edit', {
@@ -542,7 +687,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         })
         const data = await res.json()
         if (data.success) {
-          updateMessages(prev => prev.map(m =>
+          updateTargetMessages(prev => prev.map(m =>
             m.message_id === editingMsg.message_id ? { ...m, body: text, is_edited: true } : m
           ))
         } else {
@@ -550,7 +695,10 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         }
       } catch (err) {
         console.error('Failed to edit message', err)
+      } finally {
+        finishMessageSend()
       }
+      if (activeChatIdRef.current !== targetChatId) return
       setEditingMsg(null)
       setMessageText('')
       inputRef.current?.clear()
@@ -563,7 +711,6 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
     sendPresence(false)
     lastTypingSentRef.current = 0
 
-    setSendingMessage(true)
     setMessageText('')
     setReplyingTo(null)
     setQuickReplyFilter('')
@@ -616,133 +763,190 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
             // Always update the optimistic message from the API response
             const realMsg = data.message
             if (realMsg) {
-                updateMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+                updateTargetMessages(prev => reconcileOptimisticMessage(prev, tempId, realMsg as Message))
             } else {
-                updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+                updateTargetMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
             }
         } else {
-            updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+            updateTargetMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
             // alert('Error al enviar mensaje: ' + (data.error || 'Desconocido'))
         }
     } catch (err) {
-        updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        updateTargetMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
         console.error(err)
     } finally {
-        setSendingMessage(false)
+        finishMessageSend()
+    }
+  }
+
+  const transmitRetryableMedia = async (
+    tempId: string,
+    media: RetryableMedia,
+    targetChatId: string,
+    targetChatJid: string,
+    targetDeviceId: string,
+  ): Promise<boolean> => {
+    const token = localStorage.getItem('token')
+    try {
+      let uploadedMediaUrl = media.uploadedMediaUrl
+      if (!uploadedMediaUrl) {
+        const formData = new FormData()
+        formData.append('file', media.file)
+        formData.append('folder', 'uploads')
+
+        const uploadRes = await fetch('/api/media/upload', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: formData,
+        })
+        const uploadData = await uploadRes.json().catch(() => ({}))
+        if (!uploadRes.ok || !uploadData.success) {
+          throw new Error(uploadData.error || 'Error al subir archivo')
+        }
+        uploadedMediaUrl = uploadData.proxy_url || uploadData.public_url
+        if (!uploadedMediaUrl) throw new Error('La subida no devolvió una URL válida')
+        media.uploadedMediaUrl = uploadedMediaUrl
+      }
+
+      const res = await fetch('/api/messages/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          device_id: targetDeviceId,
+          to: targetChatJid,
+          body: media.caption,
+          media_url: uploadedMediaUrl,
+          media_type: media.type,
+          media_filename: media.file.name,
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.success) throw new Error(data.error || 'Error al enviar archivo')
+
+      if (data.message) {
+        updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, data.message as Message))
+        releaseRetryableMedia(tempId)
+      } else {
+        updateMessagesForChat(targetChatId, prev => prev.map(message =>
+          message.id === tempId ? { ...message, status: 'sent', media_url: uploadedMediaUrl } : message
+        ))
+        releaseRetryableMedia(tempId)
+      }
+      return true
+    } catch (err) {
+      console.error('[ChatMedia]', err)
+      updateMessagesForChat(targetChatId, prev => prev.map(message =>
+        message.id === tempId ? { ...message, status: 'failed' } : message
+      ))
+      if (activeChatIdRef.current === targetChatId) {
+        setComposerFeedback({ kind: 'error', message: 'No se pudo enviar el archivo. Puedes reintentarlo desde el mensaje.' })
+      }
+      return false
     }
   }
 
   const handleRetrySend = async (failedMsg: Message) => {
-    if (!chat || !deviceId) return
+    if (!chat || !deviceId || !chatId) return
+    const targetChatId = chatId
+    const targetChatJid = chat.jid
+    const targetDeviceId = deviceId
 
-    updateMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'sending' } : m))
+    const retryableMedia = mediaRetryRef.current.get(failedMsg.id)
+    if (retryableMedia) {
+      updateMessagesForChat(targetChatId, prev => prev.map(message => message.id === failedMsg.id ? { ...message, status: 'sending' } : message))
+      await transmitRetryableMedia(failedMsg.id, retryableMedia, targetChatId, targetChatJid, targetDeviceId)
+      return
+    }
+
+    if (failedMsg.message_type && failedMsg.message_type !== 'text') {
+      setComposerFeedback({ kind: 'error', message: 'El archivo original ya no está disponible. Vuelve a adjuntarlo.' })
+      return
+    }
+
+    updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'sending' } : m))
 
     const token = localStorage.getItem('token')
     try {
-        const res = await fetch('/api/messages/send', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${token}`
-            },
-            body: JSON.stringify({
-                device_id: deviceId,
-                to: chat.jid,
-                body: failedMsg.body
-            })
-        })
-        const data = await res.json()
-        if (data.success && data.message) {
-            updateMessages(prev => prev.map(m => m.id === failedMsg.id ? data.message : m))
-        } else {
-            updateMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'failed' } : m))
-        }
-    } catch (e) {
-        updateMessages(prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'failed' } : m))
+      const res = await fetch('/api/messages/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          device_id: targetDeviceId,
+          to: targetChatJid,
+          body: failedMsg.body,
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok && data.success && data.message) {
+        updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, failedMsg.id, data.message as Message))
+      } else {
+        throw new Error(data.error || 'Error al reenviar mensaje')
+      }
+    } catch (err) {
+      console.error('[ChatRetry]', err)
+      updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === failedMsg.id ? { ...m, status: 'failed' } : m))
+      if (activeChatIdRef.current === targetChatId) {
+        setComposerFeedback({ kind: 'error', message: 'No se pudo reenviar el mensaje.' })
+      }
     }
   }
 
-  const handleSendMedia = async (file: File, mediaType: string, caption?: string) => {
-      if (!chat || !deviceId) return
+  const handleSendMedia = async (file: File, mediaType: OutgoingMediaType, caption?: string): Promise<boolean> => {
+    if (!chat || !deviceId || !chatId) return false
+    const targetChatId = chatId
+    const targetChatJid = chat.jid
+    const targetDeviceId = deviceId
 
-      // Compress images client-side (like WhatsApp: max 1600px, JPEG 70%)
-      let fileToSend = file
-      if (mediaType === 'image') {
-        try {
-          fileToSend = await compressImageStandard(file)
-        } catch (err) {
-          console.warn('[ImageCompress] Compression failed, using original:', err)
-        }
-      }
-
-      const tempId = `optimistic-${++optimisticIdRef.current}`
-      const previewUrl = URL.createObjectURL(fileToSend)
-      const finalCaption = caption ?? (mediaType === 'document' ? fileToSend.name : '')
-
-      const optimisticMsg: Message = {
-        id: tempId,
-        message_id: tempId,
-        from_jid: '',
-        from_name: 'Me',
-        body: finalCaption,
-        message_type: mediaType,
-        media_url: previewUrl,
-        is_from_me: true,
-        is_read: false,
-        status: 'sending',
-        timestamp: new Date().toISOString()
-      }
-
-      updateMessages(prev => [...prev, optimisticMsg])
-      setActivePopup(null)
-      scrollToBottom()
-
-      const token = localStorage.getItem('token')
+    // Compress images client-side (like WhatsApp: max 1600px, JPEG 70%)
+    let fileToSend = file
+    if (mediaType === 'image') {
       try {
-           const formData = new FormData()
-           formData.append('file', fileToSend)
-           formData.append('folder', 'uploads')
-
-           const uploadRes = await fetch('/api/media/upload', {
-               method: 'POST',
-               headers: { Authorization: `Bearer ${token}` },
-               body: formData
-           })
-           const uploadData = await uploadRes.json()
-
-           if (!uploadData.success) throw new Error(uploadData.error || 'Error al subir archivo')
-
-           const res = await fetch('/api/messages/send', {
-             method: 'POST',
-             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-             body: JSON.stringify({
-               device_id: deviceId,
-               to: chat.jid,
-               body: finalCaption,
-               media_url: uploadData.proxy_url || uploadData.public_url,
-               media_type: mediaType
-             })
-           })
-
-           const data = await res.json()
-           if (data.success) {
-               const realMsg = data.message
-               if (realMsg) {
-                   updateMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
-               } else {
-                   updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
-               }
-           } else {
-               updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
-           }
+        fileToSend = await compressImageStandard(file)
       } catch (err) {
-           console.error(err)
-           updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        console.warn('[ImageCompress] Compression failed, using original:', err)
       }
+    }
+
+    if (activeChatIdRef.current !== targetChatId) return false
+
+    const tempId = `optimistic-${++optimisticIdRef.current}`
+    const previewUrl = URL.createObjectURL(fileToSend)
+    const finalCaption = caption ?? (mediaType === 'document' ? fileToSend.name : '')
+    const retryableMedia: RetryableMedia = { file: fileToSend, type: mediaType, caption: finalCaption, previewUrl }
+
+    const optimisticMsg: Message = {
+      id: tempId,
+      message_id: tempId,
+      from_jid: '',
+      from_name: 'Me',
+      body: finalCaption,
+      message_type: mediaType,
+      media_url: previewUrl,
+      media_filename: fileToSend.name,
+      media_mimetype: fileToSend.type,
+      media_size: fileToSend.size,
+      is_from_me: true,
+      is_read: false,
+      status: 'sending',
+      timestamp: new Date().toISOString(),
+    }
+
+    mediaRetryRef.current.set(tempId, retryableMedia)
+    updateMessages(prev => [...prev, optimisticMsg])
+    setActivePopup(null)
+    scrollToBottom()
+    void transmitRetryableMedia(tempId, retryableMedia, targetChatId, targetChatJid, targetDeviceId)
+    return true
   }
 
   const handleSendMediaUrl = async (url: string, mediaType: string, caption: string) => {
-    if (!chat || !deviceId) return
+    if (!chat || !deviceId || !chatId) return
+    const targetChatId = chatId
+    const targetChatJid = chat.jid
+    const targetDeviceId = deviceId
 
     const tempId = `optimistic-${++optimisticIdRef.current}`
 
@@ -760,8 +964,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
       timestamp: new Date().toISOString()
     }
 
-    updateMessages(prev => [...prev, optimisticMsg])
-    scrollToBottom()
+    updateMessagesForChat(targetChatId, prev => [...prev, optimisticMsg])
+    if (activeChatIdRef.current === targetChatId) scrollToBottom()
 
     const token = localStorage.getItem('token')
     try {
@@ -769,8 +973,8 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({
-                device_id: deviceId,
-                to: chat.jid,
+                device_id: targetDeviceId,
+                to: targetChatJid,
                 body: caption,
                 media_url: url,
                 media_type: mediaType
@@ -781,26 +985,30 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         if (data.success) {
             const realMsg = data.message
             if (realMsg) {
-                updateMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
+                updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, realMsg as Message))
             } else {
-                updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
+                updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
             }
         } else {
-            updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+            updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
         }
     } catch (err) {
         console.error(err)
-        updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
     }
   }
 
   const handleSendSticker = async (stickerUrl: string, file?: File) => {
-      if (!chat || !deviceId) return
+      if (!chat || !deviceId || !chatId) return
 
       if (file) {
           await handleSendMedia(file, 'sticker')
           return
       }
+
+      const targetChatId = chatId
+      const targetChatJid = chat.jid
+      const targetDeviceId = deviceId
 
       const tempId = `optimistic-${++optimisticIdRef.current}`
       const optimisticMsg: Message = {
@@ -816,62 +1024,95 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
           status: 'sending',
           timestamp: new Date().toISOString()
       }
-      updateMessages(prev => [...prev, optimisticMsg])
-      scrollToBottom()
+      updateMessagesForChat(targetChatId, prev => [...prev, optimisticMsg])
+      if (activeChatIdRef.current === targetChatId) scrollToBottom()
 
       const token = localStorage.getItem('token')
-      fetch('/api/messages/send', {
+      try {
+        const res = await fetch('/api/messages/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
-              device_id: deviceId,
-              to: chat.jid,
+              device_id: targetDeviceId,
+              to: targetChatJid,
               media_url: stickerUrl,
               media_type: 'sticker'
           })
-      }).then(res => res.json()).then(data => {
-          if (data.success) {
-              const realMsg = data.message
-              if (realMsg) {
-                  updateMessages(prev => prev.map(m => m.id === tempId ? { ...realMsg, is_from_me: true } : m))
-              } else {
-                  updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
-              }
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(data.error || 'Error al enviar sticker')
+        if (data.success) {
+          const realMsg = data.message
+          if (realMsg) {
+            updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, realMsg as Message))
           } else {
-              updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+            updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
           }
-      })
+        } else {
+          throw new Error(data.error || 'Error al enviar sticker')
+        }
+      } catch (err) {
+        console.error('[ChatSticker]', err)
+        updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+      }
+  }
+
+  const beginAttachmentDraft = (files: File[], forceDocument = false) => {
+    if (files.length === 0) return
+    if (editingMsg) {
+      setComposerFeedback({ kind: 'info', message: 'Termina o cancela la edición antes de adjuntar un archivo.' })
+      return
+    }
+
+    const file = files[0]
+    const validation = validateChatAttachment(file, forceDocument)
+    if (!validation.ok) {
+      setComposerFeedback({ kind: 'error', message: validation.error })
+      return
+    }
+
+    const previousDraft = attachmentDraftRef.current
+    const caption = previousDraft?.caption ?? messageText
+    if (previousDraft?.previewUrl) URL.revokeObjectURL(previousDraft.previewUrl)
+
+    const previewUrl = validation.mediaType === 'image' || validation.mediaType === 'video'
+      ? URL.createObjectURL(file)
+      : ''
+    const nextDraft: AttachmentDraft = {
+      file,
+      type: validation.mediaType,
+      previewUrl,
+      caption,
+    }
+
+    attachmentDraftRef.current = nextDraft
+    setAttachmentDraft(nextDraft)
+    setMessageText('')
+    inputRef.current?.clear()
+    captionInputRef.current?.clear()
+    setShowAttachments(false)
+    setActivePopup(null)
+    if (typingPauseTimeoutRef.current) clearTimeout(typingPauseTimeoutRef.current)
+    sendPresence(false)
+    lastTypingSentRef.current = 0
+
+    if (files.length > 1) {
+      setComposerFeedback({ kind: 'info', message: 'Se adjuntó el primer archivo. Los demás deben enviarse por separado.' })
+    }
+    window.setTimeout(() => captionInputRef.current?.focus(), 100)
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, pickerType: 'media' | 'document') => {
-     if (e.target.files && e.target.files.length > 0) {
-         const file = e.target.files[0]
-         const type = pickerType === 'document'
-           ? 'document'
-           : file.type.startsWith('video/')
-             ? 'video'
-             : 'image'
-
-         // Video size limit: 15 MB (like WhatsApp)
-         if (type === 'video' && file.size > 15 * 1024 * 1024) {
-           alert('El video es demasiado grande. Máximo 15 MB.')
-           if (e.target) e.target.value = ''
-           return
-         }
-
-         const previewUrl = type !== 'document' ? URL.createObjectURL(file) : ''
-         setPendingMedia({ file, type, previewUrl })
-         setMediaCaption('')
-         captionInputRef.current?.clear()
-         setShowAttachments(false)
-         setTimeout(() => captionInputRef.current?.focus(), 100)
-     }
-     // Reset input so same file can be selected again
-     if (e.target) e.target.value = ''
+    beginAttachmentDraft(Array.from(e.target.files || []), pickerType === 'document')
+    // Reset input so same file can be selected again
+    e.target.value = ''
   }
 
   const handleSendContact = async (contacts: SelectedPerson[]) => {
-    if (!chat || !deviceId) return
+    if (!chat || !deviceId || !chatId) return
+    const targetChatId = chatId
+    const targetChatJid = chat.jid
+    const targetDeviceId = deviceId
     setShowContactPicker(false)
     setShowAttachments(false)
     const token = localStorage.getItem('token')
@@ -892,47 +1133,61 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
         contact_name: displayName,
         contact_phone: contact.phone,
       }
-      updateMessages(prev => [...prev, optimisticMsg])
-      scrollToBottom()
+      updateMessagesForChat(targetChatId, prev => [...prev, optimisticMsg])
+      if (activeChatIdRef.current === targetChatId) scrollToBottom()
       try {
         const res = await fetch('/api/messages/send-contact', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
-            device_id: deviceId,
-            to: chat.jid,
+            device_id: targetDeviceId,
+            to: targetChatJid,
             contact_name: displayName,
             contact_phone: contact.phone,
           })
         })
         const data = await res.json()
         if (data.success && data.message) {
-          updateMessages(prev => prev.map(m => m.id === tempId ? { ...data.message, is_from_me: true } : m))
+          updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, data.message as Message))
         } else {
-          updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+          updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
         }
       } catch {
-        updateMessages(prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
       }
     }
   }
 
-  const handleSendPendingMedia = () => {
-    if (!pendingMedia) return
-    handleSendMedia(pendingMedia.file, pendingMedia.type, mediaCaption.trim())
-    URL.revokeObjectURL(pendingMedia.previewUrl)
-    setPendingMedia(null)
-    setMediaCaption('')
-    captionInputRef.current?.clear()
+  const handleSendPendingMedia = async () => {
+    const draft = attachmentDraftRef.current
+    if (!draft || attachmentSendingRef.current) return
+
+    attachmentSendingRef.current = true
+    setSendingAttachment(true)
+    try {
+      const queued = await handleSendMedia(draft.file, draft.type, draft.caption.trim())
+      if (!queued) return
+
+      if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl)
+      attachmentDraftRef.current = null
+      setAttachmentDraft(null)
+      captionInputRef.current?.clear()
+    } finally {
+      attachmentSendingRef.current = false
+      setSendingAttachment(false)
+    }
   }
 
   const handleCancelPendingMedia = () => {
-    if (pendingMedia) {
-      URL.revokeObjectURL(pendingMedia.previewUrl)
-      setPendingMedia(null)
-      setMediaCaption('')
-      captionInputRef.current?.clear()
-    }
+    const draft = attachmentDraftRef.current
+    if (!draft || attachmentSendingRef.current) return
+
+    if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl)
+    attachmentDraftRef.current = null
+    setAttachmentDraft(null)
+    setMessageText(draft.caption)
+    captionInputRef.current?.clear()
+    requestAnimationFrame(() => inputRef.current?.focus())
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1040,7 +1295,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
   }
 
   return (
-    <div className={`flex-1 flex flex-col min-h-0 overflow-hidden h-full ${className}`}>
+    <div className={`relative flex-1 flex flex-col min-h-0 overflow-hidden h-full ${className}`}>
          {/* Chat header */}
          <div className="h-14 px-4 flex items-center justify-between border-b border-slate-200 bg-white shrink-0">
               <div className="flex items-center gap-3">
@@ -1111,6 +1366,22 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                    </button>
               </div>
          </div>
+
+         {composerFeedback && (
+           <div
+             role={composerFeedback.kind === 'error' ? 'alert' : 'status'}
+             className={`absolute left-1/2 top-16 z-[70] flex w-[calc(100%_-_1.5rem)] max-w-lg -translate-x-1/2 items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs shadow-lg ${
+               composerFeedback.kind === 'error'
+                 ? 'border-red-200 bg-red-50 text-red-700'
+                 : 'border-blue-200 bg-blue-50 text-blue-700'
+             }`}
+           >
+             <span>{composerFeedback.message}</span>
+             <button type="button" onClick={() => setComposerFeedback(null)} className="shrink-0 rounded p-0.5 hover:bg-black/5" aria-label="Cerrar aviso">
+               <X className="h-3.5 w-3.5" />
+             </button>
+           </div>
+         )}
 
          {/* Content Area */}
          <div className="flex-1 flex min-h-0 relative">
@@ -1200,20 +1471,37 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                                 onReact={async (m, emoji) => {
                                   if (!deviceId || !chat) return
                                   const token = localStorage.getItem('token')
+                                  const targetChatId = chat.id
+                                  const requestedEmoji = hasOwnReaction(m.reactions, emoji) ? '' : emoji
+                                  const previousReactions = dedupeReactions(m.reactions)
+                                  const requestSeq = (reactionRequestSeqRef.current.get(m.message_id) || 0) + 1
+                                  reactionRequestSeqRef.current.set(m.message_id, requestSeq)
+
+                                  const rollback = () => {
+                                    if (reactionRequestSeqRef.current.get(m.message_id) !== requestSeq) return
+                                    updateMessagesForChat(targetChatId, prev => prev.map(message =>
+                                      message.message_id === m.message_id
+                                        ? { ...message, reactions: previousReactions }
+                                        : message
+                                    ))
+                                    if (activeChatIdRef.current === targetChatId) {
+                                      setComposerFeedback({ kind: 'error', message: 'No se pudo actualizar la reacción.' })
+                                    }
+                                  }
+
                                   try {
                                     // Optimistically update UI
-                                    updateMessages(prev => prev.map(msg => {
-                                      if (msg.message_id !== m.message_id) return msg
-                                      const reactions = [...(msg.reactions || [])]
-                                      const existingIdx = reactions.findIndex(r => r.is_from_me && r.emoji === emoji)
-                                      if (existingIdx >= 0) {
-                                        reactions.splice(existingIdx, 1)
-                                      } else {
-                                        const prevIdx = reactions.findIndex(r => r.is_from_me)
-                                        if (prevIdx >= 0) reactions.splice(prevIdx, 1)
-                                        reactions.push({ id: '', target_message_id: m.message_id, sender_jid: '', emoji, is_from_me: true })
-                                      }
-                                      return { ...msg, reactions }
+                                    updateMessagesForChat(targetChatId, prev => prev.map(message => {
+                                      if (message.message_id !== m.message_id) return message
+                                      const reactions = applyReactionMutation(message.reactions, {
+                                        targetMessageId: m.message_id,
+                                        senderJid: SELF_REACTION_ACTOR,
+                                        senderName: 'Tú',
+                                        emoji: requestedEmoji,
+                                        isFromMe: true,
+                                        removed: requestedEmoji === '',
+                                      })
+                                      return { ...message, reactions }
                                     }))
                                     const res = await fetch('/api/messages/react', {
                                       method: 'POST',
@@ -1223,15 +1511,18 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                                         to: chat.jid,
                                         target_message_id: m.message_id,
                                         target_from_me: !!m.is_from_me,
-                                        emoji: emoji
+                                        target_sender_jid: m.from_jid || '',
+                                        emoji: requestedEmoji
                                       })
                                     })
-                                    const data = await res.json()
-                                    if (!data.success) {
+                                    const data = await res.json().catch(() => ({}))
+                                    if (!res.ok || !data.success) {
                                       console.error('Failed to send reaction:', data.error)
+                                      rollback()
                                     }
                                   } catch (err) {
                                     console.error('Failed to send reaction', err)
+                                    rollback()
                                   }
                                 }}
                               />
@@ -1265,32 +1556,37 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
          </div>
 
          {/* Media Preview Overlay */}
-         {pendingMedia && (
+         {attachmentDraft && (
            <div className="absolute inset-0 z-40 bg-white flex flex-col">
              {/* Close */}
              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
-               <button onClick={handleCancelPendingMedia} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-full transition">
+               <button
+                 onClick={handleCancelPendingMedia}
+                 disabled={sendingAttachment}
+                 className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-full transition disabled:opacity-50"
+                 aria-label="Cancelar adjunto"
+               >
                  <X className="w-6 h-6" />
                </button>
                <span className="text-slate-600 text-sm font-medium">
-                 {pendingMedia.type === 'image' ? 'Imagen' : pendingMedia.type === 'video' ? 'Video' : 'Documento'}
+                 {attachmentDraft.type === 'image' ? 'Imagen' : attachmentDraft.type === 'video' ? 'Video' : attachmentDraft.type === 'audio' ? 'Audio' : 'Documento'}
                </span>
                <div className="w-10" />
              </div>
              {/* Preview */}
              <div className="flex-1 flex items-center justify-center p-4 min-h-0 bg-slate-50">
-               {pendingMedia.type === 'image' ? (
-                 <img src={pendingMedia.previewUrl} className="max-h-full max-w-full object-contain rounded-lg shadow-md" alt="Preview" />
-               ) : pendingMedia.type === 'video' ? (
-                 <video src={pendingMedia.previewUrl} className="max-h-full max-w-full rounded-lg shadow-md" controls />
+               {attachmentDraft.type === 'image' ? (
+                 <img src={attachmentDraft.previewUrl} className="max-h-full max-w-full object-contain rounded-lg shadow-md" alt="Vista previa del adjunto" />
+               ) : attachmentDraft.type === 'video' ? (
+                 <video src={attachmentDraft.previewUrl} className="max-h-full max-w-full rounded-lg shadow-md" controls />
                ) : (
                  <div className="flex flex-col items-center gap-4 p-8 bg-white rounded-2xl shadow-lg border border-slate-200 max-w-sm">
                    <div className="w-20 h-20 bg-blue-100 rounded-2xl flex items-center justify-center">
                      <FileText className="w-10 h-10 text-blue-500" />
                    </div>
                    <div className="text-center">
-                     <p className="text-sm font-semibold text-slate-800 break-all">{pendingMedia.file.name}</p>
-                     <p className="text-xs text-slate-400 mt-1">{(pendingMedia.file.size / 1024 / 1024).toFixed(2)} MB</p>
+                     <p className="text-sm font-semibold text-slate-800 break-all">{attachmentDraft.file.name}</p>
+                     <p className="text-xs text-slate-400 mt-1">{(attachmentDraft.file.size / 1024 / 1024).toFixed(2)} MB</p>
                    </div>
                  </div>
                )}
@@ -1302,7 +1598,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                    if (captionInputRef.current) {
                      captionInputRef.current.insertAtCaret(emoji)
                    } else {
-                     setMediaCaption(prev => prev + emoji)
+                     setAttachmentDraft(prev => prev ? { ...prev, caption: prev.caption + emoji } : prev)
                    }
                  }}
                  buttonClassName="p-2 text-slate-500 hover:text-emerald-600 transition"
@@ -1310,18 +1606,26 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                <div className="flex-1">
                  <WhatsAppTextInput
                    ref={captionInputRef}
-                   value={mediaCaption}
-                   onChange={setMediaCaption}
-                   placeholder={pendingMedia.type === 'document' ? 'Agregar descripción...' : 'Agregar pie de foto...'}
-                   onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendPendingMedia() } }}
+                   value={attachmentDraft.caption}
+                   onChange={caption => setAttachmentDraft(prev => {
+                     if (!prev) return prev
+                     const next = { ...prev, caption }
+                     attachmentDraftRef.current = next
+                     return next
+                   })}
+                   placeholder={attachmentDraft.type === 'document' ? 'Agregar descripción...' : 'Agregar pie de foto...'}
+                   onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !sendingAttachment) { e.preventDefault(); void handleSendPendingMedia() } }}
                    singleLine
+                   disabled={sendingAttachment}
                  />
                </div>
                <button
-                 onClick={handleSendPendingMedia}
-                 className="p-3 bg-emerald-600 text-white rounded-full hover:bg-emerald-700 transition shadow-md"
+                 onClick={() => void handleSendPendingMedia()}
+                 disabled={sendingAttachment}
+                 className="p-3 bg-emerald-600 text-white rounded-full hover:bg-emerald-700 transition shadow-md disabled:opacity-50"
+                 aria-label={sendingAttachment ? 'Preparando adjunto' : 'Enviar adjunto'}
                >
-                 <Send className="w-5 h-5" />
+                 {sendingAttachment ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                </button>
              </div>
            </div>
@@ -1376,7 +1680,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                       <Paperclip className="w-6 h-6" />
                   </button>
                   <EmojiPicker
-                    onEmojiSelect={(emoji) => setMessageText(prev => prev + emoji)}
+                    onEmojiSelect={(emoji) => inputRef.current?.insertAtCaret(emoji)}
                     isOpen={activePopup === 'emoji'}
                     onToggle={() => setActivePopup(activePopup === 'emoji' ? null : 'emoji')}
                     buttonClassName={`p-2 transition ${activePopup === 'emoji' ? 'text-emerald-600' : 'text-slate-500 hover:text-emerald-600'}`}
@@ -1402,6 +1706,7 @@ export default function ChatPanel({ chatId, deviceId, initialChat, onClose, clas
                       onChange={handleMessageChange}
                       placeholder="Escribe un mensaje... ( / para respuestas rápidas)"
                       onKeyDown={handleKeyDown}
+                      onPasteFiles={files => beginAttachmentDraft(files)}
                       singleLine
                     />
               </div>

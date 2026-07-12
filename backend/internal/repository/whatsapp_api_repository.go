@@ -7,14 +7,23 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
 
+type whatsAppAPIDatabase interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // WhatsAppAPIRepository handles Cloud API configuration, templates, webhooks and service windows.
 type WhatsAppAPIRepository struct {
-	db *pgxpool.Pool
+	db whatsAppAPIDatabase
 }
+
+var _ whatsAppAPIDatabase = (*pgxpool.Pool)(nil)
 
 type WhatsAppAPIOverview struct {
 	CloudChannelCount int `json:"cloud_channel_count"`
@@ -148,6 +157,41 @@ func (r *WhatsAppAPIRepository) CreateWebhookEvent(ctx context.Context, event *d
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (event_id) DO NOTHING
 	`, event.AccountID, event.DeviceID, event.PhoneNumberID, event.EventID, event.EventType, payload, event.Processed, event.ErrorMessage)
+	return err
+}
+
+// ClaimWebhookEvent atomically records an event before any externally visible
+// processing. A false result means another delivery already claimed the same
+// provider event ID and the caller must not repeat its side effects.
+func (r *WhatsAppAPIRepository) ClaimWebhookEvent(ctx context.Context, event *domain.WhatsAppWebhookEvent) (bool, error) {
+	payload := event.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage("{}")
+	}
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO whatsapp_webhook_events
+			(account_id, device_id, phone_number_id, event_id, event_type, payload, processed, error_message)
+		VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7)
+		ON CONFLICT (event_id) DO NOTHING
+		RETURNING id, received_at
+	`, event.AccountID, event.DeviceID, event.PhoneNumberID, event.EventID, event.EventType, payload, event.ErrorMessage).
+		Scan(&event.ID, &event.ReceivedAt)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CompleteWebhookEvent records the outcome for a previously claimed event.
+func (r *WhatsAppAPIRepository) CompleteWebhookEvent(ctx context.Context, id uuid.UUID, processed bool, errorMessage *string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE whatsapp_webhook_events
+		SET processed = $2, error_message = $3
+		WHERE id = $1
+	`, id, processed, errorMessage)
 	return err
 }
 

@@ -57,6 +57,7 @@ temp/
 
 # Go
 /backend/clarin
+/backend/server
 kommo_export_leads_2026-02-14.csv
 difusion_moquegua_chats.csv
 backups/*.sql

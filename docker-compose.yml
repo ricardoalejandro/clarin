@@ -147,6 +147,9 @@ services:
       KOMMO_PROXY_URL: ${KOMMO_PROXY_URL:-}
       # Kommo Webhooks
       KOMMO_WEBHOOK_SECRET: ${KOMMO_WEBHOOK_SECRET:-}
+      # WhatsApp Cloud API webhook authentication
+      WHATSAPP_CLOUD_VERIFY_TOKEN: ${WHATSAPP_CLOUD_VERIFY_TOKEN:-}
+      WHATSAPP_CLOUD_APP_SECRET: ${WHATSAPP_CLOUD_APP_SECRET:-}
       PUBLIC_URL: "https://clarin.naperu.cloud"
       # AI Assistant (Eros)
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}

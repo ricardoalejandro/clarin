@@ -63,6 +63,8 @@ type Config struct {
 	GoogleClientID     string
 	GoogleClientSecret string
 	GoogleRedirectURI  string
+	// WhatsApp Cloud API webhook authentication
+	WhatsAppCloudAppSecret string
 	// Login abuse protection
 	TurnstileSiteKey   string
 	TurnstileSecretKey string
@@ -119,6 +121,7 @@ func Load() *Config {
 		GoogleClientID:           getEnv("GOOGLE_CLIENT_ID", ""),
 		GoogleClientSecret:       getEnv("GOOGLE_CLIENT_SECRET", ""),
 		GoogleRedirectURI:        getEnv("GOOGLE_REDIRECT_URI", ""),
+		WhatsAppCloudAppSecret:   getEnv("WHATSAPP_CLOUD_APP_SECRET", ""),
 		TurnstileSiteKey:         getEnv("TURNSTILE_SITE_KEY", getEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "")),
 		TurnstileSecretKey:       getEnv("TURNSTILE_SECRET_KEY", ""),
 	}

@@ -1,5 +1,18 @@
 # Changelog — Clarin CRM
 
+## 2026-07-11
+
+### Build 1 — Mejoras integrales del chat de WhatsApp
+- 🐛 Reacciones idempotentes: sin duplicados visuales y con soporte para retirar una reacción.
+- ✨ Selector de emojis con búsqueda y nombres en español.
+- ✨ Pegado de imágenes y archivos desde el portapapeles con `Ctrl+V` / `Cmd+V`.
+- 🐛 El texto escrito pasa a ser el pie del adjunto y se restaura si se cancela o falla el envío.
+- 🐛 Adjuntos con nombre original, reintento sin duplicar la subida y reconciliación segura entre API y WebSocket.
+- 🐛 Protección frente a doble envío, historial duplicado y eventos fuera de orden, incluidas reacciones en grupos.
+- 🔒 Validaciones de cuenta reforzadas en operaciones sensibles del chat y webhook Cloud firmado e idempotente.
+- 🔒 Descargas de medios aisladas por cuenta y protegidas frente a URLs internas inseguras.
+- 🔧 WhatsMeow actualizado con correcciones de mensajes propios, envío multidispositivo y emparejamiento.
+
 ## 2026-03-27
 
 ### Build 1 — Eros AI Revamp

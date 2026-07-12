@@ -1938,16 +1938,25 @@ func (s *Server) invalidateContactTreeCaches(accountID uuid.UUID) {
 }
 
 func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	chatID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
+	}
+
+	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if !chatBelongsToAccount(chat, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
 
 	details, err := s.services.Chat.GetChatDetails(c.Context(), chatID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	if details == nil || details.Chat == nil {
+	if details == nil || !chatBelongsToAccount(details.Chat, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
 
@@ -2016,13 +2025,33 @@ func deviceCanSendManual(device *domain.Device) bool {
 	return getDeviceProvider(device) == domain.DeviceProviderWhatsAppWeb
 }
 
-func (s *Server) requireManualDeviceForAccount(ctx context.Context, accountID, deviceID uuid.UUID) (*domain.Device, error) {
+func chatBelongsToAccount(chat *domain.Chat, accountID uuid.UUID) bool {
+	return chat != nil && chat.AccountID == accountID
+}
+
+func deviceBelongsToAccount(device *domain.Device, accountID uuid.UUID) bool {
+	return device != nil && device.AccountID == accountID
+}
+
+func messageBelongsToChatAccount(message *domain.Message, chatID, accountID uuid.UUID) bool {
+	return message != nil && message.ChatID == chatID && message.AccountID == accountID
+}
+
+func (s *Server) requireDeviceForAccount(ctx context.Context, accountID, deviceID uuid.UUID) (*domain.Device, error) {
 	device, err := s.services.Device.GetByID(ctx, deviceID)
 	if err != nil {
 		return nil, err
 	}
-	if device == nil || device.AccountID != accountID {
+	if !deviceBelongsToAccount(device, accountID) {
 		return nil, fiber.NewError(fiber.StatusNotFound, "Device not found")
+	}
+	return device, nil
+}
+
+func (s *Server) requireManualDeviceForAccount(ctx context.Context, accountID, deviceID uuid.UUID) (*domain.Device, error) {
+	device, err := s.requireDeviceForAccount(ctx, accountID, deviceID)
+	if err != nil {
+		return nil, err
 	}
 	if !deviceCanSendManual(device) {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "Dispositivo no conectado o no disponible para envio manual")
@@ -2247,16 +2276,24 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleMarkAsRead(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	chatID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
+	}
+
+	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if !chatBelongsToAccount(chat, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
 
 	if err := s.services.Chat.MarkAsRead(c.Context(), chatID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	accountID := c.Locals("account_id").(uuid.UUID)
 	s.invalidateChatCaches(accountID, &chatID)
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -2353,6 +2390,7 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 		Body            string `json:"body"`
 		MediaURL        string `json:"media_url,omitempty"`
 		MediaType       string `json:"media_type,omitempty"` // image, video, audio, document
+		MediaFilename   string `json:"media_filename,omitempty"`
 		QuotedMessageID string `json:"quoted_message_id,omitempty"`
 		QuotedBody      string `json:"quoted_body,omitempty"`
 		QuotedSender    string `json:"quoted_sender,omitempty"`
@@ -2377,7 +2415,7 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 
 	if req.MediaURL != "" && req.MediaType != "" {
 		// Send media message
-		message, err = s.services.Chat.SendMediaMessage(c.Context(), deviceID, req.To, req.Body, req.MediaURL, req.MediaType)
+		message, err = s.services.Chat.SendMediaMessageWithFilename(c.Context(), deviceID, req.To, req.Body, req.MediaURL, req.MediaType, req.MediaFilename)
 	} else if req.QuotedMessageID != "" {
 		// Send reply message
 		message, err = s.services.Chat.SendReplyMessage(c.Context(), deviceID, req.To, req.Body, req.QuotedMessageID, req.QuotedBody, req.QuotedSender, req.QuotedIsFromMe)
@@ -2471,9 +2509,20 @@ func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
 	}
 
+	sourceChat, err := s.services.Chat.GetByID(c.Context(), chatID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if !chatBelongsToAccount(sourceChat, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Original message not found"})
+	}
+
 	// Get original message
 	originalMsg, err := s.services.Chat.GetMessageByID(c.Context(), chatID, req.MessageID)
 	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Original message not found"})
+	}
+	if !messageBelongsToChatAccount(originalMsg, chatID, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Original message not found"})
 	}
 
@@ -2498,6 +2547,7 @@ func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 		DeviceID        string `json:"device_id"`
 		To              string `json:"to"`
 		TargetMessageID string `json:"target_message_id"`
+		TargetSenderJID string `json:"target_sender_jid,omitempty"`
 		TargetFromMe    bool   `json:"target_from_me"`
 		Emoji           string `json:"emoji"` // empty to remove
 	}
@@ -2517,7 +2567,7 @@ func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "target_message_id is required"})
 	}
 
-	if err := s.services.Chat.SendReaction(c.Context(), deviceID, req.To, req.TargetMessageID, req.Emoji, req.TargetFromMe); err != nil {
+	if err := s.services.Chat.SendReaction(c.Context(), deviceID, req.To, req.TargetMessageID, req.TargetSenderJID, req.Emoji, req.TargetFromMe); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -2638,6 +2688,7 @@ func (s *Server) handleSendReadReceipt(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID  string `json:"device_id"`
 		ChatJID   string `json:"chat_jid"`
@@ -2653,6 +2704,12 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
+	if _, err := s.requireDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 
 	if req.MessageID == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "message_id is required"})
@@ -2663,7 +2720,6 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 	}
 
 	// Mark as revoked in DB
-	accountID := c.Locals("account_id").(uuid.UUID)
 	_ = s.repos.Message.MarkAsRevoked(c.Context(), accountID, req.ChatJID, req.MessageID)
 	if chat, _ := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID); chat != nil {
 		s.invalidateMessagesCache(accountID, &chat.ID)
@@ -2682,6 +2738,7 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleEditMessage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID  string `json:"device_id"`
 		ChatJID   string `json:"chat_jid"`
@@ -2696,6 +2753,12 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
+	if _, err := s.requireDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 
 	if req.MessageID == "" || req.NewBody == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "message_id and new_body are required"})
@@ -2706,7 +2769,6 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 	}
 
 	// Update in DB
-	accountID := c.Locals("account_id").(uuid.UUID)
 	_ = s.repos.Message.UpdateBody(c.Context(), accountID, req.ChatJID, req.MessageID, req.NewBody)
 	if chat, _ := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID); chat != nil {
 		s.invalidateMessagesCache(accountID, &chat.ID)
@@ -2726,6 +2788,7 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleCheckWhatsApp(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		DeviceID string   `json:"device_id"`
 		Phones   []string `json:"phones"`
@@ -2737,6 +2800,12 @@ func (s *Server) handleCheckWhatsApp(c *fiber.Ctx) error {
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+	}
+	if _, err := s.requireDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	if len(req.Phones) == 0 {

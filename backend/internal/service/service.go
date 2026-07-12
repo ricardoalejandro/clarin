@@ -922,10 +922,14 @@ func (s *ChatService) SendMessage(ctx context.Context, deviceID uuid.UUID, to, b
 }
 
 func (s *ChatService) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType string) (*domain.Message, error) {
+	return s.SendMediaMessageWithFilename(ctx, deviceID, to, caption, mediaURL, mediaType, "")
+}
+
+func (s *ChatService) SendMediaMessageWithFilename(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType, mediaFilename string) (*domain.Message, error) {
 	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
 		return nil, err
 	}
-	return s.pool.SendMediaMessage(ctx, deviceID, to, caption, mediaURL, mediaType)
+	return s.pool.SendMediaMessageWithFilename(ctx, deviceID, to, caption, mediaURL, mediaType, mediaFilename)
 }
 
 func (s *ChatService) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, to, body, quotedID, quotedBody, quotedSender string, quotedIsFromMe bool) (*domain.Message, error) {
@@ -942,11 +946,11 @@ func (s *ChatService) ForwardMessage(ctx context.Context, deviceID uuid.UUID, to
 	return s.pool.ForwardMessage(ctx, deviceID, to, originalMsg)
 }
 
-func (s *ChatService) SendReaction(ctx context.Context, deviceID uuid.UUID, to, targetMessageID, emoji string, targetFromMe bool) error {
+func (s *ChatService) SendReaction(ctx context.Context, deviceID uuid.UUID, to, targetMessageID, targetSenderJID, emoji string, targetFromMe bool) error {
 	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
 		return err
 	}
-	return s.pool.SendReaction(ctx, deviceID, to, targetMessageID, emoji, targetFromMe)
+	return s.pool.SendReaction(ctx, deviceID, to, targetMessageID, targetSenderJID, emoji, targetFromMe)
 }
 
 func (s *ChatService) SendPoll(ctx context.Context, deviceID uuid.UUID, to, question string, options []string, maxSelections int) (*domain.Message, error) {

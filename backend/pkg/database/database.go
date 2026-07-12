@@ -223,6 +223,45 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_chats_account ON chats(account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC)`,
+		// Enforce provider-message idempotency at the conversation boundary. Historical
+		// duplicates are merged only inside the same account/chat; cross-account
+		// corruption remains visible as an index creation failure instead of being deleted.
+		`DO $message_identity_migration$
+		BEGIN
+			IF to_regclass('messages_chat_id_message_id_key') IS NULL THEN
+				LOCK TABLE messages IN SHARE ROW EXCLUSIVE MODE;
+
+				WITH ranked AS (
+					SELECT
+						id,
+						ROW_NUMBER() OVER (
+							PARTITION BY account_id, chat_id, message_id
+							ORDER BY timestamp DESC, created_at DESC NULLS LAST, id DESC
+						) AS row_number
+					FROM messages
+				)
+				DELETE FROM messages m
+				USING ranked
+				WHERE m.id = ranked.id
+				  AND ranked.row_number > 1;
+
+				CREATE UNIQUE INDEX messages_chat_id_message_id_key
+					ON messages(chat_id, message_id);
+			END IF;
+			IF EXISTS (
+				SELECT 1
+				FROM pg_constraint
+				WHERE conname = 'messages_account_id_device_id_message_id_key'
+				  AND conrelid = 'messages'::regclass
+			) THEN
+				ALTER TABLE messages
+					DROP CONSTRAINT messages_account_id_device_id_message_id_key;
+			END IF;
+			IF to_regclass('messages_account_id_device_id_message_id_key') IS NOT NULL THEN
+				DROP INDEX messages_account_id_device_id_message_id_key;
+			END IF;
+		END
+		$message_identity_migration$`,
 		`CREATE INDEX IF NOT EXISTS idx_leads_account ON leads(account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)`,
 
@@ -521,12 +560,81 @@ func Migrate(db *pgxpool.Pool) error {
 			emoji VARCHAR(50) NOT NULL,
 			is_from_me BOOLEAN DEFAULT FALSE,
 			timestamp TIMESTAMPTZ NOT NULL,
-			created_at TIMESTAMPTZ DEFAULT NOW(),
-			UNIQUE(chat_id, target_message_id, sender_jid)
+			created_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_message_reactions_chat ON message_reactions(chat_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_message_reactions_target ON message_reactions(target_message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_message_reactions_filter ON message_reactions(account_id, chat_id, is_from_me, timestamp DESC)`,
+		// WhatsApp AD-JIDs identify a linked device, not a different reaction actor.
+		// Under one table lock, group only exact numeric AD-JID/canonical equivalents
+		// within the same account/chat/message, keep the newest row deterministically,
+		// normalize survivors, and replace the legacy unscoped uniqueness.
+		`DO $reaction_sender_migration$
+		BEGIN
+			IF to_regclass('uq_message_reactions_account_chat_target_sender') IS NULL
+			   OR to_regclass('message_reactions_chat_id_target_message_id_sender_jid_key') IS NOT NULL
+			   OR NOT EXISTS (
+					SELECT 1
+					FROM pg_constraint
+					WHERE conname = 'message_reactions_sender_jid_canonical_check'
+					  AND conrelid = 'message_reactions'::regclass
+			   ) THEN
+				LOCK TABLE message_reactions IN SHARE ROW EXCLUSIVE MODE;
+
+				WITH candidate_keys AS (
+				SELECT DISTINCT
+					account_id,
+					chat_id,
+					target_message_id,
+					regexp_replace(sender_jid, '^([0-9]+)(\.[0-9]+)?:[0-9]+@(s\.whatsapp\.net)$', '\1@\3') AS canonical_sender_jid
+				FROM message_reactions
+				WHERE sender_jid ~ '^([0-9]+)(\.[0-9]+)?:[0-9]+@s\.whatsapp\.net$'
+				), ranked AS (
+				SELECT
+					mr.id,
+					ROW_NUMBER() OVER (
+						PARTITION BY
+							mr.account_id,
+							mr.chat_id,
+							mr.target_message_id,
+							regexp_replace(mr.sender_jid, '^([0-9]+)(\.[0-9]+)?:[0-9]+@(s\.whatsapp\.net)$', '\1@\3')
+						ORDER BY mr.timestamp DESC, mr.created_at DESC, mr.id DESC
+					) AS row_number
+				FROM message_reactions mr
+				JOIN candidate_keys ck
+				  ON ck.account_id = mr.account_id
+				 AND ck.chat_id = mr.chat_id
+				 AND ck.target_message_id = mr.target_message_id
+				 AND ck.canonical_sender_jid = regexp_replace(mr.sender_jid, '^([0-9]+)(\.[0-9]+)?:[0-9]+@(s\.whatsapp\.net)$', '\1@\3')
+				)
+				DELETE FROM message_reactions mr
+				USING ranked
+				WHERE mr.id = ranked.id
+				  AND ranked.row_number > 1;
+
+				UPDATE message_reactions
+				SET sender_jid = regexp_replace(sender_jid, '^([0-9]+)(\.[0-9]+)?:[0-9]+@(s\.whatsapp\.net)$', '\1@\3')
+				WHERE sender_jid ~ '^([0-9]+)(\.[0-9]+)?:[0-9]+@s\.whatsapp\.net$';
+
+				IF NOT EXISTS (
+				SELECT 1
+				FROM pg_constraint
+				WHERE conname = 'message_reactions_sender_jid_canonical_check'
+				  AND conrelid = 'message_reactions'::regclass
+				) THEN
+					ALTER TABLE message_reactions
+						ADD CONSTRAINT message_reactions_sender_jid_canonical_check
+						CHECK (sender_jid !~ '^([0-9]+)(\.[0-9]+)?:[0-9]+@s\.whatsapp\.net$');
+				END IF;
+
+				ALTER TABLE message_reactions
+					DROP CONSTRAINT IF EXISTS message_reactions_chat_id_target_message_id_sender_jid_key;
+				DROP INDEX IF EXISTS message_reactions_chat_id_target_message_id_sender_jid_key;
+				CREATE UNIQUE INDEX IF NOT EXISTS uq_message_reactions_account_chat_target_sender
+					ON message_reactions(account_id, chat_id, target_message_id, sender_jid);
+			END IF;
+		END
+		$reaction_sender_migration$`,
 
 		// Poll options table
 		`CREATE TABLE IF NOT EXISTS poll_options (
@@ -2642,22 +2750,6 @@ func MigrateEventPipelines(db *pgxpool.Pool) error {
 			`, stageID, aid, status)
 		}
 	}
-
-	// Migrate messages unique constraint from (account_id, device_id, message_id) to (chat_id, message_id)
-	// This prevents cross-device duplicates and fixes NULL device_id dedup issues for history sync
-	// Drop old unique constraint (account_id, device_id, message_id) — replaced by (chat_id, message_id)
-	// Try as constraint first (most common), then as standalone index
-	_, _ = db.Exec(ctx, `
-		DO $$ BEGIN
-			IF EXISTS (
-				SELECT 1 FROM pg_constraint WHERE conname = 'messages_account_id_device_id_message_id_key'
-			) THEN
-				ALTER TABLE messages DROP CONSTRAINT messages_account_id_device_id_message_id_key;
-			END IF;
-		END $$
-	`)
-	_, _ = db.Exec(ctx, `DROP INDEX IF EXISTS messages_account_id_device_id_message_id_key`)
-	_, _ = db.Exec(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS messages_chat_id_message_id_key ON messages (chat_id, message_id)`)
 
 	// Per-user Groq API key for Eros AI assistant
 	_, _ = db.Exec(ctx, `ALTER TABLE users ADD COLUMN IF NOT EXISTS groq_api_key TEXT DEFAULT ''`)

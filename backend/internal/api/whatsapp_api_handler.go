@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -111,19 +114,54 @@ func (s *Server) handleWhatsAppCloudVerify(c *fiber.Ctx) error {
 func (s *Server) handleWhatsAppCloudWebhook(c *fiber.Ctx) error {
 	raw := append([]byte(nil), c.Body()...)
 	if len(raw) == 0 {
-		return c.JSON(fiber.Map{"success": true})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "empty webhook payload"})
+	}
+
+	appSecret := ""
+	if s.cfg != nil {
+		appSecret = strings.TrimSpace(s.cfg.WhatsAppCloudAppSecret)
+	}
+	if appSecret == "" {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"error":   "webhook authentication is not configured",
+		})
+	}
+	if !validWhatsAppCloudSignature(appSecret, c.Get("X-Hub-Signature-256"), raw) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false,
+			"error":   "invalid webhook signature",
+		})
 	}
 
 	var payload cloudWebhookPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		log.Printf("[WHATSAPP_API] invalid webhook payload: %v", err)
-		return c.JSON(fiber.Map{"success": true})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "invalid webhook payload"})
+	}
+	if payload.Object != "whatsapp_business_account" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "invalid webhook object"})
 	}
 
 	if err := s.processWhatsAppCloudWebhook(c.Context(), payload); err != nil {
 		log.Printf("[WHATSAPP_API] webhook processing error: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "webhook processing failed"})
 	}
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func validWhatsAppCloudSignature(appSecret, signatureHeader string, payload []byte) bool {
+	const prefix = "sha256="
+	if appSecret == "" || !strings.HasPrefix(signatureHeader, prefix) {
+		return false
+	}
+	provided, err := hex.DecodeString(strings.TrimPrefix(signatureHeader, prefix))
+	if err != nil || len(provided) != sha256.Size {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(appSecret))
+	_, _ = mac.Write(payload)
+	return hmac.Equal(provided, mac.Sum(nil))
 }
 
 func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudWebhookPayload) error {
@@ -142,7 +180,14 @@ func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudW
 			if device != nil {
 				accountID = &device.AccountID
 				deviceID = &device.ID
+			}
+			webhookStatusUpdated := false
+			markWebhookReceiving := func() {
+				if device == nil || webhookStatusUpdated {
+					return
+				}
 				_ = s.repos.WhatsAppAPI.UpdateDeviceWebhookStatus(ctx, device.ID, "receiving")
+				webhookStatusUpdated = true
 			}
 
 			contactNames := map[string]string{}
@@ -155,16 +200,23 @@ func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudW
 					AccountID:     accountID,
 					DeviceID:      deviceID,
 					PhoneNumberID: phoneNumberID,
-					EventID:       fmt.Sprintf("%s:%s:%d", phoneNumberID, change.Field, time.Now().UnixNano()),
+					EventID:       cloudChangeEventID(entry.ID, phoneNumberID, change.Field, changePayload),
 					EventType:     defaultString(change.Field, "change"),
 					Payload:       changePayload,
-					Processed:     device != nil,
 				}
 				if device == nil {
 					event.ErrorMessage = strPtr("Cloud API channel not configured for phone_number_id")
 				}
-				if err := s.repos.WhatsAppAPI.CreateWebhookEvent(ctx, event); err != nil {
+				claimed, err := s.repos.WhatsAppAPI.ClaimWebhookEvent(ctx, event)
+				if err != nil {
 					return err
+				}
+				if claimed {
+					markWebhookReceiving()
+					event.Processed = device != nil
+					if err := s.repos.WhatsAppAPI.CompleteWebhookEvent(ctx, event.ID, event.Processed, event.ErrorMessage); err != nil {
+						return err
+					}
 				}
 			}
 
@@ -173,10 +225,18 @@ func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudW
 					AccountID:     accountID,
 					DeviceID:      deviceID,
 					PhoneNumberID: phoneNumberID,
-					EventID:       defaultString(message.ID, fmt.Sprintf("%s:%s:%s", phoneNumberID, message.From, message.Timestamp)),
+					EventID:       cloudMessageEventID(phoneNumberID, message),
 					EventType:     "message_received",
 					Payload:       changePayload,
 				}
+				claimed, err := s.repos.WhatsAppAPI.ClaimWebhookEvent(ctx, event)
+				if err != nil {
+					return err
+				}
+				if !claimed {
+					continue
+				}
+				markWebhookReceiving()
 				if device == nil {
 					event.ErrorMessage = strPtr("Cloud API channel not configured for phone_number_id")
 				} else if !device.ReceiveMessages {
@@ -187,7 +247,7 @@ func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudW
 				} else {
 					event.Processed = true
 				}
-				if err := s.repos.WhatsAppAPI.CreateWebhookEvent(ctx, event); err != nil {
+				if err := s.repos.WhatsAppAPI.CompleteWebhookEvent(ctx, event.ID, event.Processed, event.ErrorMessage); err != nil {
 					return err
 				}
 			}
@@ -201,21 +261,60 @@ func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudW
 					AccountID:     accountID,
 					DeviceID:      deviceID,
 					PhoneNumberID: phoneNumberID,
-					EventID:       fmt.Sprintf("%s:%s", status.ID, defaultString(status.Status, "status")),
+					EventID:       cloudStatusEventID(phoneNumberID, status),
 					EventType:     eventType,
 					Payload:       changePayload,
-					Processed:     device != nil,
 				}
+				claimed, err := s.repos.WhatsAppAPI.ClaimWebhookEvent(ctx, event)
+				if err != nil {
+					return err
+				}
+				if !claimed {
+					continue
+				}
+				markWebhookReceiving()
+				event.Processed = device != nil
 				if device == nil {
 					event.ErrorMessage = strPtr("Cloud API channel not configured for phone_number_id")
 				}
-				if err := s.repos.WhatsAppAPI.CreateWebhookEvent(ctx, event); err != nil {
+				if err := s.repos.WhatsAppAPI.CompleteWebhookEvent(ctx, event.ID, event.Processed, event.ErrorMessage); err != nil {
 					return err
 				}
 			}
 		}
 	}
 	return nil
+}
+
+func cloudChangeEventID(entryID, phoneNumberID, field string, payload []byte) string {
+	return cloudFallbackEventID("change", entryID, phoneNumberID, field, string(payload))
+}
+
+func cloudMessageEventID(phoneNumberID string, message cloudWebhookMessage) string {
+	if strings.TrimSpace(message.ID) != "" {
+		// Preserve the historical event ID format so pre-upgrade rows continue
+		// deduplicating provider retries after deployment.
+		return strings.TrimSpace(message.ID)
+	}
+	return cloudFallbackEventID("message", phoneNumberID, message.From, message.Timestamp, message.Type)
+}
+
+func cloudStatusEventID(phoneNumberID string, status cloudWebhookStatus) string {
+	if strings.TrimSpace(status.ID) != "" {
+		return fmt.Sprintf("%s:%s", strings.TrimSpace(status.ID), defaultString(status.Status, "status"))
+	}
+	return cloudFallbackEventID("status", phoneNumberID, status.RecipientID, status.Timestamp, status.Status)
+}
+
+func cloudFallbackEventID(kind string, parts ...string) string {
+	hash := sha256.New()
+	for _, part := range parts {
+		_, _ = hash.Write([]byte(strconv.Itoa(len(part))))
+		_, _ = hash.Write([]byte{':'})
+		_, _ = hash.Write([]byte(part))
+		_, _ = hash.Write([]byte{'|'})
+	}
+	return kind + ":" + hex.EncodeToString(hash.Sum(nil))
 }
 
 func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Device, contactName string, message cloudWebhookMessage) error {

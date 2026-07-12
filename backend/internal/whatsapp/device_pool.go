@@ -27,7 +27,6 @@ import (
 	"github.com/naperu/clarin/pkg/config"
 	qrcode "github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -40,6 +39,49 @@ import (
 // strPtr returns a pointer to a string
 func strPtr(s string) *string {
 	return &s
+}
+
+func canonicalReactionSenderJID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	jid, err := types.ParseJID(raw)
+	if err != nil || jid.User == "" {
+		return raw
+	}
+	return jid.ToNonAD().String()
+}
+
+func ownReactionSenderJID(instance *DeviceInstance) string {
+	if instance != nil && instance.Client != nil && instance.Client.Store != nil && instance.Client.Store.ID != nil {
+		return instance.Client.Store.ID.ToNonAD().String()
+	}
+	if instance == nil {
+		return ""
+	}
+	return canonicalReactionSenderJID(instance.JID)
+}
+
+func reactionTargetSenderJID(chat types.JID, targetSenderJID string, targetFromMe bool) (types.JID, error) {
+	if targetFromMe {
+		return types.EmptyJID, nil
+	}
+	if targetSenderJID = strings.TrimSpace(targetSenderJID); targetSenderJID != "" {
+		sender, err := types.ParseJID(targetSenderJID)
+		if err != nil || sender.User == "" {
+			return types.EmptyJID, fmt.Errorf("invalid reaction target sender JID")
+		}
+		return sender.ToNonAD(), nil
+	}
+	if chat.Server == types.GroupServer {
+		return types.EmptyJID, fmt.Errorf("reaction target sender JID is required for group messages")
+	}
+	return chat.ToNonAD(), nil
+}
+
+func reactionEventTimestamp(fallback time.Time, senderTimestampMS int64) time.Time {
+	if senderTimestampMS > 0 {
+		return time.UnixMilli(senderTimestampMS)
+	}
+	return fallback
 }
 
 const (
@@ -335,7 +377,7 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 func (p *DevicePool) handleQRChannel(ctx context.Context, instance *DeviceInstance, qrChan <-chan whatsmeow.QRChannelItem) {
 	for evt := range qrChan {
 		switch evt.Event {
-		case "code":
+		case whatsmeow.QRChannelEventCode:
 			// Generate QR code image as base64
 			qr, err := qrcode.Encode(evt.Code, qrcode.Medium, 256)
 			if err != nil {
@@ -365,9 +407,55 @@ func (p *DevicePool) handleQRChannel(ctx context.Context, instance *DeviceInstan
 			instance.Status = domain.DeviceStatusDisconnected
 			instance.QRCode = ""
 			instance.mu.Unlock()
-			_ = p.repos.Device.UpdateStatus(ctx, instance.ID, domain.DeviceStatusDisconnected)
+			if err := p.repos.Device.UpdateStatus(ctx, instance.ID, domain.DeviceStatusDisconnected); err != nil {
+				log.Printf("[QR] Failed to persist timeout status for device %s: %v", instance.ID, err)
+			}
 			p.hub.BroadcastDeviceStatus(instance.AccountID, instance.ID, domain.DeviceStatusDisconnected, "")
+
+		case whatsmeow.QRChannelEventPasskeyRequest:
+			p.failUnsupportedPairing(ctx, instance, "WhatsApp requested passkey authentication")
+			return
+
+		case whatsmeow.QRChannelEventPasskeyResponse:
+			p.failUnsupportedPairing(ctx, instance, "WhatsApp requested passkey confirmation")
+			return
+
+		case whatsmeow.QRChannelEventError:
+			reason := "WhatsApp pairing failed"
+			if evt.Error != nil {
+				reason = evt.Error.Error()
+			}
+			p.failUnsupportedPairing(ctx, instance, reason)
+			return
+
+		case "err-client-outdated", "err-unexpected-state":
+			p.failUnsupportedPairing(ctx, instance, evt.Event)
+			return
+
+		case "err-scanned-without-multidevice":
+			log.Printf("[QR] Device %s scanned the code without multi-device enabled; waiting for a new scan", instance.ID)
+
+		default:
+			log.Printf("[QR] Ignoring unknown pairing event %q for device %s", evt.Event, instance.ID)
 		}
+	}
+}
+
+// failUnsupportedPairing makes new WhatsMeow pairing requirements fail visibly instead
+// of leaving the device forever in a misleading "connecting" state. Passkey/WebAuthn
+// handoff needs an explicit browser UX before it can be safely supported.
+func (p *DevicePool) failUnsupportedPairing(ctx context.Context, instance *DeviceInstance, reason string) {
+	log.Printf("[QR] Pairing stopped for device %s: %s", instance.ID, reason)
+	instance.mu.Lock()
+	instance.Status = domain.DeviceStatusDisconnected
+	instance.QRCode = ""
+	instance.mu.Unlock()
+	if err := p.repos.Device.UpdateStatus(ctx, instance.ID, domain.DeviceStatusDisconnected); err != nil {
+		log.Printf("[QR] Failed to persist pairing failure for device %s: %v", instance.ID, err)
+	}
+	p.hub.BroadcastDeviceStatus(instance.AccountID, instance.ID, domain.DeviceStatusDisconnected, "")
+	if instance.Client != nil {
+		instance.Client.Disconnect()
 	}
 }
 
@@ -405,6 +493,14 @@ func (p *DevicePool) handleEvent(ctx context.Context, instance *DeviceInstance, 
 		log.Printf("[HistorySync] EVENT RECEIVED: type=%v, conversations=%d, device=%s",
 			evt.Data.GetSyncType(), len(evt.Data.Conversations), instance.ID)
 		p.handleHistorySync(ctx, instance, evt)
+
+	case *events.NotifyAccountReachoutTimelock:
+		endsAt := "unknown"
+		if !evt.TimeEnforcementEnds.IsZero() {
+			endsAt = evt.TimeEnforcementEnds.UTC().Format(time.RFC3339)
+		}
+		log.Printf("[Device %s] WhatsApp reachout timelock: active=%t enforcement_type=%q ends_at=%s",
+			instance.ID, evt.IsActive, evt.EnforcementType, endsAt)
 	}
 }
 
@@ -1906,8 +2002,12 @@ func (p *DevicePool) handleReaction(ctx context.Context, instance *DeviceInstanc
 
 	targetMsgID := key.GetID()
 	emoji := reactionMsg.GetText()
-	senderJID := evt.Info.Sender.ToNonAD().String()
+	eventTimestamp := reactionEventTimestamp(evt.Info.Timestamp, reactionMsg.GetSenderTimestampMS())
+	senderJID := canonicalReactionSenderJID(evt.Info.Sender.String())
 	isFromMe := evt.Info.IsFromMe
+	if isFromMe {
+		senderJID = ownReactionSenderJID(instance)
+	}
 
 	// Resolve chat JID
 	chatJID := evt.Info.Chat.ToNonAD().String()
@@ -1924,10 +2024,17 @@ func (p *DevicePool) handleReaction(ctx context.Context, instance *DeviceInstanc
 		return
 	}
 
+	changed := false
 	if emoji == "" {
 		// Remove reaction
-		_ = p.repos.Reaction.Delete(ctx, chat.ID, targetMsgID, senderJID)
-		log.Printf("[Reaction] %s removed reaction from %s", senderJID, targetMsgID)
+		changed, err = p.repos.Reaction.Delete(ctx, instance.AccountID, chat.ID, targetMsgID, senderJID, eventTimestamp)
+		if err != nil {
+			log.Printf("[Reaction] Failed to remove reaction: %v", err)
+			return
+		}
+		if changed {
+			log.Printf("[Reaction] %s removed reaction from %s", senderJID, targetMsgID)
+		}
 	} else {
 		// Upsert reaction
 		reaction := &domain.MessageReaction{
@@ -1938,13 +2045,19 @@ func (p *DevicePool) handleReaction(ctx context.Context, instance *DeviceInstanc
 			SenderName:      strPtr(evt.Info.PushName),
 			Emoji:           emoji,
 			IsFromMe:        isFromMe,
-			Timestamp:       evt.Info.Timestamp,
+			Timestamp:       eventTimestamp,
 		}
-		if err := p.repos.Reaction.Upsert(ctx, reaction); err != nil {
+		changed, err = p.repos.Reaction.Upsert(ctx, reaction)
+		if err != nil {
 			log.Printf("[Reaction] Failed to save reaction: %v", err)
 			return
 		}
-		log.Printf("[Reaction] %s reacted %s to %s", senderJID, emoji, targetMsgID)
+		if changed {
+			log.Printf("[Reaction] %s reacted %s to %s", senderJID, emoji, targetMsgID)
+		}
+	}
+	if !changed {
+		return
 	}
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
@@ -2621,7 +2734,11 @@ func (p *DevicePool) ForwardMessage(ctx context.Context, deviceID uuid.UUID, to 
 		if originalMsg.Body != nil {
 			body = *originalMsg.Body
 		}
-		return p.SendMediaMessage(ctx, deviceID, to, body, *originalMsg.MediaURL, *originalMsg.MessageType)
+		filename := ""
+		if originalMsg.MediaFilename != nil {
+			filename = *originalMsg.MediaFilename
+		}
+		return p.SendMediaMessageWithFilename(ctx, deviceID, to, body, *originalMsg.MediaURL, *originalMsg.MessageType, filename)
 	}
 
 	body := ""
@@ -2632,7 +2749,7 @@ func (p *DevicePool) ForwardMessage(ctx context.Context, deviceID uuid.UUID, to 
 }
 
 // SendReaction sends a reaction emoji to a message
-func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, targetMessageID, emoji string, targetFromMe bool) error {
+func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, targetMessageID, targetSenderJID, emoji string, targetFromMe bool) error {
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -2652,19 +2769,18 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 		jid = types.NewJID(to, types.DefaultUserServer)
 	}
 
-	msg := &waE2E.Message{
-		ReactionMessage: &waE2E.ReactionMessage{
-			Key: &waCommon.MessageKey{
-				RemoteJID: proto.String(jid.String()),
-				FromMe:    proto.Bool(targetFromMe),
-				ID:        proto.String(targetMessageID),
-			},
-			Text:              proto.String(emoji),
-			SenderTimestampMS: proto.Int64(0),
-		},
+	targetSender, err := reactionTargetSenderJID(jid, targetSenderJID, targetFromMe)
+	if err != nil {
+		return err
 	}
+	msg := instance.Client.BuildReaction(
+		jid,
+		targetSender,
+		types.MessageID(targetMessageID),
+		emoji,
+	)
 
-	_, err := instance.Client.SendMessage(ctx, jid, msg)
+	sendResp, err := instance.Client.SendMessage(ctx, jid, msg)
 	if err != nil {
 		return fmt.Errorf("failed to send reaction: %w", err)
 	}
@@ -2681,9 +2797,11 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 		return err
 	}
 
-	senderJID := instance.JID
+	senderJID := ownReactionSenderJID(instance)
+	eventTimestamp := reactionEventTimestamp(sendResp.Timestamp, msg.GetReactionMessage().GetSenderTimestampMS())
+	changed := false
 	if emoji == "" {
-		_ = p.repos.Reaction.Delete(ctx, chat.ID, targetMessageID, senderJID)
+		changed, err = p.repos.Reaction.Delete(ctx, instance.AccountID, chat.ID, targetMessageID, senderJID, eventTimestamp)
 	} else {
 		reaction := &domain.MessageReaction{
 			AccountID:       instance.AccountID,
@@ -2693,9 +2811,15 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 			SenderName:      strPtr("Me"),
 			Emoji:           emoji,
 			IsFromMe:        true,
-			Timestamp:       time.Now(),
+			Timestamp:       eventTimestamp,
 		}
-		_ = p.repos.Reaction.Upsert(ctx, reaction)
+		changed, err = p.repos.Reaction.Upsert(ctx, reaction)
+	}
+	if err != nil {
+		return fmt.Errorf("reaction sent but failed to persist: %w", err)
+	}
+	if !changed {
+		return nil
 	}
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
@@ -2840,15 +2964,33 @@ func (p *DevicePool) publicToProxyURL(publicURL string) string {
 // PreUploadedMedia contains the WhatsApp upload metadata for reuse across multiple recipients.
 // Upload once, send many — avoids re-uploading the same file per recipient during campaigns.
 type PreUploadedMedia struct {
-	URL           string
-	DirectPath    string
-	MediaKey      []byte
-	FileEncSHA256 []byte
-	FileSHA256    []byte
-	FileLength    uint64
-	Mimetype      string
-	MediaType     string // domain.MessageType*
-	OriginalURL   string // original media URL for proxy URL resolution
+	URL              string
+	DirectPath       string
+	MediaKey         []byte
+	FileEncSHA256    []byte
+	FileSHA256       []byte
+	FileLength       uint64
+	Mimetype         string
+	MediaType        string // domain.MessageType*
+	OriginalURL      string // original media URL for proxy URL resolution
+	OriginalFilename string // user-visible filename for document messages
+}
+
+func mediaDisplayFilename(preferred, rawURL string) string {
+	filename := strings.TrimSpace(preferred)
+	if filename == "" {
+		if parsed, err := url.Parse(rawURL); err == nil {
+			filename = parsed.Path
+		} else {
+			filename = rawURL
+		}
+	}
+	filename = strings.ReplaceAll(filename, `\`, "/")
+	filename = filepath.Base(filename)
+	if filename == "" || filename == "." || filename == "/" {
+		return "documento"
+	}
+	return filename
 }
 
 // UploadMedia downloads a file from storage/URL and uploads it to WhatsApp ONCE.
@@ -2862,67 +3004,9 @@ func (p *DevicePool) UploadMedia(ctx context.Context, deviceID uuid.UUID, mediaU
 		return nil, fmt.Errorf("device not connected: %s", deviceID)
 	}
 
-	// Download media - handle proxy URLs and public URLs
-	var data []byte
-	var mimetype string
-
-	if strings.HasPrefix(mediaURL, "/api/media/file/") {
-		objectKey := strings.TrimPrefix(mediaURL, "/api/media/file/")
-		log.Printf("[UploadMedia] Reading from storage: %s", objectKey)
-		var err2 error
-		data, err2 = p.storage.GetFile(ctx, objectKey)
-		if err2 != nil {
-			return nil, fmt.Errorf("failed to read media from storage: %w", err2)
-		}
-		mimetype = "application/octet-stream"
-		if dotIdx := strings.LastIndex(objectKey, "."); dotIdx >= 0 {
-			ext := strings.ToLower(objectKey[dotIdx:])
-			switch ext {
-			case ".jpg", ".jpeg":
-				mimetype = "image/jpeg"
-			case ".png":
-				mimetype = "image/png"
-			case ".gif":
-				mimetype = "image/gif"
-			case ".webp":
-				mimetype = "image/webp"
-			case ".mp4":
-				mimetype = "video/mp4"
-			case ".webm":
-				mimetype = "video/webm"
-			case ".mp3":
-				mimetype = "audio/mpeg"
-			case ".ogg":
-				mimetype = "audio/ogg"
-			case ".pdf":
-				mimetype = "application/pdf"
-			}
-		}
-	} else {
-		downloadURL := mediaURL
-		if p.cfg.MinioPublicURL != "" && p.cfg.MinioEndpoint != "" {
-			scheme := "http"
-			if p.cfg.MinioUseSSL {
-				scheme = "https"
-			}
-			internalURL := fmt.Sprintf("%s://%s", scheme, p.cfg.MinioEndpoint)
-			downloadURL = strings.Replace(mediaURL, p.cfg.MinioPublicURL, internalURL, 1)
-			log.Printf("[UploadMedia] Converted URL: %s -> %s", mediaURL, downloadURL)
-		}
-		resp, err := http.Get(downloadURL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to download media: Get %q: %w", downloadURL, err)
-		}
-		defer resp.Body.Close()
-		var err2 error
-		data, err2 = io.ReadAll(resp.Body)
-		if err2 != nil {
-			return nil, fmt.Errorf("failed to read media: %w", err2)
-		}
-		mimetype = resp.Header.Get("Content-Type")
-		if mimetype == "" {
-			mimetype = "application/octet-stream"
-		}
+	data, mimetype, err := p.loadMediaForUpload(ctx, instance.AccountID, mediaURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load media: %w", err)
 	}
 
 	// Determine the correct WhatsApp media type for upload
@@ -3012,6 +3096,7 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 
 	// Build message from pre-uploaded metadata
 	var msg *waE2E.Message
+	documentFilename := mediaDisplayFilename(media.OriginalFilename, media.OriginalURL)
 	switch media.MediaType {
 	case domain.MessageTypeImage:
 		msg = &waE2E.Message{
@@ -3053,7 +3138,6 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 			},
 		}
 	case domain.MessageTypeDocument:
-		filename := filepath.Base(media.OriginalURL)
 		msg = &waE2E.Message{
 			DocumentMessage: &waE2E.DocumentMessage{
 				URL:           proto.String(media.URL),
@@ -3063,7 +3147,7 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 				FileEncSHA256: media.FileEncSHA256,
 				FileSHA256:    media.FileSHA256,
 				FileLength:    proto.Uint64(media.FileLength),
-				FileName:      proto.String(filename),
+				FileName:      proto.String(documentFilename),
 				Caption:       proto.String(caption),
 			},
 		}
@@ -3119,6 +3203,9 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 		Status:        strPtr("sent"),
 		Timestamp:     sendResp.Timestamp,
 	}
+	if media.MediaType == domain.MessageTypeDocument {
+		message.MediaFilename = strPtr(documentFilename)
+	}
 
 	if err := p.repos.Message.Create(ctx, message); err != nil {
 		log.Printf("[SendPreUploadedMedia] Failed to save message: %v", err)
@@ -3143,10 +3230,17 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 // SendMediaMessage sends a media message (downloads, uploads, and sends in one call).
 // For bulk sends, prefer UploadMedia + SendPreUploadedMediaMessage to avoid redundant uploads.
 func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType string) (*domain.Message, error) {
+	return p.SendMediaMessageWithFilename(ctx, deviceID, to, caption, mediaURL, mediaType, "")
+}
+
+// SendMediaMessageWithFilename preserves the user-visible filename even though
+// Clarin stores uploads under content-addressed object keys.
+func (p *DevicePool) SendMediaMessageWithFilename(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType, mediaFilename string) (*domain.Message, error) {
 	media, err := p.UploadMedia(ctx, deviceID, mediaURL, mediaType)
 	if err != nil {
 		return nil, err
 	}
+	media.OriginalFilename = mediaDisplayFilename(mediaFilename, mediaURL)
 	return p.SendPreUploadedMediaMessage(ctx, deviceID, to, caption, media)
 }
 

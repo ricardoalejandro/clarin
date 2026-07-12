@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
@@ -688,15 +689,17 @@ func (r *DeviceRepository) GetAll(ctx context.Context) ([]*domain.Device, error)
 }
 
 func (r *DeviceRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
-	_, err := r.db.Exec(ctx, `
-		UPDATE devices SET status = $1, updated_at = NOW() WHERE id = $2
-	`, status, id)
+	query := `UPDATE devices SET status = $1, qr_code = NULL, updated_at = NOW() WHERE id = $2`
+	if status == domain.DeviceStatusConnecting {
+		query = `UPDATE devices SET status = $1, updated_at = NOW() WHERE id = $2`
+	}
+	_, err := r.db.Exec(ctx, query, status, id)
 	return err
 }
 
 func (r *DeviceRepository) UpdateJID(ctx context.Context, id uuid.UUID, jid, phone string) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE devices SET jid = $1, phone = $2, status = $3, last_seen_at = NOW(), updated_at = NOW() WHERE id = $4
+		UPDATE devices SET jid = $1, phone = $2, status = $3, qr_code = NULL, last_seen_at = NOW(), updated_at = NOW() WHERE id = $4
 	`, jid, phone, domain.DeviceStatusConnected, id)
 	return err
 }
@@ -6289,25 +6292,56 @@ func (r *SavedStickerRepository) Delete(ctx context.Context, accountID uuid.UUID
 
 // ReactionRepository handles message reaction data access
 type ReactionRepository struct {
-	db *pgxpool.Pool
+	db reactionDB
 }
 
-func (r *ReactionRepository) Upsert(ctx context.Context, reaction *domain.MessageReaction) error {
-	return r.db.QueryRow(ctx, `
+type reactionDB interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+func (r *ReactionRepository) Upsert(ctx context.Context, reaction *domain.MessageReaction) (bool, error) {
+	err := r.db.QueryRow(ctx, `
 		INSERT INTO message_reactions (account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (chat_id, target_message_id, sender_jid) DO UPDATE SET
-			emoji = EXCLUDED.emoji, sender_name = EXCLUDED.sender_name, timestamp = EXCLUDED.timestamp
+		VALUES ($1, $2, $3,
+			regexp_replace($4::text, '^([0-9]+)(\.[0-9]+)?:[0-9]+@(s\.whatsapp\.net)$', '\1@\3'),
+			$5, $6, $7, $8)
+		ON CONFLICT (account_id, chat_id, target_message_id, sender_jid) DO UPDATE SET
+			emoji = EXCLUDED.emoji,
+			sender_name = EXCLUDED.sender_name,
+			is_from_me = EXCLUDED.is_from_me,
+			timestamp = EXCLUDED.timestamp
+		WHERE EXCLUDED.timestamp >= message_reactions.timestamp
+		  AND (
+			message_reactions.emoji IS DISTINCT FROM EXCLUDED.emoji
+			OR message_reactions.is_from_me IS DISTINCT FROM EXCLUDED.is_from_me
+		  )
 		RETURNING id, created_at
 	`, reaction.AccountID, reaction.ChatID, reaction.TargetMessageID, reaction.SenderJID, reaction.SenderName, reaction.Emoji, reaction.IsFromMe, reaction.Timestamp,
 	).Scan(&reaction.ID, &reaction.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func (r *ReactionRepository) Delete(ctx context.Context, chatID uuid.UUID, targetMessageID, senderJID string) error {
-	_, err := r.db.Exec(ctx, `
-		DELETE FROM message_reactions WHERE chat_id = $1 AND target_message_id = $2 AND sender_jid = $3
-	`, chatID, targetMessageID, senderJID)
-	return err
+func (r *ReactionRepository) Delete(ctx context.Context, accountID, chatID uuid.UUID, targetMessageID, senderJID string, removalTimestamp time.Time) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		DELETE FROM message_reactions
+		WHERE account_id = $1
+		  AND chat_id = $2
+		  AND target_message_id = $3
+		  AND sender_jid = regexp_replace($4::text, '^([0-9]+)(\.[0-9]+)?:[0-9]+@(s\.whatsapp\.net)$', '\1@\3')
+		  AND timestamp <= $5
+	`, accountID, chatID, targetMessageID, senderJID, removalTimestamp)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
 }
 
 func (r *ReactionRepository) GetByChatID(ctx context.Context, chatID uuid.UUID) ([]*domain.MessageReaction, error) {

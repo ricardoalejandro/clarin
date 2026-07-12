@@ -17,6 +17,7 @@ interface WhatsAppTextInputProps {
   className?: string
   rows?: number
   onKeyDown?: (e: React.KeyboardEvent) => void
+  onPasteFiles?: (files: File[]) => void
   disabled?: boolean
   /** Treat as single-line (Enter sends) */
   singleLine?: boolean
@@ -36,6 +37,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   className = '',
   rows = 4,
   onKeyDown,
+  onPasteFiles,
   disabled = false,
   singleLine = false,
 }, ref) {
@@ -91,6 +93,18 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   }, [onChange])
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const itemFiles = Array.from(e.clipboardData.items || [])
+      .filter(item => item.kind === 'file')
+      .map(item => item.getAsFile())
+      .filter((file): file is File => file !== null)
+    const files = itemFiles.length > 0 ? itemFiles : Array.from(e.clipboardData.files || [])
+
+    if (files.length > 0 && onPasteFiles) {
+      e.preventDefault()
+      onPasteFiles(files)
+      return
+    }
+
     e.preventDefault()
     if (!editorRef.current) return
     const pastedText = e.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n')
@@ -121,7 +135,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     const html = formatToHtmlPreview(newText)
     editorRef.current.innerHTML = html || ''
     setCaretOffset(editorRef.current, caretStart + pastedText.length)
-  }, [onChange])
+  }, [onChange, onPasteFiles])
 
   // Show toolbar on text selection
   const checkSelection = useCallback(() => {
@@ -221,6 +235,9 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
       )}
       <div
         ref={editorRef}
+        role="textbox"
+        aria-multiline={!singleLine}
+        aria-label={placeholder}
         contentEditable={!disabled}
         onInput={handleInput}
         onKeyDown={onKeyDown}

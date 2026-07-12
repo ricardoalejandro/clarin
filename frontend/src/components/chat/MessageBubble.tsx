@@ -7,6 +7,7 @@ import { renderFormattedText } from '@/lib/whatsappFormat'
 import { Message, Reaction, PollOption } from '@/types/chat'
 import { splitEmojiSegments, getAppleEmojiUrl } from '@/utils/appleEmoji'
 import dynamic from 'next/dynamic'
+import { dedupeReactions } from '@/utils/chatReactions'
 
 /** Reconstruct WhatsApp-formatted text from DOM nodes (preserves *, _, ~, ` markers on copy) */
 function domToWhatsApp(node: Node): string {
@@ -27,10 +28,10 @@ function domToWhatsApp(node: Node): string {
   }
 }
 
-const EmojiPickerReact = dynamic(() => import('emoji-picker-react'), {
+const EmojiPickerReact = dynamic(() => import('./LocalizedEmojiPicker'), {
   ssr: false,
   loading: () => (
-    <div className="w-[350px] h-[400px] bg-white rounded-xl shadow-xl border border-gray-200 flex items-center justify-center">
+    <div className="w-[min(350px,calc(100vw_-_1rem))] h-[min(400px,calc(100dvh_-_2rem))] bg-white rounded-xl shadow-xl border border-gray-200 flex items-center justify-center">
       <div className="animate-pulse text-gray-400 text-sm">Cargando emojis...</div>
     </div>
   ),
@@ -97,14 +98,14 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
   const handleOpenFullPicker = () => {
     if (plusBtnRef.current) {
       const rect = plusBtnRef.current.getBoundingClientRect()
-      const pickerWidth = 350
-      const pickerHeight = 400
+      const pickerWidth = Math.min(350, window.innerWidth - 16)
+      const pickerHeight = Math.min(400, window.innerHeight - 16)
       let left = message.is_from_me ? rect.right - pickerWidth : rect.left
       let top = rect.top - pickerHeight - 8
       // Clamp to viewport
-      if (top < 8) top = rect.bottom + 8
-      if (left < 8) left = 8
-      if (left + pickerWidth > window.innerWidth - 8) left = window.innerWidth - pickerWidth - 8
+      if (top < 8) top = Math.min(rect.bottom + 8, window.innerHeight - pickerHeight - 8)
+      left = Math.max(8, Math.min(left, window.innerWidth - pickerWidth - 8))
+      top = Math.max(8, top)
       setPickerPos({ top, left })
     }
     setShowFullPicker(true)
@@ -442,7 +443,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
 
     // Group reactions by emoji
     const grouped: Record<string, { emoji: string; count: number; hasOwn: boolean }> = {}
-    for (const r of message.reactions) {
+    for (const r of dedupeReactions(message.reactions)) {
       if (!grouped[r.emoji]) {
         grouped[r.emoji] = { emoji: r.emoji, count: 0, hasOwn: false }
       }
@@ -792,8 +793,8 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
             <EmojiPickerReact
               onEmojiClick={(emojiData: any) => { onReact?.(message, emojiData.emoji); closeAllPickers() }}
               searchPlaceHolder="Buscar una reacción..."
-              width={350}
-              height={400}
+              width="min(350px, calc(100vw - 1rem))"
+              height="min(400px, calc(100dvh - 1rem))"
               skinTonesDisabled
               previewConfig={{ showPreview: false }}
               lazyLoadEmojis

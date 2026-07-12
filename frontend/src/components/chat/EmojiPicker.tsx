@@ -4,10 +4,10 @@ import { useState, useRef, useEffect } from 'react'
 import { Smile } from 'lucide-react'
 import dynamic from 'next/dynamic'
 
-const Picker = dynamic(() => import('emoji-picker-react'), {
+const Picker = dynamic(() => import('./LocalizedEmojiPicker'), {
   ssr: false,
   loading: () => (
-    <div className="w-[350px] h-[400px] bg-white rounded-xl shadow-xl border border-gray-200 flex items-center justify-center">
+    <div className="w-[min(350px,calc(100vw_-_1rem))] h-[min(400px,calc(100dvh_-_6rem))] bg-white rounded-xl shadow-xl border border-gray-200 flex items-center justify-center">
       <div className="animate-pulse text-gray-400 text-sm">Cargando emojis...</div>
     </div>
   ),
@@ -55,12 +55,12 @@ export default function EmojiPicker({ onEmojiSelect, buttonClassName, isOpen: co
       </button>
 
       {isOpen && (
-        <div className="absolute bottom-full mb-2 left-0 z-50">
+        <div className="absolute bottom-full mb-2 left-0 z-50 max-w-[calc(100vw_-_1rem)]">
           <Picker
             onEmojiClick={(emojiData: any) => onEmojiSelect(emojiData.emoji)}
             searchPlaceHolder="Buscar emoji..."
-            width={350}
-            height={400}
+            width="min(350px, calc(100vw - 1rem))"
+            height="min(400px, calc(100dvh - 6rem))"
             skinTonesDisabled
             previewConfig={{ showPreview: false }}
             lazyLoadEmojis
