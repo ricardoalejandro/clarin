@@ -421,7 +421,7 @@ export default function DashboardLayout({
       )}
 
       {/* Sidebar */}
-      <aside className={`
+      <aside data-dashboard-sidebar className={`
         fixed lg:static inset-y-0 left-0 z-40
         ${isCollapsed ? 'lg:w-[68px]' : 'lg:w-60'} w-64
         bg-slate-800/95 backdrop-blur-md border-r border-slate-700/50
@@ -488,6 +488,26 @@ export default function DashboardLayout({
             )
           })}
         </nav>
+
+        {/* Eros launcher stays visible without exposing the mascot while closed. */}
+        <div className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'}`}>
+          <button
+            type="button"
+            onClick={() => setIsErosOpen(true)}
+            aria-label="Abrir Eros"
+            aria-keyshortcuts="Control+I Meta+I"
+            className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2.5 px-3 py-2'} rounded-lg border border-emerald-500/20 bg-emerald-500/10 text-emerald-300 transition-all hover:border-emerald-400/40 hover:bg-emerald-500/15 hover:text-emerald-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60`}
+            title={isCollapsed ? 'Abrir Eros (Ctrl+I)' : undefined}
+          >
+            <Sparkles className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
+            {!isCollapsed && (
+              <>
+                <span className="flex-1 text-left text-[13px] font-semibold">Eros</span>
+                <span className="text-[10px] text-emerald-400/70">Ctrl+I</span>
+              </>
+            )}
+          </button>
+        </div>
 
         {/* Account name / switcher */}
         {accounts.length >= 1 && (
@@ -645,6 +665,14 @@ export default function DashboardLayout({
             </div>
             <span className="font-semibold text-slate-800 text-sm">Clarin</span>
           </div>
+          <button
+            type="button"
+            onClick={() => setIsErosOpen(true)}
+            className="rounded-lg p-2 text-emerald-600 transition-colors hover:bg-emerald-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+            aria-label="Abrir Eros"
+          >
+            <Sparkles className="h-5 w-5" aria-hidden="true" />
+          </button>
         </header>
 
         {/* Page content */}
@@ -654,6 +682,9 @@ export default function DashboardLayout({
           {children}
         </main>
       </div>
+
+      {/* In docked mode Eros is a real flex sibling and the CRM yields space to it. */}
+      <ErosAssistant isOpenProp={isErosOpen} onClose={() => setIsErosOpen(false)} />
 
     </div>
 
@@ -746,8 +777,6 @@ export default function DashboardLayout({
         </div>
       </div>
     )}
-
-    <ErosAssistant isOpenProp={isErosOpen} onClose={() => setIsErosOpen(false)} />
 
     </NotificationProvider>
   )

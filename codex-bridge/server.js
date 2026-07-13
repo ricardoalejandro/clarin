@@ -9,10 +9,14 @@ const PORT = Number(process.env.PORT || 8787)
 const CODEX_HOME = process.env.CODEX_HOME || '/var/lib/codex'
 const BRIDGE_TOKEN = process.env.EROS_CODEX_BRIDGE_TOKEN || ''
 const MCP_BASE_URL = trimRight(process.env.EROS_MCP_BASE_URL || 'http://clarin-backend:8081/mcp', '/')
+const EROS_MCP_BASE_URL = MCP_BASE_URL.endsWith('/mcp/eros')
+  ? MCP_BASE_URL
+  : MCP_BASE_URL.endsWith('/mcp') ? `${MCP_BASE_URL}/eros` : `${MCP_BASE_URL}/mcp/eros`
 const MCP_TOKEN = process.env.EROS_MCP_ACCESS_TOKEN || ''
 const CODEX_MODEL = process.env.EROS_CODEX_MODEL || ''
 const CODEX_REASONING_EFFORT = process.env.EROS_CODEX_REASONING_EFFORT || ''
-const REQUEST_TIMEOUT_MS = Number(process.env.EROS_CODEX_REQUEST_TIMEOUT_MS || 120000)
+const REQUEST_TIMEOUT_MS = Number(process.env.EROS_CODEX_REQUEST_TIMEOUT_MS || 180000)
+const TURN_PERSISTENCE_GRACE_MS = 10000
 const DEVICE_LOGIN_TTL_MS = Number(process.env.EROS_DEVICE_LOGIN_TTL_MS || 15 * 60 * 1000)
 const AUTH_VALIDATION_INTERVAL_MS = Number(process.env.EROS_AUTH_VALIDATION_INTERVAL_MS || 5 * 60 * 1000)
 const CODEX_BIN = process.env.CODEX_BIN || 'codex'
@@ -79,7 +83,7 @@ async function prepareCodexHome() {
     'default_tools_approval_mode = "approve"',
     '',
     `[mcp_servers.${MCP_SERVER_NAME}]`,
-    `url = ${tomlString(MCP_BASE_URL)}`,
+    `url = ${tomlString(EROS_MCP_BASE_URL)}`,
     'bearer_token_env_var = "EROS_MCP_ACCESS_TOKEN"',
     'enabled = true',
     'required = true',
@@ -212,6 +216,7 @@ class CodexAppServer {
     this.nextId = 1
     this.pending = new Map()
     this.turns = new Map()
+    this.recentlyStartedTurns = new Map()
     this.stderrTail = []
     this.deviceLogin = emptyDeviceLoginState()
     this.deviceLoginPromise = null
@@ -247,6 +252,7 @@ class CodexAppServer {
       for (const active of this.turns.values()) active.reject(err)
       this.pending.clear()
       this.turns.clear()
+      this.recentlyStartedTurns.clear()
     })
     child.on('error', err => {
       if (this.proc !== child) return
@@ -619,16 +625,16 @@ class CodexAppServer {
     return this.request('mcpServerStatus/list', { limit: 20, detail: 'toolsAndAuthOnly' }, 20000)
   }
 
-  async chat(payload) {
-    return this.chatWithRecovery(payload)
+  async chat(payload, signal) {
+    return this.chatWithRecovery(payload, signal)
   }
 
-  async chatWithRecovery(payload) {
+  async chatWithRecovery(payload, signal) {
     let lastErr = null
     let retryPayload = payload
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const result = await this.chatOnce(retryPayload)
+        const result = await this.chatOnce(retryPayload, signal)
         result.metadata = {
           ...(result.metadata || {}),
           attempts: attempt + 1,
@@ -641,6 +647,7 @@ class CodexAppServer {
         if (isRecoverableToolAuthError(err)) {
           console.warn(`[eros] recovering Codex bridge after tool auth/isolation issue: ${redactError(err)}`)
           retryPayload = { ...payload, codex_thread_id: '' }
+          if (this.turns.size > 0) throw err
           await this.restart({ purgeApps: true })
           continue
         }
@@ -664,7 +671,18 @@ class CodexAppServer {
     throw lastErr
   }
 
-  async chatOnce(payload) {
+  async chatOnce(payload, signal) {
+    const started = await this.startChatTurn(payload)
+    const turn = await this.waitForTurn(
+      started.codex_thread_id,
+      started.codex_turn_id,
+      REQUEST_TIMEOUT_MS,
+      signal
+    )
+    return this.completedChatResponse(turn, started)
+  }
+
+  async startChatTurn(payload) {
     const requestStartedAt = Date.now()
     await this.ensureStarted()
     const account = await this.recoverManagedAuth()
@@ -675,7 +693,7 @@ class CodexAppServer {
       })
     }
     const requestedMcp = trimRight(payload.mcp_base_url || '', '/')
-    if (requestedMcp && requestedMcp !== MCP_BASE_URL) {
+    if (requestedMcp && requestedMcp !== MCP_BASE_URL && requestedMcp !== EROS_MCP_BASE_URL) {
       throw new Error('bridge MCP URL does not match configured EROS_MCP_BASE_URL')
     }
     const codexModel = effectiveCodexModel(payload.codex_model)
@@ -699,7 +717,7 @@ class CodexAppServer {
 
     const inputText = buildTurnInput(payload, !resumed)
     const turnStartedAt = Date.now()
-    const startedTurn = await this.request('turn/start', {
+    const turnParams = {
       threadId,
       input: [{ type: 'text', text: inputText, text_elements: [] }],
       approvalPolicy: 'never',
@@ -707,18 +725,151 @@ class CodexAppServer {
       sandboxPolicy: { type: 'readOnly', networkAccess: true },
       ...(codexModel ? { model: codexModel } : {}),
       ...(reasoningEffort ? { effort: reasoningEffort } : {})
-    }, 30000)
+    }
+    let appliedReasoningEffort = reasoningEffort
+    let startedTurn
+    try {
+      startedTurn = await this.request('turn/start', turnParams, 30000)
+    } catch (err) {
+      if (!reasoningEffort) throw err
+      console.warn(`[eros] selected model rejected effort ${reasoningEffort}; retrying the same model with its default effort`)
+      const { effort: _unsupportedEffort, ...compatibleTurnParams } = turnParams
+      startedTurn = await this.request('turn/start', compatibleTurnParams, 30000)
+      appliedReasoningEffort = ''
+    }
     const turnId = startedTurn.turn.id
-    const turn = await this.waitForTurn(turnId, REQUEST_TIMEOUT_MS)
+    this.recentlyStartedTurns.set(turnId, Date.now())
+    const metadata = {
+      mcp_server: MCP_SERVER_NAME,
+      model: codexModel,
+      reasoning_effort: appliedReasoningEffort,
+	  requested_reasoning_effort: reasoningEffort || null,
+	  reasoning_fallback: Boolean(reasoningEffort && !appliedReasoningEffort),
+      auth_mode: account.auth_mode || null
+    }
+    return {
+      success: true,
+      codex_thread_id: threadId,
+      codex_turn_id: turnId,
+      status: startedTurn.turn.status || 'inProgress',
+      request_started_at_ms: requestStartedAt,
+      turn_started_at_ms: turnStartedAt,
+      metadata
+    }
+  }
+
+  async readPersistedTurn(threadId, turnId) {
+    await this.ensureStarted()
+    const result = await this.request('thread/read', { threadId, includeTurns: true }, 30000)
+    const thread = result?.thread
+    const turn = Array.isArray(thread?.turns)
+      ? thread.turns.find(candidate => candidate?.id === turnId)
+      : null
+    if (!thread || thread.id !== threadId) {
+      throw new Error('Codex returned a different thread while reconciling the turn')
+    }
+    if (!turn) {
+      throw new Error('Codex turn was not found in persisted thread history')
+    }
+    const active = this.turns.get(turnId)
+    return active ? hydrateCompletedTurn(turn, active) : turn
+  }
+
+  async readChatTurn(threadId, turnId) {
+    let turn
+    try {
+      turn = await this.readPersistedTurn(threadId, turnId)
+    } catch (err) {
+      const message = String(err?.message || err || '').toLowerCase()
+      const startedAt = this.recentlyStartedTurns.get(turnId)
+      const withinPersistenceGrace = Number.isFinite(startedAt) && Date.now() - startedAt <= TURN_PERSISTENCE_GRACE_MS
+      if (withinPersistenceGrace && (message.includes('turn was not found') || message.includes('thread not found'))) {
+        // turn/start may return a locator a few milliseconds before thread/read
+        // exposes it. This is a normal persistence lag, not a terminal failure.
+        return {
+          success: true,
+          codex_thread_id: threadId,
+          codex_turn_id: turnId,
+          status: 'inProgress'
+        }
+      }
+      throw err
+    }
+    const status = turn.status || 'inProgress'
+    if (status === 'inProgress') {
+      return {
+        success: true,
+        codex_thread_id: threadId,
+        codex_turn_id: turnId,
+        status
+      }
+    }
+    this.recentlyStartedTurns.delete(turnId)
+    if (status !== 'completed') {
+      return {
+        success: false,
+        codex_thread_id: threadId,
+        codex_turn_id: turnId,
+        status,
+        error: status === 'failed'
+          ? `Codex turn failed: ${summarizeTurnError(turn)}`
+          : 'Codex turn was interrupted'
+      }
+    }
+    try {
+      return this.completedChatResponse(turn, {
+        codex_thread_id: threadId,
+        codex_turn_id: turnId,
+        metadata: {
+          mcp_server: MCP_SERVER_NAME,
+          model: CODEX_MODEL || null,
+          reasoning_effort: CODEX_REASONING_EFFORT || null
+        }
+      })
+    } catch (err) {
+      return {
+        success: false,
+        codex_thread_id: threadId,
+        codex_turn_id: turnId,
+        status: 'failed',
+        error: redactError(err),
+        tool_calls: err instanceof ToolExecutionError ? err.toolCalls : []
+      }
+    }
+  }
+
+  async interruptChatTurn(threadId, turnId) {
+    await this.ensureStarted()
+    await this.request('turn/interrupt', { threadId, turnId }, 10000)
+    this.recentlyStartedTurns.delete(turnId)
+    return {
+      success: true,
+      codex_thread_id: threadId,
+      codex_turn_id: turnId,
+      status: 'interrupted'
+    }
+  }
+
+  completedChatResponse(turn, started = {}) {
     if (turn.status === 'failed') {
       throw new Error(`Codex turn failed: ${summarizeTurnError(turn)}`)
+    }
+    if (turn.status === 'interrupted') {
+      throw new Error('Codex turn was interrupted')
     }
     const response = extractAssistantText(turn)
     const toolCalls = extractMcpTools(turn)
     const fileExports = extractErosFileExports(turn)
+    const clarification = extractErosClarification(turn)
     const externalCalls = toolCalls.filter(call => call.server && call.server !== MCP_SERVER_NAME)
     if (externalCalls.length > 0) {
       throw new RecoverableToolAuthError(`Codex attempted external MCP server(s): ${externalCalls.map(call => call.server).join(',')}`)
+    }
+    const dataCalls = toolCalls.filter(call => !['request_eros_clarification', 'prepare_file_export', 'render_file_export'].includes(call.name))
+    if (dataCalls.length > 0 && dataCalls.every(call => ['failed', 'error'].includes(String(call.status || '').toLowerCase()))) {
+	  const summary = dataCalls.map(call => `${call.name}:${call.error_code || call.status || 'failed'}`).join(', ')
+	  console.warn(`[eros] all data tools failed: ${summary}`)
+	  throw new ToolExecutionError(`Todas las herramientas de datos de Eros fallaron (${summary})`, dataCalls)
     }
     if (!response) {
       console.warn(`[eros] Codex completed without assistant response: ${summarizeTurnForLog(turn)}`)
@@ -727,20 +878,22 @@ class CodexAppServer {
     if (looksLikeReauthenticationResponse(response)) {
       throw new RecoverableToolAuthError('Codex returned a tool reauthentication response')
     }
+    const requestStartedAt = Number(started.request_started_at_ms || 0)
+    const turnStartedAt = Number(started.turn_started_at_ms || 0)
+    const persistedDuration = Number(turn.durationMs || 0)
     return {
       success: true,
       response,
-      codex_thread_id: threadId,
+      codex_thread_id: started.codex_thread_id || '',
+      codex_turn_id: started.codex_turn_id || turn.id,
       status: turn.status || 'completed',
       tool_calls: toolCalls,
       file_exports: fileExports,
+      clarification,
       metadata: {
-        mcp_server: MCP_SERVER_NAME,
-        model: codexModel,
-        reasoning_effort: reasoningEffort,
-        duration_ms: Date.now() - requestStartedAt,
-        turn_duration_ms: Date.now() - turnStartedAt,
-        auth_mode: account.auth_mode || null
+        ...(started.metadata || {}),
+        duration_ms: requestStartedAt > 0 ? Date.now() - requestStartedAt : persistedDuration,
+        turn_duration_ms: turnStartedAt > 0 ? Date.now() - turnStartedAt : persistedDuration
       }
     }
   }
@@ -781,6 +934,7 @@ class CodexAppServer {
     this.ready = null
     this.pending.clear()
     this.turns.clear()
+    this.recentlyStartedTurns.clear()
     if (options.purgeApps) {
       prepared = false
       await purgeCodexAppsCache()
@@ -814,23 +968,60 @@ class CodexAppServer {
     }
   }
 
-  waitForTurn(turnId, timeoutMs) {
+  waitForTurn(threadId, turnId, timeoutMs, signal) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let settled = false
+      const interrupt = async reason => {
+        if (settled) return
+        settled = true
         this.turns.delete(turnId)
-        reject(new Error('Codex turn timed out'))
-      }, timeoutMs)
+        try {
+          await this.request('turn/interrupt', { threadId, turnId }, 10000)
+        } catch (err) {
+          console.warn(`[eros] could not interrupt turn ${turnId}: ${redactError(err)}`)
+        }
+        reject(reason)
+      }
+      const timer = setTimeout(() => interrupt(new Error('Codex turn timed out')), timeoutMs)
+      const onAbort = () => {
+        clearTimeout(timer)
+        void interrupt(new Error('Codex turn cancelled'))
+      }
+      if (signal?.aborted) {
+        onAbort()
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
       this.turns.set(turnId, {
         items: [],
         deltas: [],
         resolve: turn => {
+		  if (settled) return
+		  settled = true
           clearTimeout(timer)
+		  signal?.removeEventListener('abort', onAbort)
           resolve(turn)
         },
         reject: err => {
+		  if (settled) return
+		  settled = true
           clearTimeout(timer)
+		  signal?.removeEventListener('abort', onAbort)
           reject(err)
         }
+      })
+      // A very short turn may complete before the notification listener is
+      // registered. Reconcile immediately from persisted history to close that
+      // race and use the same mechanism as durable backend recovery.
+      void this.readPersistedTurn(threadId, turnId).then(turn => {
+        if (!['completed', 'failed', 'interrupted'].includes(turn.status)) return
+        const active = this.turns.get(turnId)
+        if (!active) return
+        this.turns.delete(turnId)
+        active.resolve(turn)
+      }).catch(() => {
+        // The turn may not have reached rollout history yet; notifications will
+        // continue driving the synchronous compatibility route.
       })
     })
   }
@@ -871,6 +1062,14 @@ class RecoverableToolAuthError extends Error {
   constructor(message) {
     super(message)
     this.name = 'RecoverableToolAuthError'
+  }
+}
+
+class ToolExecutionError extends Error {
+  constructor(message, toolCalls) {
+    super(message)
+    this.name = 'ToolExecutionError'
+    this.toolCalls = Array.isArray(toolCalls) ? toolCalls : []
   }
 }
 
@@ -930,6 +1129,7 @@ function effectiveReasoningEffort(value) {
 function buildInstructions(payload) {
   const accountID = String(payload.account_id || '')
   const global = String(payload.global_instructions || '').trim()
+  const erosContext = String(payload.eros_context || '').trim()
   return {
     base: [
       'Eres Eros, el asistente operativo de Clarin.',
@@ -940,6 +1140,8 @@ function buildInstructions(payload) {
       `Usa exclusivamente el servidor MCP "${MCP_SERVER_NAME}" para consultar datos de Clarin.`,
       'No uses apps, conectores ni tools externas de Codex como codex_apps, Google Calendar, Gmail, Drive o similares.',
       `Para toda herramienta MCP que acepte cuenta, usa account_id="${accountID}".`,
+      erosContext ? `Para TODA herramienta MCP incluye eros_context exactamente como sigue: ${erosContext}` : '',
+      erosContext ? 'El eros_context es una credencial efímera privada: nunca la menciones, copies, resumas ni incluyas en tu respuesta final.' : '',
       'Nunca consultes ni infieras datos de otra cuenta/tenant.',
       'No ejecutes shell, no leas ni escribas archivos, no modifiques el repositorio y no uses herramientas locales.',
       'Nunca pidas al usuario reautenticar, revincular o reconectar una cuenta externa; si una tool falla por autenticacion, tratalo como error interno transitorio.',
@@ -948,14 +1150,51 @@ function buildInstructions(payload) {
       'No generes base64, no inventes URLs publicas y no digas que se guardo en servidor.',
       'Si una herramienta no existe en MCP, explica la limitacion y sugiere crear una herramienta MCP nueva.',
       'Cuando MCP devuelva datos estructurados, resume y usa tablas compactas si ayuda.'
-    ].join('\n'),
+	  ,'Si el usuario se refiere a "esa lista", "los anteriores" o pide añadir campos a un resultado previo, reutiliza el result_set correspondiente con reuse_eros_result_set; no repitas los filtros.'
+	  ,'Si el usuario cambia condiciones, fechas, estados o alcance, vuelve a consultar con los filtros actualizados.'
+	  ,'Si dos interpretaciones plausibles cambiarían materialmente el resultado, llama request_eros_clarification con 2 o 3 alternativas. No preguntes cuando exista una interpretación clara y reversible.'
+    ].filter(Boolean).join('\n'),
     developer: [
       global ? `Instrucciones globales configuradas por Admin:\n${global}` : '',
       `Contexto fijo: account_id=${accountID}, user_id=${payload.user_id || ''}, conversation_id=${payload.conversation_id || ''}.`,
       payload.current_page ? `Pagina actual del usuario: ${payload.current_page}.` : '',
+	  payload.result_memory ? `Memoria estructurada reutilizable (no contiene datos sensibles):\n${JSON.stringify(payload.result_memory)}` : '',
       `Prioridad de seguridad: aislamiento por account_id, no shell, no filesystem, no datos fuera del MCP "${MCP_SERVER_NAME}".`
     ].filter(Boolean).join('\n\n')
   }
+}
+
+function extractErosClarification(turn) {
+  const items = Array.isArray(turn?.items) ? turn.items : []
+  for (const item of [...items].reverse()) {
+    if (item?.type !== 'mcpToolCall' || item.tool !== 'request_eros_clarification' || String(item.status || '').toLowerCase() === 'failed') continue
+    for (const candidate of findAllJSONObjects(item)) {
+      if (candidate?.eros_clarification !== true || !Array.isArray(candidate.options)) continue
+      const options = candidate.options.slice(0, 3).map(option => ({
+        id: safeShortText(option?.id),
+        label: String(option?.label || '').trim().slice(0, 100),
+        description: String(option?.description || '').trim().slice(0, 240)
+      })).filter(option => option.id && option.label && option.description)
+      if (options.length >= 2) return {
+        question: String(candidate.question || '').trim().slice(0, 500),
+        context: String(candidate.context || '').trim().slice(0, 500),
+        options,
+        allow_custom: true
+      }
+    }
+  }
+  return null
+}
+
+function findAllJSONObjects(value, depth = 0) {
+  if (depth > 7 || value == null) return []
+  if (typeof value === 'string') {
+    const text = value.trim(); if (!text || text.length > 1000000) return []
+    try { return findAllJSONObjects(JSON.parse(text), depth + 1) } catch { return [] }
+  }
+  if (Array.isArray(value)) return value.flatMap(item => findAllJSONObjects(item, depth + 1))
+  if (typeof value === 'object') return [value, ...Object.values(value).flatMap(child => findAllJSONObjects(child, depth + 1))]
+  return []
 }
 
 function buildTurnInput(payload, includeHistory) {
@@ -989,8 +1228,19 @@ function extractMcpTools(turn) {
       name: item.tool,
       status: item.status,
       account_id: getAccountID(item.arguments),
-      server: item.server
+	  server: item.server,
+	  error_code: extractSafeToolErrorCode(item)
     }))
+}
+
+function extractSafeToolErrorCode(item) {
+  for (const candidate of findAllJSONObjects(item)) {
+	for (const key of ['error_code', 'code', 'errorCode']) {
+	  const value = candidate?.[key]
+	  if (typeof value === 'string' && /^[A-Z0-9_.-]{2,80}$/i.test(value.trim())) return value.trim()
+	}
+  }
+  return ''
 }
 
 function extractErosFileExports(turn) {
@@ -1197,13 +1447,48 @@ const server = createServer(async (req, res) => {
       const body = await health()
       return sendJSON(res, body.ok ? 200 : 503, { success: body.ok, ...body })
     }
+    if (req.url === '/turn/start' && req.method === 'POST') {
+      if (!hasBridgeAccess(req)) return sendJSON(res, 401, { success: false, error: 'unauthorized' })
+      const body = await readJSON(req)
+      if (!body.account_id || !body.user_id || !body.conversation_id || !body.message) {
+        return sendJSON(res, 400, { success: false, error: 'missing required Eros bridge fields' })
+      }
+      const result = await app.startChatTurn(body)
+      return sendJSON(res, 202, result)
+    }
+    if (req.url === '/turn/read' && req.method === 'POST') {
+      if (!hasBridgeAccess(req)) return sendJSON(res, 401, { success: false, error: 'unauthorized' })
+      const body = await readJSON(req)
+      const threadId = String(body.codex_thread_id || '').trim()
+      const turnId = String(body.codex_turn_id || '').trim()
+      if (!threadId || !turnId) {
+        return sendJSON(res, 400, { success: false, error: 'missing Codex thread or turn id' })
+      }
+      return sendJSON(res, 200, await app.readChatTurn(threadId, turnId))
+    }
+    if (req.url === '/turn/interrupt' && req.method === 'POST') {
+      if (!hasBridgeAccess(req)) return sendJSON(res, 401, { success: false, error: 'unauthorized' })
+      const body = await readJSON(req)
+      const threadId = String(body.codex_thread_id || '').trim()
+      const turnId = String(body.codex_turn_id || '').trim()
+      if (!threadId || !turnId) {
+        return sendJSON(res, 400, { success: false, error: 'missing Codex thread or turn id' })
+      }
+      return sendJSON(res, 200, await app.interruptChatTurn(threadId, turnId))
+    }
     if (req.url === '/chat' && req.method === 'POST') {
       if (!hasBridgeAccess(req)) return sendJSON(res, 401, { success: false, error: 'unauthorized' })
       const body = await readJSON(req)
       if (!body.account_id || !body.user_id || !body.conversation_id || !body.message) {
         return sendJSON(res, 400, { success: false, error: 'missing required Eros bridge fields' })
       }
-      const result = await app.chat(body)
+      const controller = new AbortController()
+      const abortOnDisconnect = () => {
+        if (!res.writableEnded) controller.abort()
+      }
+      res.once('close', abortOnDisconnect)
+      const result = await app.chat(body, controller.signal)
+      res.removeListener('close', abortOnDisconnect)
       return sendJSON(res, 200, result)
     }
     if (req.url === '/auth/status' && req.method === 'GET') {

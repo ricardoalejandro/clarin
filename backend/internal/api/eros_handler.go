@@ -16,6 +16,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/eroscontext"
+	"github.com/naperu/clarin/internal/service"
 )
 
 type erosBridgeChatRequest struct {
@@ -31,17 +33,26 @@ type erosBridgeChatRequest struct {
 	GlobalInstructions string          `json:"global_instructions,omitempty"`
 	MCPBaseURL         string          `json:"mcp_base_url,omitempty"`
 	AuthMode           string          `json:"auth_mode,omitempty"`
+	ErosContext        string          `json:"eros_context,omitempty"`
+	ResultMemory       any             `json:"result_memory,omitempty"`
 }
 
 type erosBridgeChatResponse struct {
 	Success       bool                 `json:"success"`
 	Response      string               `json:"response"`
 	CodexThreadID string               `json:"codex_thread_id"`
+	CodexTurnID   string               `json:"codex_turn_id,omitempty"`
 	Status        string               `json:"status"`
 	Error         string               `json:"error"`
 	ToolCalls     []erosToolTrace      `json:"tool_calls,omitempty"`
 	Metadata      json.RawMessage      `json:"metadata,omitempty"`
 	FileExports   []erosFileExportHint `json:"file_exports,omitempty"`
+	Clarification json.RawMessage      `json:"clarification,omitempty"`
+}
+
+type erosBridgeTurnLocator struct {
+	CodexThreadID string `json:"codex_thread_id"`
+	CodexTurnID   string `json:"codex_turn_id"`
 }
 
 type erosToolTrace struct {
@@ -177,7 +188,7 @@ func (s *Server) erosStatusPayload(ctx context.Context, userID uuid.UUID) (fiber
 		"codex_model":                   settings.CodexModel,
 		"default_reasoning_effort":      settings.DefaultReasoningEffort,
 		"allowed_reasoning_efforts":     settings.AllowedReasoningEfforts,
-		"allow_user_reasoning_override": settings.AllowUserReasoningOverride,
+		"allow_user_reasoning_override": false,
 		"bridge_configured":             bridgeConfigured,
 		"credential_configured":         s.erosCredentialConfigured(),
 		"mcp_configured":                settings.MCPBaseURL != "",
@@ -262,7 +273,23 @@ func (s *Server) handleErosChat(c *fiber.Ctx) error {
 		history = history[len(history)-max:]
 	}
 
-	reasoningEffort := effectiveErosReasoningEffort(req.ReasoningEffort, settings)
+	reasoningEffort, _ := automaticErosReasoning(req.Message, "chat", "", settings)
+	permissions := []string{domain.PermAll}
+	if claims, ok := c.Locals("claims").(*service.JWTClaims); ok {
+		permissions = claimsPermissions(claims)
+	}
+	legacyGrantID := uuid.New()
+	legacyGrantExpiresAt := time.Now().UTC().Add(10 * time.Minute)
+	if _, contextErr := s.repos.DB().Exec(c.Context(), `INSERT INTO eros_context_grants (id,account_id,user_id,expires_at) VALUES ($1,$2,$3,$4)`, legacyGrantID, accountID, userID, legacyGrantExpiresAt); contextErr != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "could_not_bind_eros_context"})
+	}
+	defer func() {
+		_, _ = s.repos.DB().Exec(context.Background(), `UPDATE eros_context_grants SET revoked_at=COALESCE(revoked_at,NOW()) WHERE id=$1`, legacyGrantID)
+	}()
+	erosContextToken, contextErr := eroscontext.Sign(s.cfg.JWTSecret, legacyGrantID, accountID, userID, permissions, true, time.Until(legacyGrantExpiresAt))
+	if contextErr != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "could_not_bind_eros_context"})
+	}
 	bridgeStart := time.Now()
 	bridgeResp, err := s.callErosBridge(c.Context(), settings, erosBridgeChatRequest{
 		AccountID:          accountID.String(),
@@ -277,6 +304,7 @@ func (s *Server) handleErosChat(c *fiber.Ctx) error {
 		GlobalInstructions: settings.GlobalInstructions,
 		MCPBaseURL:         settings.MCPBaseURL,
 		AuthMode:           settings.AuthMode,
+		ErosContext:        erosContextToken,
 	})
 	bridgeDurationMS := time.Since(bridgeStart).Milliseconds()
 	if err != nil {
@@ -309,6 +337,7 @@ func (s *Server) handleErosChat(c *fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusBadGateway).JSON(resp)
 	}
+	bridgeResp.Response = strings.ReplaceAll(bridgeResp.Response, erosContextToken, "[contexto protegido]")
 
 	response := displayErosFileExportResponse(strings.TrimSpace(bridgeResp.Response), bridgeResp.FileExports)
 	metadata, codexModel, savedReasoningEffort := buildErosExecutionSnapshot(
@@ -462,6 +491,8 @@ func buildErosExecutionSnapshot(raw json.RawMessage, fallbackModel, fallbackEffo
 		"mcp_server",
 		"model",
 		"reasoning_effort",
+		"requested_reasoning_effort",
+		"reasoning_fallback",
 		"duration_ms",
 		"turn_duration_ms",
 		"codex_turn_duration_ms",
@@ -548,23 +579,53 @@ func (s *Server) resolveErosConversation(ctx context.Context, accountID, userID 
 }
 
 func (s *Server) callErosBridge(ctx context.Context, settings *domain.ErosSettings, payload erosBridgeChatRequest) (*erosBridgeChatResponse, error) {
+	var bridgeResp erosBridgeChatResponse
+	if err := s.callErosBridgeEndpoint(ctx, settings, http.MethodPost, "/chat", payload, &bridgeResp, s.cfg.ErosBridgeTimeout); err != nil {
+		return nil, err
+	}
+	return &bridgeResp, nil
+}
+
+func (s *Server) startErosBridgeTurn(ctx context.Context, settings *domain.ErosSettings, payload erosBridgeChatRequest) (*erosBridgeChatResponse, error) {
+	var bridgeResp erosBridgeChatResponse
+	if err := s.callErosBridgeEndpoint(ctx, settings, http.MethodPost, "/turn/start", payload, &bridgeResp, 45*time.Second); err != nil {
+		return nil, err
+	}
+	return &bridgeResp, nil
+}
+
+func (s *Server) readErosBridgeTurn(ctx context.Context, settings *domain.ErosSettings, threadID, turnID string) (*erosBridgeChatResponse, error) {
+	var bridgeResp erosBridgeChatResponse
+	payload := erosBridgeTurnLocator{CodexThreadID: threadID, CodexTurnID: turnID}
+	if err := s.callErosBridgeEndpoint(ctx, settings, http.MethodPost, "/turn/read", payload, &bridgeResp, 40*time.Second); err != nil {
+		return nil, err
+	}
+	return &bridgeResp, nil
+}
+
+func (s *Server) interruptErosBridgeTurn(ctx context.Context, settings *domain.ErosSettings, threadID, turnID string) error {
+	var bridgeResp erosBridgeChatResponse
+	payload := erosBridgeTurnLocator{CodexThreadID: threadID, CodexTurnID: turnID}
+	return s.callErosBridgeEndpoint(ctx, settings, http.MethodPost, "/turn/interrupt", payload, &bridgeResp, 15*time.Second)
+}
+
+func (s *Server) callErosBridgeEndpoint(ctx context.Context, settings *domain.ErosSettings, method, endpoint string, payload, output any, timeout time.Duration) error {
 	if settings.BridgeURL == "" {
-		return nil, fmt.Errorf("bridge url is empty")
+		return fmt.Errorf("bridge url is empty")
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshal bridge payload: %w", err)
+		return fmt.Errorf("marshal bridge payload: %w", err)
 	}
-	timeout := s.cfg.ErosBridgeTimeout
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
 	httpCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(httpCtx, http.MethodPost, settings.BridgeURL+"/chat", bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(httpCtx, method, strings.TrimRight(settings.BridgeURL, "/")+endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("create bridge request: %w", err)
+		return fmt.Errorf("create bridge request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Clarin-Eros-Bridge", "codex")
@@ -574,7 +635,7 @@ func (s *Server) callErosBridge(ctx context.Context, settings *domain.ErosSettin
 
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("call bridge: %w", err)
+		return fmt.Errorf("call bridge: %w", err)
 	}
 	defer resp.Body.Close()
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
@@ -590,14 +651,12 @@ func (s *Server) callErosBridge(ctx context.Context, settings *domain.ErosSettin
 				bridgeErr.Detail = strings.TrimSpace(errBody.Detail)
 			}
 		}
-		return nil, bridgeErr
+		return bridgeErr
 	}
-
-	var bridgeResp erosBridgeChatResponse
-	if err := json.Unmarshal(respBytes, &bridgeResp); err != nil {
-		return nil, fmt.Errorf("parse bridge response: %w", err)
+	if err := json.Unmarshal(respBytes, output); err != nil {
+		return fmt.Errorf("parse bridge response: %w", err)
 	}
-	return &bridgeResp, nil
+	return nil
 }
 
 func (s *Server) handleErosLegacyConfig(c *fiber.Ctx) error {

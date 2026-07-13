@@ -57,6 +57,20 @@ async function waitForConnected(baseURL, timeoutMs = 4000) {
   throw new Error('device login did not complete in time')
 }
 
+async function waitForTurn(baseURL, headers, locator, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const result = await requestJSON(baseURL, '/turn/read', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(locator)
+    })
+    if (result.body.status !== 'inProgress') return result
+    await new Promise(resolve => setTimeout(resolve, 30))
+  }
+  throw new Error('turn did not finish in time')
+}
+
 test('managed OpenAI device connection lifecycle', async t => {
   const port = await freePort()
   const codexHome = await mkdtemp(path.join(tmpdir(), 'clarin-codex-bridge-test-'))
@@ -128,6 +142,103 @@ test('managed OpenAI device connection lifecycle', async t => {
   assert.equal(health.response.status, 200, output)
   assert.equal(health.body.codex_authenticated, true)
   assert.equal(health.body.mcp_tools_count, 1)
+
+  const turnPayload = {
+    account_id: '11111111-1111-1111-1111-111111111111',
+    user_id: '22222222-2222-2222-2222-222222222222',
+    conversation_id: '33333333-3333-3333-3333-333333333333',
+    message: 'Consulta durable de prueba',
+    eros_context: 'signed-test-context'
+  }
+  const unauthorizedTurn = await requestJSON(baseURL, '/turn/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(turnPayload)
+  })
+  assert.equal(unauthorizedTurn.response.status, 401)
+
+  const startedAt = Date.now()
+  const startedTurn = await requestJSON(baseURL, '/turn/start', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(turnPayload)
+  })
+  assert.equal(startedTurn.response.status, 202, output)
+  assert.equal(startedTurn.body.success, true)
+  assert.match(startedTurn.body.codex_thread_id, /^thread-/)
+  assert.match(startedTurn.body.codex_turn_id, /^turn-/)
+  assert.ok(Date.now() - startedAt < 1000, 'turn/start should not wait for model completion')
+
+  const completedTurn = await waitForTurn(baseURL, headers, {
+    codex_thread_id: startedTurn.body.codex_thread_id,
+    codex_turn_id: startedTurn.body.codex_turn_id
+  })
+  assert.equal(completedTurn.body.success, true, output)
+  assert.equal(completedTurn.body.status, 'completed')
+  assert.equal(completedTurn.body.response, 'Respuesta durable de Eros')
+
+  const clarificationTurn = await requestJSON(baseURL, '/turn/start', { method:'POST', headers, body:JSON.stringify({ ...turnPayload, message:'CLARIFICATION' }) })
+  const clarification = await waitForTurn(baseURL, headers, { codex_thread_id:clarificationTurn.body.codex_thread_id, codex_turn_id:clarificationTurn.body.codex_turn_id })
+  assert.equal(clarification.body.success, true, output)
+  assert.equal(clarification.body.clarification.question, '¿Cuál lista deseas usar?')
+  assert.equal(clarification.body.clarification.options.length, 2)
+  assert.equal(clarification.body.clarification.allow_custom, true)
+
+  const failedToolsTurn = await requestJSON(baseURL, '/turn/start', { method:'POST', headers, body:JSON.stringify({ ...turnPayload, message:'ALL_TOOLS_FAIL' }) })
+  const failedTools = await waitForTurn(baseURL, headers, { codex_thread_id:failedToolsTurn.body.codex_thread_id, codex_turn_id:failedToolsTurn.body.codex_turn_id })
+  assert.equal(failedTools.body.success, false, output)
+  assert.equal(failedTools.body.status, 'failed')
+  assert.match(failedTools.body.error, /herramientas de datos/i)
+
+  const laggingTurn = await requestJSON(baseURL, '/turn/start', { method:'POST', headers, body:JSON.stringify({ ...turnPayload, message:'PERSISTENCE_LAG' }) })
+  const firstLagRead = await requestJSON(baseURL, '/turn/read', { method:'POST', headers, body:JSON.stringify({ codex_thread_id:laggingTurn.body.codex_thread_id,codex_turn_id:laggingTurn.body.codex_turn_id }) })
+  assert.equal(firstLagRead.response.status, 200, output)
+  assert.equal(firstLagRead.body.success, true)
+  assert.equal(firstLagRead.body.status, 'inProgress')
+  const completedAfterLag = await waitForTurn(baseURL, headers, { codex_thread_id:laggingTurn.body.codex_thread_id,codex_turn_id:laggingTurn.body.codex_turn_id })
+  assert.equal(completedAfterLag.body.success, true, output)
+  assert.equal(completedAfterLag.body.status, 'completed')
+
+  const unknownTurn = await requestJSON(baseURL, '/turn/read', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ codex_thread_id: 'thread-unknown', codex_turn_id: 'turn-unknown' })
+  })
+  assert.equal(unknownTurn.response.status, 500, output)
+  assert.equal(unknownTurn.body.success, false)
+
+  const runningTurn = await requestJSON(baseURL, '/turn/start', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...turnPayload, message: 'KEEP_RUNNING' })
+  })
+  const interrupted = await requestJSON(baseURL, '/turn/interrupt', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      codex_thread_id: runningTurn.body.codex_thread_id,
+      codex_turn_id: runningTurn.body.codex_turn_id
+    })
+  })
+  assert.equal(interrupted.body.status, 'interrupted')
+  const reconciledInterrupted = await requestJSON(baseURL, '/turn/read', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      codex_thread_id: runningTurn.body.codex_thread_id,
+      codex_turn_id: runningTurn.body.codex_turn_id
+    })
+  })
+  assert.equal(reconciledInterrupted.body.success, false)
+  assert.equal(reconciledInterrupted.body.status, 'interrupted')
+
+  const legacyChat = await requestJSON(baseURL, '/chat', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...turnPayload, message: 'Ruta legacy' })
+  })
+  assert.equal(legacyChat.response.status, 200, output)
+  assert.equal(legacyChat.body.response, 'Respuesta durable de Eros')
 
   const logout = await requestJSON(baseURL, '/auth/logout', { method: 'POST', headers, body: '{}' })
   assert.equal(logout.response.status, 200)

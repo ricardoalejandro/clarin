@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 )
 
 // --- Request/Response Types ---
@@ -2009,6 +2011,12 @@ func (s *Server) handleDeleteErosConversation(c *fiber.Ctx) error {
 	}
 
 	if err := s.repos.ErosConversation.Delete(c.Context(), accountID, userID, convID); err != nil {
+		if repository.IsErosConversationBusy(err) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "conversation_run_active"})
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "conversation_not_found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})

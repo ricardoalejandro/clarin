@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/eroscontext"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 )
@@ -83,6 +85,7 @@ func readOnlyTool(name string, opts ...mcp.ToolOption) mcp.Tool {
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(false),
+		mcp.WithString("eros_context", mcp.Description("Contexto efímero interno de Eros. Sólo Eros debe enviarlo; otros clientes deben omitirlo.")),
 	}, opts...)
 	return mcp.NewTool(name, opts...)
 }
@@ -255,6 +258,8 @@ func New(repos *repository.Repositories, services *service.Services, jwtSecret s
 		mcp.WithNumber("limit", mcp.Description("Leads por página (default 500, max 1000).")),
 		mcp.WithString("cursor", mcp.Description("Cursor devuelto por la llamada anterior. No reutilices el mismo cursor si has_more=true; usa next_cursor.")),
 	), s.toolListLeads)
+
+	s.registerOperationalLeadTool(mcpSrv)
 
 	mcpSrv.AddTool(readOnlyTool("prepare_file_export",
 		mcp.WithDescription("Prepara un adjunto descargable de Eros sin guardar binarios en MinIO ni devolver URL pública. Úsalo cuando el usuario pida crear un archivo, fichero, Excel, CSV, Word, PowerPoint, PDF o TXT. Devuelve metadata segura para que Clarin pinte el adjunto en el chat."),
@@ -607,6 +612,7 @@ func (s *MCPServer) authenticatedMCPHandler(next http.Handler, transport string)
 			AllowedAccountIDs: client.AllowedAccountIDs,
 			IPHash:            session.IPHash,
 			UserAgentHash:     session.UserAgentHash,
+			ErosBound:         r.URL.Path == "/mcp/eros",
 		}
 		go s.repos.MCP.TouchClient(context.Background(), client.ID)
 		go s.repos.MCP.RecordAuditEvent(context.Background(), &domain.MCPAuditEvent{
@@ -652,6 +658,7 @@ func (s *MCPServer) Start(port string) {
 	mux.HandleFunc("/oauth/authorize", s.oauthAuthorizeHandler())
 	mux.HandleFunc("/oauth/token", s.oauthTokenHandler())
 	mux.HandleFunc("/mcp", mutexHandler(httpHandler))
+	mux.HandleFunc("/mcp/eros", mutexHandler(httpHandler))
 
 	// MCP SSE transport for legacy clients (same auth and audit)
 	sseHandler := s.sseHandler()
@@ -719,6 +726,7 @@ type MCPPrincipal struct {
 	AllowedAccountIDs []uuid.UUID
 	IPHash            string
 	UserAgentHash     string
+	ErosBound         bool
 }
 
 func (s *MCPServer) getPrincipal(ctx context.Context) (*MCPPrincipal, error) {
@@ -727,6 +735,67 @@ func (s *MCPServer) getPrincipal(ctx context.Context) (*MCPPrincipal, error) {
 		return nil, errors.New("conexión MCP no autenticada")
 	}
 	return principal, nil
+}
+
+func (s *MCPServer) getErosContextClaims(ctx context.Context, req mcp.CallToolRequest) (*eroscontext.Claims, error) {
+	principal, err := s.getPrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !principal.ErosBound {
+		return nil, errors.New("la conexión no usa el contexto protegido de Eros")
+	}
+	raw := strings.TrimSpace(fmt.Sprint(getArgs(req)["eros_context"]))
+	if raw == "" || raw == "<nil>" {
+		return nil, newMCPCodedError(mcpErrorAccountNotAllowed, "falta el contexto protegido de Eros")
+	}
+	claims, err := eroscontext.Parse(s.jwtSecret, raw)
+	if err != nil {
+		return nil, newMCPCodedError(mcpErrorAccountNotAllowed, "el contexto de Eros es inválido o expiró")
+	}
+	accountID, _ := uuid.Parse(claims.AccountID)
+	userID, _ := uuid.Parse(claims.UserID)
+	runID, _ := uuid.Parse(claims.RunID)
+	if claims.Legacy {
+		var active bool
+		if err := s.repos.DB().QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM eros_context_grants WHERE id=$1 AND account_id=$2 AND user_id=$3
+			AND revoked_at IS NULL AND expires_at>NOW()
+		)`, runID, accountID, userID).Scan(&active); err != nil || !active {
+			return nil, newMCPCodedError(mcpErrorAccountNotAllowed, "el contexto temporal de Eros ya no está activo")
+		}
+	} else {
+		var active bool
+		if err := s.repos.DB().QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM eros_runs WHERE id=$1 AND account_id=$2 AND user_id=$3
+			AND status IN ('queued','starting','running') AND cancel_requested=FALSE
+		)`, runID, accountID, userID).Scan(&active); err != nil || !active {
+			return nil, newMCPCodedError(mcpErrorAccountNotAllowed, "la ejecución de Eros ya no está activa")
+		}
+	}
+	return claims, nil
+}
+
+func erosToolPermission(toolName string) string {
+	name := strings.ToLower(toolName)
+	switch {
+	case strings.Contains(name, "chat"), strings.Contains(name, "message"):
+		return domain.PermChats
+	case strings.Contains(name, "event"), strings.Contains(name, "logbook"):
+		return domain.PermEvents
+	case strings.Contains(name, "campaign"):
+		return domain.PermBroadcasts
+	case strings.Contains(name, "program"), strings.Contains(name, "attendance"):
+		return domain.PermPrograms
+	case strings.Contains(name, "survey"):
+		return domain.PermSurveys
+	case strings.Contains(name, "automation"):
+		return domain.PermAutomations
+	case strings.Contains(name, "task"):
+		return domain.PermTasks
+	default:
+		return domain.PermLeads
+	}
 }
 
 func (p *MCPPrincipal) allowsAccount(accountID uuid.UUID) bool {
@@ -744,6 +813,29 @@ func (s *MCPServer) getAccountIDFromRequest(ctx context.Context, req mcp.CallToo
 		return uuid.Nil, err
 	}
 	args := getArgs(req)
+	if principal.ErosBound {
+		claims, err := s.getErosContextClaims(ctx, req)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		accountID, _ := uuid.Parse(claims.AccountID)
+		if raw := strings.TrimSpace(fmt.Sprint(args["account_id"])); raw != "" && raw != "<nil>" && raw != accountID.String() {
+			return uuid.Nil, newMCPCodedError(mcpErrorAccountNotAllowed, "la ejecución de Eros está vinculada a otra cuenta")
+		}
+		if raw := strings.TrimSpace(fmt.Sprint(args["account_slug"])); raw != "" && raw != "<nil>" {
+			resolved, resolveErr := s.resolveAccountSelector(ctx, raw)
+			if resolveErr != nil || resolved != accountID {
+				return uuid.Nil, newMCPCodedError(mcpErrorAccountNotAllowed, "la ejecución de Eros está vinculada a otra cuenta")
+			}
+		}
+		if !principal.allowsAccount(accountID) {
+			return uuid.Nil, newMCPCodedError(mcpErrorAccountNotAllowed, "esta conexión MCP no tiene permiso para la cuenta fijada por Eros")
+		}
+		if err := s.ensureActiveAccountExists(ctx, accountID); err != nil {
+			return uuid.Nil, err
+		}
+		return accountID, nil
+	}
 	var accountID uuid.UUID
 	accountIDRaw := strings.TrimSpace(fmt.Sprint(args["account_id"]))
 	if accountIDRaw != "" && accountIDRaw != "<nil>" {
@@ -883,11 +975,29 @@ func (s *MCPServer) auditToolCallMiddleware() server.ToolHandlerMiddleware {
 	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 		return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			principal, principalErr := s.getPrincipal(ctx)
+			var erosClaims *eroscontext.Claims
+			if principalErr == nil && principal.ErosBound {
+				var contextErr error
+				erosClaims, contextErr = s.getErosContextClaims(ctx, request)
+				if contextErr != nil {
+					_ = s.repos.MCP.RecordAuditEvent(context.Background(), &domain.MCPAuditEvent{ClientID: &principal.ClientID, SessionID: &principal.SessionID, EventType: "tool_denied", ToolName: request.Params.Name, IPHash: principal.IPHash, UserAgentHash: principal.UserAgentHash, Metadata: map[string]any{"eros_bound": true, "error_code": "EROS_CONTEXT_INVALID"}})
+					return errResult(contextErr.Error()), nil
+				}
+				permission := erosToolPermission(request.Params.Name)
+				if request.Params.Name != "list_accounts" && !eroscontext.HasPermission(erosClaims, permission) {
+					return errResult("Eros no tiene permiso para usar esta herramienta en la cuenta actual"), nil
+				}
+			}
 			result, err := next(ctx, request)
+			if err == nil && result != nil && !result.IsError && erosClaims != nil {
+				s.captureGenericErosResultSet(ctx, erosClaims, request, result)
+			}
 			if principalErr == nil {
 				args := getArgs(request)
 				accountIDs := make([]string, 0, 1)
-				if raw := strings.TrimSpace(fmt.Sprint(args["account_id"])); raw != "" && raw != "<nil>" {
+				if erosClaims != nil {
+					accountIDs = append(accountIDs, erosClaims.AccountID)
+				} else if raw := strings.TrimSpace(fmt.Sprint(args["account_id"])); raw != "" && raw != "<nil>" {
 					accountIDs = append(accountIDs, raw)
 				}
 				metadata := map[string]any{}
@@ -900,6 +1010,10 @@ func (s *MCPServer) auditToolCallMiddleware() server.ToolHandlerMiddleware {
 					if code := toolResultErrorCode(result); code != "" {
 						metadata["error_code"] = code
 					}
+				}
+				if erosClaims != nil {
+					metadata["eros_bound"] = true
+					metadata["eros_run_id"] = erosClaims.RunID
 				}
 				if len(metadata) == 0 {
 					metadata = nil
@@ -918,6 +1032,77 @@ func (s *MCPServer) auditToolCallMiddleware() server.ToolHandlerMiddleware {
 			return result, err
 		}
 	}
+}
+
+func (s *MCPServer) captureGenericErosResultSet(ctx context.Context, claims *eroscontext.Claims, request mcp.CallToolRequest, result *mcp.CallToolResult) {
+	tool := strings.ToLower(strings.TrimSpace(request.Params.Name))
+	if tool == "query_leads_operational" || tool == "reuse_eros_result_set" || strings.Contains(tool, "export") || strings.Contains(tool, "clarification") || len(result.Content) == 0 {
+		return
+	}
+	text, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		return
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(text.Text), &payload) != nil {
+		return
+	}
+	entityType := ""
+	for _, candidate := range []string{"leads", "contacts", "chats", "tasks", "events", "programs", "campaigns", "surveys", "participants"} {
+		if strings.Contains(tool, strings.TrimSuffix(candidate, "s")) {
+			entityType = strings.TrimSuffix(candidate, "s")
+			break
+		}
+	}
+	if entityType == "" {
+		return
+	}
+	var rawItems []any
+	for _, key := range []string{"items", entityType + "s", "results", "data"} {
+		if values, ok := payload[key].([]any); ok {
+			rawItems = values
+			break
+		}
+	}
+	if len(rawItems) == 0 {
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(rawItems))
+	seen := map[uuid.UUID]bool{}
+	fieldSet := map[string]bool{}
+	for _, raw := range rawItems {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, parseErr := uuid.Parse(strings.TrimSpace(fmt.Sprint(item["id"])))
+		if parseErr != nil || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+		for key := range item {
+			fieldSet[key] = true
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	fields := make([]string, 0, len(fieldSet))
+	for field := range fieldSet {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	accountID, err1 := uuid.Parse(claims.AccountID)
+	userID, err2 := uuid.Parse(claims.UserID)
+	runID, err3 := uuid.Parse(claims.RunID)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return
+	}
+	filters, _ := json.Marshal(sanitizedErosToolArgs(request))
+	hasMore, _ := payload["has_more"].(bool)
+	nextCursor, _ := payload["next_cursor"].(string)
+	_, _ = s.repos.ErosResultSet.Save(ctx, &domain.ErosResultSet{AccountID: accountID, UserID: userID, RunID: runID, EntityType: entityType, SourceTool: request.Params.Name, Fields: fields, Filters: filters, HasMore: hasMore, NextCursor: nextCursor, EntityIDs: ids})
 }
 
 func toolResultErrorCode(result *mcp.CallToolResult) string {
@@ -942,14 +1127,24 @@ func (s *MCPServer) toolListAccounts(ctx context.Context, req mcp.CallToolReques
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	var forcedAccountID *uuid.UUID
+	if principal.ErosBound {
+		claims, contextErr := s.getErosContextClaims(ctx, req)
+		if contextErr != nil {
+			return errResult(contextErr.Error()), nil
+		}
+		parsed, _ := uuid.Parse(claims.AccountID)
+		forcedAccountID = &parsed
+	}
 	rows, err := s.repos.DB().Query(ctx, `
 		SELECT a.id, a.name, COALESCE(a.slug, ''), a.plan, a.is_active
 		FROM accounts a
 		JOIN mcp_client_accounts mca ON mca.account_id = a.id
 		WHERE mca.client_id = $1
+		  AND ($2::uuid IS NULL OR a.id = $2)
 		  AND a.is_active = true
 		ORDER BY a.name ASC
-	`, principal.ClientID)
+	`, principal.ClientID, forcedAccountID)
 	if err != nil {
 		return errResult("error consultando cuentas: " + err.Error()), nil
 	}

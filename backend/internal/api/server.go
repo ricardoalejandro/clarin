@@ -49,20 +49,23 @@ func strPtr(s string) *string {
 }
 
 type Server struct {
-	app          *fiber.App
-	cfg          *config.Config
-	services     *service.Services
-	repos        *repository.Repositories
-	hub          *ws.Hub
-	pool         *whatsapp.DevicePool
-	storage      *storage.Storage
-	kommoSync    *kommo.SyncService
-	kommoManager *kommo.Manager
-	cache        *cache.Cache
-	abuseLimiter *inMemoryAbuseLimiter
-	googleClient *googleclient.Client
-	version      string
-	changelog    string
+	app            *fiber.App
+	cfg            *config.Config
+	services       *service.Services
+	repos          *repository.Repositories
+	hub            *ws.Hub
+	pool           *whatsapp.DevicePool
+	storage        *storage.Storage
+	kommoSync      *kommo.SyncService
+	kommoManager   *kommo.Manager
+	cache          *cache.Cache
+	abuseLimiter   *inMemoryAbuseLimiter
+	googleClient   *googleclient.Client
+	version        string
+	changelog      string
+	erosRunMu      sync.Mutex
+	erosRunCancels map[uuid.UUID]context.CancelFunc
+	erosRunSem     chan struct{}
 }
 
 func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, kommoManager *kommo.Manager, c *cache.Cache, gc *googleclient.Client, version string) *Server {
@@ -149,20 +152,22 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	}
 
 	server := &Server{
-		app:          app,
-		cfg:          cfg,
-		services:     services,
-		repos:        repos,
-		hub:          hub,
-		pool:         pool,
-		storage:      store,
-		kommoSync:    kommoSyncSvc,
-		kommoManager: kommoManager,
-		cache:        c,
-		abuseLimiter: newInMemoryAbuseLimiter(),
-		googleClient: gc,
-		version:      version,
-		changelog:    changelogContent,
+		app:            app,
+		cfg:            cfg,
+		services:       services,
+		repos:          repos,
+		hub:            hub,
+		pool:           pool,
+		storage:        store,
+		kommoSync:      kommoSyncSvc,
+		kommoManager:   kommoManager,
+		cache:          c,
+		abuseLimiter:   newInMemoryAbuseLimiter(),
+		googleClient:   gc,
+		version:        version,
+		changelog:      changelogContent,
+		erosRunCancels: make(map[uuid.UUID]context.CancelFunc),
+		erosRunSem:     make(chan struct{}, 2),
 	}
 
 	app.Use(server.validateBrowserOrigin)
@@ -774,6 +779,13 @@ func (s *Server) setupRoutes() {
 	// Eros Assistant (Codex Bridge + MCP shared tools)
 	protected.Get("/eros/status", s.handleErosStatus)
 	protected.Post("/eros/chat", s.handleErosChat)
+	protected.Get("/eros/quick-tasks", s.handleListErosQuickTasks)
+	protected.Get("/eros/runs", s.handleListActiveErosRuns)
+	protected.Post("/eros/runs", s.handleCreateErosRun)
+	protected.Get("/eros/runs/:id", s.handleGetErosRun)
+	protected.Post("/eros/runs/:id/cancel", s.handleCancelErosRun)
+	protected.Post("/eros/runs/:id/retry", s.handleRetryErosRun)
+	protected.Post("/eros/runs/:id/answer", s.handleAnswerErosRun)
 	protected.Get("/eros/files/:id/download", s.handleDownloadErosFile)
 	protected.Get("/eros/conversations", s.handleListErosConversations)
 	protected.Get("/eros/conversations/:id", s.handleGetErosConversation)
@@ -4285,26 +4297,9 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	// Build WHERE clause dynamically
 	args := []interface{}{accountID}
 	argIdx := 2
-	whereClauses := []string{
-		"l.account_id = $1",
-		"l.contact_id IS NOT NULL",
-		"l.deleted_at IS NULL",
-		"l.is_archived = FALSE",
-		"l.status = 'open'",
-		"COALESCE(c.do_not_contact,FALSE) = FALSE",
-	}
+	whereClauses := leadWhereClauses("$1", c.Query("lifecycle"), c.Query("status_filter", "active"))
 
-	addLeadLifecycleWhere(c, &whereClauses)
-
-	if pipelineID == "__no_pipeline__" {
-		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
-	} else if pipelineID != "" {
-		if pid, err := uuid.Parse(pipelineID); err == nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("l.pipeline_id = $%d", argIdx))
-			args = append(args, pid)
-			argIdx++
-		}
-	}
+	addLeadPipelineWhere(pipelineID, &whereClauses, &args, &argIdx)
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
@@ -4323,7 +4318,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	}
 
 	if tagFormulaRaw != "" {
-		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQL(tagFormulaRaw, accountID, args, argIdx)
+		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQLAll(tagFormulaRaw, accountID, args, argIdx)
 		if fErr != nil {
 			log.Printf("[LEADS] Formula parse/build error: %v (formula: %s)", fErr, tagFormulaRaw)
 		} else if fSQL != "" {
@@ -4430,7 +4425,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	// Goroutine 2: count leads per stage
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT l.stage_id, COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id WHERE %s AND l.stage_id IS NOT NULL GROUP BY l.stage_id`, whereSQL)
+		q := fmt.Sprintf(`SELECT l.stage_id, COUNT(*) FROM leads l JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id WHERE %s AND l.stage_id IS NOT NULL GROUP BY l.stage_id`, whereSQL)
 		rows, err := s.repos.DB().Query(c.Context(), q, args...)
 		if err != nil {
 			countsErr = err
@@ -4464,7 +4459,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 				       ps.name AS stage_name, ps.color AS stage_color, ps.position AS stage_position,
 				       ROW_NUMBER() OVER (PARTITION BY l.stage_id ORDER BY l.created_at DESC) AS rn
 				FROM leads l
-				LEFT JOIN contacts c ON c.id = l.contact_id
+				JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
 				LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 				WHERE %s AND l.stage_id IS NOT NULL
 			)
@@ -4531,7 +4526,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	// Goroutine 5: unassigned leads count + first N
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id WHERE %s AND (l.stage_id IS NULL)`, whereSQL)
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id WHERE %s AND (l.stage_id IS NULL)`, whereSQL)
 		err := s.repos.DB().QueryRow(c.Context(), q, args...).Scan(&unassignedCount)
 		if err != nil {
 			unassignedErr = err
@@ -4563,17 +4558,9 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	if strings.ToLower(c.Query("lifecycle")) != "all" && strings.ToLower(c.Query("status_filter")) != "all" && hasFormulaOrTagFilter {
 		hArgs := []interface{}{accountID}
 		hIdx := 2
-		hClauses := []string{"l.account_id = $1"}
+		hClauses := leadBaseWhereClauses("$1")
 		// NO status filter — count ALL statuses
-		if pipelineID == "__no_pipeline__" {
-			hClauses = append(hClauses, "l.pipeline_id IS NULL")
-		} else if pipelineID != "" {
-			if pid, err := uuid.Parse(pipelineID); err == nil {
-				hClauses = append(hClauses, fmt.Sprintf("l.pipeline_id = $%d", hIdx))
-				hArgs = append(hArgs, pid)
-				hIdx++
-			}
-		}
+		addLeadPipelineWhere(pipelineID, &hClauses, &hArgs, &hIdx)
 		if search != "" {
 			searchPattern := "%" + strings.ToLower(search) + "%"
 			hClauses = append(hClauses, fmt.Sprintf(
@@ -4623,7 +4610,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		hWhereSQL := strings.Join(hClauses, " AND ")
 		var totalAll int
 		err := s.repos.DB().QueryRow(c.Context(),
-			fmt.Sprintf("SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id WHERE %s", hWhereSQL),
+			fmt.Sprintf("SELECT COUNT(*) FROM leads l JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id WHERE %s", hWhereSQL),
 			hArgs...,
 		).Scan(&totalAll)
 		if err == nil {
@@ -4704,7 +4691,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
 			       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 			FROM leads l
-			LEFT JOIN contacts c ON c.id = l.contact_id
+			JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
 			WHERE %s AND l.stage_id IS NULL
 			ORDER BY l.created_at DESC
 			LIMIT %d
@@ -4792,9 +4779,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 	// Build WHERE
 	args := []interface{}{accountID}
 	argIdx := 2
-	whereClauses := []string{"l.account_id = $1"}
-
-	addLeadLifecycleWhere(c, &whereClauses)
+	whereClauses := leadWhereClauses("$1", c.Query("lifecycle"), c.Query("status_filter", "active"))
 
 	// Handle stage: "unassigned" or UUID
 	isUnassigned := stageIDParam == "unassigned"
@@ -4810,15 +4795,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 		}
 	}
 
-	if pipelineID == "__no_pipeline__" {
-		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
-	} else if pipelineID != "" {
-		if pid, err := uuid.Parse(pipelineID); err == nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("l.pipeline_id = $%d", argIdx))
-			args = append(args, pid)
-			argIdx++
-		}
-	}
+	addLeadPipelineWhere(pipelineID, &whereClauses, &args, &argIdx)
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
@@ -4845,7 +4822,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 		excludeTagNames = strings.Split(excludeTagNamesRaw, ",")
 	}
 	if tagFormulaRaw2 != "" {
-		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQL(tagFormulaRaw2, accountID, args, argIdx)
+		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQLAll(tagFormulaRaw2, accountID, args, argIdx)
 		if fErr != nil {
 			log.Printf("[LEADS] Formula parse/build error (list): %v (formula: %s)", fErr, tagFormulaRaw2)
 		} else if fSQL != "" {
@@ -4881,7 +4858,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason,
 		       ps.name, ps.color, ps.position
 		FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
+		JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE %s
 		ORDER BY l.created_at DESC
@@ -4985,19 +4962,9 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 	// Build WHERE
 	args := []interface{}{accountID}
 	argIdx := 2
-	whereClauses := []string{"l.account_id = $1"}
+	whereClauses := leadWhereClauses("$1", c.Query("lifecycle"), c.Query("status_filter", "active"))
 
-	addLeadLifecycleWhere(c, &whereClauses)
-
-	if pipelineID == "__no_pipeline__" {
-		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
-	} else if pipelineID != "" {
-		if pid, err := uuid.Parse(pipelineID); err == nil {
-			whereClauses = append(whereClauses, fmt.Sprintf("l.pipeline_id = $%d", argIdx))
-			args = append(args, pid)
-			argIdx++
-		}
-	}
+	addLeadPipelineWhere(pipelineID, &whereClauses, &args, &argIdx)
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
 		whereClauses = append(whereClauses, fmt.Sprintf(
@@ -5021,7 +4988,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 		excludeTagNames = strings.Split(excludeTagNamesRaw, ",")
 	}
 	if tagFormulaRaw3 != "" {
-		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQL(tagFormulaRaw3, accountID, args, argIdx)
+		fSQL, newArgs, newIdx, fErr := buildAdvancedFormulaSQLAll(tagFormulaRaw3, accountID, args, argIdx)
 		if fErr != nil {
 			log.Printf("[LEADS] Formula parse/build error (load-more): %v (formula: %s)", fErr, tagFormulaRaw3)
 		} else if fSQL != "" {
@@ -5083,7 +5050,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id WHERE %s`, whereSQL)
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id WHERE %s`, whereSQL)
 		countErr = s.repos.DB().QueryRow(c.Context(), q, args...).Scan(&total)
 	}()
 
@@ -5102,7 +5069,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 			       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason,
 			       ps.name, ps.color, ps.position
 			FROM leads l
-			LEFT JOIN contacts c ON c.id = l.contact_id
+			JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
 			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 			WHERE %s
 			ORDER BY l.updated_at DESC
@@ -6337,28 +6304,35 @@ func (s *Server) handleGetLeadCounts(c *fiber.Ctx) error {
 		extraWhere += " AND (l.kommo_id IS NULL OR l.kommo_deleted_at IS NOT NULL)"
 	}
 
-	// Filter by pipeline if specified
-	if pipelineID != "" && pipelineID != "__no_pipeline__" {
-		if uid, err := uuid.Parse(pipelineID); err == nil {
-			extraWhere += fmt.Sprintf(" AND l.stage_id IN (SELECT id FROM pipeline_stages WHERE pipeline_id = $%d)", len(args)+1)
-			args = append(args, uid)
-		}
-	} else if pipelineID == "__no_pipeline__" {
-		extraWhere += " AND l.stage_id IS NULL"
+	// Badges are pipeline totals and intentionally ignore search/advanced filters.
+	pipelineClauses := make([]string, 0, 1)
+	argIdx := len(args) + 1
+	addLeadPipelineWhere(pipelineID, &pipelineClauses, &args, &argIdx)
+	for _, clause := range pipelineClauses {
+		extraWhere += " AND " + clause
 	}
+
+	openPredicate := strings.Join(leadLifecycleWhereClauses(domain.LeadStatusOpen), " AND ")
+	wonPredicate := strings.Join(leadLifecycleWhereClauses(domain.LeadStatusWon), " AND ")
+	lostPredicate := strings.Join(leadLifecycleWhereClauses(domain.LeadStatusLost), " AND ")
+	archivedPredicate := strings.Join(leadLifecycleWhereClauses(leadLifecycleArchived), " AND ")
+	blockedPredicate := strings.Join(leadLifecycleWhereClauses(leadLifecycleBlocked), " AND ")
+	trashPredicate := strings.Join(leadLifecycleWhereClauses(leadLifecycleTrash), " AND ")
+	basePredicate := strings.Join(leadBaseWhereClauses("$1"), " AND ")
 
 	var active, won, lost, archived, blocked, trash int
 	err := s.repos.DB().QueryRow(c.Context(), fmt.Sprintf(`
 		SELECT
-			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND l.status='open' AND NOT l.is_archived),
-			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND l.status='won' AND NOT l.is_archived),
-			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND l.status='lost' AND NOT l.is_archived),
-			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND l.is_archived),
-			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND COALESCE(contact.do_not_contact,FALSE)),
-			COUNT(*) FILTER (WHERE l.deleted_at IS NOT NULL)
-		FROM leads l LEFT JOIN contacts contact ON contact.id=l.contact_id
-		WHERE l.account_id = $1%s
-	`, extraWhere), args...).Scan(&active, &won, &lost, &archived, &blocked, &trash)
+			COUNT(*) FILTER (WHERE %s),
+			COUNT(*) FILTER (WHERE %s),
+			COUNT(*) FILTER (WHERE %s),
+			COUNT(*) FILTER (WHERE %s),
+			COUNT(*) FILTER (WHERE %s),
+			COUNT(*) FILTER (WHERE %s)
+		FROM leads l
+		JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
+		WHERE %s%s
+	`, openPredicate, wonPredicate, lostPredicate, archivedPredicate, blockedPredicate, trashPredicate, basePredicate, extraWhere), args...).Scan(&active, &won, &lost, &archived, &blocked, &trash)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}

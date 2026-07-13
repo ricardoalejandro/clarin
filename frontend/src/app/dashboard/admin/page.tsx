@@ -313,13 +313,6 @@ const EROS_MODEL_OPTIONS = [
   { value: 'custom', label: 'Personalizado', hint: 'slug propio' },
 ]
 
-const EROS_REASONING_OPTIONS = [
-  { value: 'low', label: 'Rápido' },
-  { value: 'medium', label: 'Normal' },
-  { value: 'high', label: 'Profundo' },
-  { value: 'xhigh', label: 'Máximo' },
-]
-
 const OPENAI_PLAN_LABELS: Record<string, string> = {
   free: 'Free',
   go: 'Go',
@@ -1236,18 +1229,6 @@ export default function AdminPage() {
 
   function healthPill(ok: boolean) {
     return ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
-  }
-
-  function toggleAllowedReasoningEffort(value: string) {
-    setErosForm(f => {
-      const exists = f.allowed_reasoning_efforts.includes(value)
-      const next = exists
-        ? f.allowed_reasoning_efforts.filter(effort => effort !== value)
-        : [...f.allowed_reasoning_efforts, value]
-      const allowed = next.length ? next : [f.default_reasoning_effort || 'medium']
-      const defaultEffort = allowed.includes(f.default_reasoning_effort) ? f.default_reasoning_effort : allowed[0]
-      return { ...f, allowed_reasoning_efforts: allowed, default_reasoning_effort: defaultEffort }
-    })
   }
 
   function toggleNewMcpAccount(accountId: string) {
@@ -2244,52 +2225,10 @@ export default function AdminPage() {
                       className="w-full min-w-0 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500"
                     />
                   </div>
-                  <div className="border-b border-gray-200 pb-5 space-y-3">
-                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                      <div>
-                        <span className="block text-sm font-medium text-gray-900">Razonamiento del chat</span>
-                        <span className="block text-xs text-gray-500">Admin define el default y qué niveles aparecen para usuarios.</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-slate-500">Usuarios eligen</span>
-                        <button type="button" onClick={() => setErosForm(f => ({ ...f, allow_user_reasoning_override: !f.allow_user_reasoning_override }))} className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${erosForm.allow_user_reasoning_override ? 'bg-emerald-600' : 'bg-gray-300'}`}>
-                          <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${erosForm.allow_user_reasoning_override ? 'translate-x-5' : 'translate-x-1'}`} />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                      {EROS_REASONING_OPTIONS.map(option => (
-                        <button
-                          key={option.value}
-                          type="button"
-                          onClick={() => setErosForm(f => ({
-                            ...f,
-                            default_reasoning_effort: option.value,
-                            allowed_reasoning_efforts: f.allowed_reasoning_efforts.includes(option.value)
-                              ? f.allowed_reasoning_efforts
-                              : [...f.allowed_reasoning_efforts, option.value],
-                          }))}
-                          className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${erosForm.default_reasoning_effort === option.value ? 'border-emerald-300 bg-emerald-50 text-emerald-900' : 'border-gray-200 bg-white text-slate-700 hover:bg-slate-50'}`}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {EROS_REASONING_OPTIONS.map(option => {
-                        const enabled = erosForm.allowed_reasoning_efforts.includes(option.value)
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            onClick={() => toggleAllowedReasoningEffort(option.value)}
-                            className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-gray-200 bg-white text-slate-500 hover:bg-slate-50'}`}
-                          >
-                            {enabled ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
-                            {option.label}
-                          </button>
-                        )
-                      })}
+                  <div className="border-b border-gray-200 pb-5">
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-3">
+                      <span className="block text-sm font-medium text-emerald-950">Razonamiento automático</span>
+                      <span className="mt-1 block text-xs leading-relaxed text-emerald-800">Eros selecciona Rápido, Normal, Profundo o Máximo según cada consulta. Los usuarios no pueden modificarlo; el modelo continúa bajo control exclusivo del administrador.</span>
                     </div>
                   </div>
                   <label className="block space-y-1.5">

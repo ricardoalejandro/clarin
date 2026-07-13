@@ -1051,32 +1051,103 @@ func (s *Server) invalidateAllLeadCachesAfterPurge() {
 	}
 }
 
-func addLeadLifecycleWhere(c *fiber.Ctx, whereClauses *[]string) {
-	lifecycle := strings.ToLower(strings.TrimSpace(c.Query("lifecycle")))
-	if lifecycle == "" {
-		switch strings.ToLower(strings.TrimSpace(c.Query("status_filter", "active"))) {
-		case "archived":
-			lifecycle = "archived"
-		case "blocked":
-			lifecycle = "blocked"
-		case "all":
-			lifecycle = "all"
+const (
+	leadLifecycleArchived = "archived"
+	leadLifecycleBlocked  = "blocked"
+	leadLifecycleTrash    = "trash"
+	leadLifecycleAll      = "all"
+)
+
+// normalizeLeadLifecycle keeps the legacy status_filter query parameter
+// compatible while making lifecycle the canonical source of truth.
+func normalizeLeadLifecycle(lifecycle, statusFilter string) string {
+	lifecycle = strings.ToLower(strings.TrimSpace(lifecycle))
+	if lifecycle != "" {
+		switch lifecycle {
+		case domain.LeadStatusOpen, domain.LeadStatusWon, domain.LeadStatusLost,
+			leadLifecycleArchived, leadLifecycleBlocked, leadLifecycleTrash, leadLifecycleAll:
+			return lifecycle
 		default:
-			lifecycle = domain.LeadStatusOpen
+			return domain.LeadStatusOpen
 		}
 	}
-	switch lifecycle {
-	case "trash":
-		*whereClauses = append(*whereClauses, "l.deleted_at IS NOT NULL")
-	case domain.LeadStatusWon, domain.LeadStatusLost:
-		*whereClauses = append(*whereClauses, "l.deleted_at IS NULL", "l.is_archived=FALSE", "l.status='"+lifecycle+"'")
-	case "archived":
-		*whereClauses = append(*whereClauses, "l.deleted_at IS NULL", "l.is_archived=TRUE")
-	case "blocked":
-		*whereClauses = append(*whereClauses, "l.deleted_at IS NULL", "COALESCE(c.do_not_contact,FALSE)=TRUE")
-	case "all":
-		*whereClauses = append(*whereClauses, "l.deleted_at IS NULL")
+
+	switch strings.ToLower(strings.TrimSpace(statusFilter)) {
+	case leadLifecycleArchived:
+		return leadLifecycleArchived
+	case leadLifecycleBlocked:
+		return leadLifecycleBlocked
+	case leadLifecycleTrash:
+		return leadLifecycleTrash
+	case leadLifecycleAll:
+		return leadLifecycleAll
+	case domain.LeadStatusWon:
+		return domain.LeadStatusWon
+	case domain.LeadStatusLost:
+		return domain.LeadStatusLost
 	default:
-		*whereClauses = append(*whereClauses, "l.deleted_at IS NULL", "l.is_archived=FALSE", "l.status='open'")
+		return domain.LeadStatusOpen
 	}
+}
+
+// leadBaseWhereClauses is shared by Kanban, list, stage pagination, and counts.
+// A lead is only visible when its parent contact exists in the same account;
+// queries using these clauses must join contacts as c by both id and account_id.
+func leadBaseWhereClauses(accountPlaceholder string) []string {
+	return []string{
+		"l.account_id = " + accountPlaceholder,
+		"l.contact_id IS NOT NULL",
+	}
+}
+
+// leadLifecycleWhereClauses defines the canonical lifecycle predicates. The
+// do-not-contact state deliberately remains transversal to open/won/lost and
+// archived; it is only required when the dedicated blocked group is selected.
+func leadLifecycleWhereClauses(lifecycle string) []string {
+	lifecycle = normalizeLeadLifecycle(lifecycle, "")
+	switch lifecycle {
+	case leadLifecycleTrash:
+		return []string{"l.deleted_at IS NOT NULL"}
+	case domain.LeadStatusWon, domain.LeadStatusLost:
+		return []string{"l.deleted_at IS NULL", "l.is_archived = FALSE", "l.status = '" + lifecycle + "'"}
+	case leadLifecycleArchived:
+		return []string{"l.deleted_at IS NULL", "l.is_archived = TRUE"}
+	case leadLifecycleBlocked:
+		return []string{"l.deleted_at IS NULL", "COALESCE(c.do_not_contact, FALSE) = TRUE"}
+	case leadLifecycleAll:
+		return []string{"l.deleted_at IS NULL"}
+	default:
+		return []string{"l.deleted_at IS NULL", "l.is_archived = FALSE", "l.status = 'open'"}
+	}
+}
+
+func leadWhereClauses(accountPlaceholder, lifecycle, statusFilter string) []string {
+	whereClauses := leadBaseWhereClauses(accountPlaceholder)
+	return append(whereClauses, leadLifecycleWhereClauses(normalizeLeadLifecycle(lifecycle, statusFilter))...)
+}
+
+func addLeadLifecycleWhere(c *fiber.Ctx, whereClauses *[]string) {
+	lifecycle := normalizeLeadLifecycle(c.Query("lifecycle"), c.Query("status_filter", "active"))
+	*whereClauses = append(*whereClauses, leadLifecycleWhereClauses(lifecycle)...)
+}
+
+// addLeadPipelineWhere keeps pipeline selection consistent across lead views
+// and counters. The pipeline belongs to the lead itself; stage_id is not a
+// reliable substitute because leads can be temporarily unassigned.
+func addLeadPipelineWhere(pipelineID string, whereClauses *[]string, args *[]interface{}, argIdx *int) {
+	pipelineID = strings.TrimSpace(pipelineID)
+	if pipelineID == "" {
+		return
+	}
+	if pipelineID == "__no_pipeline__" {
+		*whereClauses = append(*whereClauses, "l.pipeline_id IS NULL")
+		return
+	}
+	parsed, err := uuid.Parse(pipelineID)
+	if err != nil {
+		return
+	}
+	*whereClauses = append(*whereClauses, fmt.Sprintf("l.pipeline_id = $%d", *argIdx))
+	*args = append(*args, parsed)
+	*argIdx++
 }

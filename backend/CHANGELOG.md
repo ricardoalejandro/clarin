@@ -2,6 +2,24 @@
 
 ## 2026-07-13
 
+### Build 4 — Inicio y reintento confiables de Eros
+- 🐛 Eros mantiene activa la ejecución durante el breve desfase de persistencia que puede ocurrir al iniciar un turno.
+- 🔄 Reintentar una consulta fallida crea un turno limpio y no reutiliza identificadores de una ejecución anterior rota.
+
+### Build 3 — Eros recuerda, aclara y decide el análisis
+- ✨ Eros conserva selecciones estructuradas para reutilizar “esa lista” sin repetir filtros ni copiar datos sensibles.
+- ✨ Las dudas reales se presentan como alternativas interactivas con una opción de texto libre y continuidad durable.
+- ⚡ El nivel de análisis ahora es automático; el modelo permanece bajo control exclusivo del administrador.
+- 🐛 Cada mensaje usa un contexto MCP aislado y los fallos totales de herramientas ya no se presentan como respuestas exitosas.
+
+### Build 2 — Leads consistentes y Eros durable
+- 🐛 Ganadas, perdidas y archivadas vuelven a mostrar los leads reales del pipeline seleccionado.
+- ✨ Eros incorpora tareas rápidas de consulta, filtros operativos combinables y exportación segura.
+- ✨ La ventana de Eros ahora puede moverse, redimensionarse, maximizarse o acoplarse al lado derecho.
+- ✨ La mascota vive en la cabecera, anima las fases reales de trabajo y respeta movimiento reducido.
+- ⚡ Las consultas continúan al cerrar Eros, navegar o recargar, con recuperación y cancelación durable.
+- 🔒 Las herramientas de Eros quedan vinculadas a una sola cuenta, usuario y ejecución mediante contexto efímero.
+
 ### Build 1 — Importación Kommo sin oportunidades duplicadas
 - 🔒 Si un contacto ya tiene una oportunidad abierta, el Excel la omite como duplicada y no modifica ningún lead.
 - ✨ Ganados, perdidos, archivados y eliminados permanecen como historial y permiten una nueva oportunidad.

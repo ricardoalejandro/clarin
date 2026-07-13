@@ -2,9 +2,11 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { usePathname } from 'next/navigation'
-import { Send, X, Minimize2, Maximize2, Sparkles, MessageSquarePlus, Trash2, FileSpreadsheet, FileText, Menu, BarChart3, Download, ChevronsUpDown, Copy } from 'lucide-react'
+import { Send, X, Minimize2, Maximize2, Sparkles, MessageSquarePlus, Trash2, FileSpreadsheet, FileText, Menu, BarChart3, Download, ChevronsUpDown, Copy, PanelRight, Square, StopCircle, RotateCcw, AlertCircle } from 'lucide-react'
 import ErosCat, { CatMood } from './ErosCat'
 import ErosChart, { parseChartBlocks, type ChartConfig } from './ErosChart'
+import ErosQuickTasks, { type ErosQuickTask } from './eros/ErosQuickTasks'
+import { useErosWindow, type ErosResizeEdge } from './eros/useErosWindow'
 
 interface ErosFileAttachment {
   id: string
@@ -56,17 +58,34 @@ interface ErosStatus {
   mcp_configured: boolean
 }
 
-const REASONING_STORAGE_KEY = 'clarin:eros:reasoning_effort'
+type ErosRunStatus = 'queued' | 'starting' | 'running' | 'waiting_for_input' | 'completed' | 'failed' | 'cancelled'
+
+interface ErosClarification {
+  question: string
+  context?: string
+  options: Array<{ id: string; label: string; description: string }>
+  allow_custom: boolean
+}
+
+interface ErosRun {
+  id: string
+  conversation_id?: string
+  status: ErosRunStatus
+  phase?: string
+  kind?: 'chat' | 'quick_task'
+  task_key?: string
+  error_code?: string
+  safe_error?: string
+  result?: unknown
+  message?: ChatMessage | string | null
+  attachments?: ErosFileAttachment[]
+  created_at?: string
+}
+
+const ACTIVE_RUN_STORAGE_KEY = 'clarin:eros:active_run:v1'
 const EROS_FILE_DB_NAME = 'clarin-eros-files'
 const EROS_FILE_DB_VERSION = 1
 const EROS_FILE_STORE = 'files'
-
-const reasoningOptions = [
-  { value: 'low', label: 'Rápido' },
-  { value: 'medium', label: 'Normal' },
-  { value: 'high', label: 'Profundo' },
-  { value: 'xhigh', label: 'Máximo' },
-]
 
 const reasoningLabelByValue: Record<string, string> = {
   low: 'Rápido',
@@ -82,35 +101,92 @@ const waitingMoods: CatMood[] = [
   'fishing', 'dancing', 'meowing', 'stargazing', 'walking', 'walking_ball'
 ]
 
-const waitingCaptions: Partial<Record<CatMood, string>> = {
-  'thinking': '🤔 Pensando...',
-  'playing_ball': '🧶 Jugando mientras pienso...',
-  'sleeping': '😴 Descansando un momento...',
-  'stretching': '🐱 Estirándome un poco...',
-  'washing': '🐾 Lavándome las patitas...',
-  'chasing_tail': '🌀 Persiguiendo mi colita...',
-  'looking_left': '👀 Buscando por aquí...',
-  'looking_right': '👀 Mirando por allá...',
-  'yawning': '🥱 Bostezando un poquito...',
-  'pawing': '🐾 Revisando datos...',
-  'jumping': '🦘 Saltando de alegría...',
-  'winking': '😉 Guiñándote el ojo...',
-  'curious': '🔍 Investigando a fondo...',
-  'excited': '⚡ ¡Encontré algo!',
-  'love': '💕 Me encanta ayudarte...',
-  'studying': '📚 Estudiando los datos...',
-  'fishing': '🎣 Pescando información...',
-  'dancing': '💃 Bailando mientras proceso...',
-  'meowing': '🐱 ¡Miau! Casi listo...',
-  'stargazing': '✨ Contemplando las estrellas...',
-  'walking': '🐾 Caminando por aquí...',
-  'walking_ball': '⚽ Paseando con mi bolita...',
+const ACTIVE_RUN_STATUSES = new Set<ErosRunStatus>(['queued', 'starting', 'running'])
+const RECOVERABLE_RUN_STATUSES = new Set<ErosRunStatus>(['queued', 'starting', 'running', 'waiting_for_input'])
+
+const createClientRequestID = () => {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-const progressTexts = [
-  'Pensando...', 'Procesando...', 'Formulando respuesta...',
-  'Un momento...', 'Casi listo...',
-]
+const isRunStatus = (value: unknown): value is ErosRunStatus => (
+  value === 'queued' || value === 'starting' || value === 'running'
+  || value === 'waiting_for_input' || value === 'completed' || value === 'failed' || value === 'cancelled'
+)
+
+const normalizeErosRun = (raw: any): ErosRun | null => {
+  if (!raw || typeof raw.id !== 'string' || !isRunStatus(raw.status)) return null
+  return {
+    id: raw.id,
+    conversation_id: typeof raw.conversation_id === 'string' ? raw.conversation_id : undefined,
+    status: raw.status,
+    phase: typeof raw.phase === 'string' ? raw.phase : undefined,
+    kind: raw.kind === 'quick_task' ? 'quick_task' : 'chat',
+    task_key: typeof raw.task_key === 'string' ? raw.task_key : undefined,
+    error_code: typeof raw.error_code === 'string' ? raw.error_code : undefined,
+    safe_error: typeof raw.safe_error === 'string' ? raw.safe_error : undefined,
+    result: raw.result,
+    message: typeof raw.message === 'string' || (raw.message && typeof raw.message === 'object') ? raw.message : null,
+    attachments: Array.isArray(raw.attachments) ? raw.attachments.map(normalizeErosAttachment).filter(Boolean) as ErosFileAttachment[] : undefined,
+    created_at: typeof raw.created_at === 'string' ? raw.created_at : undefined,
+  }
+}
+
+const runClarification = (run: ErosRun | null): ErosClarification | null => {
+  const value = run?.result && typeof run.result === 'object' ? (run.result as any).clarification : null
+  if (!value || typeof value.question !== 'string' || !Array.isArray(value.options) || value.options.length < 2) return null
+  return {
+    question: value.question,
+    context: typeof value.context === 'string' ? value.context : undefined,
+    options: value.options.filter((option: any) => option && typeof option.id === 'string' && typeof option.label === 'string' && typeof option.description === 'string').slice(0, 3),
+    allow_custom: value.allow_custom !== false,
+  }
+}
+
+const runPhaseLabel = (run: ErosRun | null) => {
+  if (!run) return 'Procesando…'
+  const known: Record<string, string> = {
+    queued: 'En cola segura',
+    starting: 'Preparando la consulta',
+    running: 'Consultando tus datos',
+    loading_context: 'Preparando el contexto',
+    querying_data: 'Consultando tus datos',
+    consulting: 'Consultando tus datos',
+    processing: 'Procesando la consulta',
+    querying: 'Consultando tus datos',
+    cancelling: 'Cancelando de forma segura',
+    reasoning: 'Analizando resultados',
+    formatting: 'Preparando la respuesta',
+    exporting: 'Generando el archivo',
+  }
+  return known[run.phase || ''] || known[run.status] || 'Procesando…'
+}
+
+const resultToMessage = (result: unknown): string => {
+  if (typeof result === 'string') return result
+  if (!result || typeof result !== 'object') return 'La tarea terminó correctamente.'
+  const row = result as Record<string, unknown>
+  for (const key of ['response', 'content', 'summary', 'text', 'message']) {
+    if (typeof row[key] === 'string' && row[key]) return String(row[key])
+  }
+  const rows = Array.isArray(row.rows) ? row.rows : Array.isArray(row.items) ? row.items : []
+  if (rows.length > 0 && rows.every(item => item && typeof item === 'object' && !Array.isArray(item))) {
+    const columns = Object.keys(rows[0] as Record<string, unknown>).slice(0, 8)
+    const header = `| ${columns.join(' | ')} |`
+    const separator = `| ${columns.map(() => '---').join(' | ')} |`
+    const body = rows.slice(0, 100).map(item => {
+      const object = item as Record<string, unknown>
+      return `| ${columns.map(column => String(object[column] ?? '').replace(/\|/g, '\\|')).join(' | ')} |`
+    })
+    return [header, separator, ...body].join('\n')
+  }
+  const count = typeof row.count === 'number' ? row.count : typeof row.total === 'number' ? row.total : null
+  return count !== null ? `Resultado: **${count.toLocaleString('es-PE')}**` : 'La tarea terminó correctamente.'
+}
 
 const normalizeChatMessage = (raw: any): ChatMessage => ({
   id: typeof raw?.id === 'string' ? raw.id : undefined,
@@ -238,48 +314,51 @@ const fileFormatLabel = (format: string) => {
 }
 
 export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenProp?: boolean; onClose?: () => void }) {
-  const [isMobile, setIsMobile] = useState(false)
   const [isOpen, setIsOpen] = useState(false)
-  const [isMaximized, setIsMaximized] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
   const [catMood, setCatMood] = useState<CatMood>('idle')
-  const [loadingProgress, setLoadingProgress] = useState(0)
-  const [progressText, setProgressText] = useState('')
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [showSidebar, setShowSidebar] = useState(false)
   const [erosConfigured, setErosConfigured] = useState<boolean | null>(null) // null = loading
   const [erosStatus, setErosStatus] = useState<ErosStatus | null>(null)
-  const [reasoningEffort, setReasoningEffort] = useState('medium')
+  const [clarificationText, setClarificationText] = useState('')
+  const [answeringClarification, setAnsweringClarification] = useState(false)
   const [mobileVH, setMobileVH] = useState<number | null>(null)
   const [maximizedChart, setMaximizedChart] = useState<ChartConfig | null>(null)
   const [isInputExpanded, setIsInputExpanded] = useState(false)
   const [inputHistory, setInputHistory] = useState<string[]>([])
   const [cachedFileIds, setCachedFileIds] = useState<Set<string>>(new Set())
+  const [quickTasks, setQuickTasks] = useState<ErosQuickTask[]>([])
+  const [quickTasksLoading, setQuickTasksLoading] = useState(false)
+  const [activeRun, setActiveRun] = useState<ErosRun | null>(null)
+  const [lastFailedRunId, setLastFailedRunId] = useState<string | null>(null)
+  const [runError, setRunError] = useState('')
   const inputHistoryIndex = useRef<number>(-1)
   const inputDraft = useRef<string>('')
+  const conversationRequestRef = useRef(0)
+  const conversationIdRef = useRef<string | null>(null)
+  const pollRequestRef = useRef(0)
+  const legacyAbortRef = useRef<AbortController | null>(null)
+  const busyRef = useRef(false)
   const headerMoods: CatMood[] = ['idle', 'winking', 'playing_ball', 'curious', 'dancing', 'jumping', 'love', 'pawing', 'walking']
   const [headerMoodIdx, setHeaderMoodIdx] = useState(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const chatPanelRef = useRef<HTMLDivElement>(null)
   const pathname = usePathname()
+  const erosWindow = useErosWindow()
+  const { effectiveMode, isMobile } = erosWindow
+
+  useEffect(() => { conversationIdRef.current = conversationId }, [conversationId])
 
   // Sync isOpen with prop from layout
   useEffect(() => {
     setIsOpen(isOpenProp)
   }, [isOpenProp])
-
-  // Mobile detection
-  useEffect(() => {
-    const check = () => setIsMobile(window.innerWidth < 1024)
-    check()
-    window.addEventListener('resize', check)
-    return () => window.removeEventListener('resize', check)
-  }, [])
 
   // Adjust inner layout when mobile keyboard opens/closes
   useEffect(() => {
@@ -347,12 +426,12 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
       if (document.activeElement === inputRef.current) return
       e.preventDefault()
       if (maximizedChart) { setMaximizedChart(null); return }
-      if (isMaximized) { setIsMaximized(false); return }
+      if (effectiveMode === 'maximized' && !isMobile) { erosWindow.setMode('floating'); return }
       onClose?.()
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [isOpen, isMaximized, maximizedChart, onClose])
+  }, [effectiveMode, erosWindow, isMobile, isOpen, maximizedChart, onClose])
 
   // Rotate moods during loading
   useEffect(() => {
@@ -361,41 +440,6 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
       const mood = waitingMoods[Math.floor(Math.random() * waitingMoods.length)]
       setCatMood(mood)
     }, 3500)
-    return () => clearInterval(interval)
-  }, [isLoading])
-
-  // Fake progress bar during loading
-  useEffect(() => {
-    if (!isLoading) {
-      setLoadingProgress(0)
-      return
-    }
-    setLoadingProgress(5)
-    const steps = [
-      { target: 40, duration: 1500 },
-      { target: 65, duration: 3000 },
-      { target: 80, duration: 5000 },
-      { target: 90, duration: 8000 },
-      { target: 95, duration: 15000 },
-    ]
-    const timers: ReturnType<typeof setTimeout>[] = []
-    let elapsed = 0
-    for (const step of steps) {
-      elapsed += step.duration
-      timers.push(setTimeout(() => setLoadingProgress(step.target), elapsed))
-    }
-    return () => timers.forEach(t => clearTimeout(t))
-  }, [isLoading])
-
-  // Rotate progress text
-  useEffect(() => {
-    if (!isLoading) return
-    let idx = 0
-    setProgressText(progressTexts[0])
-    const interval = setInterval(() => {
-      idx = (idx + 1) % progressTexts.length
-      setProgressText(progressTexts[idx])
-    }, 3000)
     return () => clearInterval(interval)
   }, [isLoading])
 
@@ -439,22 +483,6 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
     return () => window.removeEventListener('focus', onFocus)
   }, [checkErosStatus])
 
-  useEffect(() => {
-    if (!erosStatus) return
-    const allowed = erosStatus.allowed_reasoning_efforts?.length
-      ? erosStatus.allowed_reasoning_efforts
-      : ['low', 'medium', 'high', 'xhigh']
-    const fallback = allowed.includes(erosStatus.default_reasoning_effort || '')
-      ? String(erosStatus.default_reasoning_effort)
-      : allowed[0] || 'medium'
-    setReasoningEffort(prev => {
-      const saved = window.localStorage.getItem(REASONING_STORAGE_KEY) || ''
-      const next = allowed.includes(prev) ? prev : allowed.includes(saved) ? saved : fallback
-      if (next !== saved) window.localStorage.setItem(REASONING_STORAGE_KEY, next)
-      return next
-    })
-  }, [erosStatus])
-
   const loadConversations = async () => {
     try {
       const res = await fetch('/api/eros/conversations', { headers: getAuthHeaders() })
@@ -464,44 +492,58 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
   }
 
   const loadConversation = async (id: string) => {
+    if (activeRun?.status === 'waiting_for_input' && activeRun.conversation_id && activeRun.conversation_id !== id) {
+      setRunError('Responde primero la aclaración pendiente antes de cambiar de conversación.')
+      return
+    }
+    const requestId = ++conversationRequestRef.current
     try {
       const res = await fetch(`/api/eros/conversations/${id}`, { headers: getAuthHeaders() })
       const data = await res.json()
-      if (data.success && data.conversation) {
+      if (requestId === conversationRequestRef.current && data.success && data.conversation) {
         setConversationId(id)
         setMessages(data.conversation.messages?.map(normalizeChatMessage) || [])
         setShowSidebar(false)
+        setRunError('')
       }
     } catch { /* ignore */ }
   }
 
   const deleteConversation = async (id: string) => {
     try {
-      await fetch(`/api/eros/conversations/${id}`, { method: 'DELETE', headers: getAuthHeaders() })
+      const response = await fetch(`/api/eros/conversations/${id}`, { method: 'DELETE', headers: getAuthHeaders() })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setRunError(data.error === 'conversation_run_active'
+          ? 'Esta conversación tiene una consulta activa. Cancélala o espera a que termine antes de eliminarla.'
+          : 'No pude eliminar la conversación.')
+        return
+      }
       setConversations(prev => prev.filter(c => c.id !== id))
       if (conversationId === id) {
         setConversationId(null)
         setMessages([])
       }
-    } catch { /* ignore */ }
+    } catch {
+      setRunError('No pude eliminar la conversación.')
+    }
   }
 
   const startNewChat = () => {
+    if (activeRun?.status === 'waiting_for_input') {
+      setRunError('Responde primero la aclaración pendiente o vuelve a esa conversación para continuar.')
+      return
+    }
+    conversationRequestRef.current += 1
     setConversationId(null)
     setMessages([])
     setShowSidebar(false)
+    setRunError('')
+    setLastFailedMessage(null)
+    setLastFailedRunId(null)
     setCatMood('greeting')
     setTimeout(() => setCatMood('idle'), 2000)
     setTimeout(() => inputRef.current?.focus(), 100)
-  }
-
-  const selectReasoningEffort = (value: string) => {
-    const allowed = erosStatus?.allowed_reasoning_efforts?.length
-      ? erosStatus.allowed_reasoning_efforts
-      : ['low', 'medium', 'high', 'xhigh']
-    if (!allowed.includes(value)) return
-    setReasoningEffort(value)
-    window.localStorage.setItem(REASONING_STORAGE_KEY, value)
   }
 
   const downloadErosAttachment = async (file: ErosFileAttachment) => {
@@ -553,45 +595,143 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
     })
   }
 
-  const sendMessage = useCallback(async () => {
-    const msg = input.trim()
-    if (!msg || isLoading) return
+  const finishRun = useCallback((run: ErosRun) => {
+    busyRef.current = false
+    if (window.localStorage.getItem(ACTIVE_RUN_STORAGE_KEY) === run.id) {
+      window.localStorage.removeItem(ACTIVE_RUN_STORAGE_KEY)
+    }
+    setActiveRun(run)
+    setIsLoading(false)
 
-    const userMsg: ChatMessage = { role: 'user', content: msg }
-    setMessages(prev => [...prev, userMsg])
-    setInput('')
-    setInputHistory(prev => [...prev, msg])
-    inputHistoryIndex.current = -1
-    inputDraft.current = ''
-    setIsLoading(true)
-    setCatMood('thinking')
+    if (run.status === 'completed' || run.status === 'waiting_for_input') {
+      const content = typeof run.message === 'string'
+        ? run.message
+        : run.message && typeof run.message === 'object'
+          ? run.message.content
+          : resultToMessage(run.result)
+      const assistant = normalizeChatMessage(run.message && typeof run.message === 'object'
+        ? {
+            ...run.message,
+            attachments: run.message.attachments?.length ? run.message.attachments : run.attachments,
+          }
+        : { role: 'assistant', content, attachments: run.attachments })
+      if ((!run.conversation_id || conversationIdRef.current === run.conversation_id) && assistant.content) {
+        setMessages(previous => {
+          if (assistant.id && previous.some(message => message.id === assistant.id)) return previous
+          return [...previous, assistant]
+        })
+      }
+      setRunError('')
+      setLastFailedMessage(null)
+      setLastFailedRunId(null)
+      setCatMood(run.status === 'waiting_for_input' ? 'curious' : 'happy')
+      if (run.status === 'completed') window.setTimeout(() => setCatMood('idle'), 1800)
+      void loadConversations()
+    } else {
+      const cancelled = run.status === 'cancelled'
+      setRunError(cancelled ? 'La ejecución fue cancelada.' : run.safe_error || 'No pude completar la consulta. Puedes reintentarla sin perder el contexto.')
+      setLastFailedRunId(cancelled ? null : run.id)
+      setCatMood(cancelled ? 'idle' : 'curious')
+    }
+    window.setTimeout(() => inputRef.current?.focus(), 50)
+  }, [])
 
+  const pollRun = useCallback(async (runId: string) => {
+    const requestId = ++pollRequestRef.current
     try {
-      const history = [...messages, userMsg].slice(-20).map(m => ({
-        role: m.role,
-        content: m.role === 'assistant'
-          ? m.content.replace(/<chart>[\s\S]*?<\/chart>/g, '[gráfico]').replace(/^\|.*\|$/gm, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 800)
-          : m.content.slice(0, 800)
-      }))
+      const response = await fetch(`/api/eros/runs/${runId}`, { headers: getAuthHeaders(), cache: 'no-store' })
+      if (!response.ok) return
+      const data = await response.json()
+      const run = normalizeErosRun(data.run || data)
+      if (!run || requestId !== pollRequestRef.current) return
+      setActiveRun(run)
+      if (ACTIVE_RUN_STATUSES.has(run.status)) {
+        setIsLoading(true)
+        setCatMood(run.phase === 'reasoning' ? 'studying' : 'thinking')
+      } else {
+        finishRun(run)
+      }
+    } catch {
+      // Durable runs continue in the backend; a later poll or focus recovery will reconnect.
+    }
+  }, [finishRun])
 
-      const res = await fetch('/api/eros/chat', {
+  useEffect(() => {
+    if (!activeRun || !ACTIVE_RUN_STATUSES.has(activeRun.status)) return
+    const runId = activeRun.id
+    const timer = window.setInterval(() => void pollRun(runId), 1500)
+    return () => window.clearInterval(timer)
+  }, [activeRun?.id, activeRun?.status, pollRun])
+
+  const recoverActiveRuns = useCallback(async () => {
+    try {
+      const response = await fetch('/api/eros/runs?active=true', { headers: getAuthHeaders(), cache: 'no-store' })
+      if (!response.ok) return
+      const data = await response.json()
+      const runs = (Array.isArray(data.runs) ? data.runs : data.run ? [data.run] : [])
+        .map(normalizeErosRun)
+        .filter(Boolean) as ErosRun[]
+      let run = runs.find(item => RECOVERABLE_RUN_STATUSES.has(item.status)) || null
+      if (!run) {
+        const rememberedRunId = window.localStorage.getItem(ACTIVE_RUN_STORAGE_KEY)
+        if (rememberedRunId) {
+          const rememberedResponse = await fetch(`/api/eros/runs/${rememberedRunId}`, { headers: getAuthHeaders(), cache: 'no-store' })
+          if (rememberedResponse.ok) {
+            const rememberedData = await rememberedResponse.json()
+            run = normalizeErosRun(rememberedData.run || rememberedData)
+          } else {
+            window.localStorage.removeItem(ACTIVE_RUN_STORAGE_KEY)
+          }
+        }
+      }
+      if (!run) return
+      if (!ACTIVE_RUN_STATUSES.has(run.status)) {
+        if (run.conversation_id) {
+          conversationIdRef.current = run.conversation_id
+          await loadConversation(run.conversation_id)
+        }
+        finishRun(run)
+        return
+      }
+      setActiveRun(run)
+      setIsLoading(ACTIVE_RUN_STATUSES.has(run.status))
+      busyRef.current = ACTIVE_RUN_STATUSES.has(run.status)
+      window.localStorage.setItem(ACTIVE_RUN_STORAGE_KEY, run.id)
+      setRunError('')
+      if (run.conversation_id && !conversationIdRef.current) {
+        conversationIdRef.current = run.conversation_id
+        await loadConversation(run.conversation_id)
+      }
+      if (ACTIVE_RUN_STATUSES.has(run.status)) void pollRun(run.id)
+    } catch {
+      // Older backends do not expose durable runs; the chat fallback remains available.
+    }
+  }, [finishRun, pollRun])
+
+  const runLegacyChat = useCallback(async (msg: string, historyMessages: ChatMessage[]) => {
+    const controller = new AbortController()
+    legacyAbortRef.current = controller
+    try {
+      const history = historyMessages.slice(-20).map(message => ({
+        role: message.role,
+        content: message.role === 'assistant'
+          ? message.content.replace(/<chart>[\s\S]*?<\/chart>/g, '[gráfico]').replace(/^\|.*\|$/gm, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 800)
+          : message.content.slice(0, 800),
+      }))
+      const response = await fetch('/api/eros/chat', {
         method: 'POST',
         headers: getAuthHeaders(),
+        signal: controller.signal,
         body: JSON.stringify({
           message: msg,
           history,
           current_page: pathname,
-          conversation_id: conversationId || '',
-          reasoning_effort: reasoningEffort,
+          conversation_id: conversationIdRef.current || '',
         }),
       })
-
-      const data = await res.json()
-
+      const data = await response.json()
       if (data.success && data.response) {
-        setCatMood('happy')
-        setLastFailedMessage(null)
-        setMessages(prev => [...prev, normalizeChatMessage(data.message || {
+        setMessages(previous => [...previous, normalizeChatMessage(data.message || {
           role: 'assistant',
           content: data.response,
           codex_model: data.codex_model,
@@ -600,104 +740,238 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
           metadata: data.metadata,
           tool_calls: data.tool_calls,
         })])
-        // Save conversation_id from response (auto-created if new)
-        if (data.conversation_id && !conversationId) {
+        if (data.conversation_id && !conversationIdRef.current) {
+          conversationIdRef.current = data.conversation_id
           setConversationId(data.conversation_id)
-          loadConversations()
         }
-      } else if (data.error === 'eros_user_disabled' || data.error === 'eros_disabled') {
-        setErosConfigured(false)
-        setCatMood('sleeping')
-        setMessages(prev => prev.slice(0, -1)) // Remove the user message
-      } else if (data.error === 'bridge_not_configured') {
-        setCatMood('idle')
-        setLastFailedMessage(msg)
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: 'Eros aún no está configurado. Un administrador debe completar la configuración global.',
-        }])
-      } else if (data.error === 'eros_openai_connection_required' || data.error === 'eros_codex_auth_revoked') {
-        setCatMood('idle')
-        setLastFailedMessage(msg)
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: 'Eros está temporalmente sin conexión. Inténtalo nuevamente más tarde o contacta a un administrador si el problema continúa.',
-        }])
-      } else if (data.error === 'eros_bridge_unavailable' || data.error === 'eros_bridge_error') {
-        setCatMood('idle')
-        setLastFailedMessage(msg)
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: 'Eros no está disponible en este momento. Inténtalo nuevamente en unos minutos.',
-        }])
-      } else if (data.error === 'chat_limit_reached') {
-        setCatMood('idle')
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: '¡Miau! 😿 Has alcanzado el límite de **50 conversaciones**. Elimina alguna conversación antigua desde el historial para poder iniciar una nueva.',
-        }])
-      } else if (data.rate_limited) {
-        setCatMood('idle')
-        setLastFailedMessage(msg)
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: data.error || '¡Miau! 😿 Estoy procesando muchas consultas. Dame unos segunditos 🐾',
-        }])
+        setLastFailedMessage(null)
+        setRunError('')
+        setCatMood('happy')
+        void loadConversations()
       } else {
-        setCatMood('idle')
-        setLastFailedMessage(msg)
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: data.error || 'Lo siento, hubo un error. Intenta de nuevo 😿',
-        }])
+        const disabled = data.error === 'eros_user_disabled' || data.error === 'eros_disabled'
+        if (disabled) setErosConfigured(false)
+        throw new Error(typeof data.safe_error === 'string' ? data.safe_error : typeof data.error === 'string' ? data.error : 'No pude completar la consulta.')
       }
-    } catch {
-      setCatMood('idle')
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') setRunError('La consulta fue cancelada.')
+      else setRunError(error instanceof Error && !error.message.startsWith('eros_') ? error.message : 'Eros no está disponible en este momento. Inténtalo nuevamente en unos minutos.')
       setLastFailedMessage(msg)
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: 'Eros no está disponible en este momento. Inténtalo nuevamente en unos minutos.',
-      }])
+      setCatMood('curious')
     } finally {
+      legacyAbortRef.current = null
+      busyRef.current = false
       setIsLoading(false)
-      setLoadingProgress(100)
-      setTimeout(() => {
-        setCatMood('idle')
-        setLoadingProgress(0)
-      }, 3000)
-      setTimeout(() => inputRef.current?.focus(), 50)
+      window.setTimeout(() => inputRef.current?.focus(), 50)
     }
-  }, [input, isLoading, messages, pathname, conversationId, reasoningEffort])
+  }, [pathname])
 
-  const retryLastMessage = useCallback(() => {
-    if (!lastFailedMessage || isLoading) return
-    // Remove the last error message from assistant
-    setMessages(prev => {
-      const last = prev[prev.length - 1]
-      if (last?.role === 'assistant') return prev.slice(0, -1)
-      return prev
-    })
-    // Remove the last user message too (sendMessage will re-add it)
-    setMessages(prev => {
-      const last = prev[prev.length - 1]
-      if (last?.role === 'user') return prev.slice(0, -1)
-      return prev
-    })
-    setInput(lastFailedMessage)
+  const createRun = useCallback(async ({
+    kind,
+    label,
+    message,
+    task,
+  }: {
+    kind: 'chat' | 'quick_task'
+    label: string
+    message?: string
+    task?: ErosQuickTask
+  }) => {
+    if (busyRef.current || isLoading || !erosConfigured) return
+    busyRef.current = true
+    const userMessage: ChatMessage = { role: 'user', content: label }
+    const historyMessages = [...messages, userMessage]
+    setMessages(previous => [...previous, userMessage])
+    setIsLoading(true)
+    setRunError('')
     setLastFailedMessage(null)
-    setTimeout(() => {
-      // Trigger send after state update
-      const sendBtn = document.querySelector('[data-eros-send]') as HTMLButtonElement
-      sendBtn?.click()
-    }, 100)
-  }, [lastFailedMessage, isLoading])
+    setLastFailedRunId(null)
+    setCatMood(kind === 'quick_task' ? 'studying' : 'thinking')
+
+    try {
+      const parameters = {
+        ...Object.fromEntries((task?.parameters || [])
+        .filter(parameter => parameter.default !== undefined)
+        .map(parameter => [parameter.name, parameter.default])),
+        ...(task?.key === 'export_current_result' && activeRun?.status === 'completed'
+          ? { format: 'xlsx', source_run_id: activeRun.id }
+          : {}),
+      }
+      const response = await fetch('/api/eros/runs', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          client_request_id: createClientRequestID(),
+          conversation_id: conversationIdRef.current || undefined,
+          kind,
+          message,
+          task_key: task?.key,
+          parameters,
+          current_page: pathname,
+        }),
+      })
+      if ((response.status === 404 || response.status === 405 || response.status === 501) && kind === 'chat' && message) {
+        await runLegacyChat(message, historyMessages)
+        return
+      }
+      const data = await response.json().catch(() => ({}))
+      const run = normalizeErosRun(data.run || data)
+      if (!response.ok || !run) throw new Error(data.safe_error || data.error || 'No pude iniciar la consulta.')
+      if (run.conversation_id) {
+        conversationIdRef.current = run.conversation_id
+        setConversationId(run.conversation_id)
+      }
+      setActiveRun(run)
+      window.localStorage.setItem(ACTIVE_RUN_STORAGE_KEY, run.id)
+      void pollRun(run.id)
+    } catch (error) {
+      busyRef.current = false
+      setIsLoading(false)
+      setRunError(error instanceof Error ? error.message : 'No pude iniciar la consulta.')
+      setLastFailedMessage(message || label)
+      setCatMood('curious')
+    }
+  }, [activeRun, erosConfigured, isLoading, messages, pathname, pollRun, runLegacyChat])
+
+  const sendMessage = useCallback((messageOverride?: string) => {
+    const msg = (messageOverride ?? input).trim()
+    if (!msg || busyRef.current || isLoading) return
+    setInput('')
+    setInputHistory(previous => [...previous, msg])
+    inputHistoryIndex.current = -1
+    inputDraft.current = ''
+    void createRun({ kind: 'chat', label: msg, message: msg })
+  }, [createRun, input, isLoading])
+
+  const runQuickTask = useCallback((task: ErosQuickTask) => {
+    void createRun({ kind: 'quick_task', label: `⚡ ${task.title}`, task })
+  }, [createRun])
+
+  const answerClarification = useCallback(async (optionId?: string) => {
+    const clarification = runClarification(activeRun)
+    const customText = clarificationText.trim()
+    if (!activeRun || activeRun.status !== 'waiting_for_input' || !clarification || (!optionId && !customText) || answeringClarification) return
+    setAnsweringClarification(true)
+    setRunError('')
+    try {
+      const selected = clarification.options.find(option => option.id === optionId)
+      const response = await fetch(`/api/eros/runs/${activeRun.id}/answer`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ client_request_id: createClientRequestID(), option_id: optionId || '', custom_text: optionId ? '' : customText }),
+      })
+      const data = await response.json().catch(() => ({}))
+      const run = normalizeErosRun(data.run || data)
+      if (!response.ok || !run) throw new Error(data.error || 'No pude registrar la aclaración.')
+      const label = selected?.label || customText
+      setMessages(previous => [...previous, { role: 'user', content: label }])
+      setClarificationText('')
+      setActiveRun(run)
+      setIsLoading(true)
+      busyRef.current = true
+      window.localStorage.setItem(ACTIVE_RUN_STORAGE_KEY, run.id)
+      void pollRun(run.id)
+    } catch (error) {
+      setRunError(error instanceof Error ? error.message : 'No pude registrar la aclaración.')
+    } finally {
+      setAnsweringClarification(false)
+    }
+  }, [activeRun, answeringClarification, clarificationText, pollRun])
+
+  const cancelActiveRun = useCallback(async () => {
+    if (activeRun && ACTIVE_RUN_STATUSES.has(activeRun.status)) {
+      try {
+        const response = await fetch(`/api/eros/runs/${activeRun.id}/cancel`, { method: 'POST', headers: getAuthHeaders(), body: '{}' })
+        const data = await response.json().catch(() => ({}))
+        const run = normalizeErosRun(data.run || data)
+        if (run) finishRun(run)
+        else setActiveRun(current => current ? { ...current, phase: 'cancelling' } : current)
+      } catch {
+        setRunError('No pude confirmar la cancelación; la ejecución seguirá visible al reconectar.')
+      }
+      return
+    }
+    legacyAbortRef.current?.abort()
+  }, [activeRun, finishRun])
+
+  const retryLastMessage = useCallback(async () => {
+    if (isLoading) return
+    setRunError('')
+    if (lastFailedRunId) {
+      try {
+        const response = await fetch(`/api/eros/runs/${lastFailedRunId}/retry`, { method: 'POST', headers: getAuthHeaders(), body: '{}' })
+        const data = await response.json().catch(() => ({}))
+        const run = normalizeErosRun(data.run || data)
+        if (response.ok && run) {
+          busyRef.current = true
+          setActiveRun(run)
+          window.localStorage.setItem(ACTIVE_RUN_STORAGE_KEY, run.id)
+          setLastFailedRunId(null)
+          setIsLoading(true)
+          void pollRun(run.id)
+          return
+        }
+      } catch { /* fall through to message retry */ }
+    }
+    if (lastFailedMessage) {
+      const retry = lastFailedMessage
+      setLastFailedMessage(null)
+      sendMessage(retry)
+    }
+  }, [isLoading, lastFailedMessage, lastFailedRunId, pollRun, sendMessage])
+
+  const loadQuickTasks = useCallback(async () => {
+    setQuickTasksLoading(true)
+    try {
+      const response = await fetch('/api/eros/quick-tasks', { headers: getAuthHeaders(), cache: 'no-store' })
+      if (!response.ok) return
+      const data = await response.json()
+      const tasks = Array.isArray(data.tasks) ? data.tasks.flatMap((task: any) => {
+        const key = typeof task?.key === 'string' ? task.key : typeof task?.id === 'string' ? task.id : ''
+        if (!key || typeof task?.title !== 'string' || typeof task?.description !== 'string') return []
+        return [{
+          key,
+          title: task.title,
+          description: task.description,
+          icon: typeof task.icon === 'string' ? task.icon : undefined,
+          category: typeof task.category === 'string' ? task.category : undefined,
+          parameters: Array.isArray(task.parameters) ? task.parameters : undefined,
+          defaults: task.defaults && typeof task.defaults === 'object' && !Array.isArray(task.defaults) ? task.defaults : undefined,
+          input_schema: task.input_schema && typeof task.input_schema === 'object' && !Array.isArray(task.input_schema) ? task.input_schema : undefined,
+        }]
+      }) : []
+      setQuickTasks(tasks)
+    } catch {
+      setQuickTasks([])
+    } finally {
+      setQuickTasksLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isOpen || !erosConfigured) return
+    void loadQuickTasks()
+    void recoverActiveRuns()
+  }, [erosConfigured, isOpen, loadQuickTasks, recoverActiveRuns])
+
+  useEffect(() => {
+    const reconnect = () => {
+      if (document.visibilityState === 'visible') void recoverActiveRuns()
+    }
+    window.addEventListener('focus', reconnect)
+    document.addEventListener('visibilitychange', reconnect)
+    return () => {
+      window.removeEventListener('focus', reconnect)
+      document.removeEventListener('visibilitychange', reconnect)
+    }
+  }, [recoverActiveRuns])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
       e.preventDefault()
       if (maximizedChart) { setMaximizedChart(null); return }
-      if (isMaximized) { setIsMaximized(false); return }
-      setIsOpen(false)
+      if (effectiveMode === 'maximized' && !isMobile) { erosWindow.setMode('floating'); return }
+      onClose?.()
       return
     }
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -845,12 +1119,6 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
       pdf.save(`eros_conversacion_${new Date().toISOString().slice(0, 10)}.pdf`)
     } catch (err) {
       console.error('PDF export error:', err)
-    }
-  }
-
-  const toggleOpen = () => {
-    if (isOpen && onClose) {
-      onClose()
     }
   }
 
@@ -1157,39 +1425,64 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
   // --- UNIFIED RENDER ---
   if (!isOpen) return null
 
-  // Determine container style based on mode
-  const isFullscreen = isMobile && !isMaximized
-  const isMaximizedView = isMaximized
-  const allowedReasoningEfforts = erosStatus?.allowed_reasoning_efforts?.length
-    ? erosStatus.allowed_reasoning_efforts
-    : ['low', 'medium', 'high', 'xhigh']
-  const canChooseReasoning = Boolean(
-    erosConfigured &&
-    erosStatus?.allow_user_reasoning_override &&
-    allowedReasoningEfforts.length > 0
-  )
+  const isFullscreen = isMobile
+  const isMaximizedView = effectiveMode === 'maximized'
+  const isDocked = effectiveMode === 'docked'
+  const isFloating = effectiveMode === 'floating'
+  const pendingClarification = runClarification(activeRun)
+  const availableQuickTasks = quickTasks.filter(task => (
+    task.key !== 'export_current_result'
+    || (activeRun?.status === 'completed' && activeRun.task_key !== 'export_current_result')
+  ))
 
   return (
     <>
-      {/* Backdrop — maximized or mobile */}
-      {(isMaximizedView || isFullscreen) && (
+      {/* A desktop maximized window keeps a small, clickable margin around it. */}
+      {isMaximizedView && !isMobile && (
         <div
-          className="fixed inset-0 bg-black/30 z-[55] transition-opacity"
-          onClick={() => { if (isMaximizedView) setIsMaximized(false); else onClose?.() }}
+          className="fixed inset-0 z-[55] bg-slate-950/30 backdrop-blur-[1px] transition-opacity"
+          onClick={() => erosWindow.setMode('floating')}
         />
       )}
 
       <div
         ref={chatPanelRef}
-        className={`fixed z-[56] bg-white flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${
-          isMaximizedView
-            ? 'inset-4 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-[95vw] sm:max-w-[1100px] sm:h-[90vh] rounded-2xl shadow-2xl border border-slate-200'
-            : isFullscreen
-              ? 'inset-0 rounded-none'
-              : 'top-14 right-4 w-[420px] h-[550px] rounded-2xl shadow-[0_8px_40px_rgba(0,0,0,0.18)] border border-slate-200/60 ring-1 ring-black/5'
+        className={`${isDocked ? 'relative z-20 shrink-0' : 'fixed z-[56]'} flex flex-col overflow-hidden bg-white ${
+          !erosWindow.isInteracting ? 'transition-[inset,width,height,box-shadow,border-radius] duration-200 ease-out' : ''
+        } ${isDocked
+          ? 'border-l border-slate-200 shadow-[-10px_0_30px_rgba(15,23,42,0.08)]'
+          : isFullscreen
+            ? 'rounded-none shadow-2xl'
+            : isMaximizedView
+              ? 'rounded-2xl border border-slate-200 shadow-2xl'
+              : 'rounded-2xl border border-slate-200/80 shadow-[0_18px_60px_rgba(15,23,42,0.22)] ring-1 ring-black/5'
         }`}
-        style={isFullscreen ? { height: mobileVH ? `${mobileVH}px` : '100dvh' } : undefined}
+        style={{ ...erosWindow.panelStyle, ...(isFullscreen && mobileVH ? { height: `${mobileVH}px` } : {}) }}
+        aria-label="Asistente Eros"
       >
+        {isDocked && (
+          <div
+            role="separator"
+            aria-label="Ajustar ancho del panel Eros"
+            aria-orientation="vertical"
+            aria-valuemin={erosWindow.dockMin}
+            aria-valuemax={erosWindow.dockMax}
+            aria-valuenow={Math.round(erosWindow.dockWidth)}
+            tabIndex={0}
+            onPointerDown={erosWindow.beginDockResize}
+            onDoubleClick={erosWindow.resetDockWidth}
+            onKeyDown={erosWindow.handleDockSeparatorKeyDown}
+            className="eros-dock-separator absolute inset-y-0 left-0 z-[75] w-3 -translate-x-1/2 cursor-col-resize focus:outline-none focus-visible:bg-emerald-400/25"
+          />
+        )}
+        {isFloating && (['n', 'e', 's', 'w', 'ne', 'nw', 'se', 'sw'] as ErosResizeEdge[]).map(edge => (
+          <div
+            key={edge}
+            aria-hidden="true"
+            onPointerDown={event => erosWindow.beginResize(edge, event)}
+            className={`eros-resize-handle eros-resize-${edge}`}
+          />
+        ))}
         {/* Conversation history drawer */}
         {showSidebar && (
           <>
@@ -1216,13 +1509,21 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                       conversationId === conv.id ? 'bg-emerald-50 border-l-2 border-l-emerald-500' : ''
                     }`}
                     onClick={() => loadConversation(conv.id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        void loadConversation(conv.id)
+                      }
+                    }}
                   >
                     <p className="text-xs font-medium text-slate-700 truncate">{conv.title || 'Sin título'}</p>
                     <div className="flex items-center justify-between mt-1">
                       <span className="text-[10px] text-slate-400">{formatDate(conv.updated_at)}</span>
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteConversation(conv.id) }}
-                        className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-50 rounded text-slate-400 hover:text-red-500 transition-all"
+                        className="rounded p-1 text-slate-400 opacity-100 transition-all hover:bg-red-50 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
                         title="Eliminar"
                       >
                         <Trash2 size={12} />
@@ -1241,38 +1542,42 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
         )}
 
         {/* Header */}
-        <div className={`bg-gradient-to-r from-emerald-600 to-emerald-500 px-3 flex items-center gap-2.5 shrink-0 ${
-          isFullscreen ? 'py-3 pt-[max(0.75rem,env(safe-area-inset-top))]' : 'py-2.5'
-        } ${!isFullscreen && !isMaximizedView ? 'rounded-t-2xl' : ''}`}>
+        <div
+          className={`relative flex shrink-0 select-none items-center gap-1.5 overflow-visible bg-gradient-to-r from-emerald-700 via-emerald-600 to-teal-500 px-2.5 ${isFullscreen ? 'h-[calc(3.5rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)]' : 'h-14'} ${isFloating ? 'cursor-grab rounded-t-2xl active:cursor-grabbing' : ''}`}
+          onPointerDown={erosWindow.beginDrag}
+          onDoubleClick={event => {
+            if ((event.target as HTMLElement).closest('button, a, input, textarea, select, [data-no-window-drag]')) return
+            if (!isMobile) erosWindow.setMode(isMaximizedView ? 'floating' : 'maximized')
+          }}
+        >
           <button
             onClick={() => setShowSidebar(prev => !prev)}
-            className="p-1 hover:bg-white/20 rounded-lg transition-colors"
+            className="z-10 rounded-lg p-1.5 transition-colors hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
             title="Historial"
           >
             <Menu size={16} className="text-white" />
           </button>
-          <div
-            className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center overflow-hidden shrink-0"
-            style={{ animation: 'eros-header-bounce 3s ease-in-out infinite' }}
-          >
-            <ErosCat mood={isLoading ? catMood : headerMoods[headerMoodIdx]} size={26} />
+          <div className="eros-header-cat-lane relative h-14 min-w-[52px] flex-1 overflow-hidden" aria-hidden="true">
+            <div className={`eros-header-cat-wander absolute top-1/2 flex h-[46px] w-[46px] -translate-y-1/2 items-center justify-center rounded-full bg-white/15 shadow-inner ring-1 ring-white/20 ${isLoading ? 'eros-header-cat-working' : ''}`}>
+              <ErosCat mood={isLoading ? catMood : headerMoods[headerMoodIdx]} size={42} />
+            </div>
           </div>
-          <div className="flex-1 min-w-0">
+          <div className="min-w-[46px] max-w-[72px]" data-no-window-drag>
             <h3 className="text-white font-semibold text-sm leading-tight">Eros</h3>
             <p className="text-emerald-100/80 text-[11px] truncate">
-              {isLoading ? 'Pensando...' : conversationId ? 'Chat activo' : 'Asistente de IA'}
+              {isLoading ? 'Trabajando' : conversationId ? 'Chat activo' : 'IA de consulta'}
             </p>
           </div>
-          <div className="flex items-center gap-0.5">
+          <div className="z-10 flex shrink-0 items-center gap-0.5" data-no-window-drag>
             {erosConfigured && messages.length > 0 && (
-              <div className="relative group/export">
-                <button
-                  className="p-1.5 hover:bg-white/20 rounded-lg transition-colors"
-                  title="Exportar"
+              <details className="group/export relative">
+                <summary
+                  className="flex cursor-pointer list-none rounded-lg p-1.5 transition-colors hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70 [&::-webkit-details-marker]:hidden"
+                  title="Exportar conversación"
                 >
                   <Download size={14} className="text-white/80" />
-                </button>
-                <div className="absolute right-0 top-full mt-1 bg-white rounded-lg shadow-xl border border-slate-200 py-1 hidden group-hover/export:block z-10 min-w-[120px]">
+                </summary>
+                <div className="absolute right-0 top-full z-10 mt-1 min-w-[132px] rounded-lg border border-slate-200 bg-white py-1 shadow-xl">
                   <button
                     onClick={exportAsTxt}
                     className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
@@ -1286,25 +1591,25 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                     <FileSpreadsheet size={12} className="text-emerald-500" /> PDF
                   </button>
                 </div>
-              </div>
+              </details>
             )}
             <button
               onClick={startNewChat}
-              className="p-1.5 hover:bg-white/20 rounded-lg transition-colors"
+              className="rounded-lg p-1.5 transition-colors hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
               title="Nuevo chat"
             >
               <Sparkles size={14} className="text-white/80" />
             </button>
-            <button
-              onClick={() => setIsMaximized(prev => !prev)}
-              className="p-1.5 hover:bg-white/20 rounded-lg transition-colors"
-              title={isMaximized ? 'Restaurar' : 'Maximizar'}
-            >
-              {isMaximized ? <Minimize2 size={14} className="text-white/80" /> : <Maximize2 size={14} className="text-white/80" />}
-            </button>
+            {!isMobile && (
+              <div className="flex items-center rounded-lg bg-black/10 p-0.5" aria-label="Modo de ventana">
+                <button onClick={() => erosWindow.setMode('floating')} className={`rounded-md p-1 ${isFloating ? 'bg-white/25 text-white' : 'text-white/65 hover:bg-white/15'}`} title="Ventana flotante"><Square size={12} /></button>
+                <button onClick={() => erosWindow.setMode('maximized')} className={`rounded-md p-1 ${isMaximizedView ? 'bg-white/25 text-white' : 'text-white/65 hover:bg-white/15'}`} title="Maximizar"><Maximize2 size={12} /></button>
+                {erosWindow.canDock && <button onClick={() => erosWindow.setMode('docked')} className={`rounded-md p-1 ${isDocked ? 'bg-white/25 text-white' : 'text-white/65 hover:bg-white/15'}`} title="Acoplar a la derecha"><PanelRight size={12} /></button>}
+              </div>
+            )}
             <button
               onClick={() => onClose?.()}
-              className="p-1.5 hover:bg-white/20 rounded-lg transition-colors"
+              className="rounded-lg p-1.5 transition-colors hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
               title="Cerrar"
             >
               <X size={14} className="text-white/80" />
@@ -1312,17 +1617,17 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
           </div>
         </div>
 
-        {/* Progress Bar */}
+        {/* Progress comes from the durable run state, never from a fake timer. */}
         {isLoading && (
-          <div className="shrink-0">
+          <div className="shrink-0" role="status" aria-live="polite">
             <div className="h-0.5 bg-slate-100 overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-emerald-400 to-emerald-600 transition-all duration-1000 ease-out"
-                style={{ width: `${loadingProgress}%` }}
-              />
+              <div className="eros-run-progress h-full w-1/3 bg-gradient-to-r from-transparent via-emerald-500 to-transparent" />
             </div>
-            <div className="text-center py-0.5 bg-emerald-50/50">
-              <span className="text-[10px] text-emerald-600 animate-pulse">{progressText}</span>
+            <div className="flex min-h-7 items-center justify-between gap-2 bg-emerald-50/70 px-3 py-1">
+              <span className="truncate text-[10px] font-medium text-emerald-700">{activeRun ? runPhaseLabel(activeRun) : 'Procesando consulta anterior…'}</span>
+              <button type="button" onClick={cancelActiveRun} className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-slate-500 hover:bg-white hover:text-red-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50">
+                <StopCircle size={11} /> Cancelar
+              </button>
             </div>
           </div>
         )}
@@ -1356,19 +1661,23 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
           {/* Chat area */}
           {erosConfigured && (<>
             {messages.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full text-center py-8 gap-3">
-                <ErosCat mood="greeting" size={isMaximizedView || isFullscreen ? 100 : 64} />
+              <div className="flex min-h-full flex-col items-center justify-center px-1 py-6 text-center">
+                <ErosCat mood="greeting" size={isMaximizedView || isFullscreen ? 100 : 76} />
                 <div>
-                  <p className="text-slate-700 font-medium text-sm">¡Hola! Soy Eros 🐱</p>
-                  <p className="text-slate-500 text-xs mt-1 max-w-[220px]">
-                    Tu asistente de IA. Pregúntame sobre tus leads, campañas, estadísticas o estrategias.
+                  <p className="text-sm font-semibold text-slate-700">¡Hola! Soy Eros 🐱</p>
+                  <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-slate-500">
+                    Pregúntame libremente o inicia una consulta frecuente con un toque.
                   </p>
                 </div>
+                <ErosQuickTasks tasks={availableQuickTasks} loading={quickTasksLoading} disabled={isLoading} onRun={runQuickTask} />
               </div>
             )}
 
             {messages.map((msg, i) => {
               const execution = getAssistantExecutionLabel(msg)
+              const savedResult = msg.role === 'assistant' && msg.metadata?.result_set && typeof msg.metadata.result_set === 'object'
+                ? msg.metadata.result_set as Record<string, unknown>
+                : null
               return (
                 <div key={msg.id || i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`group/message flex flex-col ${isMaximizedView || isFullscreen ? 'max-w-[75%]' : 'max-w-[85%]'}`}>
@@ -1383,6 +1692,11 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                       {msg.role === 'assistant' ? renderAssistantMessage(msg.content, i) : msg.content}
                     </div>
                     {msg.role === 'assistant' && msg.attachments?.map(renderErosAttachment)}
+                    {savedResult && (
+                      <div className="mt-1.5 ml-1 inline-flex w-fit items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700" title="Eros puede reutilizar exactamente estos registros en tu siguiente consulta">
+                        <Sparkles size={10} /> Resultado guardado · {Number(savedResult.returned_count || 0).toLocaleString('es-PE')} {String(savedResult.entity_type || 'registros')}
+                      </div>
+                    )}
                     {execution && (
                       <div
                         className="mt-1 ml-1 text-[10px] leading-none text-slate-400 transition-opacity sm:opacity-0 sm:group-hover/message:opacity-100 sm:group-focus-within/message:opacity-100"
@@ -1419,7 +1733,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                     <ErosCat mood={catMood} size={isMaximizedView || isFullscreen ? 72 : 48} />
                     <div className="flex flex-col gap-1">
                       <span className="text-xs text-slate-600 font-medium">
-                        {waitingCaptions[catMood] || '🐱 Procesando...'}
+                        {activeRun ? runPhaseLabel(activeRun) : 'Reconectando con la consulta…'}
                       </span>
                       <span className="inline-flex gap-1.5 items-center">
                         <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
@@ -1428,6 +1742,47 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                       </span>
                     </div>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {runError && !isLoading && (
+              <div className="flex justify-start" role="alert">
+                <div className="max-w-[92%] rounded-2xl rounded-bl-sm border border-amber-200 bg-amber-50 px-3 py-2.5 text-amber-900 shadow-sm">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle size={15} className="mt-0.5 shrink-0 text-amber-600" />
+                    <div className="min-w-0">
+                      <p className="text-xs leading-relaxed">{runError}</p>
+                      {(lastFailedRunId || lastFailedMessage) && (
+                        <button type="button" onClick={retryLastMessage} className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-white/70 px-2 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40">
+                          <RotateCcw size={11} /> Reintentar
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeRun?.status === 'waiting_for_input' && pendingClarification && (
+              <div className="flex justify-start" role="group" aria-label="Aclaración solicitada por Eros">
+                <div className="w-full max-w-[94%] rounded-2xl rounded-bl-sm border border-emerald-200 bg-white p-3 shadow-sm">
+                  <p className="text-sm font-semibold text-slate-800">{pendingClarification.question}</p>
+                  {pendingClarification.context && <p className="mt-1 text-xs leading-relaxed text-slate-500">{pendingClarification.context}</p>}
+                  <div className="mt-3 grid gap-2">
+                    {pendingClarification.options.map(option => (
+                      <button key={option.id} type="button" disabled={answeringClarification} onClick={() => void answerClarification(option.id)} className="rounded-xl border border-slate-200 px-3 py-2 text-left transition-colors hover:border-emerald-300 hover:bg-emerald-50 disabled:opacity-60">
+                        <span className="block text-xs font-semibold text-slate-700">{option.label}</span>
+                        <span className="mt-0.5 block text-[11px] leading-relaxed text-slate-500">{option.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {pendingClarification.allow_custom && (
+                    <div className="mt-3 flex items-end gap-2">
+                      <textarea value={clarificationText} onChange={event => setClarificationText(event.target.value)} rows={2} maxLength={1000} placeholder="Otra opción: escribe exactamente lo que deseas…" disabled={answeringClarification} className="min-h-[58px] flex-1 resize-none rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-700 focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20" />
+                      <button type="button" onClick={() => void answerClarification()} disabled={!clarificationText.trim() || answeringClarification} className="rounded-xl bg-emerald-500 p-2.5 text-white hover:bg-emerald-600 disabled:opacity-40" aria-label="Enviar otra opción"><Send size={15} /></button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1458,32 +1813,10 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
         {/* Input */}
         <div className={`border-t border-slate-200 p-2.5 bg-white shrink-0 ${
           isFullscreen ? 'pb-[max(0.625rem,env(safe-area-inset-bottom))]' : ''
-        } ${!isFullscreen && !isMaximizedView ? 'rounded-b-2xl' : ''}`}>
-          {canChooseReasoning && (
-            <div className="mb-2 flex items-center gap-1.5 overflow-x-auto pb-0.5">
-              <span className="shrink-0 text-[10px] font-medium uppercase tracking-normal text-slate-400">
-                Pensamiento
-              </span>
-              {reasoningOptions
-                .filter(option => allowedReasoningEfforts.includes(option.value))
-                .map(option => {
-                  const active = reasoningEffort === option.value
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => selectReasoningEffort(option.value)}
-                      disabled={isLoading}
-                      className={`shrink-0 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                        active
-                          ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                          : 'border-slate-200 bg-white text-slate-500 hover:border-emerald-200 hover:text-emerald-700'
-                      } disabled:cursor-not-allowed disabled:opacity-60`}
-                    >
-                      {option.label}
-                    </button>
-                  )
-                })}
+        } ${isFloating ? 'rounded-b-2xl' : ''}`}>
+          {erosConfigured && (
+            <div className="mb-2 text-[10px] font-medium text-slate-400" aria-label="Nivel de análisis automático">
+              Análisis automático{activeRun?.message && typeof activeRun.message === 'object' && activeRun.message.reasoning_effort ? ` · ${reasoningLabelByValue[activeRun.message.reasoning_effort] || activeRun.message.reasoning_effort}` : ''}
             </div>
           )}
           <div className="flex gap-2 items-end">
@@ -1508,7 +1841,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
                 rows={isInputExpanded ? 4 : 1}
                 className={`w-full resize-none rounded-xl border border-slate-200 px-3 py-2 pr-8 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all ${isInputExpanded ? 'max-h-[200px]' : 'max-h-[80px]'}`}
                 style={{ minHeight: isInputExpanded ? '100px' : '38px' }}
-                disabled={isLoading || !erosConfigured}
+                disabled={isLoading || activeRun?.status === 'waiting_for_input' || !erosConfigured}
               />
               <button
                 onClick={() => {
@@ -1531,23 +1864,14 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
               </button>
             </div>
             <button
-              onClick={sendMessage}
+              onClick={() => sendMessage()}
               data-eros-send
-              disabled={!input.trim() || isLoading || !erosConfigured}
+              disabled={!input.trim() || isLoading || activeRun?.status === 'waiting_for_input' || !erosConfigured}
               className="p-2 rounded-xl bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-40 disabled:hover:bg-emerald-500 transition-all shrink-0 active:scale-95"
             >
               <Send size={16} />
             </button>
           </div>
-          {lastFailedMessage && !isLoading && (
-            <button
-              onClick={retryLastMessage}
-              className="mt-1.5 w-full text-xs text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg py-1 transition-colors flex items-center justify-center gap-1.5"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-              Reintentar
-            </button>
-          )}
         </div>
       </div>
     </>

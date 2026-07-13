@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
@@ -128,7 +129,7 @@ func (r *ErosConversationRepository) GetWithMessages(ctx context.Context, accoun
 	}
 
 	msgRows, err := r.db.Query(ctx, `
-		SELECT id, conversation_id, role, content,
+		SELECT id, conversation_id, run_id, role, content,
 		       COALESCE(codex_model, ''), COALESCE(reasoning_effort, ''), COALESCE(duration_ms, 0),
 		       COALESCE(metadata, '{}'::jsonb), COALESCE(tool_calls, '[]'::jsonb), created_at
 		FROM eros_messages
@@ -145,7 +146,7 @@ func (r *ErosConversationRepository) GetWithMessages(ctx context.Context, accoun
 		var metadata []byte
 		var toolCalls []byte
 		if err := msgRows.Scan(
-			&m.ID, &m.ConversationID, &m.Role, &m.Content,
+			&m.ID, &m.ConversationID, &m.RunID, &m.Role, &m.Content,
 			&m.CodexModel, &m.ReasoningEffort, &m.DurationMS,
 			&metadata, &toolCalls, &m.CreatedAt,
 		); err != nil {
@@ -232,8 +233,27 @@ func normalizedJSONRaw(raw json.RawMessage, fallback string) string {
 
 // Delete removes a conversation (cascade deletes messages).
 func (r *ErosConversationRepository) Delete(ctx context.Context, accountID, userID, convID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM eros_conversations WHERE id = $1 AND account_id = $2 AND user_id = $3`, convID, accountID, userID)
-	return err
+	var deletedID uuid.UUID
+	err := r.db.QueryRow(ctx, `
+		DELETE FROM eros_conversations c
+		WHERE c.id = $1 AND c.account_id = $2 AND c.user_id = $3
+		  AND NOT EXISTS (
+			SELECT 1 FROM eros_runs r
+			WHERE r.conversation_id = c.id AND r.status IN ('queued','starting','running')
+		  )
+		RETURNING c.id
+	`, convID, accountID, userID).Scan(&deletedID)
+	if err != pgx.ErrNoRows {
+		return err
+	}
+	var exists bool
+	if queryErr := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM eros_conversations WHERE id=$1 AND account_id=$2 AND user_id=$3)`, convID, accountID, userID).Scan(&exists); queryErr != nil {
+		return queryErr
+	}
+	if exists {
+		return ErrErosConversationBusy
+	}
+	return pgx.ErrNoRows
 }
 
 // UpdateTitle updates a conversation title.

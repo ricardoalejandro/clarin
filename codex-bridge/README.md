@@ -13,11 +13,14 @@ Sidecar privado para que Eros use una conexion administrada con OpenAI y el MCP 
 - Codex administra, persiste y renueva la sesion dentro del volumen `codex_bridge_home`.
 - Los tokens nunca se envian al frontend ni se guardan en la base de datos de Clarin.
 - `/live` mide la vida del proceso para Docker; `/health` comprueba la conexion completa con OpenAI y las herramientas de Clarin.
+- El protocolo durable interno usa `POST /turn/start`, `POST /turn/read` y `POST /turn/interrupt`. El inicio devuelve `codex_thread_id` y `codex_turn_id` sin esperar la respuesta; la lectura reconstruye el turno con `thread/read` incluso después de reiniciar el backend.
+- `POST /chat` permanece como compatibilidad síncrona temporal y usa internamente el mismo inicio e interrupción segura.
 
 ## Variables
 
 - `EROS_CODEX_BRIDGE_TOKEN`: bearer interno obligatorio entre backend y bridge.
-- `EROS_MCP_BASE_URL`: endpoint MCP interno, normalmente `http://clarin-backend:8081/mcp`.
+- `EROS_MCP_BASE_URL`: endpoint MCP interno base, normalmente `http://clarin-backend:8081/mcp`. El bridge deriva `/mcp/eros`, que exige un contexto efímero ligado a una sola cuenta; `/mcp` público no cambia.
+- `EROS_CODEX_REQUEST_TIMEOUT_MS`: límite de un turno (180000 ms por defecto en despliegue). Los timeouts y cancelaciones interrumpen el turno antes de responder.
 - `EROS_MCP_ACCESS_TOKEN`: bearer MCP con cuentas permitidas para Eros.
 - `EROS_CODEX_MODEL`: modelo opcional.
 

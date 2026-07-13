@@ -1760,6 +1760,7 @@ type ErosConversation struct {
 type ErosMessage struct {
 	ID              uuid.UUID       `json:"id"`
 	ConversationID  uuid.UUID       `json:"conversation_id"`
+	RunID           *uuid.UUID      `json:"run_id,omitempty"`
 	Role            string          `json:"role"` // "user" or "assistant"
 	Content         string          `json:"content"`
 	CodexModel      string          `json:"codex_model,omitempty"`
@@ -1769,6 +1770,68 @@ type ErosMessage struct {
 	ToolCalls       json.RawMessage `json:"tool_calls,omitempty"`
 	Attachments     []ErosFile      `json:"attachments,omitempty"`
 	CreatedAt       time.Time       `json:"created_at"`
+}
+
+const (
+	ErosRunQueued          = "queued"
+	ErosRunStarting        = "starting"
+	ErosRunRunning         = "running"
+	ErosRunWaitingForInput = "waiting_for_input"
+	ErosRunCompleted       = "completed"
+	ErosRunFailed          = "failed"
+	ErosRunCancelled       = "cancelled"
+)
+
+// ErosRun is a durable, account-scoped execution. Chat and deterministic quick
+// tasks share the same lifecycle so results survive navigation and reloads.
+type ErosRun struct {
+	ID              uuid.UUID       `json:"id"`
+	AccountID       uuid.UUID       `json:"account_id,omitempty"`
+	UserID          uuid.UUID       `json:"user_id,omitempty"`
+	ConversationID  uuid.UUID       `json:"conversation_id"`
+	ParentRunID     *uuid.UUID      `json:"parent_run_id,omitempty"`
+	Kind            string          `json:"kind"`
+	TaskKey         string          `json:"task_key,omitempty"`
+	Parameters      json.RawMessage `json:"parameters,omitempty"`
+	Permissions     []string        `json:"-"`
+	Status          string          `json:"status"`
+	Phase           string          `json:"phase,omitempty"`
+	IdempotencyKey  string          `json:"-"`
+	CodexThreadID   string          `json:"codex_thread_id,omitempty"`
+	CodexTurnID     string          `json:"codex_turn_id,omitempty"`
+	AttemptCount    int             `json:"attempt_count"`
+	MaxAttempts     int             `json:"max_attempts"`
+	NextAttemptAt   time.Time       `json:"next_attempt_at,omitempty"`
+	LockedAt        *time.Time      `json:"-"`
+	HeartbeatAt     *time.Time      `json:"-"`
+	CancelRequested bool            `json:"cancel_requested,omitempty"`
+	ErrorCode       string          `json:"error_code,omitempty"`
+	SafeError       string          `json:"safe_error,omitempty"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	StartedAt       *time.Time      `json:"started_at,omitempty"`
+	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	Message         *ErosMessage    `json:"message,omitempty"`
+}
+
+// ErosResultSet stores only an ordered selection and query provenance. Live
+// fields (phone, email, names) are deliberately never copied into this memory.
+type ErosResultSet struct {
+	ID             uuid.UUID       `json:"id"`
+	AccountID      uuid.UUID       `json:"-"`
+	UserID         uuid.UUID       `json:"-"`
+	ConversationID uuid.UUID       `json:"conversation_id"`
+	RunID          uuid.UUID       `json:"run_id"`
+	EntityType     string          `json:"entity_type"`
+	SourceTool     string          `json:"source_tool"`
+	Fields         []string        `json:"fields"`
+	Filters        json.RawMessage `json:"filters,omitempty"`
+	ReturnedCount  int             `json:"returned_count"`
+	HasMore        bool            `json:"has_more"`
+	NextCursor     string          `json:"next_cursor,omitempty"`
+	EntityIDs      []uuid.UUID     `json:"-"`
+	CreatedAt      time.Time       `json:"created_at"`
 }
 
 // ErosFile is a downloadable attachment descriptor. The binary is rendered on demand.

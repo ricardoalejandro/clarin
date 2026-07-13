@@ -107,14 +107,10 @@ func (s *Server) handleAdminUpdateErosSettings(c *fiber.Ctx) error {
 	current.BridgeURL = strings.TrimRight(strings.TrimSpace(req.BridgeURL), "/")
 	current.MCPBaseURL = strings.TrimRight(strings.TrimSpace(req.MCPBaseURL), "/")
 	current.CodexModel = normalizeCodexModel(req.CodexModel, s.cfg.ErosCodexModel)
-	current.AllowedReasoningEfforts = normalizeAllowedReasoningEfforts(req.AllowedReasoningEfforts)
-	current.DefaultReasoningEffort = selectAllowedReasoningEffort(
-		normalizeReasoningEffortValue(req.DefaultReasoningEffort, s.cfg.ErosCodexReasoning),
-		current.AllowedReasoningEfforts,
-	)
-	if req.AllowUserReasoningOverride != nil {
-		current.AllowUserReasoningOverride = *req.AllowUserReasoningOverride
-	}
+	// The administrator owns the model. Eros owns per-run effort selection.
+	current.AllowedReasoningEfforts = []string{"low", "medium", "high", "xhigh"}
+	current.DefaultReasoningEffort = "medium"
+	current.AllowUserReasoningOverride = false
 	current.GlobalInstructions = strings.TrimSpace(req.GlobalInstructions)
 	if req.MaxHistoryMessages > 0 {
 		if req.MaxHistoryMessages > 50 {

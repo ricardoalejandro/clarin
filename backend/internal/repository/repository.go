@@ -48,6 +48,8 @@ type Repositories struct {
 	MCP                *MCPRepository
 	ErosSettings       *ErosSettingsRepository
 	ErosConversation   *ErosConversationRepository
+	ErosRun            *ErosRunRepository
+	ErosResultSet      *ErosResultSetRepository
 	ErosFile           *ErosFileRepository
 	AIToken            *AITokenRepository
 	Automation         *AutomationRepository
@@ -96,6 +98,8 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		MCP:                &MCPRepository{db: db},
 		ErosSettings:       &ErosSettingsRepository{db: db},
 		ErosConversation:   &ErosConversationRepository{db: db},
+		ErosRun:            &ErosRunRepository{db: db},
+		ErosResultSet:      &ErosResultSetRepository{db: db},
 		ErosFile:           &ErosFileRepository{db: db},
 		AIToken:            &AITokenRepository{db: db},
 		Automation:         &AutomationRepository{db: db},
