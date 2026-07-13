@@ -169,6 +169,7 @@ const (
 	PermTasks         = "tasks"
 	PermDocuments     = "documents"
 	PermSharedBrowser = "shared_browser"
+	PermReports       = "reports"
 	PermAll           = "*"
 )
 
@@ -177,7 +178,7 @@ var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
 	PermAutomations, PermBots, PermDevices, PermEvents,
 	PermBroadcasts, PermSurveys, PermTasks, PermDynamics,
-	PermDocuments, PermSharedBrowser, PermTags, PermSettings, PermIntegrations,
+	PermDocuments, PermSharedBrowser, PermReports, PermTags, PermSettings, PermIntegrations,
 }
 
 // Role represents a named set of module permissions

@@ -301,6 +301,7 @@ const ALL_MODULES = [
   { key: 'tasks', label: 'Tareas', color: 'lime' },
   { key: 'documents', label: 'Plantillas', color: 'purple' },
   { key: 'shared_browser', label: 'Navegador', color: 'cyan' },
+  { key: 'reports', label: 'Reportería', color: 'emerald' },
 ]
 
 const KOMMO_ADMIN_UI_ENABLED = false

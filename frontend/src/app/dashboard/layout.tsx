@@ -38,6 +38,7 @@ import {
   CreditCard,
   Smartphone,
   Monitor,
+  BarChart3,
 } from 'lucide-react'
 
 interface User {
@@ -315,6 +316,7 @@ export default function DashboardLayout({
     '/dashboard/tasks': 'tasks',
     '/dashboard/documents': 'documents',
     '/dashboard/browser': 'shared_browser',
+    '/dashboard/reports': 'reports',
     '/dashboard/tags': 'tags',
     '/dashboard/settings': 'settings',
   }
@@ -331,6 +333,7 @@ export default function DashboardLayout({
 
   const navItems = [
     { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', desc: 'Panel principal' },
+    { href: '/dashboard/reports', icon: BarChart3, label: 'Reportería', desc: 'Centro de reportes' },
     { href: '/dashboard/chats', icon: MessageSquare, label: 'Chats', desc: 'Conversaciones WhatsApp' },
     { href: '/dashboard/contacts', icon: Contact, label: 'Contactos', desc: 'Directorio de contactos' },
     { href: '/dashboard/programs', icon: BookOpenCheck, label: 'Programas', desc: 'Programas educativos' },

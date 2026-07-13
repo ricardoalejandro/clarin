@@ -62,6 +62,7 @@ type Repositories struct {
 	Bot                *BotRepository
 	Integration        *IntegrationRepository
 	MediaAsset         *MediaAssetRepository
+	Report             *ReportRepository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -112,6 +113,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Bot:                &BotRepository{db: db},
 		Integration:        &IntegrationRepository{db: db},
 		MediaAsset:         &MediaAssetRepository{db: db},
+		Report:             &ReportRepository{db: db},
 	}
 }
 

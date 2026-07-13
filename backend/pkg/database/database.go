@@ -871,6 +871,7 @@ func Migrate(db *pgxpool.Pool) error {
 		// Ensure existing 'Administrador' role gets the new 'integrations' permission
 		`UPDATE roles SET permissions = array_append(permissions, 'integrations') WHERE name = 'Administrador' AND NOT ('integrations' = ANY(permissions))`,
 		`UPDATE roles SET permissions = array_append(permissions, 'shared_browser') WHERE name = 'Administrador' AND NOT ('shared_browser' = ANY(permissions))`,
+		`UPDATE roles SET permissions = array_append(permissions, 'reports') WHERE name = 'Administrador' AND NOT ('reports' = ANY(permissions))`,
 		`INSERT INTO roles (name, description, is_system, permissions) VALUES
 			('Supervisor', 'Acceso a chats, leads, contactos y eventos', TRUE, ARRAY['chats','contacts','leads','events','tags'])
 		 ON CONFLICT (name) DO NOTHING`,

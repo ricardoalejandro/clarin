@@ -44,6 +44,7 @@ type Services struct {
 	Survey           *SurveyService
 	Task             *TaskService
 	DocumentTemplate *DocumentTemplateService
+	Report           *ReportService
 }
 
 func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub *ws.Hub) *Services {
@@ -67,6 +68,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Survey:           NewSurveyService(repos),
 		Task:             NewTaskService(repos, hub),
 		DocumentTemplate: NewDocumentTemplateService(repos),
+		Report:           NewReportService(repos, pool),
 	}
 }
 
