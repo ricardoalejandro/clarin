@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Phone, Mail, User, Calendar, MessageCircle, Trash2, ChevronDown,
-  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff, MapPin, Briefcase, Map, SlidersHorizontal, LayoutList
+  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CheckCircle2, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff, MapPin, Briefcase, Map, SlidersHorizontal, LayoutList
 } from 'lucide-react'
 import { formatDistanceToNow, format, parseISO } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -48,6 +48,10 @@ interface LeadDetailPanelProps {
   participantId?: string
   /** Callback when stage changes in event mode */
   onStageChange?: (stageId: string, stageName: string, stageColor: string) => void
+  /** Lets the parent coordinate close/reopen semantics before moving an opportunity. */
+  onStageChangeRequest?: (lead: Lead, stage: PipelineStage) => void
+  /** Explicit close/reopen actions for the lead lifecycle. */
+  onLifecycleAction?: (lead: Lead, mode: 'won' | 'lost' | 'reopen') => void
   /** Called before assigning a tag in event mode. Return false to cancel. */
   onBeforeTagAssign?: (tagId: string) => Promise<boolean>
   /** Called before removing a tag in event mode. Return false to cancel. */
@@ -95,6 +99,8 @@ export default function LeadDetailPanel({
   eventStages,
   participantId,
   onStageChange,
+  onStageChangeRequest,
+  onLifecycleAction,
   onBeforeTagAssign,
   onBeforeTagRemove,
   onArchive,
@@ -121,13 +127,6 @@ export default function LeadDetailPanel({
       custom_field_values: (leadProp as any).custom_field_values ?? (prev as any).custom_field_values,
     }))
 
-    // Preserve relations that the parent may not refresh in-place (avoids visual wipe
-    // of tags / custom fields while the local state is still authoritative).
-    setLead(prev => ({
-      ...leadProp,
-      structured_tags: leadProp.structured_tags ?? prev.structured_tags,
-      custom_field_values: (leadProp as any).custom_field_values ?? (prev as any).custom_field_values,
-    }))
   }, [leadProp])
 
   // Pipelines
@@ -176,11 +175,6 @@ export default function LeadDetailPanel({
   const [googleSynced, setGoogleSynced] = useState(false)
   const [googleSyncing, setGoogleSyncing] = useState(false)
   const [googleConnected, setGoogleConnected] = useState(false)
-
-  // Lead stage dropdown (event mode only)
-  const [showLeadStageDropdown, setShowLeadStageDropdown] = useState(false)
-  const [expandedLeadPipelineId, setExpandedLeadPipelineId] = useState<string | null>(null)
-  const leadStageDropdownRef = useRef<HTMLDivElement>(null)
 
   // Custom fields
   const [cfDefs, setCfDefs] = useState<CustomFieldDefinition[]>([])
@@ -252,9 +246,9 @@ export default function LeadDetailPanel({
     }
   }
 
-  // ─── Fetch pipelines (skip in contact mode) ───────────────
+  // ─── Fetch commercial pipelines only for opportunity mode ───────────────
   useEffect(() => {
-    if (contactMode) return
+    if (contactMode || eventMode) return
     const token = localStorage.getItem('token')
     fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } })
       .then(res => res.json())
@@ -330,22 +324,18 @@ export default function LeadDetailPanel({
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (showLeadStageDropdown) { e.stopPropagation(); setShowLeadStageDropdown(false); return }
       if (showPipelineDropdown) { e.stopPropagation(); setShowPipelineDropdown(false); return }
       // No internal state to close → let event propagate to parent page handler
     }
     document.addEventListener('keydown', h, true)
     return () => document.removeEventListener('keydown', h, true)
-  }, [showPipelineDropdown, showLeadStageDropdown])
+  }, [showPipelineDropdown])
 
   // ─── Click outside to close dropdown ───────────────────
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setShowPipelineDropdown(false)
-      }
-      if (leadStageDropdownRef.current && !leadStageDropdownRef.current.contains(event.target as Node)) {
-        setShowLeadStageDropdown(false)
       }
     }
     document.addEventListener('mousedown', handleClickOutside)
@@ -526,12 +516,18 @@ export default function LeadDetailPanel({
           onStageChange?.(stageId, stage?.name || '', stage?.color || '')
         }
       } else {
-        // Optimistic update BEFORE API call
         let stage: PipelineStage | undefined
         for (const p of pipelines) {
           const found = p.stages?.find(s => s.id === stageId)
           if (found) { stage = found; break }
         }
+        if (!stage) return
+        if (onStageChangeRequest) {
+          onStageChangeRequest(lead, stage)
+          return
+        }
+
+        // Optimistic update BEFORE API call
         const updated = {
           ...lead,
           stage_id: stageId,
@@ -557,27 +553,6 @@ export default function LeadDetailPanel({
       console.error('Failed to update stage:', err)
       setLead(prevLead)
       onLeadChange(prevLead)
-    }
-  }
-
-  const handleUpdateLeadPipeline = async (leadId: string, pipelineId: string) => {
-    const token = localStorage.getItem('token')
-    const newPipeline = pipelines.find(p => p.id === pipelineId)
-    const firstStageId = pipelineId ? (newPipeline?.stages?.[0]?.id || null) : null
-    try {
-      const res = await fetch(`/api/leads/${leadId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ pipeline_id: pipelineId || null, stage_id: firstStageId }),
-      })
-      const data = await res.json()
-      if (data.success && data.lead) {
-        const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
-        setLead(merged)
-        onLeadChange(merged)
-      }
-    } catch (err) {
-      console.error('Failed to update pipeline:', err)
     }
   }
 
@@ -686,7 +661,11 @@ export default function LeadDetailPanel({
   }
 
   const handleDeleteLead = async () => {
-    const confirmMsg = contactMode ? '¿Estás seguro de eliminar este contacto?' : eventMode ? '¿Estás seguro de eliminar este participante?' : '¿Estás seguro de eliminar este lead?'
+    const confirmMsg = contactMode
+      ? '¿Estás seguro de eliminar este contacto?'
+      : eventMode
+        ? '¿Estás seguro de eliminar este participante?'
+        : '¿Mover esta oportunidad a la papelera? Podrás restaurarla durante 30 días; el contacto, el chat y sus eventos se conservarán.'
     if (!confirm(confirmMsg)) return
     const token = localStorage.getItem('token')
     try {
@@ -732,9 +711,9 @@ export default function LeadDetailPanel({
       {/* Header */}
       {!hideHeader && (
         <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10 shrink-0">
-          <h2 className="text-sm font-semibold text-slate-900">{contactMode ? 'Detalle del Contacto' : eventMode ? 'Detalle del Participante' : 'Detalle del Lead'}</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{contactMode ? 'Detalle del contacto' : eventMode ? 'Detalle del participante' : 'Detalle del lead'}</h2>
           <div className="flex items-center gap-1">
-            <button onClick={onClose} className="p-1.5 hover:bg-slate-100 rounded-lg">
+            <button onClick={onClose} className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar panel de detalle">
               <X className="w-4 h-4 text-slate-400" />
             </button>
           </div>
@@ -745,7 +724,7 @@ export default function LeadDetailPanel({
       <div className="flex border-b border-slate-200 shrink-0 bg-white px-2">
         <button
           onClick={() => setActiveTab('general')}
-          className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
+          className={`flex min-h-11 items-center gap-1.5 px-4 text-xs font-medium transition-colors whitespace-nowrap ${
             activeTab === 'general'
               ? 'text-emerald-600 border-b-2 border-emerald-600'
               : 'text-slate-400 hover:text-slate-600'
@@ -756,7 +735,7 @@ export default function LeadDetailPanel({
         </button>
         <button
           onClick={() => setActiveTab('campos')}
-          className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors whitespace-nowrap ${
+          className={`flex min-h-11 items-center gap-1.5 px-4 text-xs font-medium transition-colors whitespace-nowrap ${
             activeTab === 'campos'
               ? 'text-emerald-600 border-b-2 border-emerald-600'
               : 'text-slate-400 hover:text-slate-600'
@@ -795,12 +774,12 @@ export default function LeadDetailPanel({
               onChange={(e) => setEditValues({ ...editValues, name: e.target.value })}
               onKeyDown={(e) => handleFieldKeyDown(e, 'name')}
               onBlur={() => saveLeadField('name')}
-              className="text-lg font-bold text-slate-900 text-center bg-transparent border-b-2 border-emerald-500 outline-none w-full max-w-[250px] mx-auto block"
+              className="mx-auto block w-full max-w-[250px] border-b-2 border-emerald-500 bg-transparent text-center text-lg font-bold text-slate-900 outline-none"
               placeholder="Nombre"
             />
           ) : (
             <h3
-              className="text-lg font-bold text-slate-900 cursor-pointer hover:text-emerald-700 transition-colors"
+              className="cursor-pointer text-lg font-bold text-slate-900 transition-colors hover:text-emerald-700"
               onClick={() => startEditing('name', lead.name || '')}
               title="Clic para editar nombre"
             >
@@ -808,12 +787,16 @@ export default function LeadDetailPanel({
             </h3>
           )}
           {lead.stage_name && (
-            <span
-              className="inline-block px-2 py-0.5 text-xs rounded-full mt-1 text-white"
-              style={{ backgroundColor: lead.stage_color || '#6b7280' }}
-            >
+            <span className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700">
+              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: lead.stage_color || '#64748b' }} aria-hidden="true" />
               {lead.stage_name}
             </span>
+          )}
+          {!eventMode && !contactMode && (lead.status === 'won' || lead.status === 'lost') && (
+            <div className={`mx-auto mt-2 max-w-sm rounded-xl border px-3 py-2 text-left ${lead.status === 'won' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-800'}`}>
+              <p className="text-xs font-bold">{lead.status === 'won' ? 'Oportunidad ganada' : 'Oportunidad perdida'}</p>
+              {lead.status === 'lost' && lead.close_reason && <p className="mt-0.5 text-xs leading-relaxed opacity-80">{lead.close_reason}</p>}
+            </div>
           )}
           {contactMode && pushName && pushName !== lead.name && (
             <p className="text-xs text-slate-400 mt-0.5">Push: {pushName}</p>
@@ -834,7 +817,7 @@ export default function LeadDetailPanel({
               {lead.is_blocked && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-50 border border-red-200 rounded-full text-xs font-medium text-red-700" title={lead.block_reason || ''}>
                   <ShieldBan className="w-3 h-3" />
-                  Bloqueado{lead.block_reason ? `: ${lead.block_reason}` : ''}
+                  No contactable{lead.block_reason ? `: ${lead.block_reason}` : ''}
                 </span>
               )}
             </div>
@@ -847,10 +830,10 @@ export default function LeadDetailPanel({
                 onUnblock && (
                   <button
                     onClick={() => onUnblock(lead.id)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50 rounded-full text-xs font-medium text-slate-500 hover:text-emerald-700 transition-colors"
+                    className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 transition-colors hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                   >
                     <ShieldOff className="w-3 h-3" />
-                    Desbloquear
+                    Permitir contacto
                   </button>
                 )
               ) : (
@@ -859,7 +842,7 @@ export default function LeadDetailPanel({
                     onArchive && (
                       <button
                         onClick={() => onArchive(lead.id, false)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50 rounded-full text-xs font-medium text-slate-500 hover:text-emerald-700 transition-colors"
+                        className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 transition-colors hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                       >
                         <ArchiveRestore className="w-3 h-3" />
                         Restaurar
@@ -869,7 +852,7 @@ export default function LeadDetailPanel({
                     onArchive && (
                       <button
                         onClick={() => onArchive(lead.id, true)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:border-amber-300 hover:bg-amber-50 rounded-full text-xs font-medium text-slate-500 hover:text-amber-700 transition-colors"
+                        className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 transition-colors hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
                       >
                         <Archive className="w-3 h-3" />
                         Archivar
@@ -879,12 +862,31 @@ export default function LeadDetailPanel({
                   {onBlock && (
                     <button
                       onClick={() => onBlock(lead.id)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-red-200 hover:bg-red-50 rounded-full text-xs font-medium text-slate-500 hover:text-red-700 transition-colors"
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3 text-xs font-medium text-slate-600 transition-colors hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
                     >
                       <ShieldBan className="w-3 h-3" />
-                      Bloquear
+                      No contactar
                     </button>
                   )}
+                </>
+              )}
+            </div>
+          )}
+
+          {!contactMode && !eventMode && !lead.deleted_at && onLifecycleAction && (
+            <div className="mt-3 flex items-center justify-center gap-2">
+              {lead.status === 'won' || lead.status === 'lost' ? (
+                <button type="button" onClick={() => onLifecycleAction(lead, 'reopen')} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 text-xs font-bold text-blue-700 transition hover:bg-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <ArchiveRestore className="h-4 w-4" /> Reabrir lead
+                </button>
+              ) : (
+                <>
+                  <button type="button" onClick={() => onLifecycleAction(lead, 'won')} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-700 transition hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                    <CheckCircle2 className="h-4 w-4" /> Ganado
+                  </button>
+                  <button type="button" onClick={() => onLifecycleAction(lead, 'lost')} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 text-xs font-bold text-red-700 transition hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">
+                    <XCircle className="h-4 w-4" /> Perdido
+                  </button>
                 </>
               )}
             </div>
@@ -921,6 +923,30 @@ export default function LeadDetailPanel({
             )}
           </div>
         </div>
+
+        {!contactMode && !eventMode && (
+          <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+            <div className="mb-1 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+              <Briefcase className="h-3.5 w-3.5" /> Concepto del lead
+            </div>
+            {editingField === 'title' ? (
+              <input
+                autoFocus
+                value={editValues.title ?? ''}
+                onChange={(e) => setEditValues({ ...editValues, title: e.target.value })}
+                onKeyDown={(e) => handleFieldKeyDown(e, 'title')}
+                onBlur={() => saveLeadField('title')}
+                className="mt-2 w-full border-b-2 border-emerald-500 bg-transparent py-1 text-sm font-semibold text-slate-900 outline-none"
+                placeholder="Ej. Matrícula del curso de verano"
+              />
+            ) : (
+              <button type="button" onClick={() => startEditing('title', lead.title || '')} className="mt-1 flex min-h-9 w-full items-center justify-between gap-3 rounded-lg text-left text-sm font-semibold text-slate-800 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                <span className={lead.title ? '' : 'font-normal italic text-slate-400'}>{lead.title || 'Agregar concepto comercial'}</span>
+                <Edit2 className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Inline editable info fields */}
         <div className="space-y-3">
@@ -1059,12 +1085,12 @@ export default function LeadDetailPanel({
           </div>
         </div>
 
-        {/* Tags */}
-        <div className="space-y-2">
+        {/* Tags belong to the person/contact, including inside an event. */}
+        {(!eventMode || contactId || lead.contact_id) && <div className="space-y-2">
           <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
           <TagInput
-            entityType={contactMode ? "contact" : "lead"}
-            entityId={contactMode && contactId ? contactId : lead.id}
+            entityType={contactMode || eventMode ? "contact" : "lead"}
+            entityId={(contactMode || eventMode) && (contactId || lead.contact_id) ? (contactId || lead.contact_id)! : lead.id}
             assignedTags={lead.structured_tags || []}
             onTagsChange={(newTags) => {
               const updated = { ...lead, structured_tags: newTags }
@@ -1074,13 +1100,13 @@ export default function LeadDetailPanel({
             onBeforeAssign={eventMode ? onBeforeTagAssign : undefined}
             onBeforeRemove={eventMode ? onBeforeTagRemove : undefined}
           />
-        </div>
+        </div>}
 
         {/* Pipeline & Stage Selector (hidden in contact mode) */}
         {!contactMode && (
         <div className="border-t border-slate-100 pt-4" ref={dropdownRef}>
           <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-            {eventMode ? 'Etapa del Evento' : 'Etapa del Pipeline'}
+            {eventMode ? 'Etapa del evento' : 'Etapa de la oportunidad'}
           </h5>
 
           <div className="relative">
@@ -1113,7 +1139,7 @@ export default function LeadDetailPanel({
                         <span className="mx-1.5 opacity-30">/</span>
                         {lead.stage_name || 'Sin etapa'}
                       </>
-                    ) : 'Leads Entrantes (Sin asignar)'
+                    ) : 'Oportunidad sin asignar'
                   )}
                 </span>
               </div>
@@ -1129,7 +1155,7 @@ export default function LeadDetailPanel({
                     {eventStages?.map(stage => (
                       <button
                         key={stage.id}
-                        className={`w-full flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors text-left ${
+                        className={`flex min-h-11 w-full items-center gap-2 px-3 py-2 cursor-pointer transition-colors text-left ${
                           lead.stage_id === stage.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50 text-slate-700'
                         }`}
                         onClick={() => {
@@ -1147,26 +1173,13 @@ export default function LeadDetailPanel({
                 ) : (
                   /* Lead mode: pipelines with accordion stages */
                   <>
-                    {/* Unassigned */}
-                    <button
-                      className="w-full text-left px-3 py-2 hover:bg-slate-50 cursor-pointer flex items-center gap-2 border-b border-slate-50 transition-colors"
-                      onClick={() => {
-                        handleUpdateLeadPipeline(lead.id, '')
-                        setShowPipelineDropdown(false)
-                      }}
-                      type="button"
-                    >
-                      <div className="w-2 h-2 rounded-full bg-slate-300" />
-                      <span className="text-sm text-slate-600">Leads Entrantes (Sin Asignar)</span>
-                    </button>
-
                     {/* Pipelines and Stages */}
                     {pipelines.map(pipeline => {
                       const isExpanded = expandedPipelineId === pipeline.id
                       return (
                         <div key={pipeline.id} className="border-b border-slate-50 last:border-0">
                           <button
-                            className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
+                            className={`flex min-h-11 w-full items-center justify-between px-3 py-2 text-left transition-colors ${
                               isExpanded ? 'bg-slate-50' : 'hover:bg-slate-50 bg-white'
                             }`}
                             onClick={() => setExpandedPipelineId(prev => prev === pipeline.id ? null : pipeline.id)}
@@ -1181,26 +1194,11 @@ export default function LeadDetailPanel({
                               {pipeline.stages?.map(stage => (
                                 <button
                                   key={stage.id}
-                                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors text-left ${
+                                  className={`flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-2 cursor-pointer transition-colors text-left ${
                                     lead.stage_id === stage.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-100 text-slate-700'
                                   }`}
                                   onClick={() => {
-                                    if (lead.pipeline_id !== pipeline.id) {
-                                      const token = localStorage.getItem('token')
-                                      fetch(`/api/leads/${lead.id}`, {
-                                        method: 'PUT',
-                                        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                        body: JSON.stringify({ pipeline_id: pipeline.id, stage_id: stage.id })
-                                      }).then(res => res.json()).then(data => {
-                                        if (data.success && data.lead) {
-                                          const merged = { ...data.lead, structured_tags: data.lead.structured_tags || lead.structured_tags }
-                                          setLead(merged)
-                                          onLeadChange(merged)
-                                        }
-                                      })
-                                    } else {
-                                      handleUpdateLeadStage(lead.id, stage.id)
-                                    }
+                                    handleUpdateLeadStage(lead.id, stage.id)
                                     setShowPipelineDropdown(false)
                                   }}
                                   type="button"
@@ -1223,102 +1221,18 @@ export default function LeadDetailPanel({
         </div>
         )}
 
-        {/* Lead Stage (event mode only — independent of event stage) */}
-        {eventMode && pipelines.length > 0 && (
-        <div className="border-t border-slate-100 pt-3 mt-1">
-          <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-            Etapa del Lead
-          </h5>
-
-          <div className="relative" ref={leadStageDropdownRef}>
-            <button
-              onClick={() => setShowLeadStageDropdown(!showLeadStageDropdown)}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border transition-all text-sm ${
-                lead.lead_stage_id
-                  ? 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
-                  : 'bg-slate-50 border-slate-200 text-slate-400'
-              }`}
-            >
-              <div className="flex items-center gap-2 overflow-hidden">
-                {lead.lead_stage_color && (
-                  <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: lead.lead_stage_color }} />
-                )}
-                <span className="truncate">
-                  {lead.lead_stage_name ? (
-                    <>
-                      <span className="opacity-50 font-normal">{pipelines.find(p => p.id === lead.lead_pipeline_id)?.name || ''}</span>
-                      {lead.lead_pipeline_id && <span className="mx-1 opacity-30">/</span>}
-                      {lead.lead_stage_name}
-                    </>
-                  ) : 'Sin etapa de lead'}
-                </span>
+        {/* An event participant is a contact. A linked opportunity is provenance only. */}
+        {eventMode && (lead as any).original_lead_id && (
+          <div className="mt-1 border-t border-slate-100 pt-4">
+            <h5 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Oportunidad vinculada</h5>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                {lead.lead_stage_color && <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: lead.lead_stage_color }} />}
+                <span className="truncate">{lead.lead_stage_name || 'Sin etapa comercial'}</span>
               </div>
-              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showLeadStageDropdown ? 'rotate-180' : ''}`} />
-            </button>
-
-            {showLeadStageDropdown && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-20 max-h-[350px] overflow-y-auto">
-                {pipelines.map(pipeline => {
-                  const isExpanded = expandedLeadPipelineId === pipeline.id
-                  return (
-                    <div key={pipeline.id} className="border-b border-slate-50 last:border-0">
-                      <button
-                        className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
-                          lead.lead_pipeline_id === pipeline.id ? 'bg-emerald-50/50' : 'hover:bg-slate-50'
-                        }`}
-                        onClick={() => setExpandedLeadPipelineId(isExpanded ? null : pipeline.id)}
-                        type="button"
-                      >
-                        <span className="text-sm font-medium text-slate-700 truncate">{pipeline.name}</span>
-                        <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                      </button>
-
-                      <div className={`transition-all duration-300 ease-in-out overflow-hidden ${isExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'}`}>
-                        <div className="p-1 bg-slate-50/30 border-t border-slate-100">
-                          {pipeline.stages?.map(stage => (
-                            <button
-                              key={stage.id}
-                              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors text-left ${
-                                lead.lead_stage_id === stage.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-100 text-slate-600'
-                              }`}
-                              onClick={() => {
-                                const token = localStorage.getItem('token')
-                                const leadId = lead.id
-                                fetch(`/api/leads/${leadId}`, {
-                                  method: 'PUT',
-                                  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                  body: JSON.stringify({ pipeline_id: pipeline.id, stage_id: stage.id })
-                                }).then(res => res.json()).then(data => {
-                                  if (data.success) {
-                                    const updated = {
-                                      ...lead,
-                                      lead_pipeline_id: pipeline.id,
-                                      lead_stage_id: stage.id,
-                                      lead_stage_name: stage.name,
-                                      lead_stage_color: stage.color,
-                                    }
-                                    setLead(updated)
-                                    onLeadChange(updated)
-                                  }
-                                }).catch(console.error)
-                                setShowLeadStageDropdown(false)
-                              }}
-                              type="button"
-                            >
-                              <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: stage.color }} />
-                              <span className="text-sm truncate">{stage.name}</span>
-                              {lead.lead_stage_id === stage.id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-500" />}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
+              <p className="mt-1 text-xs leading-relaxed text-slate-500">Se muestra como referencia. Los cambios comerciales se realizan desde Leads y no alteran la participación en este evento.</p>
+            </div>
           </div>
-        </div>
         )}
 
         {/* Device Names (contact mode only) */}
@@ -1368,7 +1282,7 @@ export default function LeadDetailPanel({
               value={notesValue}
               onChange={(e) => setNotesValue(e.target.value)}
               className="w-full h-28 p-3 text-sm text-slate-800 border-2 border-emerald-500 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent resize-none placeholder:text-slate-400"
-              placeholder="Escribe notas sobre este lead..."
+              placeholder="Escribe notas sobre esta oportunidad..."
             />
           ) : (
             <div className="text-sm text-slate-700 bg-slate-50 rounded-xl p-3 min-h-[50px] border border-slate-100">

@@ -193,6 +193,7 @@ func main() {
 	// Start event tag auto-sync worker
 	eventSyncCtx, eventSyncCancel := context.WithCancel(context.Background())
 	server.StartEventTagSyncWorker(eventSyncCtx)
+	server.StartLeadTrashPurgeWorker(eventSyncCtx)
 
 	// Start task reminder and overdue workers
 	taskCtx, taskCancel := context.WithCancel(context.Background())

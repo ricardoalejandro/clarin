@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/pkg/config"
 	"golang.org/x/crypto/bcrypt"
@@ -40,6 +41,11 @@ func Connect(databaseURL string) (*pgxpool.Pool, error) {
 
 func Migrate(db *pgxpool.Pool) error {
 	ctx := context.Background()
+	const (
+		beginEventContactDataMigration = "__BEGIN_EVENT_CONTACT_DATA_MIGRATION_V1__"
+		endEventContactDataMigration   = "__END_EVENT_CONTACT_DATA_MIGRATION_V1__"
+		eventContactDataMigrationKey   = "crm_event_contact_v1"
+	)
 
 	migrations := []string{
 		// Accounts table (multi-tenant)
@@ -93,6 +99,10 @@ func Migrate(db *pgxpool.Pool) error {
 			avatar_url TEXT,
 			avatar_checked_at TIMESTAMPTZ,
 			is_group BOOLEAN DEFAULT FALSE,
+			do_not_contact BOOLEAN NOT NULL DEFAULT FALSE,
+			do_not_contact_at TIMESTAMPTZ,
+			do_not_contact_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			do_not_contact_reason TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			updated_at TIMESTAMPTZ DEFAULT NOW(),
 			UNIQUE(account_id, jid)
@@ -144,19 +154,19 @@ func Migrate(db *pgxpool.Pool) error {
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 			contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
+			title TEXT NOT NULL DEFAULT 'Oportunidad',
 			jid VARCHAR(255) NOT NULL,
 			name VARCHAR(255),
 			phone VARCHAR(50),
 			email VARCHAR(255),
-			status VARCHAR(50) DEFAULT 'new',
+			status VARCHAR(50) NOT NULL DEFAULT 'open',
 			source VARCHAR(100),
 			notes TEXT,
 			tags TEXT[],
 			custom_fields JSONB DEFAULT '{}',
 			assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
 			created_at TIMESTAMPTZ DEFAULT NOW(),
-			updated_at TIMESTAMPTZ DEFAULT NOW(),
-			UNIQUE(account_id, jid)
+			updated_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 
 		// Pipelines table
@@ -177,6 +187,7 @@ func Migrate(db *pgxpool.Pool) error {
 			name VARCHAR(255) NOT NULL,
 			color VARCHAR(50) DEFAULT '#6366f1',
 			position INT DEFAULT 0,
+			stage_type VARCHAR(20) NOT NULL DEFAULT 'active',
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 
@@ -405,7 +416,9 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS short_name VARCHAR(100)`,
 		`DROP INDEX IF EXISTS idx_event_participants_unique_phone`,
 		`DROP INDEX IF EXISTS idx_event_participants_unique_email`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_participants_unique_contact ON event_participants(event_id, contact_id) WHERE contact_id IS NOT NULL`,
+		// The event/contact uniqueness guard is created after the legacy identity
+		// backfill and duplicate consolidation below. Creating it here would make
+		// upgrades with historical duplicates fail before they can be repaired.
 
 		// Saved stickers
 		`CREATE TABLE IF NOT EXISTS saved_stickers (
@@ -1226,8 +1239,208 @@ func Migrate(db *pgxpool.Pool) error {
 		// Kommo deletion tracking
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS kommo_deleted_at TIMESTAMPTZ`,
 
+		// CRM opportunity lifecycle. Contacts remain the parent/person; a lead is
+		// an independently closable commercial opportunity.
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS title TEXT`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS closed_by UUID REFERENCES users(id) ON DELETE SET NULL`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS close_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS deleted_by UUID REFERENCES users(id) ON DELETE SET NULL`,
+		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS delete_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS do_not_contact BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS do_not_contact_at TIMESTAMPTZ`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS do_not_contact_by UUID REFERENCES users(id) ON DELETE SET NULL`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS do_not_contact_reason TEXT NOT NULL DEFAULT ''`,
+		// Durable outbound suppression is intentionally independent from the
+		// Contact row. A destructive contact deletion must never make a blocked
+		// phone/JID eligible for messaging again.
+		`CREATE TABLE IF NOT EXISTS contact_suppressions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
+			identity_type VARCHAR(16) NOT NULL,
+			normalized_value TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			active BOOLEAN NOT NULL DEFAULT TRUE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			released_at TIMESTAMPTZ,
+			released_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			CONSTRAINT contact_suppressions_identity_type_check CHECK (identity_type IN ('jid','phone')),
+			CONSTRAINT contact_suppressions_value_check CHECK (BTRIM(normalized_value) <> ''),
+			UNIQUE(account_id, identity_type, normalized_value)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_suppressions_active_lookup ON contact_suppressions(account_id, identity_type, normalized_value) WHERE active=TRUE`,
+		`ALTER TABLE pipeline_stages ADD COLUMN IF NOT EXISTS stage_type VARCHAR(20) NOT NULL DEFAULT 'active'`,
+		`UPDATE leads l
+		 SET title = COALESCE(NULLIF(BTRIM(l.title), ''),
+			CASE WHEN p.name IS NOT NULL AND BTRIM(p.name) <> '' THEN 'Oportunidad · ' || BTRIM(p.name) ELSE 'Oportunidad' END)
+		 FROM pipelines p
+		 WHERE p.id = l.pipeline_id AND (l.title IS NULL OR BTRIM(l.title) = '')`,
+		`UPDATE leads SET title = 'Oportunidad' WHERE title IS NULL OR BTRIM(title) = ''`,
+		`ALTER TABLE leads ALTER COLUMN title SET DEFAULT 'Oportunidad'`,
+		`ALTER TABLE leads ALTER COLUMN title SET NOT NULL`,
+		`UPDATE pipeline_stages terminal SET stage_type='active'
+		 WHERE terminal.stage_type='won' AND terminal.kommo_id IS DISTINCT FROM 142
+		   AND EXISTS (SELECT 1 FROM pipeline_stages kommo_stage WHERE kommo_stage.pipeline_id=terminal.pipeline_id AND kommo_stage.kommo_id=142)`,
+		`UPDATE pipeline_stages SET stage_type='won' WHERE kommo_id=142 AND stage_type<>'won'`,
+		`UPDATE pipeline_stages terminal SET stage_type='active'
+		 WHERE terminal.stage_type='lost' AND terminal.kommo_id IS DISTINCT FROM 143
+		   AND EXISTS (SELECT 1 FROM pipeline_stages kommo_stage WHERE kommo_stage.pipeline_id=terminal.pipeline_id AND kommo_stage.kommo_id=143)`,
+		`UPDATE pipeline_stages SET stage_type='lost' WHERE kommo_id=143 AND stage_type<>'lost'`,
+		`UPDATE pipeline_stages candidate SET stage_type='won'
+		 WHERE candidate.stage_type='active' AND LOWER(BTRIM(candidate.name)) IN ('ganado','ganada','closed-won','closed won')
+		   AND NOT EXISTS (SELECT 1 FROM pipeline_stages terminal WHERE terminal.pipeline_id=candidate.pipeline_id AND terminal.stage_type='won')`,
+		`UPDATE pipeline_stages candidate SET stage_type='lost'
+		 WHERE candidate.stage_type='active' AND LOWER(BTRIM(candidate.name)) IN ('perdido','perdida','closed-lost','closed lost')
+		   AND NOT EXISTS (SELECT 1 FROM pipeline_stages terminal WHERE terminal.pipeline_id=candidate.pipeline_id AND terminal.stage_type='lost')`,
+		`WITH ranked AS (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY pipeline_id, stage_type ORDER BY position, created_at, id) AS rn
+			FROM pipeline_stages WHERE stage_type IN ('won','lost')
+		 )
+		 UPDATE pipeline_stages ps SET stage_type = 'active'
+		 FROM ranked r WHERE ps.id = r.id AND r.rn > 1`,
+		`INSERT INTO pipeline_stages (pipeline_id, name, color, position, stage_type)
+		 SELECT p.id, 'Ganado', '#10b981', COALESCE(MAX(ps.position), -1) + 1, 'won'
+		 FROM pipelines p JOIN pipeline_stages ps ON ps.pipeline_id = p.id
+		 GROUP BY p.id
+		 HAVING NOT EXISTS (SELECT 1 FROM pipeline_stages w WHERE w.pipeline_id = p.id AND w.stage_type = 'won')`,
+		`INSERT INTO pipeline_stages (pipeline_id, name, color, position, stage_type)
+		 SELECT p.id, 'Perdido', '#ef4444', COALESCE(MAX(ps.position), -1) + 1, 'lost'
+		 FROM pipelines p JOIN pipeline_stages ps ON ps.pipeline_id = p.id
+		 GROUP BY p.id
+		 HAVING NOT EXISTS (SELECT 1 FROM pipeline_stages x WHERE x.pipeline_id = p.id AND x.stage_type = 'lost')`,
+		`WITH duplicate_names AS (
+			SELECT id, ROW_NUMBER() OVER (
+				PARTITION BY pipeline_id, LOWER(REGEXP_REPLACE(BTRIM(name), '\s+', ' ', 'g'))
+				ORDER BY position, created_at, id
+			) AS rn
+			FROM pipeline_stages
+		 )
+		 UPDATE pipeline_stages ps
+		 SET name = BTRIM(ps.name) || ' · ' || SUBSTRING(ps.id::text, 1, 8)
+		 FROM duplicate_names d WHERE ps.id = d.id AND d.rn > 1`,
+		`WITH ordered AS (
+			SELECT id, ROW_NUMBER() OVER (
+				PARTITION BY pipeline_id
+				ORDER BY CASE stage_type WHEN 'active' THEN 0 WHEN 'won' THEN 1 ELSE 2 END, position, created_at, id
+			) - 1 AS new_position
+			FROM pipeline_stages
+		 )
+		 UPDATE pipeline_stages ps SET position = ordered.new_position
+		 FROM ordered WHERE ps.id = ordered.id`,
+		`DO $crm_stage_constraints$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pipeline_stages_stage_type_check') THEN
+				ALTER TABLE pipeline_stages ADD CONSTRAINT pipeline_stages_stage_type_check CHECK (stage_type IN ('active','won','lost'));
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pipeline_stages_pipeline_position_key') THEN
+				ALTER TABLE pipeline_stages ADD CONSTRAINT pipeline_stages_pipeline_position_key UNIQUE (pipeline_id, position) DEFERRABLE INITIALLY DEFERRED;
+			END IF;
+		END $crm_stage_constraints$`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_stages_won ON pipeline_stages(pipeline_id) WHERE stage_type = 'won'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_stages_lost ON pipeline_stages(pipeline_id) WHERE stage_type = 'lost'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_stages_normalized_name ON pipeline_stages(pipeline_id, LOWER(REGEXP_REPLACE(BTRIM(name), '\s+', ' ', 'g')))`,
+		`UPDATE leads l SET stage_id=NULL, pipeline_id=NULL, status='open', closed_at=NULL, closed_by=NULL, close_reason=''
+		 WHERE (l.stage_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM pipeline_stages ps JOIN pipelines p ON p.id=ps.pipeline_id
+			WHERE ps.id=l.stage_id AND p.account_id=l.account_id
+		 )) OR (l.stage_id IS NULL AND l.pipeline_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM pipelines p WHERE p.id=l.pipeline_id AND p.account_id=l.account_id
+		 ))`,
+		`UPDATE leads l SET pipeline_id = ps.pipeline_id
+		 FROM pipeline_stages ps JOIN pipelines p ON p.id=ps.pipeline_id
+		 WHERE l.stage_id = ps.id AND p.account_id=l.account_id AND l.pipeline_id IS DISTINCT FROM ps.pipeline_id`,
+		`UPDATE leads l
+		 SET status = CASE ps.stage_type WHEN 'won' THEN 'won' WHEN 'lost' THEN 'lost' ELSE 'open' END,
+			closed_at = CASE WHEN ps.stage_type IN ('won','lost') THEN COALESCE(l.closed_at, l.updated_at, NOW()) ELSE NULL END,
+			close_reason = CASE WHEN ps.stage_type = 'lost' AND BTRIM(l.close_reason) = '' THEN 'Migrado desde etapa perdida' WHEN ps.stage_type = 'active' THEN '' ELSE l.close_reason END,
+			closed_by = CASE WHEN ps.stage_type = 'active' THEN NULL ELSE l.closed_by END
+		 FROM pipeline_stages ps WHERE l.stage_id = ps.id`,
+		`UPDATE leads SET status = 'open', closed_at = NULL, closed_by = NULL, close_reason = '' WHERE stage_id IS NULL`,
+		`UPDATE leads l
+		 SET status = 'won', closed_at = COALESCE(l.closed_at, l.updated_at, NOW()), close_reason = COALESCE(NULLIF(l.close_reason,''), 'Ganado en Kommo'),
+			is_blocked = FALSE, blocked_at = NULL, block_reason = ''
+		 WHERE l.is_blocked = TRUE AND LOWER(l.block_reason) LIKE '%ganad%' AND LOWER(l.block_reason) LIKE '%kommo%'`,
+		`UPDATE leads l
+		 SET status = 'lost', closed_at = COALESCE(l.closed_at, l.updated_at, NOW()), close_reason = COALESCE(NULLIF(l.close_reason,''), 'Perdido en Kommo'),
+			is_blocked = FALSE, blocked_at = NULL, block_reason = ''
+		 WHERE l.is_blocked = TRUE AND LOWER(l.block_reason) LIKE '%perdid%' AND LOWER(l.block_reason) LIKE '%kommo%'`,
+		`UPDATE leads l
+		 SET status = 'lost', closed_at = COALESCE(l.closed_at, l.updated_at, NOW()), close_reason = COALESCE(NULLIF(l.close_reason,''), 'No está interesado'),
+			is_blocked = FALSE, blocked_at = NULL, block_reason = ''
+		 WHERE l.is_blocked = TRUE AND LOWER(TRANSLATE(l.block_reason, 'áéíóú', 'aeiou')) LIKE '%no esta interesado%'`,
+		`UPDATE leads l SET stage_id = ps.id
+		 FROM pipeline_stages ps
+		 WHERE ps.pipeline_id = l.pipeline_id AND ps.stage_type = l.status
+		   AND l.status IN ('won','lost')
+		   AND (l.stage_id IS NULL OR NOT EXISTS (SELECT 1 FROM pipeline_stages current_stage WHERE current_stage.id = l.stage_id AND current_stage.stage_type = l.status))`,
+		`UPDATE contacts c
+		 SET do_not_contact = TRUE,
+			do_not_contact_at = COALESCE(c.do_not_contact_at, l.blocked_at, NOW()),
+			do_not_contact_reason = COALESCE(NULLIF(c.do_not_contact_reason,''), NULLIF(l.block_reason,''), 'Migrado desde bloqueo de lead')
+		 FROM leads l
+		 WHERE l.contact_id = c.id AND l.account_id = c.account_id AND l.is_blocked = TRUE`,
+		`UPDATE leads l SET is_blocked=FALSE, blocked_at=NULL, block_reason=''
+		 WHERE l.is_blocked=TRUE
+		   AND EXISTS (SELECT 1 FROM contacts c WHERE c.id=l.contact_id AND c.account_id=l.account_id AND c.do_not_contact=TRUE)`,
+		`INSERT INTO contact_suppressions (account_id, contact_id, identity_type, normalized_value, reason, created_by)
+		 SELECT c.account_id, c.id, 'jid', LOWER(BTRIM(c.jid)), COALESCE(NULLIF(c.do_not_contact_reason,''),'Migrado desde DNC de contacto'), c.do_not_contact_by
+		 FROM contacts c WHERE c.do_not_contact=TRUE AND NULLIF(BTRIM(c.jid),'') IS NOT NULL
+		 ON CONFLICT (account_id, identity_type, normalized_value) DO UPDATE SET
+			contact_id=EXCLUDED.contact_id, reason=EXCLUDED.reason, active=TRUE, updated_at=NOW(), released_at=NULL, released_by=NULL`,
+		`INSERT INTO contact_suppressions (account_id, contact_id, identity_type, normalized_value, reason, created_by)
+		 SELECT c.account_id, c.id, 'phone', REGEXP_REPLACE(c.phone, '[^0-9]', '', 'g'), COALESCE(NULLIF(c.do_not_contact_reason,''),'Migrado desde DNC de contacto'), c.do_not_contact_by
+		 FROM contacts c WHERE c.do_not_contact=TRUE AND REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g') <> ''
+		 ON CONFLICT (account_id, identity_type, normalized_value) DO UPDATE SET
+			contact_id=EXCLUDED.contact_id, reason=EXCLUDED.reason, active=TRUE, updated_at=NOW(), released_at=NULL, released_by=NULL`,
+		`UPDATE leads SET status = 'open' WHERE status IS NULL OR status NOT IN ('open','won','lost')`,
+		`ALTER TABLE leads ALTER COLUMN status SET DEFAULT 'open'`,
+		`ALTER TABLE leads ALTER COLUMN status SET NOT NULL`,
+		`DO $crm_lead_status_constraint$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'leads_status_check') THEN
+				ALTER TABLE leads ADD CONSTRAINT leads_status_check CHECK (status IN ('open','won','lost'));
+			END IF;
+		END $crm_lead_status_constraint$`,
+		`UPDATE accounts a SET default_incoming_stage_id=NULL
+		 WHERE a.default_incoming_stage_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM pipeline_stages ps JOIN pipelines p ON p.id=ps.pipeline_id
+			WHERE ps.id=a.default_incoming_stage_id AND ps.stage_type='active' AND p.account_id=a.id
+		 )`,
+		`WITH replacements AS (
+			SELECT a.id AS account_id, (
+				SELECT ps.id FROM pipeline_stages ps JOIN pipelines p ON p.id = ps.pipeline_id
+				WHERE p.account_id = a.id AND ps.stage_type = 'active'
+				ORDER BY p.is_default DESC, p.created_at, ps.position LIMIT 1
+			) AS stage_id
+			FROM accounts a
+			WHERE a.default_incoming_stage_id IS NULL
+			   OR NOT EXISTS (SELECT 1 FROM pipeline_stages current_stage JOIN pipelines current_pipeline ON current_pipeline.id=current_stage.pipeline_id WHERE current_stage.id = a.default_incoming_stage_id AND current_stage.stage_type = 'active' AND current_pipeline.account_id=a.id)
+		 )
+		 UPDATE accounts a SET default_incoming_stage_id = replacements.stage_id
+		 FROM replacements WHERE a.id = replacements.account_id AND replacements.stage_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_leads_lifecycle ON leads(account_id, status, pipeline_id, stage_id) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_leads_trash ON leads(account_id, deleted_at DESC) WHERE deleted_at IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_leads_open_duplicate ON leads(account_id, contact_id, LOWER(REGEXP_REPLACE(BTRIM(title), '\s+', ' ', 'g'))) WHERE status = 'open' AND deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_contacts_do_not_contact ON contacts(account_id) WHERE do_not_contact = TRUE`,
+		`WITH ranked AS (
+			SELECT cr.id, ROW_NUMBER() OVER (
+				PARTITION BY cr.campaign_id, cr.contact_id
+				ORDER BY CASE cr.status WHEN 'delivered' THEN 0 WHEN 'sent' THEN 1 WHEN 'pending' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,
+					cr.sent_at DESC NULLS LAST, cr.id
+			) AS rn
+			FROM campaign_recipients cr WHERE cr.contact_id IS NOT NULL
+		 )
+		 DELETE FROM campaign_recipients cr USING ranked r WHERE cr.id=r.id AND r.rn>1`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_recipients_contact ON campaign_recipients(campaign_id, contact_id) WHERE contact_id IS NOT NULL`,
+
 		// Address field on contacts and leads (must be before data unification)
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS address TEXT`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS dni VARCHAR(50)`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS birth_date TIMESTAMPTZ`,
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS address TEXT`,
 
 		// Distrito and Ocupacion fields on contacts and leads
@@ -1332,7 +1545,6 @@ func Migrate(db *pgxpool.Pool) error {
 		   address = COALESCE(contacts.address, l.address),
 		   distrito = COALESCE(NULLIF(contacts.distrito, ''), NULLIF(l.distrito, '')),
 		   ocupacion = COALESCE(NULLIF(contacts.ocupacion, ''), NULLIF(l.ocupacion, '')),
-		   notes = COALESCE(contacts.notes, l.notes),
 		   updated_at = NOW()
 		 FROM leads l
 		 WHERE contacts.id = l.contact_id
@@ -1355,9 +1567,25 @@ func Migrate(db *pgxpool.Pool) error {
 		// Backfill contact_id on campaign_recipients via JID match
 		`UPDATE campaign_recipients cr
 		 SET contact_id = c.id
-		 FROM contacts c
+		 FROM campaigns campaign, contacts c
 		 WHERE cr.contact_id IS NULL
+		   AND campaign.id = cr.campaign_id
+		   AND c.account_id = campaign.account_id
 		   AND c.jid = cr.jid`,
+
+		// Run the legacy block conversion again after lead→contact linking. On the
+		// first migration pass some historical blocked leads did not yet have a
+		// contact_id; fail closed for unknown legacy reasons and clear the obsolete
+		// lead flags only after the Contact has inherited the restriction.
+		`UPDATE contacts c
+		 SET do_not_contact = TRUE,
+			do_not_contact_at = COALESCE(c.do_not_contact_at, l.blocked_at, NOW()),
+			do_not_contact_reason = COALESCE(NULLIF(c.do_not_contact_reason,''), NULLIF(l.block_reason,''), 'Migrado desde bloqueo histórico de lead')
+		 FROM leads l
+		 WHERE l.contact_id = c.id AND l.account_id = c.account_id AND l.is_blocked = TRUE`,
+		`UPDATE leads l SET is_blocked=FALSE, blocked_at=NULL, block_reason=''
+		 WHERE l.is_blocked=TRUE
+		   AND EXISTS (SELECT 1 FROM contacts c WHERE c.id=l.contact_id AND c.account_id=l.account_id AND c.do_not_contact=TRUE)`,
 
 		// Drop obsolete lead_tags table (all tags now in contact_tags)
 		`DROP TABLE IF EXISTS lead_tags`,
@@ -1366,9 +1594,9 @@ func Migrate(db *pgxpool.Pool) error {
 		`UPDATE leads SET
 		   name = NULL, last_name = NULL, short_name = NULL,
 		   phone = NULL, email = NULL, company = NULL,
-		   age = NULL, dni = NULL, birth_date = NULL, notes = NULL
-		 WHERE contact_id IS NOT NULL
-		   AND name IS NOT NULL`,
+		   age = NULL, dni = NULL, birth_date = NULL, address = NULL,
+		   distrito = NULL, ocupacion = NULL
+		 WHERE contact_id IS NOT NULL`,
 
 		// Program folders – organise programs in folders
 		`CREATE TABLE IF NOT EXISTS program_folders (
@@ -1396,9 +1624,194 @@ func Migrate(db *pgxpool.Pool) error {
 		`UPDATE devices SET provider = 'whatsapp_web' WHERE provider IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_devices_account_provider ON devices(account_id, provider)`,
 		`CREATE INDEX IF NOT EXISTS idx_devices_phone_number_id ON devices(phone_number_id) WHERE phone_number_id IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS app_data_migrations (
+			key TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 
 		// Backfill contact_id for event_participants that have lead_id but missing contact_id
-		`UPDATE event_participants SET contact_id = l.contact_id FROM leads l WHERE l.id = event_participants.lead_id AND event_participants.contact_id IS NULL AND l.contact_id IS NOT NULL`,
+		beginEventContactDataMigration,
+		// Temporarily remove the uniqueness guard so every deterministic legacy
+		// identity can be linked first. Duplicate event/contact rows are then
+		// consolidated with their dependent records before the guard is restored.
+		`DROP INDEX IF EXISTS idx_event_participants_unique_contact`,
+		`UPDATE event_participants ep SET contact_id = l.contact_id
+		 FROM events e, leads l
+		 WHERE ep.event_id=e.id AND ep.lead_id=l.id AND l.account_id=e.account_id
+		   AND ep.contact_id IS NULL AND l.contact_id IS NOT NULL`,
+		`WITH phone_candidates AS (
+			SELECT ep.id AS participant_id, (ARRAY_AGG(c.id ORDER BY c.id))[1] AS contact_id
+			FROM event_participants ep
+			JOIN events e ON e.id = ep.event_id
+			JOIN contacts c ON c.account_id = e.account_id
+			 AND REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g') = REGEXP_REPLACE(COALESCE(ep.phone,''), '[^0-9]', '', 'g')
+			WHERE ep.contact_id IS NULL AND REGEXP_REPLACE(COALESCE(ep.phone,''), '[^0-9]', '', 'g') <> ''
+			GROUP BY ep.id HAVING COUNT(*) = 1
+		 )
+		 UPDATE event_participants ep SET contact_id = pc.contact_id
+		 FROM phone_candidates pc WHERE ep.id = pc.participant_id`,
+		`WITH email_candidates AS (
+			SELECT ep.id AS participant_id, (ARRAY_AGG(c.id ORDER BY c.id))[1] AS contact_id
+			FROM event_participants ep
+			JOIN events e ON e.id = ep.event_id
+			JOIN contacts c ON c.account_id = e.account_id AND LOWER(BTRIM(c.email)) = LOWER(BTRIM(ep.email))
+			WHERE ep.contact_id IS NULL AND NULLIF(BTRIM(ep.email),'') IS NOT NULL
+			GROUP BY ep.id HAVING COUNT(*) = 1
+		 )
+		 UPDATE event_participants ep SET contact_id = ec.contact_id
+		 FROM email_candidates ec WHERE ep.id = ec.participant_id`,
+
+		// Consolidate duplicate event/contact memberships. The canonical row is
+		// the most progressed participant (then oldest for deterministic ties).
+		`WITH ranked AS (
+			SELECT ep.id, ep.event_id, ep.contact_id,
+				FIRST_VALUE(ep.id) OVER (
+					PARTITION BY ep.event_id, ep.contact_id
+					ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC,
+						ep.created_at, ep.id
+				) AS keep_id,
+				ROW_NUMBER() OVER (
+					PARTITION BY ep.event_id, ep.contact_id
+					ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC,
+						ep.created_at, ep.id
+				) AS rn
+			FROM event_participants ep WHERE ep.contact_id IS NOT NULL
+		 )
+		 INSERT INTO participant_tags (participant_id, tag_id)
+		 SELECT DISTINCT r.keep_id, pt.tag_id
+		 FROM ranked r JOIN participant_tags pt ON pt.participant_id=r.id
+		 WHERE r.rn > 1 ON CONFLICT DO NOTHING`,
+		`WITH ranked AS (
+			SELECT ep.id,
+				FIRST_VALUE(ep.id) OVER (PARTITION BY ep.event_id, ep.contact_id ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC, ep.created_at, ep.id) AS keep_id,
+				ROW_NUMBER() OVER (PARTITION BY ep.event_id, ep.contact_id ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC, ep.created_at, ep.id) AS rn
+			FROM event_participants ep WHERE ep.contact_id IS NOT NULL
+		 )
+		 UPDATE interactions i SET participant_id=r.keep_id
+		 FROM ranked r WHERE i.participant_id=r.id AND r.rn > 1`,
+		`WITH ranked AS (
+			SELECT ep.id,
+				FIRST_VALUE(ep.id) OVER (PARTITION BY ep.event_id, ep.contact_id ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC, ep.created_at, ep.id) AS keep_id
+			FROM event_participants ep WHERE ep.contact_id IS NOT NULL
+		 ), entry_ranked AS (
+			SELECT ele.id, ele.logbook_id, r.keep_id,
+				ROW_NUMBER() OVER (PARTITION BY ele.logbook_id, r.keep_id ORDER BY (ele.participant_id=r.keep_id) DESC, ele.created_at, ele.id) AS rn
+			FROM event_logbook_entries ele JOIN ranked r ON r.id=ele.participant_id
+		 ), merged AS (
+			SELECT ele.logbook_id, r.keep_id,
+				STRING_AGG(NULLIF(BTRIM(ele.notes),''), E'\n\n' ORDER BY ele.created_at, ele.id) AS merged_notes
+			FROM event_logbook_entries ele JOIN ranked r ON r.id=ele.participant_id
+			GROUP BY ele.logbook_id, r.keep_id
+		 )
+		 UPDATE event_logbook_entries ele SET notes=COALESCE(m.merged_notes,'')
+		 FROM entry_ranked er JOIN merged m ON m.logbook_id=er.logbook_id AND m.keep_id=er.keep_id
+		 WHERE ele.id=er.id AND er.rn=1`,
+		`WITH ranked AS (
+			SELECT ep.id, FIRST_VALUE(ep.id) OVER (PARTITION BY ep.event_id, ep.contact_id ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC, ep.created_at, ep.id) AS keep_id
+			FROM event_participants ep WHERE ep.contact_id IS NOT NULL
+		 ), entry_ranked AS (
+			SELECT ele.id, ROW_NUMBER() OVER (PARTITION BY ele.logbook_id, r.keep_id ORDER BY (ele.participant_id=r.keep_id) DESC, ele.created_at, ele.id) AS rn
+			FROM event_logbook_entries ele JOIN ranked r ON r.id=ele.participant_id
+		 )
+		 DELETE FROM event_logbook_entries ele USING entry_ranked er WHERE ele.id=er.id AND er.rn>1`,
+		`WITH ranked AS (
+			SELECT ep.id, FIRST_VALUE(ep.id) OVER (PARTITION BY ep.event_id, ep.contact_id ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC, ep.created_at, ep.id) AS keep_id
+			FROM event_participants ep WHERE ep.contact_id IS NOT NULL
+		 )
+		 UPDATE event_logbook_entries ele SET participant_id=r.keep_id
+		 FROM ranked r WHERE ele.participant_id=r.id AND r.id<>r.keep_id`,
+		`WITH ranked AS (
+			SELECT ep.*,
+				FIRST_VALUE(ep.id) OVER (PARTITION BY ep.event_id, ep.contact_id ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC, ep.created_at, ep.id) AS keep_id,
+				ROW_NUMBER() OVER (PARTITION BY ep.event_id, ep.contact_id ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC, ep.created_at, ep.id) AS rn
+			FROM event_participants ep WHERE ep.contact_id IS NOT NULL
+		 ), merged AS (
+			SELECT keep_id,
+				STRING_AGG(NULLIF(BTRIM(notes),''), E'\n\n' ORDER BY created_at, id) FILTER (WHERE rn>1) AS duplicate_notes,
+				(ARRAY_AGG(next_action ORDER BY (next_action IS NULL), updated_at DESC, id))[1] AS next_action,
+				(ARRAY_AGG(next_action_date ORDER BY (next_action_date IS NULL), next_action_date, id))[1] AS next_action_date,
+				(ARRAY_AGG(lead_id ORDER BY (lead_id IS NULL), updated_at DESC, id))[1] AS lead_id,
+				(ARRAY_AGG(stage_id ORDER BY (stage_id IS NULL), updated_at DESC, id))[1] AS stage_id,
+				BOOL_OR(auto_tag_sync) AS auto_tag_sync,
+				MIN(invited_at) AS invited_at, MIN(confirmed_at) AS confirmed_at, MIN(attended_at) AS attended_at,
+				MIN(created_at) AS created_at, MAX(updated_at) AS updated_at
+			FROM ranked GROUP BY keep_id
+		 )
+		 UPDATE event_participants ep SET
+			notes=CASE WHEN m.duplicate_notes IS NULL THEN ep.notes ELSE NULLIF(CONCAT_WS(E'\n\n',NULLIF(BTRIM(ep.notes),''),m.duplicate_notes),'') END,
+			next_action=COALESCE(ep.next_action,m.next_action), next_action_date=COALESCE(ep.next_action_date,m.next_action_date),
+			lead_id=COALESCE(ep.lead_id,m.lead_id), stage_id=COALESCE(ep.stage_id,m.stage_id), auto_tag_sync=m.auto_tag_sync,
+			invited_at=COALESCE(m.invited_at,ep.invited_at), confirmed_at=COALESCE(m.confirmed_at,ep.confirmed_at), attended_at=COALESCE(m.attended_at,ep.attended_at),
+			created_at=m.created_at, updated_at=m.updated_at
+		 FROM merged m WHERE ep.id=m.keep_id`,
+		`WITH ranked AS (
+			SELECT ep.id, ROW_NUMBER() OVER (PARTITION BY ep.event_id, ep.contact_id ORDER BY CASE ep.status WHEN 'attended' THEN 6 WHEN 'confirmed' THEN 5 WHEN 'contacted' THEN 4 WHEN 'invited' THEN 3 WHEN 'no_show' THEN 2 WHEN 'declined' THEN 1 ELSE 0 END DESC, ep.created_at, ep.id) AS rn
+			FROM event_participants ep WHERE ep.contact_id IS NOT NULL
+		 )
+		 DELETE FROM event_participants ep USING ranked r WHERE ep.id=r.id AND r.rn>1`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_event_participants_unique_contact ON event_participants(event_id, contact_id) WHERE contact_id IS NOT NULL`,
+
+		// Repair historical participants assigned to a stage from another event
+		// pipeline. Prefer the first stage of the event's own pipeline; otherwise
+		// leave the participant explicitly unassigned.
+		`WITH replacements AS (
+			SELECT ep.id, (
+				SELECT eps.id FROM event_pipeline_stages eps
+				WHERE eps.pipeline_id=e.pipeline_id ORDER BY eps.position, eps.created_at, eps.id LIMIT 1
+			) AS stage_id
+			FROM event_participants ep JOIN events e ON e.id=ep.event_id
+			WHERE ep.stage_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM event_pipeline_stages current_stage WHERE current_stage.id=ep.stage_id AND current_stage.pipeline_id=e.pipeline_id
+			)
+		 )
+		 UPDATE event_participants ep SET stage_id=r.stage_id, updated_at=NOW()
+		 FROM replacements r WHERE ep.id=r.id`,
+		`INSERT INTO contacts (id, account_id, jid, phone, name, custom_name, email, source, is_group, created_at, updated_at)
+		 SELECT gen_random_uuid(), e.account_id, 'event_' || REPLACE(ep.id::text, '-', '') || '@clarin.local',
+			ep.phone, NULLIF(BTRIM(ep.name),''), NULLIF(BTRIM(ep.name),''), ep.email, 'event_migration', FALSE, NOW(), NOW()
+		 FROM event_participants ep JOIN events e ON e.id = ep.event_id
+		 WHERE ep.contact_id IS NULL
+		 ON CONFLICT (account_id, jid) DO NOTHING`,
+		`UPDATE event_participants ep SET contact_id = c.id
+		 FROM events e JOIN contacts c ON c.account_id = e.account_id
+		 WHERE e.id = ep.event_id AND ep.contact_id IS NULL
+		   AND c.jid = 'event_' || REPLACE(ep.id::text, '-', '') || '@clarin.local'`,
+		// Repeat participant tag migration after participant identities have been
+		// linked/consolidated. The earlier pass cannot see legacy rows whose
+		// contact_id was NULL. Account correlation prevents historical junction
+		// corruption from crossing tenant boundaries.
+		`INSERT INTO contact_tags (contact_id, tag_id)
+		 SELECT DISTINCT ep.contact_id, pt.tag_id
+		 FROM participant_tags pt
+		 JOIN event_participants ep ON ep.id=pt.participant_id
+		 JOIN events e ON e.id=ep.event_id
+		 JOIN contacts c ON c.id=ep.contact_id AND c.account_id=e.account_id
+		 JOIN tags t ON t.id=pt.tag_id AND t.account_id=e.account_id
+		 WHERE ep.contact_id IS NOT NULL
+		 ON CONFLICT DO NOTHING`,
+		`DELETE FROM contact_tags ct USING contacts c, tags t
+		 WHERE ct.contact_id=c.id AND ct.tag_id=t.id AND c.account_id<>t.account_id`,
+		`DELETE FROM participant_tags pt USING event_participants ep, events e, tags t
+		 WHERE pt.participant_id=ep.id AND ep.event_id=e.id AND pt.tag_id=t.id AND e.account_id<>t.account_id`,
+		`DELETE FROM event_tags et USING events e, tags t
+		 WHERE et.event_id=e.id AND et.tag_id=t.id AND e.account_id<>t.account_id`,
+		`DELETE FROM chat_tags cht USING chats ch, tags t
+		 WHERE cht.chat_id=ch.id AND cht.tag_id=t.id AND ch.account_id<>t.account_id`,
+		endEventContactDataMigration,
+
+		// Event membership is participant/contact based. Preserve interaction
+		// history on the contact before retiring legacy lead provenance from every
+		// participant row. The nullable column remains temporarily for rolling
+		// compatibility, but active code never writes it.
+		`UPDATE interactions i SET contact_id=ep.contact_id
+		 FROM event_participants ep JOIN events e ON e.id=ep.event_id
+		 WHERE i.participant_id=ep.id AND i.account_id=e.account_id
+		   AND i.contact_id IS NULL AND ep.contact_id IS NOT NULL`,
+		`UPDATE event_participants SET lead_id=NULL WHERE lead_id IS NOT NULL`,
+		`DROP INDEX IF EXISTS idx_event_participants_auto_sync`,
+		`DROP INDEX IF EXISTS idx_event_participants_lead`,
+		`CREATE INDEX IF NOT EXISTS idx_event_participants_auto_sync_contact
+		 ON event_participants(event_id, contact_id) WHERE auto_tag_sync=TRUE AND contact_id IS NOT NULL`,
 
 		// ─── Dynamics (Interactive Activities) ─────────────────────────────
 
@@ -1637,6 +2050,24 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_contact_aliases_lookup ON contact_aliases(account_id, alias_type, normalized_value)`,
+		// Capture every known identity for already-blocked contacts. These rows
+		// survive future Contact deletion and are the final outbound safety net.
+		`INSERT INTO contact_suppressions (account_id, contact_id, identity_type, normalized_value, reason, created_by)
+		 SELECT c.account_id, c.id, 'phone', REGEXP_REPLACE(cp.phone, '[^0-9]', '', 'g'), COALESCE(NULLIF(c.do_not_contact_reason,''),'Migrado desde DNC de contacto'), c.do_not_contact_by
+		 FROM contacts c JOIN contact_phones cp ON cp.contact_id=c.id
+		 WHERE c.do_not_contact=TRUE AND REGEXP_REPLACE(COALESCE(cp.phone,''), '[^0-9]', '', 'g') <> ''
+		 ON CONFLICT (account_id, identity_type, normalized_value) DO UPDATE SET
+			contact_id=EXCLUDED.contact_id, reason=EXCLUDED.reason, active=TRUE, updated_at=NOW(), released_at=NULL, released_by=NULL`,
+		`INSERT INTO contact_suppressions (account_id, contact_id, identity_type, normalized_value, reason, created_by)
+		 SELECT c.account_id, c.id,
+			CASE WHEN LOWER(ca.alias_type)='jid' OR ca.alias_value LIKE '%@%' THEN 'jid' ELSE 'phone' END,
+			CASE WHEN LOWER(ca.alias_type)='jid' OR ca.alias_value LIKE '%@%' THEN LOWER(BTRIM(ca.alias_value)) ELSE REGEXP_REPLACE(ca.alias_value, '[^0-9]', '', 'g') END,
+			COALESCE(NULLIF(c.do_not_contact_reason,''),'Migrado desde DNC de contacto'), c.do_not_contact_by
+		 FROM contacts c JOIN contact_aliases ca ON ca.contact_id=c.id
+		 WHERE c.do_not_contact=TRUE
+		   AND CASE WHEN LOWER(ca.alias_type)='jid' OR ca.alias_value LIKE '%@%' THEN BTRIM(ca.alias_value) <> '' ELSE REGEXP_REPLACE(ca.alias_value, '[^0-9]', '', 'g') <> '' END
+		 ON CONFLICT (account_id, identity_type, normalized_value) DO UPDATE SET
+			contact_id=EXCLUDED.contact_id, reason=EXCLUDED.reason, active=TRUE, updated_at=NOW(), released_at=NULL, released_by=NULL`,
 		`CREATE TABLE IF NOT EXISTS contact_merge_audit (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -2319,10 +2750,61 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_tokens_client ON mcp_oauth_refresh_tokens(client_id, expires_at DESC)`,
 	}
 
+	var dataTx pgx.Tx
+	skipDataMigration := false
 	for _, migration := range migrations {
+		switch migration {
+		case beginEventContactDataMigration:
+			tx, err := db.Begin(ctx)
+			if err != nil {
+				return fmt.Errorf("begin event/contact data migration: %w", err)
+			}
+			dataTx = tx
+			// Serialize startup across replicas and keep every destructive repair
+			// (including the temporary index drop) in one rollback-safe tx.
+			if _, err := dataTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, eventContactDataMigrationKey); err != nil {
+				_ = dataTx.Rollback(ctx)
+				return fmt.Errorf("lock event/contact data migration: %w", err)
+			}
+			if err := dataTx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app_data_migrations WHERE key=$1)`, eventContactDataMigrationKey).Scan(&skipDataMigration); err != nil {
+				_ = dataTx.Rollback(ctx)
+				return fmt.Errorf("check event/contact data migration: %w", err)
+			}
+			continue
+		case endEventContactDataMigration:
+			if dataTx == nil {
+				return fmt.Errorf("event/contact data migration end without begin")
+			}
+			if !skipDataMigration {
+				if _, err := dataTx.Exec(ctx, `INSERT INTO app_data_migrations (key) VALUES ($1)`, eventContactDataMigrationKey); err != nil {
+					_ = dataTx.Rollback(ctx)
+					return fmt.Errorf("record event/contact data migration: %w", err)
+				}
+			}
+			if err := dataTx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit event/contact data migration: %w", err)
+			}
+			dataTx = nil
+			skipDataMigration = false
+			continue
+		}
+		if dataTx != nil {
+			if skipDataMigration {
+				continue
+			}
+			if _, err := dataTx.Exec(ctx, migration); err != nil {
+				_ = dataTx.Rollback(ctx)
+				return fmt.Errorf("event/contact data migration failed: %w\nSQL: %s", err, migration)
+			}
+			continue
+		}
 		if _, err := db.Exec(ctx, migration); err != nil {
 			return fmt.Errorf("migration failed: %w\nSQL: %s", err, migration)
 		}
+	}
+	if dataTx != nil {
+		_ = dataTx.Rollback(ctx)
+		return fmt.Errorf("event/contact data migration was not closed")
 	}
 
 	return nil

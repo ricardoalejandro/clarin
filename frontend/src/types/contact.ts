@@ -9,12 +9,15 @@ export interface StructuredTag {
   color: string
 }
 
+export type PipelineStageType = 'active' | 'won' | 'lost'
+
 export interface PipelineStage {
   id: string
   pipeline_id: string
   name: string
   color: string
   position: number
+  stage_type?: PipelineStageType
   lead_count?: number
 }
 
@@ -45,6 +48,8 @@ export interface Lead {
   id: string
   jid: string
   contact_id: string | null
+  /** Commercial opportunity title. Personal identity remains on Contact. */
+  title?: string
   name: string
   last_name: string | null
   short_name: string | null
@@ -57,7 +62,7 @@ export interface Lead {
   address: string | null
   distrito: string | null
   ocupacion: string | null
-  status: string
+  status: 'open' | 'won' | 'lost' | string
   pipeline_id: string | null
   stage_id: string | null
   stage_name: string | null
@@ -73,6 +78,13 @@ export interface Lead {
   kommo_id: number | null
   is_archived: boolean
   archived_at: string | null
+  closed_at?: string | null
+  closed_by?: string | null
+  close_reason?: string | null
+  deleted_at?: string | null
+  deleted_by?: string | null
+  delete_reason?: string | null
+  purge_at?: string | null
   is_blocked: boolean
   blocked_at: string | null
   block_reason: string
@@ -110,6 +122,10 @@ export interface Contact {
   source?: string | null
   is_group?: boolean
   kommo_id?: number | null
+  do_not_contact?: boolean
+  do_not_contact_at?: string | null
+  do_not_contact_by?: string | null
+  do_not_contact_reason?: string | null
   created_at?: string
   updated_at?: string
   last_activity?: string | null

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/ws"
 )
 
@@ -1601,43 +1602,56 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	}
 
 	// ─── Won/Lost Detection (status 142=Won, 143=Lost) ───
-	// Won/lost leads are NOT imported into Clarin. If an existing active lead
-	// transitions to won/lost in Kommo, it's auto-blocked and desynced.
+	// Commercial outcomes close the opportunity. They must never suppress the
+	// Contact globally (DNC is an orthogonal, explicit contactability decision).
 	if statusKommoID == 142 || statusKommoID == 143 {
 		var existingLeadID uuid.UUID
-		var alreadyDesynced bool
+		var existingPipelineID *uuid.UUID
+		var currentStatus string
 		err := s.db.QueryRow(ctx,
-			`SELECT id, (kommo_deleted_at IS NOT NULL) FROM leads WHERE account_id = $1 AND kommo_id = $2`,
-			accountID, kommoID).Scan(&existingLeadID, &alreadyDesynced)
+			`SELECT id, pipeline_id, status FROM leads WHERE account_id = $1 AND kommo_id = $2`,
+			accountID, kommoID).Scan(&existingLeadID, &existingPipelineID, &currentStatus)
 		if err != nil {
 			// Lead doesn't exist in Clarin → skip, don't import won/lost
 			return false, nil
 		}
-		if alreadyDesynced {
-			// Already desynced from Kommo → nothing to do
+		targetStatus := domain.LeadStatusWon
+		statusLabel := "GANADO"
+		closeReason := "Ganado en Kommo"
+		if statusKommoID == 143 {
+			targetStatus = domain.LeadStatusLost
+			statusLabel = "PERDIDO"
+			closeReason = "Perdido en Kommo"
+		}
+		if currentStatus == targetStatus {
 			return false, nil
 		}
-		// Lead transitioning to won/lost → block (if not already) + desync + add observation
-		statusLabel := "GANADO"
-		emoji := "🏆"
-		blockReason := "Ganado en Kommo"
-		if statusKommoID == 143 {
-			statusLabel = "PERDIDO"
-			emoji = "❌"
-			blockReason = "Perdido en Kommo"
+		targetPipelineID := pipelineID
+		if targetPipelineID == nil {
+			targetPipelineID = existingPipelineID
+		}
+		var terminalStageID *uuid.UUID
+		if targetPipelineID != nil {
+			var sid uuid.UUID
+			if stageErr := s.db.QueryRow(ctx, `
+				SELECT id FROM pipeline_stages WHERE pipeline_id=$1 AND stage_type=$2 ORDER BY position, id LIMIT 1
+			`, *targetPipelineID, targetStatus).Scan(&sid); stageErr == nil {
+				terminalStageID = &sid
+			}
 		}
 		_, _ = s.db.Exec(ctx, `
-			UPDATE leads SET is_blocked = true, blocked_at = COALESCE(blocked_at, NOW()), block_reason = $2,
-				kommo_deleted_at = NOW(), updated_at = NOW()
+			UPDATE leads SET status=$2, pipeline_id=COALESCE($3,pipeline_id), stage_id=$4,
+				closed_at=COALESCE(closed_at,NOW()), close_reason=COALESCE(NULLIF(close_reason,''),$5),
+				is_blocked=FALSE, blocked_at=NULL, block_reason='', kommo_deleted_at=NULL, updated_at=NOW()
 			WHERE id = $1
-		`, existingLeadID, blockReason)
+		`, existingLeadID, targetStatus, targetPipelineID, terminalStageID, closeReason)
 		// Create observation explaining what happened
-		obsNotes := fmt.Sprintf("%s Lead marcado como %s en Kommo. Bloqueado automáticamente y desvinculado de la sincronización. Si deseas eliminarlo, puedes hacerlo sin afectar Kommo.", emoji, statusLabel)
+		obsNotes := fmt.Sprintf("Oportunidad marcada como %s en Kommo. Se registró como cierre comercial en Clarin; la preferencia de contacto no fue modificada.", statusLabel)
 		_, _ = s.db.Exec(ctx, `
 			INSERT INTO interactions (id, account_id, lead_id, contact_id, type, notes, created_at)
 			VALUES (gen_random_uuid(), $1, $2, (SELECT contact_id FROM leads WHERE id = $2), 'note', $3, NOW())
 		`, accountID, existingLeadID, obsNotes)
-		log.Printf("[Kommo Sync] Lead %s (Kommo %d) transitioned to %s → auto-blocked and desynced", existingLeadID, kommoID, statusLabel)
+		log.Printf("[Kommo Sync] Lead %s (Kommo %d) transitioned to %s", existingLeadID, kommoID, statusLabel)
 		// Broadcast updates
 		if s.hub != nil {
 			s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{"action": "updated"})
@@ -1743,14 +1757,6 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	err = s.db.QueryRow(ctx, `SELECT id FROM leads WHERE account_id = $1 AND kommo_id = $2`, accountID, kommoID).Scan(&leadID)
 	if err == nil {
 		foundByKommoID = true
-	} else if jid != "" {
-		// Try to find an unlinked WhatsApp-created lead (no kommo_id) to attach this Kommo lead to.
-		// We deliberately skip leads that already have a kommo_id — since the UNIQUE(account_id,jid)
-		// constraint was removed, there can now be multiple leads per phone; each deserves its own row.
-		var existingKommoID *int64
-		err = s.db.QueryRow(ctx,
-			`SELECT id, kommo_id FROM leads WHERE account_id = $1 AND jid = $2 AND kommo_id IS NULL LIMIT 1`,
-			accountID, jid).Scan(&leadID, &existingKommoID)
 	}
 	if err != nil {
 		// NEW lead — only import if it belongs to a synced pipeline.
@@ -1769,12 +1775,35 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		}
 
 		leadID = uuid.New()
+		title := strings.TrimSpace(cleanQuotes(kl.Name))
+		if title == "" {
+			title = "Oportunidad importada"
+		}
+		status := domain.LeadStatusOpen
+		var closedAt *time.Time
+		closeReason := ""
+		if stageID != nil {
+			var stageType string
+			if scanErr := s.db.QueryRow(ctx, `SELECT stage_type FROM pipeline_stages WHERE id=$1`, *stageID).Scan(&stageType); scanErr == nil {
+				switch stageType {
+				case domain.PipelineStageTypeWon:
+					status = domain.LeadStatusWon
+					now := time.Now()
+					closedAt = &now
+				case domain.PipelineStageTypeLost:
+					status = domain.LeadStatusLost
+					now := time.Now()
+					closedAt = &now
+					closeReason = "Perdido en Kommo"
+				}
+			}
+		}
 		_, err = s.db.Exec(ctx, `
-			INSERT INTO leads (id, account_id, contact_id, jid, name, status, source,
-					pipeline_id, stage_id, tags, kommo_synced_tags, kommo_id, created_at, updated_at)
-				VALUES ($1, $2, $3, $4, $5, 'new', 'kommo', $6, $7, $8, $8, $9, NOW(), NOW())
-		`, leadID, accountID, contactID, jid,
-			nilIfEmpty(cleanQuotes(kl.Name)), pipelineID, stageID, tagNames, kommoID)
+			INSERT INTO leads (id, account_id, contact_id, title, jid, name, status, source,
+					pipeline_id, stage_id, tags, kommo_synced_tags, kommo_id, closed_at, close_reason, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, 'kommo', $8, $9, $10, $10, $11, $12, $13, NOW(), NOW())
+		`, leadID, accountID, contactID, title, jid,
+			nilIfEmpty(cleanQuotes(kl.Name)), status, pipelineID, stageID, tagNames, kommoID, closedAt, closeReason)
 		if err != nil {
 			return false, err
 		}
@@ -1803,7 +1832,12 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		var curPipelineID *uuid.UUID
 		_ = s.db.QueryRow(ctx, `SELECT pipeline_id FROM leads WHERE id = $1`, leadID).Scan(&curPipelineID)
 		if curPipelineID != nil {
-			_, _ = s.db.Exec(ctx, `UPDATE leads SET pipeline_id = NULL, stage_id = NULL, updated_at = NOW() WHERE id = $1`, leadID)
+			_, _ = s.db.Exec(ctx, `
+				UPDATE leads
+				SET pipeline_id = NULL, stage_id = NULL, status = 'open',
+					closed_at = NULL, close_reason = '', updated_at = NOW()
+				WHERE id = $1
+			`, leadID)
 			log.Printf("[Kommo Sync] Lead %s (Kommo %d) moved to non-synced pipeline %d in Kommo → removed from Clarin pipeline", leadID, kommoID, pipelineKommoID)
 			if s.hub != nil {
 				s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{"action": "updated"})
@@ -1814,10 +1848,39 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 	}
 
 	// Check if data actually changed before updating (avoid unnecessary writes + broadcasts)
+	status := domain.LeadStatusOpen
+	var closedAt *time.Time
+	closeReason := ""
+	if stageID != nil {
+		var stageType string
+		if scanErr := s.db.QueryRow(ctx, `SELECT stage_type FROM pipeline_stages WHERE id=$1`, *stageID).Scan(&stageType); scanErr == nil {
+			switch stageType {
+			case domain.PipelineStageTypeWon:
+				status = domain.LeadStatusWon
+				now := time.Now()
+				closedAt = &now
+			case domain.PipelineStageTypeLost:
+				status = domain.LeadStatusLost
+				now := time.Now()
+				closedAt = &now
+				closeReason = "Perdido en Kommo"
+			}
+		}
+	}
+
 	var curPipelineID, curStageID *uuid.UUID
 	var curLeadName *string
 	var curTags []string
-	_ = s.db.QueryRow(ctx, `SELECT pipeline_id, stage_id, tags, name FROM leads WHERE id = $1`, leadID).Scan(&curPipelineID, &curStageID, &curTags, &curLeadName)
+	var curStatus string
+	var curClosedAt *time.Time
+	var curCloseReason string
+	_ = s.db.QueryRow(ctx, `SELECT pipeline_id, stage_id, tags, name, status, closed_at, close_reason FROM leads WHERE id = $1`, leadID).Scan(&curPipelineID, &curStageID, &curTags, &curLeadName, &curStatus, &curClosedAt, &curCloseReason)
+	if curStatus == status && status != domain.LeadStatusOpen {
+		closedAt = curClosedAt
+		if strings.TrimSpace(curCloseReason) != "" {
+			closeReason = curCloseReason
+		}
+	}
 	tagsSame := len(curTags) == len(tagNames)
 	if tagsSame {
 		curTagSet := make(map[string]bool, len(curTags))
@@ -1841,7 +1904,7 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 		tagNames = []string{}
 	}
 
-	if foundByKommoID && pipelineSame && stageSame && tagsSame && leadNameSame && !contactChanged {
+	if foundByKommoID && pipelineSame && stageSame && tagsSame && leadNameSame && curStatus == status && !contactChanged {
 		// Lead fields unchanged — still reconcile contact_tags junction (may be out of sync)
 		s.syncLeadTags(ctx, accountID, leadID, tagNames)
 		return false, nil
@@ -1855,11 +1918,14 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 				contact_id = COALESCE($2, contact_id),
 				pipeline_id = $3,
 				stage_id = $4,
-				tags = $5,
+				status = $5,
+				closed_at = $6,
+				close_reason = $7,
+				tags = $8,
 				kommo_deleted_at = NULL,
 				updated_at = NOW()
-			WHERE id = $6
-		`, leadName, contactID, pipelineID, stageID, tagNames, leadID)
+			WHERE id = $9
+		`, leadName, contactID, pipelineID, stageID, status, closedAt, closeReason, tagNames, leadID)
 	} else {
 		// First-time linking (found by JID) — Clarin keeps name/phone/email,
 		// only link kommo_id and sync CRM fields (pipeline, stage, tags)
@@ -1870,11 +1936,14 @@ func (s *SyncService) upsertLead(ctx context.Context, accountID uuid.UUID, kl Ko
 				contact_id = COALESCE($3, contact_id),
 				pipeline_id = $4,
 				stage_id = $5,
-				tags = $6,
+				status = $6,
+				closed_at = $7,
+				close_reason = $8,
+				tags = $9,
 				kommo_deleted_at = NULL,
 				updated_at = NOW()
-			WHERE id = $7
-		`, kommoID, leadName, contactID, pipelineID, stageID, tagNames, leadID)
+			WHERE id = $10
+		`, kommoID, leadName, contactID, pipelineID, stageID, status, closedAt, closeReason, tagNames, leadID)
 		log.Printf("[Kommo Sync] Linked existing Clarin lead %s to Kommo ID %d (preserved Clarin name/phone/email)", leadID, kommoID)
 	}
 	if err != nil {

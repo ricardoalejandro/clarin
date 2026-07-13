@@ -6,7 +6,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   Search, Phone, PhoneOff, Mail, Building2, Tag, Edit, Trash2, RefreshCw,
   ChevronDown, CheckSquare, Square, XCircle, MoreVertical, MoreHorizontal,
-  Users, Merge, Eye, X, Smartphone, AlertTriangle, MessageSquare, Send,
+  Users, Merge, Eye, X, Smartphone, MessageSquare, Send,
   Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter, Radio,
   UserPlus, ClipboardPaste, Hash, Code, Download, CheckCircle2, ExternalLink, ArrowUpDown, ChevronUp, Cloud, Settings
 } from 'lucide-react'
@@ -21,6 +21,7 @@ import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ChatPanel from '@/components/chat/ChatPanel'
 import FormulaEditor from '@/components/FormulaEditor'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
+import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { subscribeWebSocket } from '@/lib/api'
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import type { Lead } from '@/types/contact'
@@ -319,11 +320,6 @@ export default function ContactsPage() {
   const [sortBy, setSortBy] = useState('')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
 
-  // Duplicate leads alert
-  const [duplicateLeadsCount, setDuplicateLeadsCount] = useState(0)
-  const [duplicateLeadsDismissed, setDuplicateLeadsDismissed] = useState(false)
-  const [archivingLeadId, setArchivingLeadId] = useState<string | null>(null)
-
   const [showImportModal, setShowImportModal] = useState(false)
   const [showCreateContact, setShowCreateContact] = useState(false)
   const [showPasteExcel, setShowPasteExcel] = useState(false)
@@ -409,6 +405,13 @@ export default function ContactsPage() {
   const [contactLeadsTarget, setContactLeadsTarget] = useState<Contact | null>(null)
   const [contactLeads, setContactLeads] = useState<any[]>([])
   const [contactLeadsLoading, setContactLeadsLoading] = useState(false)
+  const contactOpportunitiesDialogRef = useRef<HTMLDivElement>(null)
+  const closeContactOpportunities = useCallback(() => {
+    setShowContactLeads(false)
+    setContactLeads([])
+    setContactLeadsTarget(null)
+  }, [])
+  useAccessibleDialog(showContactLeads, contactOpportunitiesDialogRef, closeContactOpportunities)
 
   // Actions dropdown
   const [actionsMenuId, setActionsMenuId] = useState<string | null>(null)
@@ -587,12 +590,7 @@ export default function ContactsPage() {
         })
         .catch(() => {})
     }
-    // Check for contacts with duplicate leads
     if (token) {
-      fetch('/api/contacts/lead-duplicates', { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.json())
-        .then(d => { if (d.success) setDuplicateLeadsCount(d.count || 0) })
-        .catch(() => {})
       // Check Google Contacts status
       fetch('/api/google/status', { headers: { Authorization: `Bearer ${token}` } })
         .then(r => r.json())
@@ -1130,35 +1128,6 @@ export default function ContactsPage() {
     }
   }
 
-  // Archive (finalize) a lead from the Ver Leads modal
-  const handleArchiveLeadFromModal = async (leadId: string) => {
-    if (!token || !contactLeadsTarget) return
-    if (!confirm('¿Finalizar este lead? Se archivará y sus etiquetas se recalcularán en el contacto.')) return
-    setArchivingLeadId(leadId)
-    try {
-      const res = await fetch(`/api/leads/${leadId}/archive`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ archive: true }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        // Refresh the leads list for this contact
-        fetchContactLeads(contactLeadsTarget)
-        // Refresh contacts list and duplicate count
-        fetchContacts()
-        fetch('/api/contacts/lead-duplicates', { headers: { Authorization: `Bearer ${token}` } })
-          .then(r => r.json())
-          .then(d => { if (d.success) setDuplicateLeadsCount(d.count || 0) })
-          .catch(() => {})
-      }
-    } catch {
-      console.error('Failed to archive lead')
-    } finally {
-      setArchivingLeadId(null)
-    }
-  }
-
   // Export contacts
   const handleExportContacts = async () => {
     setExporting(true)
@@ -1338,11 +1307,6 @@ export default function ContactsPage() {
         <div className="flex items-center gap-2 min-w-0">
           <h1 className="text-lg font-bold text-slate-900 whitespace-nowrap">Contactos</h1>
           <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full">{total.toLocaleString()}</span>
-          {duplicateLeadsCount > 0 && !duplicateLeadsDismissed && (
-            <button onClick={() => setDuplicateLeadsDismissed(true)} className="text-amber-500 hover:text-amber-600 transition-colors" title={`${duplicateLeadsCount} contacto(s) con varios leads activos vinculados`}>
-              <AlertTriangle className="w-4 h-4" />
-            </button>
-          )}
         </div>
 
         <div ref={filterDropdownRef} className="flex-1 max-w-sm relative">
@@ -2101,14 +2065,9 @@ export default function ContactsPage() {
                       {(contact.lead_count ?? 0) > 0 ? (
                         <button
                           onClick={(e) => { e.stopPropagation(); fetchContactLeads(contact) }}
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium transition ${
-                            (contact.lead_count ?? 0) >= 2
-                              ? 'bg-amber-50 text-amber-700 hover:bg-amber-100'
-                              : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                          }`}
-                          title={(contact.lead_count ?? 0) >= 2 ? 'Este contacto tiene múltiples leads activos' : undefined}
+                          className="inline-flex min-h-8 items-center gap-1 rounded-full bg-emerald-50 px-2.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                          title={`${contact.lead_count} oportunidad${contact.lead_count === 1 ? '' : 'es'}`}
                         >
-                          {(contact.lead_count ?? 0) >= 2 && <AlertTriangle className="w-3 h-3" />}
                           {contact.lead_count}
                           <ExternalLink className="w-3 h-3" />
                         </button>
@@ -2692,100 +2651,73 @@ export default function ContactsPage() {
         onSuccess={fetchContacts}
       />
 
-      {/* Ver Leads Modal */}
+      {/* Opportunity history for a contact */}
       {showContactLeads && contactLeadsTarget && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setShowContactLeads(false); setContactLeads([]); setContactLeadsTarget(null) }}
-          onKeyDown={(e) => { if (e.key === 'Escape') { setShowContactLeads(false); setContactLeads([]); setContactLeadsTarget(null) } }}>
-          <div className="bg-white rounded-xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-4 border-b border-slate-200">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900">Leads de {getDisplayName(contactLeadsTarget)}</h2>
-                <p className="text-sm text-slate-500">{contactLeads.length} lead{contactLeads.length !== 1 ? 's' : ''}</p>
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) closeContactOpportunities() }}>
+          <div ref={contactOpportunitiesDialogRef} role="dialog" aria-modal="true" aria-labelledby="contact-opportunities-title" aria-describedby="contact-opportunities-description" tabIndex={-1} className="flex h-full w-full max-w-3xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[88vh] sm:rounded-3xl">
+            <header className="flex items-start gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><Radio className="h-5 w-5" /></div>
+              <div className="min-w-0 flex-1">
+                <h2 id="contact-opportunities-title" className="truncate text-lg font-bold text-slate-900">Oportunidades de {getDisplayName(contactLeadsTarget)}</h2>
+                <p id="contact-opportunities-description" className="mt-1 text-sm text-slate-500">Cada oportunidad representa un interés comercial distinto; la persona y sus datos permanecen en el contacto.</p>
               </div>
-              <button onClick={() => { setShowContactLeads(false); setContactLeads([]); setContactLeadsTarget(null) }} className="p-1 hover:bg-slate-100 rounded">
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-            {/* Warning for multiple active leads */}
-            {contactLeads.filter((l: any) => !l.is_archived && !l.is_blocked).length >= 2 && (
-              <div className="mx-4 mt-3 flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
-                <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
-                <p className="text-xs text-amber-700">
-                  Este contacto tiene <strong>{contactLeads.filter((l: any) => !l.is_archived && !l.is_blocked).length} leads activos</strong>.
-                  Se recomienda finalizar los leads que ya no estén en uso para evitar confusión de etiquetas.
-                </p>
+              <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold tabular-nums text-slate-600 sm:inline-flex">{contactLeads.length}</span>
+              <button type="button" onClick={closeContactOpportunities} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar historial de oportunidades"><X className="h-5 w-5" /></button>
+            </header>
+
+            {contactLeads.filter((lead: any) => lead.status === 'open' && !lead.is_archived && !lead.deleted_at).length >= 2 && (
+              <div className="mx-5 mt-4 flex items-start gap-3 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 sm:mx-6">
+                <Hash className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+                <p className="text-xs leading-relaxed text-blue-800">Hay <strong>{contactLeads.filter((lead: any) => lead.status === 'open' && !lead.is_archived && !lead.deleted_at).length} oportunidades abiertas</strong>. Esto es válido; sus títulos y pipelines permiten distinguir qué proceso representa cada una.</p>
               </div>
             )}
-            <div className="flex-1 overflow-y-auto p-4">
+
+            <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50/70 p-5 sm:p-6">
               {contactLeadsLoading ? (
-                <div className="flex items-center justify-center py-8">
-                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-emerald-600" />
-                </div>
+                <div className="flex min-h-48 items-center justify-center" aria-busy="true"><div className="h-7 w-7 animate-spin rounded-full border-2 border-slate-200 border-b-emerald-600 motion-reduce:animate-none" /><span className="ml-3 text-sm font-medium text-slate-500">Cargando oportunidades…</span></div>
               ) : contactLeads.length === 0 ? (
-                <div className="text-center py-8 text-slate-500">
-                  <Users className="w-10 h-10 mx-auto mb-2 text-slate-300" />
-                  <p className="font-medium">No tiene leads asociados</p>
+                <div className="flex min-h-56 flex-col items-center justify-center rounded-3xl border border-dashed border-slate-300 bg-white px-6 text-center">
+                  <Users className="h-10 w-10 text-slate-300" />
+                  <p className="mt-3 font-bold text-slate-700">Aún no tiene oportunidades</p>
+                  <p className="mt-1 max-w-sm text-sm leading-relaxed text-slate-500">Puedes crear una desde Leads sin duplicar este contacto.</p>
                 </div>
               ) : (
-                <div className="space-y-2">
-                  {contactLeads.map((lead: any) => (
-                    <div key={lead.id} className="flex items-center gap-3 p-3 border border-slate-200 rounded-lg hover:bg-slate-50 transition">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-medium text-slate-900 truncate">
-                            {lead.name || ''} {lead.last_name || ''}
-                          </p>
-                          {lead.is_archived && <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 text-[10px] rounded font-medium">Archivado</span>}
-                          {lead.is_blocked && <span className="px-1.5 py-0.5 bg-red-100 text-red-700 text-[10px] rounded font-medium">Bloqueado</span>}
-                        </div>
-                        <div className="flex items-center gap-3 mt-1">
-                          {lead.phone && <span className="text-xs text-slate-500">{lead.phone}</span>}
-                          {lead.pipeline_name && (
-                            <span className="inline-flex items-center gap-1 text-xs text-slate-400">
-                              {lead.pipeline_name}
-                              {lead.stage_name && (
-                                <>
-                                  <span className="text-slate-300">&gt;</span>
-                                  <span className="inline-flex items-center gap-1">
-                                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: lead.stage_color || '#6b7280' }} />
-                                    {lead.stage_name}
-                                  </span>
-                                </>
-                              )}
-                            </span>
-                          )}
-                        </div>
-                        {lead.tags && lead.tags.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-1.5">
-                            {lead.tags.slice(0, 4).map((tag: any) => (
-                              <span key={tag.id || tag.name} className="px-1.5 py-0.5 text-[10px] rounded-full font-medium text-white" style={{ backgroundColor: tag.color || '#6b7280' }}>
-                                {tag.name}
-                              </span>
-                            ))}
-                            {lead.tags.length > 4 && <span className="text-[10px] text-slate-400">+{lead.tags.length - 4}</span>}
+                <div className="space-y-3">
+                  {contactLeads.map((lead: any) => {
+                    const lifecycle = lead.deleted_at
+                      ? { label: 'Papelera', className: 'bg-slate-200 text-slate-700' }
+                      : lead.is_archived
+                        ? { label: 'Archivada', className: 'bg-amber-100 text-amber-800' }
+                        : lead.status === 'won'
+                          ? { label: 'Ganada', className: 'bg-emerald-100 text-emerald-800' }
+                          : lead.status === 'lost'
+                            ? { label: 'Perdida', className: 'bg-red-100 text-red-800' }
+                            : { label: 'Abierta', className: 'bg-blue-100 text-blue-800' }
+                    return (
+                      <article key={lead.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                        <div className="flex items-start gap-3">
+                          <span className="mt-1 h-3 w-3 shrink-0 rounded-full ring-2 ring-white shadow-[0_0_0_1px_rgba(15,23,42,0.15)]" style={{ backgroundColor: lead.stage_color || '#94a3b8' }} aria-hidden="true" />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="min-w-0 truncate text-sm font-bold text-slate-900">{lead.title || 'Oportunidad sin título'}</h3>
+                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${lifecycle.className}`}>{lifecycle.label}</span>
+                              {lead.is_blocked && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-700 ring-1 ring-red-200">No contactable</span>}
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+                              <span>{lead.pipeline_name || 'Sin pipeline'}</span>
+                              <span aria-hidden="true">·</span>
+                              <span className="font-medium text-slate-600">{lead.stage_name || 'Sin etapa'}</span>
+                              {lead.created_at && <><span aria-hidden="true">·</span><span>{format(new Date(lead.created_at), 'dd/MM/yy', { locale: es })}</span></>}
+                            </div>
+                            {lead.status === 'lost' && lead.close_reason && <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-red-700">Motivo: {lead.close_reason}</p>}
                           </div>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        <span className="text-xs text-slate-400">{lead.created_at ? format(new Date(lead.created_at), 'dd/MM/yy', { locale: es }) : ''}</span>
-                        {!lead.is_archived && !lead.is_blocked && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleArchiveLeadFromModal(lead.id) }}
-                            disabled={archivingLeadId === lead.id}
-                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md transition disabled:opacity-50"
-                            title="Finalizar este lead (archivar y recalcular etiquetas)"
-                          >
-                            {archivingLeadId === lead.id ? (
-                              <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-amber-600" />
-                            ) : (
-                              <XCircle className="w-3 h-3" />
-                            )}
-                            Finalizar
+                          <button type="button" onClick={() => { closeContactOpportunities(); router.push(`/dashboard/leads?lead_id=${lead.id}`) }} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-700 transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Abrir ${lead.title || 'oportunidad'}`}>
+                            Abrir <ExternalLink className="h-3.5 w-3.5" />
                           </button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                        </div>
+                      </article>
+                    )
+                  })}
                 </div>
               )}
             </div>

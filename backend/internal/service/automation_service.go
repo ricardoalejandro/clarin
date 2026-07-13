@@ -441,6 +441,9 @@ func (s *AutomationService) execSendWhatsApp(ctx context.Context, exec *domain.A
 	if lead.AccountID != exec.AccountID {
 		return fmt.Errorf("lead does not belong to automation account")
 	}
+	if lead.IsBlocked {
+		return fmt.Errorf("contact is marked as do not contact")
+	}
 	if lead.JID == "" || strings.HasPrefix(lead.JID, "manual_") {
 		return fmt.Errorf("lead has no phone number for whatsapp")
 	}
@@ -475,7 +478,11 @@ func (s *AutomationService) execChangeStage(ctx context.Context, exec *domain.Au
 	if err != nil {
 		return fmt.Errorf("invalid stage_id")
 	}
-	if err := s.repos.Lead.UpdateStage(ctx, *exec.LeadID, stageID); err != nil {
+	closeReason, _ := cfg["close_reason"].(string)
+	if strings.TrimSpace(closeReason) == "" {
+		closeReason = "Cerrado por automatización"
+	}
+	if err := s.repos.Lead.MoveToStage(ctx, exec.AccountID, *exec.LeadID, stageID, closeReason, nil); err != nil {
 		return err
 	}
 	if s.hub != nil {

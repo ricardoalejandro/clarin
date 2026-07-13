@@ -181,7 +181,6 @@ export default function BroadcastsPage() {
   const [csvHeaders, setCsvHeaders] = useState<string[]>([])
   const [csvPhoneCol, setCsvPhoneCol] = useState('')
   const [csvNameCol, setCsvNameCol] = useState('')
-  const [csvSaveAsContacts, setCsvSaveAsContacts] = useState(false)
   const [selectionMode, setSelectionMode] = useState(false)
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<string>>(new Set())
   const [allTags, setAllTags] = useState<BroadcastTag[]>([])
@@ -290,7 +289,7 @@ export default function BroadcastsPage() {
           await fetch(`/api/campaigns/${data.campaign.id}/recipients`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ recipients: sheetRecipients }),
+            body: JSON.stringify({ recipients: sheetRecipients, save_as_contacts: true }),
           })
         }
         setShowCreateModal(false)
@@ -423,7 +422,7 @@ export default function BroadcastsPage() {
       const res = await fetch(`/api/campaigns/${selectedCampaign.id}/recipients`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ recipients: recipientsList, save_as_contacts: csvSaveAsContacts }),
+        body: JSON.stringify({ recipients: recipientsList, save_as_contacts: true }),
       })
       const data = await res.json()
       if (data.success) {
@@ -432,7 +431,6 @@ export default function BroadcastsPage() {
         setCsvHeaders([])
         setCsvPhoneCol('')
         setCsvNameCol('')
-        setCsvSaveAsContacts(false)
         fetchCampaigns()
       } else {
         alert(data.error || 'Error al agregar destinatarios')
@@ -695,7 +693,7 @@ export default function BroadcastsPage() {
       'Nombre': rec.name || '',
       'Teléfono': rec.phone || rec.jid.replace('@s.whatsapp.net', ''),
       'JID': rec.jid,
-      'Estado': rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente',
+      'Estado': rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : rec.status === 'skipped' ? 'Omitido por privacidad' : 'Pendiente',
       'Enviado a las': rec.sent_at ? format(new Date(rec.sent_at), 'dd/MM/yyyy HH:mm:ss', { locale: es }) : '',
       'Tiempo espera (s)': rec.wait_time_ms != null ? (rec.wait_time_ms / 1000).toFixed(1) : '',
       'Error': rec.error_message || '',
@@ -1468,15 +1466,10 @@ export default function BroadcastsPage() {
                       )}
                     </div>
 
-                    <label className="flex items-center gap-2 text-sm text-gray-700 mb-3">
-                      <input
-                        type="checkbox"
-                        checked={csvSaveAsContacts}
-                        onChange={e => setCsvSaveAsContacts(e.target.checked)}
-                        className="rounded border-gray-300 text-green-600 focus:ring-green-500"
-                      />
-                      Guardar también como contactos
-                    </label>
+                    <div className="mb-3 flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-900">
+                      <UserPlus className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                      <p><span className="font-semibold">Contactos protegidos y reutilizables.</span> Clarin creará o reutilizará un contacto por número antes de incorporarlo a la campaña.</p>
+                    </div>
                   </>
                 )}
 
@@ -1484,7 +1477,7 @@ export default function BroadcastsPage() {
                   <button
                     onClick={() => {
                       if (csvData.length > 0) {
-                        setCsvData([]); setCsvHeaders([]); setCsvPhoneCol(''); setCsvNameCol(''); setCsvSaveAsContacts(false)
+                        setCsvData([]); setCsvHeaders([]); setCsvPhoneCol(''); setCsvNameCol('')
                       } else {
                         setShowRecipientsModal(false)
                       }
@@ -1625,6 +1618,7 @@ export default function BroadcastsPage() {
                   <div className="flex items-center gap-3 text-xs text-gray-500">
                     <span className="flex items-center gap-1"><CheckCircle2 className="w-3 h-3 text-green-500" />{recipients.filter(r => r.status === 'sent').length} enviados</span>
                     <span className="flex items-center gap-1"><XCircle className="w-3 h-3 text-red-500" />{recipients.filter(r => r.status === 'failed').length} fallidos</span>
+                    <span className="flex items-center gap-1"><Ban className="w-3 h-3 text-amber-600" />{recipients.filter(r => r.status === 'skipped').length} omitidos</span>
                     <span className="flex items-center gap-1"><Clock className="w-3 h-3 text-gray-400" />{recipients.filter(r => r.status === 'pending').length} pendientes</span>
                   </div>
                   <button
@@ -1661,8 +1655,8 @@ export default function BroadcastsPage() {
                                 </span>
                               )}
                             </div>
-                            {rec.status === 'failed' && rec.error_message && (
-                              <p className="text-xs text-red-500 mt-0.5 truncate" title={rec.error_message}>
+                            {(rec.status === 'failed' || rec.status === 'skipped') && rec.error_message && (
+                              <p className={`text-xs mt-0.5 truncate ${rec.status === 'skipped' ? 'text-amber-700' : 'text-red-500'}`} title={rec.error_message}>
                                 {rec.error_message}
                               </p>
                             )}
@@ -1672,13 +1666,15 @@ export default function BroadcastsPage() {
                       <div className="flex items-center gap-1.5 shrink-0 ml-2">
                         {rec.status === 'sent' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
                         {rec.status === 'failed' && <XCircle className="w-4 h-4 text-red-500" />}
+                        {rec.status === 'skipped' && <Ban className="w-4 h-4 text-amber-600" />}
                         {rec.status === 'pending' && <Clock className="w-4 h-4 text-gray-400" />}
                         <span className={`text-xs px-1.5 py-0.5 rounded ${
                           rec.status === 'sent' ? 'bg-green-100 text-green-700' :
                           rec.status === 'failed' ? 'bg-red-100 text-red-700' :
+                          rec.status === 'skipped' ? 'bg-amber-100 text-amber-800' :
                           'bg-gray-100 text-gray-600'
                         }`}>
-                          {rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : 'Pendiente'}
+                          {rec.status === 'sent' ? 'Enviado' : rec.status === 'failed' ? 'Fallido' : rec.status === 'skipped' ? 'Omitido' : 'Pendiente'}
                         </span>
                         {rec.status === 'failed' && (
                           <button
@@ -1912,9 +1908,10 @@ export default function BroadcastsPage() {
                 <span className={`inline-block px-2 py-0.5 rounded-full font-medium ${
                   editingRecipient.status === 'sent' ? 'bg-green-100 text-green-700' :
                   editingRecipient.status === 'failed' ? 'bg-red-100 text-red-700' :
+                  editingRecipient.status === 'skipped' ? 'bg-amber-100 text-amber-800' :
                   'bg-gray-100 text-gray-600'
                 }`}>
-                  {editingRecipient.status === 'sent' ? 'Enviado' : editingRecipient.status === 'failed' ? 'Fallido' : 'Pendiente'}
+                  {editingRecipient.status === 'sent' ? 'Enviado' : editingRecipient.status === 'failed' ? 'Fallido' : editingRecipient.status === 'skipped' ? 'Omitido por privacidad' : 'Pendiente'}
                 </span>
                 {editingRecipient.sent_at && (
                   <span className="text-slate-400">Enviado: {format(new Date(editingRecipient.sent_at), 'dd/MM/yyyy HH:mm', { locale: es })}</span>

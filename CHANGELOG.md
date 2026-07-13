@@ -1,5 +1,23 @@
 # Changelog — Clarin CRM
 
+## 2026-07-13
+
+### Build 1 — Importación Kommo sin oportunidades duplicadas
+- 🔒 Si un contacto ya tiene una oportunidad abierta, el Excel la omite como duplicada y no modifica ningún lead.
+- ✨ Ganados, perdidos, archivados y eliminados permanecen como historial y permiten una nueva oportunidad.
+- ✨ La vista previa separa oportunidades a crear, contactos nuevos, existentes Kommo, duplicados evitados e inválidos.
+- 🔧 Las importaciones de una misma cuenta se serializan y revalidan antes de crear para evitar carreras.
+
+## 2026-07-12
+
+### Build 2 — Importación Kommo segura y Eventos más fluidos
+- 🔒 El importador de leads bloquea cualquier cambio en la estructura aprobada del Excel de Kommo.
+- ✨ La vista previa distingue oportunidades nuevas, contactos nuevos y casos que requieren revisión manual.
+- ✨ Los leads locales sin ID de Kommo se pueden vincular, conservar como oportunidad separada u omitir sin decisiones automáticas riesgosas.
+- ✨ Se conserva el nombre del contacto, el título de la oportunidad y el nuevo campo `Atención` del export de Kommo.
+- 🐛 Los eventos vuelven a abrirse con un solo clic; moverlos usa ahora un control de arrastre dedicado.
+- 🔧 Eventos incorpora participantes desde contactos y mantiene su historial independiente de los leads.
+
 ## 2026-07-11
 
 ### Build 1 — Mejoras integrales del chat de WhatsApp

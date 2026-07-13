@@ -787,6 +787,11 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 				&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
 				&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
 			)
+			if err == nil {
+				if _, suppressionErr := applyDurableSuppressionToContact(ctx, r.db, accountID, *aliasContactID); suppressionErr != nil {
+					return nil, suppressionErr
+				}
+			}
 			return chat, err
 		}
 	}
@@ -816,6 +821,11 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
 		&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
 	)
+	if err == nil && !isGroup && chat.ContactID != nil {
+		if _, suppressionErr := applyDurableSuppressionToContact(ctx, r.db, accountID, *chat.ContactID); suppressionErr != nil {
+			return nil, suppressionErr
+		}
+	}
 	return chat, err
 }
 
@@ -1380,6 +1390,9 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 				    updated_at = NOW()
 				WHERE account_id = $1 AND id = $6
 			`, accountID, deviceID, name, pushName, phone, *aliasContactID)
+			if _, err := applyDurableSuppressionToContact(ctx, r.db, accountID, *aliasContactID); err != nil {
+				return nil, err
+			}
 			return r.GetByID(ctx, *aliasContactID)
 		}
 	}
@@ -1393,20 +1406,59 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 			phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
 			updated_at = NOW()
 		RETURNING id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url, avatar_checked_at,
-		          email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at
+		          email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
+		          do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
 	`, accountID, deviceID, jid, phone, name, pushName, isGroup).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL, &contact.AvatarCheckedAt,
 		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+		&contact.DoNotContact, &contact.DoNotContactAt, &contact.DoNotContactBy, &contact.DoNotContactReason,
 	)
+	if err == nil && !isGroup {
+		changed, suppressionErr := applyDurableSuppressionToContact(ctx, r.db, accountID, contact.ID)
+		if suppressionErr != nil {
+			return nil, suppressionErr
+		}
+		if changed {
+			return r.GetByID(ctx, contact.ID)
+		}
+	}
 	return contact, err
+}
+
+func applyDurableSuppressionToContact(ctx context.Context, db *pgxpool.Pool, accountID, contactID uuid.UUID) (bool, error) {
+	tag, err := db.Exec(ctx, `
+		UPDATE contacts c SET
+			do_not_contact=TRUE,
+			do_not_contact_at=COALESCE(c.do_not_contact_at, (
+				SELECT cs.created_at FROM contact_suppressions cs
+				WHERE cs.account_id=$1 AND cs.active=TRUE AND cs.normalized_value IN (LOWER(BTRIM(c.jid)), REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g'))
+				ORDER BY cs.updated_at DESC, cs.created_at DESC LIMIT 1
+			), NOW()),
+			do_not_contact_reason=COALESCE(NULLIF(c.do_not_contact_reason,''), NULLIF((
+				SELECT cs.reason FROM contact_suppressions cs
+				WHERE cs.account_id=$1 AND cs.active=TRUE AND cs.normalized_value IN (LOWER(BTRIM(c.jid)), REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g'))
+				ORDER BY cs.updated_at DESC, cs.created_at DESC LIMIT 1
+			),''), 'Supresión histórica por identidad'),
+			updated_at=NOW()
+		WHERE c.id=$2 AND c.account_id=$1 AND c.do_not_contact=FALSE
+		  AND EXISTS (
+			SELECT 1 FROM contact_suppressions cs WHERE cs.account_id=$1 AND cs.active=TRUE
+			  AND cs.normalized_value IN (LOWER(BTRIM(c.jid)), REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g'))
+		  )
+	`, accountID, contactID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func (r *ContactRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Contact, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
+		       do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
 		FROM contacts WHERE account_id = $1 ORDER BY COALESCE(custom_name, name, push_name, phone) ASC
 	`, accountID)
 	if err != nil {
@@ -1422,6 +1474,7 @@ func (r *ContactRepository) GetByAccountID(ctx context.Context, accountID uuid.U
 			&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
 			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
 			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+			&contact.DoNotContact, &contact.DoNotContactAt, &contact.DoNotContactBy, &contact.DoNotContactReason,
 		); err != nil {
 			return nil, err
 		}
@@ -1514,7 +1567,8 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 			WHERE l.account_id = contacts.account_id
 			  AND l.contact_id = contacts.id
 			  AND l.is_archived = false
-			  AND l.is_blocked = false
+			  AND l.status = 'open'
+			  AND l.deleted_at IS NULL
 		)`
 	}
 
@@ -1542,6 +1596,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		SELECT c.id, c.account_id, c.device_id, c.jid, c.phone, c.name, c.last_name, c.short_name, c.custom_name, c.push_name, c.avatar_url,
 		       c.email, c.company, c.age, c.dni, c.birth_date, c.address, c.distrito, c.ocupacion, c.tags, c.notes, c.source, c.is_group, c.created_at, c.updated_at,
 		       c.google_sync, c.google_synced_at, c.google_sync_error,
+		       c.do_not_contact, c.do_not_contact_at, c.do_not_contact_by, c.do_not_contact_reason,
 		       ch_agg.last_activity,
 		       COALESCE(lc.cnt, 0) AS lead_count
 		FROM contacts c
@@ -1554,7 +1609,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		LEFT JOIN (
 			SELECT contact_id, COUNT(*) AS cnt
 			FROM leads
-			WHERE account_id = $1 AND contact_id IS NOT NULL AND is_archived = false AND is_blocked = false
+			WHERE account_id = $1 AND contact_id IS NOT NULL AND is_archived = false AND status = 'open' AND deleted_at IS NULL
 			GROUP BY contact_id
 		) lc ON lc.contact_id = c.id
 		WHERE c.account_id = $1 AND c.is_group = $2
@@ -1636,7 +1691,8 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 			WHERE l.account_id = c.account_id
 			  AND l.contact_id = c.id
 			  AND l.is_archived = false
-			  AND l.is_blocked = false
+			  AND l.status = 'open'
+			  AND l.deleted_at IS NULL
 		)`
 	}
 
@@ -1700,6 +1756,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
 			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 			&contact.GoogleSync, &contact.GoogleSyncedAt, &contact.GoogleSyncError,
+			&contact.DoNotContact, &contact.DoNotContactAt, &contact.DoNotContactBy, &contact.DoNotContactReason,
 			&contact.LastActivity,
 			&contact.LeadCount,
 		); err != nil {
@@ -1714,13 +1771,15 @@ func (r *ContactRepository) GetByJID(ctx context.Context, accountID uuid.UUID, j
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
+		       do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
 		FROM contacts WHERE account_id = $1 AND jid = $2
 	`, accountID, jid).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
 		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+		&contact.DoNotContact, &contact.DoNotContactAt, &contact.DoNotContactBy, &contact.DoNotContactReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1732,7 +1791,8 @@ func (r *ContactRepository) GetByPhone(ctx context.Context, accountID uuid.UUID,
 	contact := &domain.Contact{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
-		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at
+		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
+		       do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
 		FROM contacts WHERE account_id = $1 AND phone = $2
 		LIMIT 1
 	`, accountID, phone).Scan(
@@ -1740,6 +1800,7 @@ func (r *ContactRepository) GetByPhone(ctx context.Context, accountID uuid.UUID,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
 		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+		&contact.DoNotContact, &contact.DoNotContactAt, &contact.DoNotContactBy, &contact.DoNotContactReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1752,7 +1813,8 @@ func (r *ContactRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
 		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
-		       google_sync, google_resource_name, google_synced_at, google_sync_error
+		       google_sync, google_resource_name, google_synced_at, google_sync_error,
+		       do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
 		FROM contacts WHERE id = $1
 	`, id).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
@@ -1760,6 +1822,7 @@ func (r *ContactRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
 		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 		&contact.GoogleSync, &contact.GoogleResourceName, &contact.GoogleSyncedAt, &contact.GoogleSyncError,
+		&contact.DoNotContact, &contact.DoNotContactAt, &contact.DoNotContactBy, &contact.DoNotContactReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1773,56 +1836,79 @@ func (r *ContactRepository) Update(ctx context.Context, contact *domain.Contact)
 			name = $1, last_name = $2, short_name = $3, custom_name = $4, push_name = $5,
 			email = $6, company = $7, age = $8,
 			tags = $9, notes = $10, phone = $11, dni = $12, birth_date = $13, address = $14, distrito = $15, ocupacion = $16, source = $17, updated_at = NOW()
-		WHERE id = $18
+		WHERE id = $18 AND account_id = $19
 	`, contact.Name, contact.LastName, contact.ShortName, contact.CustomName, contact.PushName, contact.Email, contact.Company,
-		contact.Age, contact.Tags, contact.Notes, contact.Phone, contact.DNI, contact.BirthDate, contact.Address, contact.Distrito, contact.Ocupacion, contact.Source, contact.ID)
-	return err
+		contact.Age, contact.Tags, contact.Notes, contact.Phone, contact.DNI, contact.BirthDate, contact.Address, contact.Distrito, contact.Ocupacion, contact.Source, contact.ID, contact.AccountID)
+	if err != nil {
+		return err
+	}
+	changed, err := applyDurableSuppressionToContact(ctx, r.db, contact.AccountID, contact.ID)
+	if err != nil {
+		return err
+	}
+	if changed {
+		fresh, err := r.GetByID(ctx, contact.ID)
+		if err != nil {
+			return err
+		}
+		if fresh != nil {
+			*contact = *fresh
+		}
+	}
+	return nil
 }
 
 // SyncToParticipants propagates contact fields to all linked event_participants and campaign_recipients
 func (r *ContactRepository) SyncToParticipants(ctx context.Context, contact *domain.Contact) error {
 	name := contact.DisplayName()
-	_, err := r.db.Exec(ctx, `
-		UPDATE event_participants SET
+	_, participantErr := r.db.Exec(ctx, `
+		UPDATE event_participants ep SET
 			name = $2,
-			last_name = COALESCE($3, last_name),
-			short_name = COALESCE($4, short_name),
-			phone = COALESCE($5, phone),
-			email = COALESCE($6, email),
-			age = COALESCE($7, age),
+			last_name = $3,
+			short_name = $4,
+			phone = $5,
+			email = $6,
+			age = $7,
+			company = $8,
+			dni = $9,
+			birth_date = $10,
+			address = $11,
+			distrito = $12,
+			ocupacion = $13,
 			updated_at = NOW()
-		WHERE contact_id = $1
-	`, contact.ID, name, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Age)
-	if err != nil {
-		log.Printf("[SYNC] Error syncing contact %s to event_participants: %v", contact.ID, err)
+		FROM events e
+		WHERE ep.contact_id = $1 AND e.id=ep.event_id AND e.account_id=$14
+	`, contact.ID, name, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Age,
+		contact.Company, contact.DNI, contact.BirthDate, contact.Address, contact.Distrito, contact.Ocupacion, contact.AccountID)
+	if participantErr != nil {
+		log.Printf("[SYNC] Error syncing contact %s to event_participants: %v", contact.ID, participantErr)
 	}
-	_, err = r.db.Exec(ctx, `
-		UPDATE campaign_recipients SET name = $2, phone = COALESCE($3, phone)
-		WHERE contact_id = $1
-	`, contact.ID, name, contact.Phone)
-	if err != nil {
-		log.Printf("[SYNC] Error syncing contact %s to campaign_recipients: %v", contact.ID, err)
+	_, campaignErr := r.db.Exec(ctx, `
+		UPDATE campaign_recipients cr SET name=$2, phone=$3, jid=COALESCE(NULLIF($4,''),cr.jid)
+		FROM campaigns campaign
+		WHERE cr.contact_id=$1 AND campaign.id=cr.campaign_id AND campaign.account_id=$5
+	`, contact.ID, name, contact.Phone, contact.JID, contact.AccountID)
+	if campaignErr != nil {
+		log.Printf("[SYNC] Error syncing contact %s to campaign_recipients: %v", contact.ID, campaignErr)
 	}
-	return nil
+	if participantErr != nil {
+		return participantErr
+	}
+	return campaignErr
 }
 
-// SyncToLead propagates contact name to linked lead
+// SyncToLead removes legacy personal snapshots from linked opportunities.
+// Reads hydrate profile data from Contact; copying values here would make a
+// cleared Contact field reappear later through COALESCE fallback.
 func (r *ContactRepository) SyncToLead(ctx context.Context, contact *domain.Contact) error {
-	name := contact.DisplayName()
 	_, err := r.db.Exec(ctx, `
 		UPDATE leads SET
-			name = $2,
-			last_name = COALESCE($3, last_name),
-			short_name = COALESCE($4, short_name),
-			phone = COALESCE($5, phone),
-			email = COALESCE($6, email),
-			age = COALESCE($7, age),
-			dni = COALESCE($8, dni),
-			birth_date = COALESCE($9, birth_date),
-			address = COALESCE($10, address),
+			name=NULL, last_name=NULL, short_name=NULL, phone=NULL, email=NULL,
+			company=NULL, age=NULL, dni=NULL, birth_date=NULL, address=NULL,
+			distrito=NULL, ocupacion=NULL,
 			updated_at = NOW()
 		WHERE contact_id = $1
-	`, contact.ID, name, contact.LastName, contact.ShortName, contact.Phone, contact.Email, contact.Age, contact.DNI, contact.BirthDate, contact.Address)
+	`, contact.ID)
 	if err != nil {
 		log.Printf("[SYNC] Error syncing contact %s to leads: %v", contact.ID, err)
 	}
@@ -1927,6 +2013,27 @@ func (r *ContactRepository) deleteTree(ctx context.Context, accountID uuid.UUID,
 			return pgx.ErrNoRows
 		}
 		return tx.Commit(ctx)
+	}
+
+	// Freeze every current identity of DNC contacts before deleting aliases,
+	// chats or leads. This covers phone/JID edits made after the original block.
+	if _, err := tx.Exec(ctx, `
+		WITH blocked AS (
+			SELECT id, COALESCE(NULLIF(do_not_contact_reason,''),'Contacto eliminado mientras estaba en DNC') AS reason, do_not_contact_by
+			FROM contacts WHERE account_id=$1 AND id=ANY($2) AND do_not_contact=TRUE
+		), identities AS (
+			SELECT b.id AS contact_id, 'jid'::text AS identity_type, LOWER(BTRIM(c.jid)) AS normalized_value, b.reason, b.do_not_contact_by FROM blocked b JOIN contacts c ON c.id=b.id WHERE NULLIF(BTRIM(c.jid),'') IS NOT NULL
+			UNION SELECT b.id, 'phone', REGEXP_REPLACE(c.phone, '[^0-9]', '', 'g'), b.reason, b.do_not_contact_by FROM blocked b JOIN contacts c ON c.id=b.id WHERE REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g') <> ''
+			UNION SELECT b.id, 'phone', REGEXP_REPLACE(cp.phone, '[^0-9]', '', 'g'), b.reason, b.do_not_contact_by FROM blocked b JOIN contact_phones cp ON cp.contact_id=b.id WHERE REGEXP_REPLACE(COALESCE(cp.phone,''), '[^0-9]', '', 'g') <> ''
+			UNION SELECT b.id, CASE WHEN LOWER(ca.alias_type)='jid' OR ca.alias_value LIKE '%@%' THEN 'jid' ELSE 'phone' END, CASE WHEN LOWER(ca.alias_type)='jid' OR ca.alias_value LIKE '%@%' THEN LOWER(BTRIM(ca.alias_value)) ELSE REGEXP_REPLACE(ca.alias_value, '[^0-9]', '', 'g') END, b.reason, b.do_not_contact_by FROM blocked b JOIN contact_aliases ca ON ca.contact_id=b.id
+			UNION SELECT b.id, 'jid', LOWER(BTRIM(ch.jid)), b.reason, b.do_not_contact_by FROM blocked b JOIN chats ch ON ch.contact_id=b.id AND ch.account_id=$1 WHERE NULLIF(BTRIM(ch.jid),'') IS NOT NULL
+			UNION SELECT b.id, 'jid', LOWER(BTRIM(l.jid)), b.reason, b.do_not_contact_by FROM blocked b JOIN leads l ON l.contact_id=b.id AND l.account_id=$1 WHERE NULLIF(BTRIM(l.jid),'') IS NOT NULL
+		)
+		INSERT INTO contact_suppressions (account_id, contact_id, identity_type, normalized_value, reason, created_by)
+		SELECT $1, contact_id, identity_type, normalized_value, reason, do_not_contact_by FROM identities WHERE NULLIF(BTRIM(normalized_value),'') IS NOT NULL
+		ON CONFLICT (account_id, identity_type, normalized_value) DO UPDATE SET contact_id=EXCLUDED.contact_id, reason=EXCLUDED.reason, created_by=EXCLUDED.created_by, active=TRUE, updated_at=NOW(), released_at=NULL, released_by=NULL
+	`, accountID, contactIDs); err != nil {
+		return err
 	}
 
 	chatRows, err := tx.Query(ctx, `
@@ -2086,15 +2193,16 @@ func (r *ContactRepository) PreviewMergeContacts(ctx context.Context, accountID,
 	}, nil
 }
 
-// GetContactsWithDuplicateLeads returns the count of contacts that have 2+ active (non-archived, non-blocked) leads.
+// GetContactsWithDuplicateLeads returns contacts with genuinely probable
+// duplicates: multiple open opportunities sharing the same normalized title.
 func (r *ContactRepository) GetContactsWithDuplicateLeads(ctx context.Context, accountID uuid.UUID) (int, error) {
 	var count int
 	err := r.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM (
-			SELECT contact_id
+		SELECT COUNT(DISTINCT contact_id) FROM (
+			SELECT contact_id, LOWER(REGEXP_REPLACE(BTRIM(title), '\s+', ' ', 'g')) AS normalized_title
 			FROM leads
-			WHERE account_id = $1 AND contact_id IS NOT NULL AND is_archived = false AND is_blocked = false
-			GROUP BY contact_id
+			WHERE account_id = $1 AND contact_id IS NOT NULL AND status='open' AND deleted_at IS NULL
+			GROUP BY contact_id, LOWER(REGEXP_REPLACE(BTRIM(title), '\s+', ' ', 'g'))
 			HAVING COUNT(*) > 1
 		) dup
 	`, accountID).Scan(&count)
@@ -2245,7 +2353,8 @@ func (r *ContactRepository) getContactsByIDsForAccount(ctx context.Context, acco
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
 		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
-		       google_sync, google_resource_name, google_synced_at, google_sync_error
+		       google_sync, google_resource_name, google_synced_at, google_sync_error,
+		       do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
 		FROM contacts
 		WHERE account_id = $1 AND id = ANY($2)
 	`, accountID, ids)
@@ -2260,7 +2369,8 @@ func (r *ContactRepository) loadContactsForMerge(ctx context.Context, tx pgx.Tx,
 	rows, err := tx.Query(ctx, `
 		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
 		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
-		       google_sync, google_resource_name, google_synced_at, google_sync_error
+		       google_sync, google_resource_name, google_synced_at, google_sync_error,
+		       do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
 		FROM contacts
 		WHERE account_id = $1 AND id = ANY($2)
 		FOR UPDATE
@@ -2282,6 +2392,7 @@ func scanContactMap(rows pgx.Rows) (map[uuid.UUID]*domain.Contact, error) {
 			&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
 			&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
 			&contact.GoogleSync, &contact.GoogleResourceName, &contact.GoogleSyncedAt, &contact.GoogleSyncError,
+			&contact.DoNotContact, &contact.DoNotContactAt, &contact.DoNotContactBy, &contact.DoNotContactReason,
 		); err != nil {
 			return nil, err
 		}
@@ -2445,6 +2556,12 @@ func (r *ContactRepository) mergeContactProfile(ctx context.Context, tx pgx.Tx, 
 				keep.GoogleSyncError = c.GoogleSyncError
 			}
 			keep.GoogleSync = keep.GoogleSync || c.GoogleSync
+			if c.DoNotContact && (!keep.DoNotContact || keep.DoNotContactAt == nil || (c.DoNotContactAt != nil && c.DoNotContactAt.After(*keep.DoNotContactAt))) {
+				keep.DoNotContact = true
+				keep.DoNotContactAt = c.DoNotContactAt
+				keep.DoNotContactBy = c.DoNotContactBy
+				keep.DoNotContactReason = c.DoNotContactReason
+			}
 		}
 	}
 	keep.Name = firstStringPtr(keep.Name, contacts, mergeIDs, func(c *domain.Contact) *string { return c.Name })
@@ -2473,11 +2590,14 @@ func (r *ContactRepository) mergeContactProfile(ctx context.Context, tx pgx.Tx, 
 			avatar_url = $6, avatar_checked_at = $7, phone = $8, email = $9, company = $10,
 			age = $11, dni = $12, birth_date = $13, address = $14, distrito = $15, ocupacion = $16,
 			tags = $17, notes = $18, source = $19, google_sync = $20, google_resource_name = $21,
-			google_synced_at = $22, google_sync_error = $23, updated_at = NOW()
-		WHERE id = $24 AND account_id = $25
+			google_synced_at = $22, google_sync_error = $23,
+			do_not_contact=$24, do_not_contact_at=$25, do_not_contact_by=$26, do_not_contact_reason=$27,
+			updated_at = NOW()
+		WHERE id = $28 AND account_id = $29
 	`, keep.Name, keep.LastName, keep.ShortName, keep.CustomName, keep.PushName, keep.AvatarURL, keep.AvatarCheckedAt,
 		keep.Phone, keep.Email, keep.Company, keep.Age, keep.DNI, keep.BirthDate, keep.Address, keep.Distrito, keep.Ocupacion,
 		keep.Tags, keep.Notes, keep.Source, keep.GoogleSync, keep.GoogleResourceName, keep.GoogleSyncedAt, keep.GoogleSyncError,
+		keep.DoNotContact, keep.DoNotContactAt, keep.DoNotContactBy, keep.DoNotContactReason,
 		keep.ID, keep.AccountID)
 	return err
 }
@@ -2873,7 +2993,7 @@ func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 	var contactExists bool
 	if err := r.db.QueryRow(ctx, `
 		SELECT EXISTS(
-			SELECT 1 FROM contacts WHERE id = $1 AND account_id = $2
+			SELECT 1 FROM contacts WHERE id = $1 AND account_id = $2 AND is_group=FALSE
 		)
 	`, *lead.ContactID, lead.AccountID).Scan(&contactExists); err != nil {
 		return err
@@ -2881,13 +3001,65 @@ func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 	if !contactExists {
 		return fmt.Errorf("lead contact_id does not belong to account")
 	}
+	lead.Title = strings.TrimSpace(lead.Title)
+	if lead.Title == "" {
+		lead.Title = "Oportunidad"
+	}
+	status := domain.LeadStatusOpen
+	lead.Status = &status
+	lead.ClosedAt = nil
+	lead.ClosedBy = nil
+	lead.CloseReason = ""
+	if lead.StageID != nil {
+		var pipelineID uuid.UUID
+		var stageType string
+		if err := r.db.QueryRow(ctx, `
+			SELECT ps.pipeline_id, ps.stage_type FROM pipeline_stages ps JOIN pipelines p ON p.id=ps.pipeline_id
+			WHERE ps.id=$1 AND p.account_id=$2
+		`, *lead.StageID, lead.AccountID).Scan(&pipelineID, &stageType); err != nil {
+			return fmt.Errorf("lead stage does not belong to account")
+		}
+		lead.PipelineID = &pipelineID
+		switch stageType {
+		case domain.PipelineStageTypeWon:
+			status = domain.LeadStatusWon
+			now := time.Now()
+			lead.ClosedAt = &now
+		case domain.PipelineStageTypeLost:
+			status = domain.LeadStatusLost
+			now := time.Now()
+			lead.ClosedAt = &now
+			if strings.TrimSpace(lead.CloseReason) == "" {
+				lead.CloseReason = "Oportunidad importada como perdida"
+			}
+		}
+		lead.Status = &status
+	} else if lead.PipelineID != nil {
+		var valid bool
+		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pipelines WHERE id=$1 AND account_id=$2)`, *lead.PipelineID, lead.AccountID).Scan(&valid); err != nil {
+			return err
+		}
+		if !valid {
+			return fmt.Errorf("lead pipeline does not belong to account")
+		}
+	}
+	if lead.AssignedTo != nil {
+		var valid bool
+		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$2)`, lead.AccountID, *lead.AssignedTo).Scan(&valid); err != nil {
+			return err
+		}
+		if !valid {
+			return fmt.Errorf("lead assignee does not belong to account")
+		}
+	}
 	return r.db.QueryRow(ctx, `
-		INSERT INTO leads (account_id, contact_id, jid, name, phone, email, notes, dni, birth_date, status, source, pipeline_id, stage_id, tags, custom_fields, assigned_to, kommo_id, kommo_synced_tags)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-		        CASE WHEN $17::bigint IS NOT NULL THEN COALESCE($14::text[], '{}'::text[]) ELSE '{}'::text[] END)
+		INSERT INTO leads (account_id, contact_id, title, jid, name, phone, email, notes, dni, birth_date, status, source, pipeline_id, stage_id, tags, custom_fields, assigned_to, kommo_id, kommo_synced_tags, closed_at, closed_by, close_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+		        CASE WHEN $18::bigint IS NOT NULL THEN COALESCE($15::text[], '{}'::text[]) ELSE '{}'::text[] END,
+		        $19, $20, $21)
 		RETURNING id, created_at, updated_at
-	`, lead.AccountID, lead.ContactID, lead.JID, lead.Name, lead.Phone, lead.Email, lead.Notes, lead.DNI, lead.BirthDate, lead.Status, lead.Source, lead.PipelineID, lead.StageID, lead.Tags, lead.CustomFields, lead.AssignedTo,
-		lead.KommoID,
+	`, lead.AccountID, lead.ContactID, lead.Title, lead.JID, nil, nil, nil, lead.Notes, nil, nil, lead.Status, lead.Source, lead.PipelineID, lead.StageID, lead.Tags, lead.CustomFields, lead.AssignedTo,
+		lead.KommoID, lead.ClosedAt, lead.ClosedBy, lead.CloseReason,
 	).Scan(&lead.ID, &lead.CreatedAt, &lead.UpdatedAt)
 }
 
@@ -2898,14 +3070,15 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
 		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
 		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
-		       l.status, l.source, COALESCE(c.notes, l.notes),
+		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position, l.kommo_id,
-		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at
+		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 		FROM leads l
 		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
-		WHERE l.account_id = $1 ORDER BY l.created_at DESC
+		WHERE l.account_id = $1 AND l.deleted_at IS NULL ORDER BY l.created_at DESC
 	`, accountID)
 	if err != nil {
 		return nil, err
@@ -2921,6 +3094,7 @@ func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 			&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 			&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 			&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+			&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 		); err != nil {
 			return nil, err
 		}
@@ -2937,21 +3111,23 @@ func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid 
 		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
 		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
 		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
-		       l.status, l.source, COALESCE(c.notes, l.notes),
+		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position, l.kommo_id,
-		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at
+		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 		FROM leads l
 		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.account_id = $1 AND l.jid = $2
-		ORDER BY l.updated_at DESC LIMIT 1
+		ORDER BY (l.deleted_at IS NULL) DESC, (l.status = 'open') DESC, l.updated_at DESC, l.id LIMIT 1
 	`, accountID, jid).Scan(
 		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
 		&lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Address, &lead.Distrito, &lead.Ocupacion, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 		&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 		&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+		&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -2972,10 +3148,11 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
 		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
 		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
-		       l.status, l.source, COALESCE(c.notes, l.notes),
+		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position, l.kommo_id,
-		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at
+		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 		FROM leads l
 		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
@@ -2986,6 +3163,7 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 		&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 		&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+		&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -2994,33 +3172,86 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 }
 
 func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
-	// CRM fields stay on leads table; personal data is written to contacts separately
-	_, err := r.db.Exec(ctx, `
-		UPDATE leads SET
-			name = $1, last_name = $2, short_name = $3, phone = $4, email = $5,
-			company = $6, age = $7, dni = $8, birth_date = $9, address = $10, distrito = $11, ocupacion = $12, notes = $13,
-			status = $14, source = $15, tags = $16, custom_fields = $17, assigned_to = $18,
-			pipeline_id = $19, stage_id = $20, updated_at = NOW()
-		WHERE id = $21
-	`, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email,
-		lead.Company, lead.Age, lead.DNI, lead.BirthDate, lead.Address, lead.Distrito, lead.Ocupacion, lead.Notes,
-		lead.Status, lead.Source, lead.Tags, lead.CustomFields, lead.AssignedTo,
-		lead.PipelineID, lead.StageID, lead.ID)
+	lead.Title = strings.TrimSpace(lead.Title)
+	if lead.Title == "" {
+		lead.Title = "Oportunidad"
+	}
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	// Also write personal data to linked contact (source of truth)
-	if lead.ContactID != nil {
-		_, err = r.db.Exec(ctx, `
-			UPDATE contacts SET
-				custom_name = $1, last_name = $2, short_name = $3, phone = $4, email = $5,
-				company = $6, age = $7, dni = $8, birth_date = $9, address = $10, distrito = $11, ocupacion = $12, notes = $13,
-				updated_at = NOW()
-			WHERE id = $14
-		`, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email,
-			lead.Company, lead.Age, lead.DNI, lead.BirthDate, lead.Address, lead.Distrito, lead.Ocupacion, lead.Notes, *lead.ContactID)
+	defer tx.Rollback(ctx)
+	var contactID *uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT contact_id FROM leads WHERE id=$1 AND account_id=$2 FOR UPDATE
+	`, lead.ID, lead.AccountID).Scan(&contactID); err != nil {
+		return err
 	}
-	return err
+	if lead.AssignedTo != nil {
+		var valid bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$2)`, lead.AccountID, *lead.AssignedTo).Scan(&valid); err != nil {
+			return err
+		}
+		if !valid {
+			return fmt.Errorf("lead assignee does not belong to account")
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE leads SET notes=$1, source=$2, tags=$3, custom_fields=$4,
+			assigned_to=$5, title=$6, updated_at=NOW()
+		WHERE id=$7 AND account_id=$8
+	`, lead.Notes, lead.Source, lead.Tags, lead.CustomFields, lead.AssignedTo, lead.Title, lead.ID, lead.AccountID); err != nil {
+		return err
+	}
+	if contactID != nil && len(lead.PersonalFieldChanges) > 0 {
+		result, err := tx.Exec(ctx, `
+			UPDATE contacts SET
+				custom_name=CASE WHEN $15 THEN NULLIF(BTRIM($1),'') ELSE custom_name END,
+				name=CASE WHEN $15 THEN COALESCE(NULLIF(BTRIM($1),''),name) ELSE name END,
+				last_name=CASE WHEN $16 THEN $2 ELSE last_name END,
+				short_name=CASE WHEN $17 THEN $3 ELSE short_name END,
+				phone=CASE WHEN $18 THEN $4 ELSE phone END,
+				email=CASE WHEN $19 THEN $5 ELSE email END,
+				company=CASE WHEN $20 THEN $6 ELSE company END,
+				age=CASE WHEN $21 THEN $7 ELSE age END,
+				dni=CASE WHEN $22 THEN $8 ELSE dni END,
+				birth_date=CASE WHEN $23 THEN $9 ELSE birth_date END,
+				address=CASE WHEN $24 THEN $10 ELSE address END,
+				distrito=CASE WHEN $25 THEN $11 ELSE distrito END,
+				ocupacion=CASE WHEN $26 THEN $12 ELSE ocupacion END,
+				updated_at = NOW()
+			WHERE id = $13 AND account_id = $14
+		`, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email,
+			lead.Company, lead.Age, lead.DNI, lead.BirthDate, lead.Address, lead.Distrito, lead.Ocupacion, *contactID, lead.AccountID,
+			lead.PersonalFieldChanges["name"], lead.PersonalFieldChanges["last_name"], lead.PersonalFieldChanges["short_name"],
+			lead.PersonalFieldChanges["phone"], lead.PersonalFieldChanges["email"], lead.PersonalFieldChanges["company"],
+			lead.PersonalFieldChanges["age"], lead.PersonalFieldChanges["dni"], lead.PersonalFieldChanges["birth_date"],
+			lead.PersonalFieldChanges["address"], lead.PersonalFieldChanges["distrito"], lead.PersonalFieldChanges["ocupacion"])
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return fmt.Errorf("lead contact does not belong to account")
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE event_participants ep SET
+				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),ep.name),
+				last_name=c.last_name, short_name=c.short_name, phone=c.phone, email=c.email, age=c.age,
+				company=c.company, dni=c.dni, birth_date=c.birth_date, address=c.address, distrito=c.distrito, ocupacion=c.ocupacion,
+				updated_at=NOW()
+			FROM contacts c WHERE ep.contact_id=c.id AND c.id=$1 AND c.account_id=$2
+		`, *contactID, lead.AccountID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE campaign_recipients cr SET
+				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),cr.name), phone=c.phone
+			FROM contacts c WHERE cr.contact_id=c.id AND c.id=$1 AND c.account_id=$2
+		`, *contactID, lead.AccountID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // UpdateStage moves a lead to a different pipeline stage
@@ -3029,30 +3260,10 @@ func (r *LeadRepository) UpdateStage(ctx context.Context, id uuid.UUID, stageID 
 	return err
 }
 
-// SyncToContact is now a no-op — Contact is the source of truth and Lead.Update writes to contacts directly.
+// SyncToContact remains for compatibility with older service callers. Contact
+// is the source of truth and updates must carry explicit field-presence data to
+// Lead.Update, so an implicit full-profile write here would be unsafe.
 func (r *LeadRepository) SyncToContact(ctx context.Context, lead *domain.Lead) error {
-	if lead.ContactID == nil {
-		return nil
-	}
-	_, err := r.db.Exec(ctx, `
-		UPDATE contacts SET
-			custom_name = COALESCE($2, custom_name),
-			last_name = COALESCE($3, last_name),
-			short_name = COALESCE($4, short_name),
-			phone = COALESCE($5, phone),
-			email = COALESCE($6, email),
-			age = COALESCE($7, age),
-			dni = COALESCE($8, dni),
-			birth_date = COALESCE($9, birth_date),
-			address = COALESCE($10, address),
-			distrito = COALESCE(NULLIF($11, ''), distrito),
-			ocupacion = COALESCE(NULLIF($12, ''), ocupacion),
-			updated_at = NOW()
-		WHERE id = $1
-	`, *lead.ContactID, lead.Name, lead.LastName, lead.ShortName, lead.Phone, lead.Email, lead.Age, lead.DNI, lead.BirthDate, lead.Address, lead.Distrito, lead.Ocupacion)
-	if err != nil {
-		log.Printf("[SYNC] Error syncing lead %s to contact: %v", lead.ID, err)
-	}
 	return nil
 }
 
@@ -3065,20 +3276,24 @@ func (r *LeadRepository) GetByContactID(ctx context.Context, contactID uuid.UUID
 		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
 		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
 		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
-		       l.status, l.source, COALESCE(c.notes, l.notes),
+		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position, l.kommo_id,
-		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at
+		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 		FROM leads l
 		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.contact_id = $1
+		ORDER BY (l.deleted_at IS NULL) DESC, (l.status = 'open') DESC, l.updated_at DESC, l.id
+		LIMIT 1
 	`, contactID).Scan(
 		&lead.ID, &lead.AccountID, &lead.ContactID, &lead.JID, &lead.Name, &lead.LastName, &lead.ShortName, &lead.Phone,
 		&lead.Email, &lead.Company, &lead.Age, &lead.DNI, &lead.BirthDate, &lead.Address, &lead.Distrito, &lead.Ocupacion, &lead.Status, &lead.Source, &lead.Notes, &lead.Tags,
 		&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 		&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 		&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+		&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -3205,8 +3420,8 @@ func (r *PipelineRepository) GetByAccountID(ctx context.Context, accountID uuid.
 			pipelineMap[p.ID] = p
 		}
 		stageRows, err := r.db.Query(ctx, `
-			SELECT ps.id, ps.pipeline_id, ps.name, ps.color, ps.position, ps.created_at,
-			       (SELECT COUNT(*) FROM leads WHERE stage_id = ps.id) as lead_count
+			SELECT ps.id, ps.pipeline_id, ps.name, ps.color, ps.position, ps.stage_type, ps.created_at,
+			       (SELECT COUNT(*) FROM leads WHERE stage_id = ps.id AND deleted_at IS NULL) as lead_count
 			FROM pipeline_stages ps WHERE ps.pipeline_id = ANY($1) ORDER BY ps.pipeline_id, ps.position
 		`, pipelineIDs)
 		if err != nil {
@@ -3217,7 +3432,7 @@ func (r *PipelineRepository) GetByAccountID(ctx context.Context, accountID uuid.
 			stage := &domain.PipelineStage{}
 			if err := stageRows.Scan(
 				&stage.ID, &stage.PipelineID, &stage.Name, &stage.Color,
-				&stage.Position, &stage.CreatedAt, &stage.LeadCount,
+				&stage.Position, &stage.StageType, &stage.CreatedAt, &stage.LeadCount,
 			); err != nil {
 				return nil, err
 			}
@@ -3232,8 +3447,8 @@ func (r *PipelineRepository) GetByAccountID(ctx context.Context, accountID uuid.
 
 func (r *PipelineRepository) GetStages(ctx context.Context, pipelineID uuid.UUID) ([]*domain.PipelineStage, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT ps.id, ps.pipeline_id, ps.name, ps.color, ps.position, ps.created_at,
-		       (SELECT COUNT(*) FROM leads WHERE stage_id = ps.id) as lead_count
+		SELECT ps.id, ps.pipeline_id, ps.name, ps.color, ps.position, ps.stage_type, ps.created_at,
+		       (SELECT COUNT(*) FROM leads WHERE stage_id = ps.id AND deleted_at IS NULL) as lead_count
 		FROM pipeline_stages ps WHERE ps.pipeline_id = $1 ORDER BY ps.position
 	`, pipelineID)
 	if err != nil {
@@ -3246,7 +3461,7 @@ func (r *PipelineRepository) GetStages(ctx context.Context, pipelineID uuid.UUID
 		stage := &domain.PipelineStage{}
 		if err := rows.Scan(
 			&stage.ID, &stage.PipelineID, &stage.Name, &stage.Color,
-			&stage.Position, &stage.CreatedAt, &stage.LeadCount,
+			&stage.Position, &stage.StageType, &stage.CreatedAt, &stage.LeadCount,
 		); err != nil {
 			return nil, err
 		}
@@ -3258,11 +3473,11 @@ func (r *PipelineRepository) GetStages(ctx context.Context, pipelineID uuid.UUID
 func (r *PipelineRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Pipeline, error) {
 	pipeline := &domain.Pipeline{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, name, description, is_default, created_at, updated_at
+		SELECT id, account_id, name, description, is_default, kommo_id, created_at, updated_at
 		FROM pipelines WHERE id = $1
 	`, id).Scan(
 		&pipeline.ID, &pipeline.AccountID, &pipeline.Name, &pipeline.Description,
-		&pipeline.IsDefault, &pipeline.CreatedAt, &pipeline.UpdatedAt,
+		&pipeline.IsDefault, &pipeline.KommoID, &pipeline.CreatedAt, &pipeline.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -3314,6 +3529,14 @@ func (r *PipelineRepository) DeleteForAccount(ctx context.Context, id, accountID
 	}
 	defer tx.Rollback(ctx)
 
+	var leadCount int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM leads WHERE pipeline_id=$1 AND account_id=$2`, id, accountID).Scan(&leadCount); err != nil {
+		return err
+	}
+	if leadCount > 0 {
+		return ErrPipelineHasLeads
+	}
+
 	_, err = tx.Exec(ctx, `
 		UPDATE accounts
 		SET default_incoming_stage_id = NULL, updated_at = NOW()
@@ -3321,15 +3544,6 @@ func (r *PipelineRepository) DeleteForAccount(ctx context.Context, id, accountID
 		  AND default_incoming_stage_id IN (
 			SELECT id FROM pipeline_stages WHERE pipeline_id = $1
 		  )
-	`, id, accountID)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec(ctx, `
-		UPDATE leads
-		SET pipeline_id = NULL, stage_id = NULL, updated_at = NOW()
-		WHERE pipeline_id = $1 AND account_id = $2
 	`, id, accountID)
 	if err != nil {
 		return err
@@ -3361,6 +3575,9 @@ func (r *PipelineRepository) DeleteForAccount(ctx context.Context, id, accountID
 func (r *PipelineRepository) CreateStage(ctx context.Context, stage *domain.PipelineStage) error {
 	stage.ID = uuid.New()
 	stage.CreatedAt = time.Now()
+	if stage.StageType == "" {
+		stage.StageType = domain.PipelineStageTypeActive
+	}
 	// Auto-set position to the end
 	if stage.Position == 0 {
 		var maxPos *int
@@ -3370,9 +3587,9 @@ func (r *PipelineRepository) CreateStage(ctx context.Context, stage *domain.Pipe
 		}
 	}
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO pipeline_stages (id, pipeline_id, name, color, position, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, stage.ID, stage.PipelineID, stage.Name, stage.Color, stage.Position, stage.CreatedAt)
+		INSERT INTO pipeline_stages (id, pipeline_id, name, color, position, stage_type, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, stage.ID, stage.PipelineID, stage.Name, stage.Color, stage.Position, stage.StageType, stage.CreatedAt)
 	return err
 }
 
@@ -3403,11 +3620,11 @@ func (r *PipelineRepository) ReorderStages(ctx context.Context, pipelineID uuid.
 func (r *PipelineRepository) GetDefaultPipeline(ctx context.Context, accountID uuid.UUID) (*domain.Pipeline, error) {
 	pipeline := &domain.Pipeline{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, name, description, is_default, created_at, updated_at
+		SELECT id, account_id, name, description, is_default, kommo_id, created_at, updated_at
 		FROM pipelines WHERE account_id = $1 AND is_default = TRUE LIMIT 1
 	`, accountID).Scan(
 		&pipeline.ID, &pipeline.AccountID, &pipeline.Name, &pipeline.Description,
-		&pipeline.IsDefault, &pipeline.CreatedAt, &pipeline.UpdatedAt,
+		&pipeline.IsDefault, &pipeline.KommoID, &pipeline.CreatedAt, &pipeline.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -3444,7 +3661,7 @@ func (r *PipelineRepository) ResolveStageDestination(ctx context.Context, accoun
 		SELECT ps.pipeline_id
 		FROM pipeline_stages ps
 		JOIN pipelines p ON p.id = ps.pipeline_id
-		WHERE ps.id = $1 AND p.account_id = $2
+		WHERE ps.id = $1 AND p.account_id = $2 AND ps.stage_type = 'active'
 	`, stageID, accountID).Scan(&pipelineID)
 	if err == pgx.ErrNoRows {
 		return nil, nil, nil
@@ -3464,7 +3681,7 @@ func (r *PipelineRepository) ResolveIncomingLeadDestination(ctx context.Context,
 		FROM accounts a
 		JOIN pipeline_stages ps ON ps.id = a.default_incoming_stage_id
 		JOIN pipelines p ON p.id = ps.pipeline_id
-		WHERE a.id = $1 AND p.account_id = $1
+		WHERE a.id = $1 AND p.account_id = $1 AND ps.stage_type = 'active'
 	`, accountID).Scan(&configuredPipelineID, &configuredStageID)
 	if err == nil {
 		pid := configuredPipelineID
@@ -3482,15 +3699,20 @@ func (r *PipelineRepository) ResolveIncomingLeadDestination(ctx context.Context,
 		pid := pipeline.ID
 		var stageID *uuid.UUID
 		for _, st := range pipeline.Stages {
-			if strings.EqualFold(st.Name, "Leads Entrantes") {
+			if st.StageType == domain.PipelineStageTypeActive && strings.EqualFold(st.Name, "Leads Entrantes") {
 				sid := st.ID
 				stageID = &sid
 				break
 			}
 		}
-		if stageID == nil && len(pipeline.Stages) > 0 {
-			sid := pipeline.Stages[0].ID
-			stageID = &sid
+		if stageID == nil {
+			for _, st := range pipeline.Stages {
+				if st.StageType == domain.PipelineStageTypeActive {
+					sid := st.ID
+					stageID = &sid
+					break
+				}
+			}
 		}
 		return &pid, stageID
 	}
@@ -4150,7 +4372,36 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 	if len(recipients) == 0 {
 		return nil
 	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var accountID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT account_id FROM campaigns WHERE id=$1 FOR UPDATE`, recipients[0].CampaignID).Scan(&accountID); err != nil {
+		return err
+	}
 	for _, rec := range recipients {
+		if rec.CampaignID != recipients[0].CampaignID || rec.ContactID == nil {
+			return fmt.Errorf("cada destinatario debe pertenecer a la campaña y tener un contacto")
+		}
+		var allowed bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM contacts c
+				WHERE c.id=$1 AND c.account_id=$2 AND c.do_not_contact=FALSE
+				  AND NOT EXISTS (
+					SELECT 1 FROM contact_suppressions cs
+					WHERE cs.account_id=c.account_id AND cs.active=TRUE
+					  AND cs.normalized_value IN (LOWER(BTRIM(c.jid)), REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g'))
+				  )
+			)
+		`, *rec.ContactID, accountID).Scan(&allowed); err != nil {
+			return err
+		}
+		if !allowed {
+			return fmt.Errorf("el destinatario no es un contacto vigente y habilitado de la cuenta")
+		}
 		rec.ID = uuid.New()
 		if rec.Status == "" {
 			rec.Status = "pending"
@@ -4161,21 +4412,24 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 				metaJSON = b
 			}
 		}
-		_, err := r.db.Exec(ctx, `
+		_, err := tx.Exec(ctx, `
 			INSERT INTO campaign_recipients (id, campaign_id, contact_id, jid, name, phone, status, metadata)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-			ON CONFLICT DO NOTHING
+			ON CONFLICT (campaign_id, contact_id) WHERE contact_id IS NOT NULL DO NOTHING
 		`, rec.ID, rec.CampaignID, rec.ContactID, rec.JID, rec.Name, rec.Phone, rec.Status, metaJSON)
 		if err != nil {
 			return err
 		}
 	}
 	// Update total count
-	_, err := r.db.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		UPDATE campaigns SET total_recipients = (SELECT count(*) FROM campaign_recipients WHERE campaign_id = $1), updated_at = NOW()
 		WHERE id = $1
 	`, recipients[0].CampaignID)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *CampaignRepository) GetRecipients(ctx context.Context, campaignID uuid.UUID) ([]*domain.CampaignRecipient, error) {
@@ -5797,6 +6051,41 @@ type ParticipantRepository struct {
 }
 
 func (r *ParticipantRepository) Add(ctx context.Context, p *domain.EventParticipant) error {
+	if p.ContactID == nil {
+		return fmt.Errorf("participant contact_id is required")
+	}
+	var valid bool
+	if err := r.db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM events e JOIN contacts c ON c.id=$2 AND c.account_id=e.account_id
+			WHERE e.id=$1
+			  AND ($3::uuid IS NULL OR EXISTS (
+				SELECT 1 FROM leads l WHERE l.id=$3 AND l.account_id=e.account_id AND l.contact_id=c.id
+			  ))
+			  AND ($4::uuid IS NULL OR EXISTS (
+				SELECT 1 FROM event_pipeline_stages eps WHERE eps.id=$4 AND eps.pipeline_id=e.pipeline_id
+			  ))
+		)
+	`, p.EventID, *p.ContactID, p.LeadID, p.StageID).Scan(&valid); err != nil {
+		return err
+	}
+	if !valid {
+		return fmt.Errorf("participant contact, lead or stage does not belong to event account")
+	}
+	// Contact is the source of truth for personal data. Snapshots are retained
+	// only for legacy compatibility and exports, and are refreshed on writes.
+	if err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(BTRIM(c.custom_name),''), NULLIF(BTRIM(c.name),''), NULLIF(BTRIM(c.push_name),''), NULLIF(BTRIM(c.phone),''), c.jid),
+		       c.last_name, c.short_name, c.phone, c.email, c.age,
+		       c.company, c.dni, c.birth_date, c.address, c.distrito, c.ocupacion
+		FROM contacts c JOIN events e ON e.account_id=c.account_id
+		WHERE c.id=$1 AND e.id=$2
+	`, *p.ContactID, p.EventID).Scan(
+		&p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
+		&p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion,
+	); err != nil {
+		return fmt.Errorf("load participant contact: %w", err)
+	}
 	p.ID = uuid.New()
 	now := time.Now()
 	p.CreatedAt = now
@@ -5806,10 +6095,13 @@ func (r *ParticipantRepository) Add(ctx context.Context, p *domain.EventParticip
 	}
 	p.InvitedAt = &now
 	if err := r.db.QueryRow(ctx, `
-		INSERT INTO event_participants (id, event_id, contact_id, lead_id, stage_id, name, last_name, short_name, phone, email, age, status, notes, next_action, next_action_date, invited_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		INSERT INTO event_participants (id, event_id, contact_id, lead_id, stage_id, name, last_name, short_name, phone, email, age,
+			company, dni, birth_date, address, distrito, ocupacion, status, notes, next_action, next_action_date, invited_at, created_at, updated_at)
+		VALUES ($1,$2,$3,NULL,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 		RETURNING id
-	`, p.ID, p.EventID, p.ContactID, p.LeadID, p.StageID, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Status, p.Notes, p.NextAction, p.NextActionDate, p.InvitedAt, p.CreatedAt, p.UpdatedAt).Scan(&p.ID); err != nil {
+	`, p.ID, p.EventID, p.ContactID, p.StageID, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age,
+		p.Company, p.DNI, p.BirthDate, p.Address, p.Distrito, p.Ocupacion, p.Status, p.Notes, p.NextAction, p.NextActionDate,
+		p.InvitedAt, p.CreatedAt, p.UpdatedAt).Scan(&p.ID); err != nil {
 		return err
 	}
 	// Tags are now derived from contact_tags via contact_id
@@ -5828,11 +6120,17 @@ func (r *ParticipantRepository) BulkAdd(ctx context.Context, eventID uuid.UUID, 
 
 func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.UUID, search, statusFilter string, tagIDs []uuid.UUID, hasPhone *bool) ([]*domain.EventParticipant, error) {
 	useDistinct := len(tagIDs) > 0
-	selectClause := `SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color, COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked`
+	selectClause := `SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
+		COALESCE(NULLIF(BTRIM(c.custom_name),''), NULLIF(BTRIM(c.name),''), NULLIF(BTRIM(c.push_name),''), p.name),
+		COALESCE(c.last_name,p.last_name), COALESCE(c.short_name,p.short_name), COALESCE(c.phone,p.phone), COALESCE(c.email,p.email), COALESCE(c.age,p.age),
+		COALESCE(c.company,p.company), COALESCE(c.dni,p.dni), COALESCE(c.birth_date,p.birth_date), COALESCE(c.address,p.address), COALESCE(c.distrito,p.distrito), COALESCE(c.ocupacion,p.ocupacion),
+		p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at,
+		eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color,
+		COALESCE(l.is_archived, false) AS is_archived, COALESCE(c.do_not_contact, false) AS is_blocked`
 	if useDistinct {
-		selectClause = `SELECT DISTINCT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id, p.name, p.last_name, p.short_name, p.phone, p.email, p.age, p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at, eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color, COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked`
+		selectClause = strings.Replace(selectClause, "SELECT ", "SELECT DISTINCT ", 1)
 	}
-	query := selectClause + ` FROM event_participants p LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id LEFT JOIN leads l ON l.id = p.lead_id LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id`
+	query := selectClause + ` FROM event_participants p LEFT JOIN contacts c ON c.id = p.contact_id LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id LEFT JOIN leads l ON l.id = p.lead_id LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id`
 	args := []interface{}{eventID}
 	argNum := 2
 
@@ -5852,7 +6150,7 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 		argNum++
 	}
 	if search != "" {
-		query += fmt.Sprintf(" AND (p.name ILIKE $%d OR p.last_name ILIKE $%d OR p.phone ILIKE $%d OR p.email ILIKE $%d)", argNum, argNum, argNum, argNum)
+		query += fmt.Sprintf(" AND (COALESCE(c.custom_name,c.name,c.push_name,p.name,'') ILIKE $%d OR COALESCE(c.last_name,p.last_name,'') ILIKE $%d OR COALESCE(c.phone,p.phone,'') ILIKE $%d OR COALESCE(c.email,p.email,'') ILIKE $%d)", argNum, argNum, argNum, argNum)
 		args = append(args, "%"+search+"%")
 		argNum++
 	}
@@ -5869,9 +6167,9 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 		query += fmt.Sprintf(" AND ct.tag_id IN (%s)", placeholders)
 	}
 	if hasPhone != nil && *hasPhone {
-		query += " AND p.phone IS NOT NULL AND p.phone != ''"
+		query += " AND NULLIF(BTRIM(COALESCE(c.phone,p.phone,'')),'') IS NOT NULL"
 	}
-	query += " ORDER BY p.next_action_date ASC NULLS LAST, p.name ASC"
+	query += " ORDER BY p.next_action_date ASC NULLS LAST, COALESCE(c.custom_name,c.name,c.push_name,p.name) ASC"
 
 	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
@@ -5882,7 +6180,10 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 	var participants []*domain.EventParticipant
 	for rows.Next() {
 		p := &domain.EventParticipant{}
-		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt, &p.StageName, &p.StageColor, &p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor, &p.IsArchived, &p.IsBlocked); err != nil {
+		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
+			&p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion,
+			&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt,
+			&p.StageName, &p.StageColor, &p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor, &p.IsArchived, &p.IsBlocked); err != nil {
 			return nil, err
 		}
 		participants = append(participants, p)
@@ -5920,8 +6221,13 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 func (r *ParticipantRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.EventParticipant, error) {
 	p := &domain.EventParticipant{}
 	err := r.db.QueryRow(ctx, `
-		SELECT id, event_id, contact_id, lead_id, stage_id, name, last_name, short_name, phone, email, age, company, dni, birth_date, address, distrito, ocupacion, status, notes, next_action, next_action_date, invited_at, confirmed_at, attended_at, created_at, updated_at
-		FROM event_participants WHERE id = $1
+		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
+		       COALESCE(NULLIF(BTRIM(c.custom_name),''), NULLIF(BTRIM(c.name),''), NULLIF(BTRIM(c.push_name),''), p.name),
+		       COALESCE(c.last_name,p.last_name), COALESCE(c.short_name,p.short_name), COALESCE(c.phone,p.phone), COALESCE(c.email,p.email), COALESCE(c.age,p.age),
+		       COALESCE(c.company,p.company), COALESCE(c.dni,p.dni), COALESCE(c.birth_date,p.birth_date), COALESCE(c.address,p.address), COALESCE(c.distrito,p.distrito), COALESCE(c.ocupacion,p.ocupacion),
+		       p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.created_at, p.updated_at
+		FROM event_participants p LEFT JOIN contacts c ON c.id=p.contact_id
+		WHERE p.id = $1
 	`, id).Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -5995,25 +6301,77 @@ func (r *ParticipantRepository) BulkUpdateStatus(ctx context.Context, ids []uuid
 
 func (r *ParticipantRepository) Update(ctx context.Context, p *domain.EventParticipant) error {
 	p.UpdatedAt = time.Now()
-	_, err := r.db.Exec(ctx, `
-		UPDATE event_participants SET name=$1, last_name=$2, short_name=$3, phone=$4, email=$5, age=$6, company=$7, dni=$8, birth_date=$9, address=$10, distrito=$11, ocupacion=$12, notes=$13, next_action=$14, next_action_date=$15, updated_at=$16
-		WHERE id=$17
-	`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Company, p.DNI, p.BirthDate, p.Address, p.Distrito, p.Ocupacion, p.Notes, p.NextAction, p.NextActionDate, p.UpdatedAt, p.ID)
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	// Sync personal data back to Contact (source of truth)
-	if p.ContactID != nil {
-		_, _ = r.db.Exec(ctx, `
-			UPDATE contacts SET
-				name = COALESCE($1, name), last_name = $2, short_name = $3,
-				phone = COALESCE($4, phone), email = $5, age = $6,
-				company = $7, dni = $8, birth_date = $9, address = $10, distrito = $11, ocupacion = $12,
-				updated_at = NOW()
-			WHERE id = $13
-		`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Company, p.DNI, p.BirthDate, p.Address, p.Distrito, p.Ocupacion, *p.ContactID)
+	defer tx.Rollback(ctx)
+	var accountID uuid.UUID
+	var contactID *uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT e.account_id, ep.contact_id
+		FROM event_participants ep JOIN events e ON e.id=ep.event_id
+		WHERE ep.id=$1 FOR UPDATE OF ep
+	`, p.ID).Scan(&accountID, &contactID); err != nil {
+		return err
 	}
-	return nil
+	if _, err := tx.Exec(ctx, `
+		UPDATE event_participants
+		SET notes=$1, next_action=$2, next_action_date=$3, updated_at=$4
+		WHERE id=$5
+	`, p.Notes, p.NextAction, p.NextActionDate, p.UpdatedAt, p.ID); err != nil {
+		return err
+	}
+	if contactID != nil && len(p.PersonalFieldChanges) > 0 {
+		result, err := tx.Exec(ctx, `
+			UPDATE contacts SET
+				custom_name=CASE WHEN $15 THEN NULLIF(BTRIM($1),'') ELSE custom_name END,
+				name=CASE WHEN $15 THEN COALESCE(NULLIF(BTRIM($1),''),name) ELSE name END,
+				last_name=CASE WHEN $16 THEN $2 ELSE last_name END,
+				short_name=CASE WHEN $17 THEN $3 ELSE short_name END,
+				phone=CASE WHEN $18 THEN $4 ELSE phone END,
+				email=CASE WHEN $19 THEN $5 ELSE email END,
+				age=CASE WHEN $20 THEN $6 ELSE age END,
+				company=CASE WHEN $21 THEN $7 ELSE company END,
+				dni=CASE WHEN $22 THEN $8 ELSE dni END,
+				birth_date=CASE WHEN $23 THEN $9 ELSE birth_date END,
+				address=CASE WHEN $24 THEN $10 ELSE address END,
+				distrito=CASE WHEN $25 THEN $11 ELSE distrito END,
+				ocupacion=CASE WHEN $26 THEN $12 ELSE ocupacion END,
+				updated_at=NOW()
+			WHERE id=$13 AND account_id=$14
+		`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Company, p.DNI,
+			p.BirthDate, p.Address, p.Distrito, p.Ocupacion, *contactID, accountID,
+			p.PersonalFieldChanges["name"], p.PersonalFieldChanges["last_name"], p.PersonalFieldChanges["short_name"],
+			p.PersonalFieldChanges["phone"], p.PersonalFieldChanges["email"], p.PersonalFieldChanges["age"],
+			p.PersonalFieldChanges["company"], p.PersonalFieldChanges["dni"], p.PersonalFieldChanges["birth_date"],
+			p.PersonalFieldChanges["address"], p.PersonalFieldChanges["distrito"], p.PersonalFieldChanges["ocupacion"])
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return fmt.Errorf("participant contact does not belong to event account")
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE event_participants ep SET
+				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),ep.name),
+				last_name=c.last_name, short_name=c.short_name, phone=c.phone, email=c.email, age=c.age,
+				company=c.company, dni=c.dni, birth_date=c.birth_date, address=c.address, distrito=c.distrito, ocupacion=c.ocupacion,
+				updated_at=NOW()
+			FROM contacts c WHERE ep.contact_id=c.id AND c.id=$1 AND c.account_id=$2
+		`, *contactID, accountID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE campaign_recipients cr SET
+				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),cr.name),
+				phone=c.phone
+			FROM contacts c WHERE cr.contact_id=c.id AND c.id=$1 AND c.account_id=$2
+		`, *contactID, accountID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // SyncToContact propagates shared participant fields back to the linked contact
@@ -6031,9 +6389,20 @@ func (r *ParticipantRepository) SyncToContact(ctx context.Context, p *domain.Eve
 	return err
 }
 
-func (r *ParticipantRepository) LinkContact(ctx context.Context, participantID, contactID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `UPDATE event_participants SET contact_id = $2 WHERE id = $1`, participantID, contactID)
-	return err
+func (r *ParticipantRepository) LinkContact(ctx context.Context, accountID, eventID, participantID, contactID uuid.UUID) error {
+	result, err := r.db.Exec(ctx, `
+		UPDATE event_participants ep SET contact_id=$4, updated_at=NOW()
+		FROM events e, contacts c
+		WHERE ep.id=$3 AND ep.event_id=$2 AND e.id=ep.event_id AND e.account_id=$1
+		  AND c.id=$4 AND c.account_id=$1
+	`, accountID, eventID, participantID, contactID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("participant or contact not found in account")
+	}
+	return nil
 }
 
 func (r *ParticipantRepository) Delete(ctx context.Context, id uuid.UUID) error {
@@ -6047,9 +6416,13 @@ func (r *ParticipantRepository) GetUpcomingActions(ctx context.Context, accountI
 		limit = 20
 	}
 	rows, err := r.db.Query(ctx, `
-		SELECT ep.id, ep.event_id, ep.contact_id, ep.lead_id, ep.stage_id, ep.name, ep.last_name, ep.short_name, ep.phone, ep.email, ep.age, ep.status, ep.notes, ep.next_action, ep.next_action_date, ep.invited_at, ep.confirmed_at, ep.attended_at, ep.created_at, ep.updated_at
+		SELECT ep.id, ep.event_id, ep.contact_id, ep.lead_id, ep.stage_id,
+		       COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),ep.name),
+		       COALESCE(c.last_name,ep.last_name), COALESCE(c.short_name,ep.short_name), COALESCE(c.phone,ep.phone), COALESCE(c.email,ep.email), COALESCE(c.age,ep.age),
+		       ep.status, ep.notes, ep.next_action, ep.next_action_date, ep.invited_at, ep.confirmed_at, ep.attended_at, ep.created_at, ep.updated_at
 		FROM event_participants ep
 		JOIN events e ON e.id = ep.event_id
+		LEFT JOIN contacts c ON c.id=ep.contact_id AND c.account_id=e.account_id
 		WHERE e.account_id = $1 AND ep.next_action_date IS NOT NULL AND ep.status NOT IN ('attended','no_show','declined')
 		ORDER BY ep.next_action_date ASC
 		LIMIT $2

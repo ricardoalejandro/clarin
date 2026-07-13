@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
-import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, AlertTriangle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import { es } from 'date-fns/locale'
@@ -18,6 +18,8 @@ import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
+import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
+import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { Chat } from '@/types/chat'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
@@ -41,6 +43,7 @@ interface StageData {
   name: string
   color: string
   position: number
+  stage_type?: 'active' | 'won' | 'lost'
   total_count: number
   leads: Lead[]
   has_more: boolean
@@ -62,20 +65,42 @@ interface LeadCardProps {
   onToggleSelection: (id: string) => void
   onOpenDetail: (lead: Lead) => void
   onDelete: (id: string) => void
+  onRestore: (id: string) => void
+  onLifecycleAction: (lead: Lead, mode: 'won' | 'lost' | 'reopen') => void
+  isTrash: boolean
   onDragStart: (e: React.DragEvent, id: string) => void
   onDragEnd: (e: React.DragEvent) => void
 }
 
 const LeadCard = memo(function LeadCard({
   lead, isSelected, isDetailActive, isDragged, selectionMode,
-  onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd,
+  onToggleSelection, onOpenDetail, onDelete, onRestore, onLifecycleAction, isTrash, onDragStart, onDragEnd,
 }: LeadCardProps) {
+  const [actionsOpen, setActionsOpen] = useState(false)
+  const actionsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!actionsOpen) return
+    const close = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key !== 'Escape') return
+      if (event instanceof MouseEvent && actionsRef.current?.contains(event.target as Node)) return
+      setActionsOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', close)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', close)
+    }
+  }, [actionsOpen])
+  const trashRemainingDays = isTrash && lead.deleted_at
+    ? Math.max(0, 30 - Math.floor((Date.now() - new Date(lead.deleted_at).getTime()) / (24 * 60 * 60 * 1000)))
+    : null
   return (
     <div
       draggable={!selectionMode}
       onDragStart={(e) => onDragStart(e, lead.id)}
       onDragEnd={onDragEnd}
-      className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
+      className={`relative bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
         isSelected ? 'border-emerald-500 ring-2 ring-emerald-100'
         : isDetailActive ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
         : 'border-slate-100'
@@ -93,20 +118,59 @@ const LeadCard = memo(function LeadCard({
               <span className="text-emerald-700 text-xs font-semibold">{(lead.name || '?').charAt(0).toUpperCase()}</span>
             </div>
           )}
-          <p className="text-[13px] font-medium text-slate-900 truncate max-w-[150px]">{lead.name || 'Sin nombre'}</p>
+          <div className="min-w-0">
+            <p className="max-w-[150px] truncate text-[13px] font-semibold text-slate-900">{lead.name || 'Sin nombre'}</p>
+          </div>
           {lead.kommo_id && (
             <span title={lead.kommo_deleted_at ? `Eliminado de Kommo #${lead.kommo_id}` : `Vinculado a Kommo #${lead.kommo_id}`} className={`flex-shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium leading-none ${lead.kommo_deleted_at ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600'}`}>
               <RefreshCw className="w-2.5 h-2.5" />{lead.kommo_deleted_at ? 'K✗' : 'K'}
             </span>
           )}
         </div>
-        {!selectionMode && (
+        {!selectionMode && isTrash && (
           <button
-            onClick={(e) => { e.stopPropagation(); onDelete(lead.id) }}
-            className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+            onClick={(e) => { e.stopPropagation(); onRestore(lead.id) }}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 opacity-0 transition-all hover:bg-emerald-50 hover:text-emerald-700 focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 group-hover:opacity-100"
+            aria-label={`Restaurar ${lead.name || 'lead'}`}
           >
-            <Trash2 className="w-3.5 h-3.5" />
+            <ArchiveRestore className="h-4 w-4" />
           </button>
+        )}
+        {!selectionMode && !isTrash && (
+          <div ref={actionsRef} className="relative">
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); setActionsOpen(open => !open) }}
+              className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 opacity-0 transition-all hover:bg-slate-100 hover:text-slate-700 focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 group-hover:opacity-100"
+              aria-label={`Acciones de ${lead.name || 'lead'}`}
+              aria-haspopup="menu"
+              aria-expanded={actionsOpen}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </button>
+            {actionsOpen && (
+              <div role="menu" className="absolute right-0 top-10 z-30 w-48 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl" onClick={event => event.stopPropagation()}>
+                {lead.status === 'won' || lead.status === 'lost' ? (
+                  <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'reopen') }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-blue-700 hover:bg-blue-50">
+                    <ArchiveRestore className="h-4 w-4" /> Reabrir lead
+                  </button>
+                ) : (
+                  <>
+                    <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'won') }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-emerald-700 hover:bg-emerald-50">
+                      <CheckCircle2 className="h-4 w-4" /> Marcar como ganado
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'lost') }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-red-700 hover:bg-red-50">
+                      <XCircle className="h-4 w-4" /> Marcar como perdido
+                    </button>
+                  </>
+                )}
+                <div className="my-1 border-t border-slate-100" />
+                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onDelete(lead.id) }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-slate-600 hover:bg-red-50 hover:text-red-700">
+                  <Trash2 className="h-4 w-4" /> Mover a papelera
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </div>
       {lead.phone && (
@@ -132,8 +196,8 @@ const LeadCard = memo(function LeadCard({
         </div>
       ) : null}
       <div className="flex items-center justify-between mt-2 text-[10px] text-slate-400">
-        <span>{formatDistanceToNow(new Date(lead.created_at), { locale: es })}</span>
-        <MessageCircle className="w-3 h-3" />
+        <span>{trashRemainingDays !== null ? (trashRemainingDays > 0 ? `${trashRemainingDays} día${trashRemainingDays === 1 ? '' : 's'} para restaurar` : 'Pendiente de purga') : formatDistanceToNow(new Date(lead.created_at), { locale: es })}</span>
+        {isTrash ? <Trash2 className="h-3 w-3" aria-hidden="true" /> : <MessageCircle className="w-3 h-3" aria-hidden="true" />}
       </div>
     </div>
   )
@@ -154,6 +218,9 @@ interface VirtualColumnProps {
   onToggleSelection: (id: string) => void
   onOpenDetail: (lead: Lead) => void
   onDelete: (id: string) => void
+  onRestore: (id: string) => void
+  onLifecycleAction: (lead: Lead, mode: 'won' | 'lost' | 'reopen') => void
+  isTrash: boolean
   onDragStart: (e: React.DragEvent, id: string) => void
   onDragEnd: (e: React.DragEvent) => void
   onDragOver: (e: React.DragEvent, stageId: string) => void
@@ -165,6 +232,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   column, totalCount, hasMore, loadingMore, onLoadMore,
   selectedIds, detailLeadId, draggedLeadId, dragOverColumn, selectionMode,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
+  onRestore, onLifecycleAction, isTrash,
 }: VirtualColumnProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
@@ -238,6 +306,9 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
                     onToggleSelection={onToggleSelection}
                     onOpenDetail={onOpenDetail}
                     onDelete={onDelete}
+                    onRestore={onRestore}
+                    onLifecycleAction={onLifecycleAction}
+                    isTrash={isTrash}
                     onDragStart={onDragStart}
                     onDragEnd={onDragEnd}
                   />
@@ -345,6 +416,7 @@ export default function LeadsPage() {
   const [appliedFormulaType, setAppliedFormulaType] = useState<'simple' | 'advanced'>('simple')
   const [appliedFormulaText, setAppliedFormulaText] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
+  const [creatingLead, setCreatingLead] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
   const [selectionMode, setSelectionMode] = useState(false)
@@ -353,6 +425,7 @@ export default function LeadsPage() {
   const [draggedLeadId, setDraggedLeadId] = useState<string | null>(null)
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null)
   const [formData, setFormData] = useState({
+    title: '',
     name: '',
     phone: '',
     email: '',
@@ -377,6 +450,15 @@ export default function LeadsPage() {
   const [showImportModal, setShowImportModal] = useState(false)
   const [showContactImportModal, setShowContactImportModal] = useState(false)
   const [importingContacts, setImportingContacts] = useState(false)
+  const [duplicateConfirmation, setDuplicateConfirmation] = useState<{
+    kind: 'single' | 'bulk'
+    count: number
+    contacts?: SelectedPerson[]
+  } | null>(null)
+  const duplicateDialogRef = useRef<HTMLDivElement>(null)
+  const duplicateCancelRef = useRef<HTMLButtonElement>(null)
+  const addLeadDialogRef = useRef<HTMLDivElement>(null)
+  const newLeadTitleRef = useRef<HTMLInputElement>(null)
   const [historyFilterType, setHistoryFilterType] = useState('')
   const [historyFilterFrom, setHistoryFilterFrom] = useState('')
   const [historyFilterTo, setHistoryFilterTo] = useState('')
@@ -391,15 +473,7 @@ export default function LeadsPage() {
 
   // Pipeline stage management
   const [showStageModal, setShowStageModal] = useState(false)
-  const [newStageName, setNewStageName] = useState('')
-  const [newStageColor, setNewStageColor] = useState('#6366f1')
-  const [editingStageId, setEditingStageId] = useState<string | null>(null)
-  const [editStageName, setEditStageName] = useState('')
-  const [editStageColor, setEditStageColor] = useState('')
   const [hiddenStageIds, setHiddenStageIds] = useState<Set<string>>(new Set())
-  const [dragSrcIdx, setDragSrcIdx] = useState<number | null>(null)
-  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
-  const [expandedPipelineId, setExpandedPipelineId] = useState<string | null>(null)
 
   // Click outside to close dropdown
 
@@ -419,6 +493,15 @@ export default function LeadsPage() {
   const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
   const whatsappRequestRef = useRef(0)
   const activeLeadIdRef = useRef<string | null>(null)
+
+  const closeDuplicateConfirmation = useCallback(() => setDuplicateConfirmation(null), [])
+  useAccessibleDialog(Boolean(duplicateConfirmation), duplicateDialogRef, closeDuplicateConfirmation, duplicateCancelRef)
+  const closeAddLeadDialog = useCallback(() => {
+    if (creatingLead) return
+    setShowAddModal(false)
+    setFormData({ title: '', name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
+  }, [creatingLead])
+  useAccessibleDialog(showAddModal && !duplicateConfirmation, addLeadDialogRef, closeAddLeadDialog, newLeadTitleRef)
 
   useEffect(() => {
     activeLeadIdRef.current = detailLead?.id || null
@@ -460,9 +543,9 @@ export default function LeadsPage() {
   const [viewMode, setViewMode] = useState<'kanban' | 'list'>('kanban')
   const prevViewModeRef = useRef<'kanban' | 'list'>('kanban')
 
-  // Status filter: active, archived, blocked
-  const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'blocked'>('active')
-  const [leadCounts, setLeadCounts] = useState({ active: 0, archived: 0, blocked: 0 })
+  // Opportunity lifecycle. "blocked" remains temporarily visible for legacy records.
+  const [statusFilter, setStatusFilter] = useState<'active' | 'won' | 'lost' | 'archived' | 'blocked' | 'trash'>('active')
+  const [leadCounts, setLeadCounts] = useState({ active: 0, won: 0, lost: 0, archived: 0, blocked: 0, trash: 0 })
   const [hiddenByStatus, setHiddenByStatus] = useState(0)
 
   // List view paginated data
@@ -514,9 +597,78 @@ export default function LeadsPage() {
   const filterDropdownRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
   const activePipelineIdRef = useRef<string | null>(null)
+  const kanbanRequestRef = useRef(0)
+  const listRequestRef = useRef(0)
+  const [resultsError, setResultsError] = useState('')
+  const filterSnapshotRef = useRef<{
+    stageIds: Set<string>
+    includeTags: Set<string>
+    excludeTags: Set<string>
+    deviceIds: Set<string>
+    tagMode: 'OR' | 'AND'
+    formulaType: 'simple' | 'advanced'
+    formulaText: string
+    formulaValid: boolean
+    appliedFormulaType: 'simple' | 'advanced'
+    appliedFormulaText: string
+    dateField: 'created_at' | 'updated_at'
+    datePreset: string
+    dateFrom: string
+    dateTo: string
+    customFields: CustomFieldFilter[]
+  } | null>(null)
+
+  const openFilters = () => {
+    filterSnapshotRef.current = {
+      stageIds: new Set(filterStageIds),
+      includeTags: new Set(filterTagNames),
+      excludeTags: new Set(excludeFilterTagNames),
+      deviceIds: new Set(filterDeviceIds),
+      tagMode: tagFilterMode,
+      formulaType: leadFormulaType,
+      formulaText: leadFormulaText,
+      formulaValid: leadFormulaIsValid,
+      appliedFormulaType,
+      appliedFormulaText,
+      dateField: filterDateField,
+      datePreset: filterDatePreset,
+      dateFrom: filterDateFrom,
+      dateTo: filterDateTo,
+      customFields: cfFilters.map(filter => ({ ...filter })),
+    }
+    setShowFilterDropdown(true)
+  }
+
+  const discardFilterDraft = useCallback(() => {
+    const snapshot = filterSnapshotRef.current
+    if (snapshot) {
+      setFilterStageIds(snapshot.stageIds)
+      setFilterTagNames(snapshot.includeTags)
+      setExcludeFilterTagNames(snapshot.excludeTags)
+      setFilterDeviceIds(snapshot.deviceIds)
+      setTagFilterMode(snapshot.tagMode)
+      setLeadFormulaType(snapshot.formulaType)
+      setLeadFormulaText(snapshot.formulaText)
+      setLeadFormulaIsValid(snapshot.formulaValid)
+      setAppliedFormulaType(snapshot.appliedFormulaType)
+      setAppliedFormulaText(snapshot.appliedFormulaText)
+      setFilterDateField(snapshot.dateField)
+      setFilterDatePreset(snapshot.datePreset)
+      setFilterDateFrom(snapshot.dateFrom)
+      setFilterDateTo(snapshot.dateTo)
+      setCfFilters(snapshot.customFields)
+    }
+    filterSnapshotRef.current = null
+    setShowFilterDropdown(false)
+  }, [])
 
   useEffect(() => {
     activePipelineIdRef.current = activePipeline?.id || null
+    const validStageIds = new Set((activePipeline?.stages || []).map(stage => stage.id))
+    setFilterStageIds(current => {
+      const next = new Set(Array.from(current).filter(stageId => validStageIds.has(stageId)))
+      return next.size === current.size ? current : next
+    })
   }, [activePipeline?.id])
 
   // Ctrl+drag kanban panning
@@ -525,9 +677,6 @@ export default function LeadsPage() {
   // Click outside to close dropdowns
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (filterDropdownRef.current && !filterDropdownRef.current.contains(event.target as Node)) {
-        setShowFilterDropdown(false)
-      }
       if (moreMenuRef.current && !moreMenuRef.current.contains(event.target as Node)) {
         setShowMoreMenu(false)
       }
@@ -536,7 +685,7 @@ export default function LeadsPage() {
     return () => {
       document.removeEventListener("mousedown", handleClickOutside)
     }
-  }, [filterDropdownRef])
+  }, [])
 
   const fetchPipelines = useCallback(async (preferredPipelineId?: string | null) => {
     const token = localStorage.getItem('token')
@@ -573,7 +722,14 @@ export default function LeadsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        setLeadCounts({ active: data.active || 0, archived: data.archived || 0, blocked: data.blocked || 0 })
+        setLeadCounts({
+          active: data.open ?? data.active ?? 0,
+          won: data.won || 0,
+          lost: data.lost || 0,
+          archived: data.archived || 0,
+          blocked: data.blocked || 0,
+          trash: data.trash ?? data.deleted ?? 0,
+        })
       }
     } catch (err) {
       console.error('Failed to fetch lead counts:', err)
@@ -581,10 +737,13 @@ export default function LeadsPage() {
   }, [activePipeline])
 
   const fetchLeadsPaginated = useCallback(async () => {
+    const requestId = ++kanbanRequestRef.current
     const token = localStorage.getItem('token')
+    setResultsError('')
     try {
       const params = new URLSearchParams()
       params.set('status_filter', statusFilter)
+      params.set('lifecycle', statusFilter === 'active' ? 'open' : statusFilter)
       if (activePipeline) params.set('pipeline_id', activePipeline.id)
       params.set('per_stage', '50')
       if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
@@ -607,27 +766,33 @@ export default function LeadsPage() {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
+      if (requestId !== kanbanRequestRef.current) return
       if (data.success) {
         setStageData((data.stages || []).map((s: StageData) => ({ ...s, leads: s.leads || [] })))
         const ua = data.unassigned || { total_count: 0, leads: [], has_more: false }
         setUnassignedData({ ...ua, leads: ua.leads || [] })
         setAllTags(data.all_tags || [])
         setHiddenByStatus(data.hidden_by_status || 0)
-      }
+      } else setResultsError(data.error || 'No pudimos cargar las oportunidades.')
     } catch (err) {
+      if (requestId !== kanbanRequestRef.current) return
       console.error('Failed to fetch leads:', err)
+      setResultsError('No pudimos cargar las oportunidades. Revisa tu conexión e inténtalo otra vez.')
     } finally {
-      setLoading(false)
+      if (requestId === kanbanRequestRef.current) setLoading(false)
     }
   }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const fetchListLeads = useCallback(async (reset: boolean = false) => {
+    const requestId = ++listRequestRef.current
     setListLoading(true)
+    setResultsError('')
     const offset = reset ? 0 : listOffsetRef.current
     const token = localStorage.getItem('token')
     try {
       const params = new URLSearchParams()
       params.set('status_filter', statusFilter)
+      params.set('lifecycle', statusFilter === 'active' ? 'open' : statusFilter)
       // When searching, omit pipeline_id to find leads across all pipelines
       if (activePipeline && !debouncedSearchTerm) params.set('pipeline_id', activePipeline.id)
       params.set('offset', String(offset))
@@ -654,6 +819,7 @@ export default function LeadsPage() {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
+      if (requestId !== listRequestRef.current) return
       if (data.success) {
         const newLeads = data.leads || []
         if (reset) {
@@ -665,11 +831,13 @@ export default function LeadsPage() {
         }
         setListTotal(data.total || 0)
         setListHasMore(data.has_more || false)
-      }
+      } else setResultsError(data.error || 'No pudimos cargar las oportunidades.')
     } catch (err) {
+      if (requestId !== listRequestRef.current) return
       console.error('Failed to fetch list leads:', err)
+      setResultsError('No pudimos cargar las oportunidades. Revisa tu conexión e inténtalo otra vez.')
     } finally {
-      setListLoading(false)
+      if (requestId === listRequestRef.current) setListLoading(false)
     }
   }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo, cfVisibleIds, cfFilters])
 
@@ -684,6 +852,7 @@ export default function LeadsPage() {
         : stageData.find(s => s.id === stageId)?.leads || []
       const params = new URLSearchParams()
       params.set('status_filter', statusFilter)
+      params.set('lifecycle', statusFilter === 'active' ? 'open' : statusFilter)
       params.set('offset', String(currentLeads.length))
       params.set('limit', '50')
       if (activePipeline) params.set('pipeline_id', activePipeline.id)
@@ -845,18 +1014,18 @@ export default function LeadsPage() {
 
   // Fetch paginated kanban data when pipelines loaded or pipeline/filters change
   useEffect(() => {
-    if (pipelinesLoaded) {
+    if (pipelinesLoaded && !showFilterDropdown) {
       fetchLeadsPaginated()
       fetchLeadCounts()
     }
-  }, [pipelinesLoaded, fetchLeadsPaginated, fetchLeadCounts])
+  }, [pipelinesLoaded, fetchLeadsPaginated, fetchLeadCounts, showFilterDropdown])
 
   // Fetch list data when in list view (and when filters change)
   useEffect(() => {
-    if (viewMode === 'list' && pipelinesLoaded) {
+    if (viewMode === 'list' && pipelinesLoaded && !showFilterDropdown) {
       fetchListLeads(true)
     }
-  }, [viewMode, fetchListLeads, pipelinesLoaded])
+  }, [viewMode, fetchListLeads, pipelinesLoaded, showFilterDropdown])
 
   // Auto-switch to list view when search is active (cross-pipeline results work best in list)
   useEffect(() => {
@@ -1062,12 +1231,12 @@ export default function LeadsPage() {
     }
     const handleClickOutside = (e: MouseEvent) => {
       if (filterDropdownRef.current && !filterDropdownRef.current.contains(e.target as Node)) {
-        setShowFilterDropdown(false)
+        discardFilterDraft()
       }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [showFilterDropdown])
+  }, [showFilterDropdown, discardFilterDraft])
 
   // Sync horizontal scroll between top scrollbar and kanban
   const handleTopScroll = () => {
@@ -1097,51 +1266,20 @@ export default function LeadsPage() {
     })
   }
 
-  const handleReorderStages = async (fromIdx: number, toIdx: number) => {
-    if (!activePipeline || fromIdx === toIdx) return
-    const reordered = [...allStages]
-    if (
-      fromIdx < 0 ||
-      toIdx < 0 ||
-      fromIdx >= reordered.length ||
-      toIdx >= reordered.length
-    ) {
-      console.warn('Ignoring invalid stage reorder', { fromIdx, toIdx, total: reordered.length })
-      return
-    }
-    const [moved] = reordered.splice(fromIdx, 1)
-    if (!moved) {
-      console.warn('Ignoring stage reorder without source stage', { fromIdx, toIdx, total: reordered.length })
-      return
-    }
-    reordered.splice(toIdx, 0, moved)
-    // Optimistically update
-    const updated = { ...activePipeline, stages: reordered.map((s, i) => ({ ...s, position: i })) }
-    setActivePipeline(updated)
-    setPipelines(prev => prev.map(p => p.id === updated.id ? updated : p))
-    // API call
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch(`/api/pipelines/${activePipeline.id}/stages/reorder`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ stage_ids: reordered.map(s => s.id) }),
-      })
-      if (!res.ok) {
-        const data = await res.json().catch(() => null)
-        throw new Error(data?.error || 'No se pudo reordenar las etapas')
-      }
-    } catch (err) {
-      console.error('Failed to reorder stages:', err)
-      fetchPipelines()
-    }
-  }
-
   const allStages = activePipeline?.stages || []
-  const stages = allStages.filter(s => !hiddenStageIds.has(s.id))
+  const activeStages = allStages.filter(stage => stage.stage_type !== 'won' && stage.stage_type !== 'lost')
+  const terminalStages = allStages.filter(stage => stage.stage_type === 'won' || stage.stage_type === 'lost')
+  const stages = activeStages.filter(stage => !hiddenStageIds.has(stage.id))
+  const filterableStages = statusFilter === 'won'
+    ? terminalStages.filter(stage => stage.stage_type === 'won')
+    : statusFilter === 'lost'
+    ? terminalStages.filter(stage => stage.stage_type === 'lost')
+    : stages
 
-  const handleCreateLead = async () => {
+  const handleCreateLead = async (confirmDuplicate = false) => {
+    if (!formData.title.trim() || !formData.name.trim() || creatingLead) return
     const token = localStorage.getItem('token')
+    setCreatingLead(true)
     try {
       const stageId = formData.stage_id || undefined
       const res = await fetch('/api/leads', {
@@ -1151,6 +1289,7 @@ export default function LeadsPage() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
+          title: formData.title.trim(),
           name: formData.name,
           phone: formData.phone,
           email: formData.email,
@@ -1159,19 +1298,26 @@ export default function LeadsPage() {
           birth_date: formData.birth_date || undefined,
           tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
           stage_id: stageId || undefined,
+          confirm_duplicate: confirmDuplicate,
         }),
       })
       const data = await res.json()
       if (data.success) {
         setShowAddModal(false)
-        setFormData({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
+        setFormData({ title: '', name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
         fetchLeadsPaginated()
+        fetchLeadCounts()
+      } else if (res.status === 409 && (data.code === 'possible_duplicate' || data.error_code === 'possible_duplicate')) {
+        const matches = Array.isArray(data.candidates) ? data.candidates.length : 1
+        setDuplicateConfirmation({ kind: 'single', count: matches })
       } else {
-        alert(data.error || 'Error al crear lead')
+        alert(data.error || 'Error al crear la oportunidad')
       }
     } catch (err) {
       console.error('Failed to create lead:', err)
-      alert('Error al crear lead')
+      alert('Error al crear la oportunidad')
+    } finally {
+      setCreatingLead(false)
     }
   }
 
@@ -1205,7 +1351,7 @@ export default function LeadsPage() {
   }
 
   const handleDeleteLead = async (leadId: string) => {
-    if (!confirm('¿Eliminar este lead? No se eliminará el contacto ni el chat asociado.')) return
+    if (!confirm('¿Mover esta oportunidad a la papelera? Podrás restaurarla durante 30 días. El contacto y el chat no se eliminarán.')) return
     const token = localStorage.getItem('token')
     try {
       const res = await fetch(`/api/leads/${leadId}`, {
@@ -1215,28 +1361,56 @@ export default function LeadsPage() {
       const data = await res.json()
       if (data.success) {
         fetchLeadsPaginated()
+        fetchLeadCounts()
+        if (viewMode === 'list') fetchListLeads(true)
       }
     } catch (err) {
       console.error('Failed to delete lead:', err)
     }
   }
 
-  const handleCreateLeadsFromContacts = async (contacts: SelectedPerson[]) => {
+  const handleRestoreLead = async (leadId: string, askConfirmation = true) => {
+    if (askConfirmation && !confirm('¿Restaurar esta oportunidad? Volverá a aparecer en su vista correspondiente.')) return
+    const token = localStorage.getItem('token')
+    try {
+      const res = await fetch(`/api/leads/${leadId}/restore`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo restaurar la oportunidad.')
+      removeLeadFromStages(leadId)
+      await Promise.all([fetchLeadsPaginated(), fetchLeadCounts(), viewMode === 'list' ? fetchListLeads(true) : Promise.resolve()])
+    } catch (err) {
+      console.error('Failed to restore lead:', err)
+      alert(err instanceof Error ? err.message : 'No se pudo restaurar la oportunidad.')
+    }
+  }
+
+  const handleCreateLeadsFromContacts = async (contacts: SelectedPerson[], confirmDuplicate = false) => {
     if (contacts.length === 0 || importingContacts) return
     const token = localStorage.getItem('token')
     setImportingContacts(true)
     try {
-      const res = await fetch('/api/leads/from-contacts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ contact_ids: contacts.map(c => c.id) }),
-      })
-      const data = await res.json()
+      const createFromContacts = async (confirmDuplicate: boolean) => {
+        const response = await fetch('/api/leads/from-contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ contact_ids: contacts.map(contact => contact.id), confirm_duplicate: confirmDuplicate }),
+        })
+        return { response, data: await response.json() }
+      }
+      let { response: res, data } = await createFromContacts(confirmDuplicate)
+      if (res.status === 409 && (data.code === 'possible_duplicate' || data.error_code === 'possible_duplicate')) {
+        setDuplicateConfirmation({
+          kind: 'bulk',
+          count: Array.isArray(data.candidates) ? data.candidates.length : contacts.length,
+          contacts,
+        })
+        return
+      }
       if (!res.ok || !data.success) {
-        alert(data.error || 'Error al crear leads desde contactos')
+        alert(data.error || 'Error al crear oportunidades desde contactos')
         return
       }
       setShowContactImportModal(false)
@@ -1247,19 +1421,30 @@ export default function LeadsPage() {
       const created = data.created || 0
       const skipped = data.skipped || 0
       if (skipped > 0) {
-        alert(`Se crearon ${created} lead(s). ${skipped} contacto(s) fueron omitidos porque ya tenían lead activo o no pudieron procesarse.`)
+        alert(`Se crearon ${created} oportunidad(es). ${skipped} contacto(s) no pudieron procesarse; revisa posibles duplicados o datos incompletos.`)
       }
     } catch (err) {
       console.error('Failed to create leads from contacts:', err)
-      alert('Error al crear leads desde contactos')
+      alert('Error al crear oportunidades desde contactos')
     } finally {
       setImportingContacts(false)
     }
   }
 
+  const confirmDuplicateCreation = () => {
+    const pending = duplicateConfirmation
+    if (!pending) return
+    setDuplicateConfirmation(null)
+    if (pending.kind === 'single') {
+      void handleCreateLead(true)
+    } else if (pending.contacts) {
+      void handleCreateLeadsFromContacts(pending.contacts, true)
+    }
+  }
+
   const handleDeleteSelected = async () => {
     if (selectedIds.size === 0) return
-    if (!confirm(`¿Eliminar ${selectedIds.size} lead(s)? No se eliminarán contactos ni chats asociados.`)) return
+    if (!confirm(`¿Mover ${selectedIds.size} oportunidad(es) a la papelera? Podrás restaurarlas durante 30 días.`)) return
     const token = localStorage.getItem('token')
     setDeleting(true)
     try {
@@ -1276,9 +1461,29 @@ export default function LeadsPage() {
         setSelectedIds(new Set())
         setSelectionMode(false)
         fetchLeadsPaginated()
+        fetchLeadCounts()
+        if (viewMode === 'list') fetchListLeads(true)
       }
     } catch (err) {
       console.error('Failed to delete leads:', err)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const handleRestoreSelected = async () => {
+    if (selectedIds.size === 0) return
+    if (!confirm(`¿Restaurar ${selectedIds.size} oportunidad(es)?`)) return
+    setDeleting(true)
+    try {
+      const token = localStorage.getItem('token')
+      const results = await Promise.all(Array.from(selectedIds).map(id => fetch(`/api/leads/${id}/restore`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } })))
+      if (results.some(result => !result.ok)) throw new Error('Algunas oportunidades no pudieron restaurarse.')
+      setSelectedIds(new Set())
+      setSelectionMode(false)
+      await Promise.all([fetchLeadsPaginated(), fetchLeadCounts(), viewMode === 'list' ? fetchListLeads(true) : Promise.resolve()])
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'No se pudieron restaurar las oportunidades.')
     } finally {
       setDeleting(false)
     }
@@ -1362,7 +1567,7 @@ export default function LeadsPage() {
         body: JSON.stringify({ block, reason }),
       })
       const data = await res.json()
-      if (data.success) {
+      if (res.ok && data.success) {
         fetchLeadsPaginated()
         fetchLeadCounts()
         if (viewMode === 'list') fetchListLeads(true)
@@ -1370,9 +1575,12 @@ export default function LeadsPage() {
           setShowDetailPanel(false)
           resetInlineChatState()
         }
+        return true
       }
+      throw new Error(data.error || 'No se pudo actualizar la preferencia del contacto.')
     } catch (err) {
       console.error('Failed to block lead:', err)
+      return false
     }
   }
 
@@ -1402,7 +1610,7 @@ export default function LeadsPage() {
   }
 
   const handleBlockSelectedBatch = async (block: boolean, reason: string = '') => {
-    if (selectedIds.size === 0) return
+    if (selectedIds.size === 0) return false
     const token = localStorage.getItem('token')
     setDeleting(true)
     try {
@@ -1412,15 +1620,18 @@ export default function LeadsPage() {
         body: JSON.stringify({ ids: Array.from(selectedIds), block, reason }),
       })
       const data = await res.json()
-      if (data.success) {
+      if (res.ok && data.success) {
         setSelectedIds(new Set())
         setSelectionMode(false)
         fetchLeadsPaginated()
         fetchLeadCounts()
         if (viewMode === 'list') fetchListLeads(true)
+        return true
       }
+      throw new Error(data.error || 'No se pudieron actualizar los contactos seleccionados.')
     } catch (err) {
       console.error('Failed to block leads batch:', err)
+      return false
     } finally {
       setDeleting(false)
     }
@@ -1431,6 +1642,10 @@ export default function LeadsPage() {
   const [blockReason, setBlockReason] = useState('')
   const [blockTargetId, setBlockTargetId] = useState<string | null>(null)
   const [blockBatchMode, setBlockBatchMode] = useState(false)
+  const [savingBlockPreference, setSavingBlockPreference] = useState(false)
+  const [blockPreferenceError, setBlockPreferenceError] = useState('')
+  const blockDialogRef = useRef<HTMLDivElement>(null)
+  const blockFirstChoiceRef = useRef<HTMLButtonElement>(null)
 
   // Archive reason modal state
   const [showArchiveModal, setShowArchiveModal] = useState(false)
@@ -1438,10 +1653,98 @@ export default function LeadsPage() {
   const [archiveTargetId, setArchiveTargetId] = useState<string | null>(null)
   const [archiveBatchMode, setArchiveBatchMode] = useState(false)
 
+  // Explicit close/reopen flow for terminal stages.
+  const [lifecycleRequest, setLifecycleRequest] = useState<{ lead: Lead; stage: PipelineStage; mode: 'won' | 'lost' | 'reopen' } | null>(null)
+  const [lifecycleReason, setLifecycleReason] = useState('')
+  const [savingLifecycle, setSavingLifecycle] = useState(false)
+  const [lifecycleError, setLifecycleError] = useState('')
+  const lifecycleDialogRef = useRef<HTMLDivElement>(null)
+
+  const closeLifecycleDialog = useCallback(() => {
+    if (!savingLifecycle) setLifecycleRequest(null)
+  }, [savingLifecycle])
+
+  useAccessibleDialog(Boolean(lifecycleRequest), lifecycleDialogRef, closeLifecycleDialog)
+  const closeBlockDialog = useCallback(() => {
+    if (!savingBlockPreference) setShowBlockModal(false)
+  }, [savingBlockPreference])
+  useAccessibleDialog(showBlockModal, blockDialogRef, closeBlockDialog, blockFirstChoiceRef)
+
+  const requestLeadStageChange = (lead: Lead, stage: PipelineStage) => {
+    if (stage.stage_type === 'won' || stage.stage_type === 'lost') {
+      setLifecycleRequest({ lead, stage, mode: stage.stage_type })
+      setLifecycleReason('')
+      setLifecycleError('')
+      return
+    }
+    if (lead.status === 'won' || lead.status === 'lost') {
+      setLifecycleRequest({ lead, stage, mode: 'reopen' })
+      setLifecycleReason('')
+      setLifecycleError('')
+      return
+    }
+    void handleUpdateLeadStage(lead.id, stage.id)
+  }
+
+  const requestLifecycleAction = (lead: Lead, mode: 'won' | 'lost' | 'reopen') => {
+    const pipelineStages = pipelines.find(pipeline => pipeline.id === lead.pipeline_id)?.stages
+      || (activePipeline?.id === lead.pipeline_id ? allStages : [])
+    const target = mode === 'reopen'
+      ? [...pipelineStages]
+          .filter(stage => stage.stage_type !== 'won' && stage.stage_type !== 'lost')
+          .sort((a, b) => a.position - b.position)[0]
+      : pipelineStages.find(stage => stage.stage_type === mode)
+
+    if (!target) {
+      setResultsError(mode === 'reopen'
+        ? 'Este pipeline no tiene una etapa activa para reabrir el lead.'
+        : `Este pipeline no tiene configurada una etapa de ${mode === 'won' ? 'ganados' : 'perdidos'}.`)
+      return
+    }
+    requestLeadStageChange(lead, target)
+  }
+
+  const confirmLifecycleChange = async () => {
+    if (!lifecycleRequest || savingLifecycle) return
+    if (lifecycleRequest.mode === 'lost' && !lifecycleReason.trim()) {
+      setLifecycleError('Indica por qué se perdió esta oportunidad.')
+      return
+    }
+    setSavingLifecycle(true)
+    setLifecycleError('')
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/leads/${lifecycleRequest.lead.id}/stage`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          stage_id: lifecycleRequest.stage.id,
+          ...(lifecycleRequest.mode === 'lost' ? { close_reason: lifecycleReason.trim() } : {}),
+        }),
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.success) throw new Error(data?.error || 'No se pudo actualizar la oportunidad.')
+      setLifecycleRequest(null)
+      setLifecycleReason('')
+      setShowDetailPanel(false)
+      resetInlineChatState()
+      await Promise.all([
+        fetchLeadsPaginated(),
+        fetchLeadCounts(),
+        viewMode === 'list' ? fetchListLeads(true) : Promise.resolve(),
+      ])
+    } catch (err) {
+      setLifecycleError(err instanceof Error ? err.message : 'No se pudo actualizar la oportunidad.')
+    } finally {
+      setSavingLifecycle(false)
+    }
+  }
+
   const openBlockModal = (leadId: string | null, batchMode: boolean = false) => {
     setBlockTargetId(leadId)
     setBlockBatchMode(batchMode)
     setBlockReason('')
+    setBlockPreferenceError('')
     setShowBlockModal(true)
   }
 
@@ -1464,14 +1767,19 @@ export default function LeadsPage() {
     setShowArchiveModal(false)
   }
 
-  const confirmBlock = () => {
-    if (!blockReason) return
+  const confirmBlock = async () => {
+    if (!blockReason || savingBlockPreference) return
+    setSavingBlockPreference(true)
+    setBlockPreferenceError('')
+    let success = false
     if (blockBatchMode) {
-      handleBlockSelectedBatch(true, blockReason)
+      success = await handleBlockSelectedBatch(true, blockReason)
     } else if (blockTargetId) {
-      handleBlockLead(blockTargetId, true, blockReason)
+      success = await handleBlockLead(blockTargetId, true, blockReason)
     }
-    setShowBlockModal(false)
+    setSavingBlockPreference(false)
+    if (success) setShowBlockModal(false)
+    else setBlockPreferenceError('No se pudo actualizar la preferencia. Intenta nuevamente.')
   }
 
   const toggleSelection = (leadId: string) => {
@@ -1658,7 +1966,7 @@ export default function LeadsPage() {
     // Find first stage of new pipeline
     const newPipeline = pipelines.find(p => p.id === pipelineId)
     // If selecting "Unassigned" (pipelineId is empty string), stage should be null
-    const firstStageId = pipelineId ? (newPipeline?.stages?.[0]?.id || null) : null
+    const firstStageId = pipelineId ? (newPipeline?.stages?.find(stage => stage.stage_type !== 'won' && stage.stage_type !== 'lost')?.id || null) : null
 
     try {
       const res = await fetch(`/api/leads/${leadId}`, {
@@ -1845,75 +2153,11 @@ export default function LeadsPage() {
     if (leadId) {
       const lead = findLeadById(leadId)
       if (lead && lead.stage_id !== targetStageId) {
-        handleUpdateLeadStage(leadId, targetStageId)
+        const target = allStages.find(stage => stage.id === targetStageId)
+        if (target) requestLeadStageChange(lead, target)
       }
     }
     setDraggedLeadId(null)
-  }
-
-  // Stage management
-  const handleAddStage = async () => {
-    if (!activePipeline || !newStageName.trim()) return
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch(`/api/pipelines/${activePipeline.id}/stages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ name: newStageName.trim(), color: newStageColor }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setNewStageName('')
-        setNewStageColor('#6366f1')
-        fetchPipelines()
-      }
-    } catch (err) {
-      console.error('Failed to add stage:', err)
-    }
-  }
-
-  const handleDeleteStage = async (stageId: string) => {
-    if (!activePipeline) return
-    if (!confirm('¿Eliminar esta etapa? Los leads en esta etapa quedarán sin etapa asignada.')) return
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch(`/api/pipelines/${activePipeline.id}/stages/${stageId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        fetchPipelines()
-        fetchLeadsPaginated()
-      }
-    } catch (err) {
-      console.error('Failed to delete stage:', err)
-    }
-  }
-
-  const handleUpdateStage = async (stageId: string) => {
-    if (!activePipeline || !editStageName.trim()) return
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch(`/api/pipelines/${activePipeline.id}/stages/${stageId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ name: editStageName.trim(), color: editStageColor }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setEditingStageId(null)
-        fetchPipelines()
-      }
-    } catch (err) {
-      console.error('Failed to update stage:', err)
-    }
   }
 
   // Create event from current lead filters
@@ -2034,18 +2278,19 @@ export default function LeadsPage() {
   useEffect(() => {
     const handleEscapeKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (lifecycleRequest) return // handled by the accessible lifecycle dialog
         if (showDeviceSelector) { setShowDeviceSelector(false); return }
         if (showStageModal) { setShowStageModal(false); return }
         if (showAddModal) { setShowAddModal(false); return }
         if (showEditModal) { setShowEditModal(false); return }
-        if (showFilterDropdown) { setShowFilterDropdown(false); return }
+        if (showFilterDropdown) { discardFilterDraft(); return }
         if (showInlineChat) { resetInlineChatState(); return }
         if (showDetailPanel) { setShowDetailPanel(false); resetInlineChatState(); return }
       }
     }
     window.addEventListener('keydown', handleEscapeKey)
     return () => window.removeEventListener('keydown', handleEscapeKey)
-  }, [resetInlineChatState, showDeviceSelector, showStageModal, showAddModal, showEditModal, showFilterDropdown, showInlineChat, showDetailPanel])
+  }, [resetInlineChatState, lifecycleRequest, showDeviceSelector, showStageModal, showAddModal, showEditModal, showFilterDropdown, showInlineChat, showDetailPanel, discardFilterDraft])
 
   // Tags for filter dropdown (from server response)
   const allUniqueTags = useMemo(() =>
@@ -2075,7 +2320,7 @@ export default function LeadsPage() {
     return tag.name.toLowerCase().includes(term.toLowerCase())
   })
 
-  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + cfFilters.length
+  const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + filterDeviceIds.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + cfFilters.length
 
   // Export leads
   const handleExportLeads = async () => {
@@ -2086,6 +2331,7 @@ export default function LeadsPage() {
       if (exportScope === 'filtered') {
         // Mirror EXACTLY the filters used by fetchListLeads so the export matches the visible list.
         params.set('status_filter', statusFilter)
+        params.set('lifecycle', statusFilter === 'active' ? 'open' : statusFilter)
         if (activePipeline && !debouncedSearchTerm) params.set('pipeline_id', activePipeline.id)
         if (debouncedSearchTerm) params.set('search', debouncedSearchTerm)
         if (appliedFormulaType === 'advanced' && appliedFormulaText) {
@@ -2253,11 +2499,15 @@ export default function LeadsPage() {
     }
   }
 
-  // Visible stages (from server data, filtered by hiddenStageIds)
-  const visibleStages = useMemo(() =>
-    stageData.filter(s => !hiddenStageIds.has(s.id)),
-    [stageData, hiddenStageIds]
-  )
+  // Keep lifecycle views focused: open opportunities use active stages and
+  // closed views use only their corresponding terminal result.
+  const visibleStages = useMemo(() => stageData.filter(stage => {
+    if (hiddenStageIds.has(stage.id)) return false
+    if (statusFilter === 'active') return stage.stage_type !== 'won' && stage.stage_type !== 'lost'
+    if (statusFilter === 'won') return stage.stage_type === 'won'
+    if (statusFilter === 'lost') return stage.stage_type === 'lost'
+    return stage.total_count > 0
+  }), [stageData, hiddenStageIds, statusFilter])
 
   // List virtualizer
   const listVirtualizer = useVirtualizer({
@@ -2370,24 +2620,35 @@ export default function LeadsPage() {
           </div>
         )}
 
-        <div ref={filterDropdownRef} className="flex-1 max-w-sm relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 z-10" />
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            onFocus={() => setShowFilterDropdown(true)}
-            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
-            placeholder="Buscar leads..."
-            className={`w-full pl-8 pr-3 py-1.5 bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 text-sm ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
-          />
-          {activeFilterCount > 0 && !showFilterDropdown && (
-            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 bg-emerald-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center">{activeFilterCount}</span>
-          )}
+        <div ref={filterDropdownRef} className="relative max-w-lg flex-1">
+          <div className="flex items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Search className="absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+              <input
+                type="search"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Buscar oportunidades…"
+                aria-label="Buscar oportunidades en todos los pipelines"
+                className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => showFilterDropdown ? discardFilterDraft() : openFilters()}
+              className={`relative inline-flex h-11 shrink-0 items-center gap-2 rounded-xl border px-3 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${showFilterDropdown || activeFilterCount > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
+              aria-expanded={showFilterDropdown}
+              aria-haspopup="dialog"
+            >
+              <Filter className="h-4 w-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Filtros</span>
+              {activeFilterCount > 0 && <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-emerald-600 px-1.5 text-[10px] font-bold text-white">{activeFilterCount}</span>}
+            </button>
+          </div>
 
           {/* Filter Dropdown — Two-Column Layout */}
           {showFilterDropdown && (
-            <div className="absolute top-full left-0 mt-1 w-[min(600px,90vw)] bg-white border border-slate-200/80 rounded-2xl shadow-2xl shadow-slate-200/50 z-30 flex flex-col max-h-[70vh]">
+            <div className="fixed inset-0 z-[70] flex max-h-none w-full flex-col rounded-none border border-slate-200/80 bg-white shadow-2xl shadow-slate-200/50 sm:absolute sm:inset-auto sm:left-0 sm:top-full sm:z-30 sm:mt-1 sm:max-h-[70vh] sm:w-[min(600px,90vw)] sm:rounded-2xl" role="dialog" aria-modal="true" aria-label="Filtros de oportunidades">
               {/* ─── Header ─── */}
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-2.5">
@@ -2400,33 +2661,33 @@ export default function LeadsPage() {
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
                     <button
-                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setCfFilters([]) }}
+                      onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setFilterDeviceIds(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setCfFilters([]) }}
                       className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                     >
                       Limpiar todo
                     </button>
                   )}
-                  <button onClick={() => setShowFilterDropdown(false)} className="p-1 hover:bg-slate-100 rounded-lg transition-colors">
+                  <button onClick={discardFilterDraft} className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Descartar cambios y cerrar filtros">
                     <X className="w-4 h-4 text-slate-400" />
                   </button>
                 </div>
               </div>
 
               {/* ─── Responsive Body: 2 cols when space, 1 col when narrow ─── */}
-              <div className="flex flex-col sm:flex-row flex-1 min-h-0 overflow-hidden">
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto sm:flex-row sm:overflow-hidden">
 
                 {/* ══ Left Column — Selections ══ */}
-                <div className="w-full sm:w-[240px] shrink-0 border-b sm:border-b-0 sm:border-r border-slate-100 overflow-y-auto p-3 space-y-4 bg-slate-50/30 max-h-[30vh] sm:max-h-none">
+                <div className="w-full shrink-0 space-y-4 border-b border-slate-100 bg-slate-50/30 p-3 sm:w-[240px] sm:overflow-y-auto sm:border-b-0 sm:border-r">
 
                   {/* Stage pills */}
-                  {stages.length > 0 && (
+                  {filterableStages.length > 0 && (
                     <div>
                       <div className="flex items-center gap-2 mb-2.5">
                         <div className="w-1 h-3.5 bg-slate-300 rounded-full" />
                         <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Etapas</p>
                       </div>
                       <div className="flex flex-wrap gap-1.5">
-                        {stages.map(stage => {
+                        {filterableStages.map(stage => {
                           const isActive = filterStageIds.has(stage.id)
                           return (
                             <button
@@ -2436,13 +2697,14 @@ export default function LeadsPage() {
                                 if (isActive) next.delete(stage.id); else next.add(stage.id)
                                 setFilterStageIds(next)
                               }}
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all border ${
-                                isActive ? 'border-transparent text-white shadow-sm' : 'border-slate-200 text-slate-600 hover:bg-white hover:shadow-sm'
+                              className={`inline-flex min-h-10 items-center gap-1.5 rounded-xl border px-2.5 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                                isActive ? 'border-emerald-300 bg-emerald-50 text-emerald-800 shadow-sm' : 'border-slate-200 text-slate-600 hover:bg-white hover:shadow-sm'
                               }`}
-                              style={isActive ? { backgroundColor: stage.color } : {}}
+                              aria-pressed={isActive}
                             >
-                              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: stage.color }} />
+                              <div className="h-2 w-2 rounded-full" style={{ backgroundColor: stage.color }} aria-hidden="true" />
                               {stage.name}
+                              {isActive && <CheckCircle2 className="h-3 w-3" aria-hidden="true" />}
                             </button>
                           )
                         })}
@@ -2524,6 +2786,33 @@ export default function LeadsPage() {
                       </div>
                     )}
                   </div>
+
+                  {devices.length > 0 && (
+                    <div>
+                      <div className="mb-2.5 flex items-center gap-2">
+                        <div className="h-3.5 w-1 rounded-full bg-violet-400" />
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Dispositivo</p>
+                      </div>
+                      <div className="space-y-1">
+                        {devices.map(device => (
+                          <label key={device.id} className="flex min-h-10 cursor-pointer items-center gap-2 rounded-lg px-2 text-xs text-slate-700 hover:bg-white">
+                            <input
+                              type="checkbox"
+                              checked={filterDeviceIds.has(device.id)}
+                              onChange={() => setFilterDeviceIds(current => {
+                                const next = new Set(current)
+                                if (next.has(device.id)) next.delete(device.id)
+                                else next.add(device.id)
+                                return next
+                              })}
+                              className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                            />
+                            <span className="truncate">{device.name || device.phone || 'Dispositivo'}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Active tag selections */}
                   {allUniqueTags.length > 0 && (
@@ -2618,7 +2907,7 @@ export default function LeadsPage() {
 
                 {/* ══ Center Column — Custom Fields ══ */}
                 {cfDefs.length > 0 && (
-                <div className="w-full sm:w-[220px] shrink-0 border-b sm:border-b-0 sm:border-r border-slate-100 overflow-y-auto p-3 space-y-3 max-h-[30vh] sm:max-h-none">
+                <div className="w-full shrink-0 space-y-3 border-b border-slate-100 p-3 sm:w-[220px] sm:overflow-y-auto sm:border-b-0 sm:border-r">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="w-1 h-3.5 bg-violet-400 rounded-full" />
@@ -2750,10 +3039,12 @@ export default function LeadsPage() {
                       {/* Top controls — shrink-0 */}
                       <div className="p-3 pb-0 shrink-0 space-y-2.5">
                         {/* Simple / Advanced tabs */}
-                        <div className="flex rounded-xl border border-slate-200 bg-slate-50/50 overflow-hidden">
+                        <div className="flex overflow-hidden rounded-xl border border-slate-200 bg-slate-50/50" role="tablist" aria-label="Modo de filtrado por etiquetas">
                           <button type="button"
                             onClick={() => setLeadFormulaType('simple')}
-                            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-[11px] font-semibold transition-all ${
+                            role="tab"
+                            aria-selected={leadFormulaType === 'simple'}
+                            className={`flex min-h-11 flex-1 items-center justify-center gap-1.5 px-3 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${
                               leadFormulaType === 'simple'
                                 ? 'bg-emerald-500 text-white shadow-sm'
                                 : 'text-slate-500 hover:bg-white hover:text-slate-700'
@@ -2763,7 +3054,9 @@ export default function LeadsPage() {
                           </button>
                           <button type="button"
                             onClick={() => setLeadFormulaType('advanced')}
-                            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-[11px] font-semibold transition-all ${
+                            role="tab"
+                            aria-selected={leadFormulaType === 'advanced'}
+                            className={`flex min-h-11 flex-1 items-center justify-center gap-1.5 px-3 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500 ${
                               leadFormulaType === 'advanced'
                                 ? 'bg-violet-500 text-white shadow-sm'
                                 : 'text-slate-500 hover:bg-white hover:text-slate-700'
@@ -2777,20 +3070,26 @@ export default function LeadsPage() {
                         {leadFormulaType === 'simple' && (
                           <>
                             <div className="flex items-center gap-3">
-                              <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+                              <div className="inline-flex overflow-hidden rounded-lg border border-slate-200" role="radiogroup" aria-label="Coincidencia de etiquetas incluidas">
                                 <button
+                                  type="button"
                                   onClick={() => setTagFilterMode('OR')}
-                                  className={`px-3 py-1 text-[10px] font-bold tracking-wide transition-all ${
+                                  role="radio"
+                                  aria-checked={tagFilterMode === 'OR'}
+                                  className={`min-h-10 px-3 text-[10px] font-bold tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${
                                     tagFilterMode === 'OR' ? 'bg-emerald-500 text-white' : 'bg-white text-slate-400 hover:bg-slate-50'
                                   }`}>
-                                  OR
+                                  Cualquiera
                                 </button>
                                 <button
+                                  type="button"
                                   onClick={() => setTagFilterMode('AND')}
-                                  className={`px-3 py-1 text-[10px] font-bold tracking-wide transition-all ${
+                                  role="radio"
+                                  aria-checked={tagFilterMode === 'AND'}
+                                  className={`min-h-10 px-3 text-[10px] font-bold tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${
                                     tagFilterMode === 'AND' ? 'bg-blue-500 text-white' : 'bg-white text-slate-400 hover:bg-slate-50'
                                   }`}>
-                                  AND
+                                  Todas
                                 </button>
                               </div>
                               <p className="text-[10px] text-slate-400 leading-tight">
@@ -2804,7 +3103,7 @@ export default function LeadsPage() {
                                 type="text"
                                 value={tagSearchTerm}
                                 onChange={(e) => setTagSearchTerm(e.target.value)}
-                                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
+                                onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault() }}
                                 placeholder="Buscar etiquetas... (% = comodín)"
                                 className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all"
                               />
@@ -2815,7 +3114,7 @@ export default function LeadsPage() {
 
                       {/* ─── SIMPLE MODE — Tag list (scrollable, fills space) ─── */}
                       {leadFormulaType === 'simple' && (
-                        <div className="flex-1 min-h-0 overflow-y-auto p-3 pt-2">
+                        <div className="min-h-0 flex-1 p-3 pt-2 sm:overflow-y-auto">
                           <div className="space-y-0.5">
                             {filteredTags.map(tag => {
                               const isIncluded = filterTagNames.has(tag.name)
@@ -2824,17 +3123,7 @@ export default function LeadsPage() {
                               return (
                                 <div
                                   key={tag.id}
-                                  onClick={() => {
-                                    if (!isIncluded && !isExcluded) {
-                                      const next = new Set(filterTagNames); next.add(tag.name); setFilterTagNames(next)
-                                    } else if (isIncluded) {
-                                      const incl = new Set(filterTagNames); incl.delete(tag.name); setFilterTagNames(incl)
-                                      const excl = new Set(excludeFilterTagNames); excl.add(tag.name); setExcludeFilterTagNames(excl)
-                                    } else {
-                                      const next = new Set(excludeFilterTagNames); next.delete(tag.name); setExcludeFilterTagNames(next)
-                                    }
-                                  }}
-                                  className={`flex items-center gap-2.5 px-2.5 py-2 rounded-xl cursor-pointer select-none transition-all ${
+                                  className={`flex items-center gap-2 px-2.5 py-1.5 rounded-xl transition-all ${
                                     isIncluded
                                       ? 'bg-emerald-50 ring-1 ring-emerald-200'
                                       : isExcluded
@@ -2842,27 +3131,43 @@ export default function LeadsPage() {
                                         : 'hover:bg-white hover:shadow-sm'
                                   }`}
                                 >
-                                  {isIncluded ? (
-                                    <div className="w-5 h-5 rounded-full shrink-0 bg-emerald-500 flex items-center justify-center shadow-sm shadow-emerald-200">
-                                      <CheckSquare className="w-3 h-3 text-white" />
-                                    </div>
-                                  ) : isExcluded ? (
-                                    <div className="w-5 h-5 rounded-full shrink-0 bg-red-500 flex items-center justify-center shadow-sm shadow-red-200">
-                                      <X className="w-3 h-3 text-white" />
-                                    </div>
-                                  ) : (
-                                    <div className="w-3.5 h-3.5 rounded-full shrink-0 ring-2 ring-white shadow-sm" style={{ backgroundColor: tag.color }} />
-                                  )}
+                                  <div className="h-3.5 w-3.5 shrink-0 rounded-full ring-2 ring-white shadow-sm" style={{ backgroundColor: tag.color }} aria-hidden="true" />
                                   <span className={`flex-1 text-[12px] transition-colors ${
                                     isIncluded
                                       ? 'text-emerald-700 font-semibold'
                                       : isExcluded
-                                        ? 'text-red-400 line-through'
+                                        ? 'text-red-700 font-semibold'
                                         : 'text-slate-700'
                                   }`}>{tag.name}</span>
                                   <span className={`text-[10px] tabular-nums font-medium px-1.5 py-0.5 rounded-md ${
                                     isIncluded ? 'bg-emerald-100 text-emerald-600' : isExcluded ? 'bg-red-100 text-red-500' : 'bg-slate-100 text-slate-400'
                                   }`}>{count}</span>
+                                  <div className="inline-flex overflow-hidden rounded-lg border border-slate-200 bg-white" aria-label={`Filtro para ${tag.name}`}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const include = new Set(filterTagNames)
+                                        const exclude = new Set(excludeFilterTagNames)
+                                        if (isIncluded) include.delete(tag.name)
+                                        else { include.add(tag.name); exclude.delete(tag.name) }
+                                        setFilterTagNames(include); setExcludeFilterTagNames(exclude)
+                                      }}
+                                      className={`min-h-10 px-2 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${isIncluded ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-emerald-50 hover:text-emerald-700'}`}
+                                      aria-pressed={isIncluded}
+                                    >Incluir</button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const include = new Set(filterTagNames)
+                                        const exclude = new Set(excludeFilterTagNames)
+                                        if (isExcluded) exclude.delete(tag.name)
+                                        else { exclude.add(tag.name); include.delete(tag.name) }
+                                        setFilterTagNames(include); setExcludeFilterTagNames(exclude)
+                                      }}
+                                      className={`min-h-10 border-l border-slate-200 px-2 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500 ${isExcluded ? 'bg-red-600 text-white' : 'text-slate-500 hover:bg-red-50 hover:text-red-700'}`}
+                                      aria-pressed={isExcluded}
+                                    >Excluir</button>
+                                  </div>
                                 </div>
                               )
                             })}
@@ -2878,7 +3183,7 @@ export default function LeadsPage() {
 
                       {/* ─── ADVANCED MODE ─── */}
                       {leadFormulaType === 'advanced' && (
-                        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+                        <div className="min-h-0 flex-1 space-y-3 p-3 sm:overflow-y-auto">
                           <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100">
                             <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Sintaxis</div>
                             <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-600">
@@ -2918,10 +3223,11 @@ export default function LeadsPage() {
                   onClick={() => {
                     setAppliedFormulaType(leadFormulaType)
                     setAppliedFormulaText(leadFormulaType === 'advanced' ? leadFormulaText : '')
+                    filterSnapshotRef.current = null
                     setShowFilterDropdown(false)
                   }}
                   disabled={leadFormulaType === 'advanced' && !leadFormulaIsValid}
-                  className="w-full px-4 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm font-semibold shadow-sm shadow-emerald-200 hover:shadow-md hover:shadow-emerald-200"
+                  className="min-h-11 w-full rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm shadow-emerald-200 transition-all hover:bg-emerald-700 hover:shadow-md hover:shadow-emerald-200 active:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Aplicar
                 </button>
@@ -2937,9 +3243,12 @@ export default function LeadsPage() {
               <span className="flex items-center px-2 py-1.5 text-xs text-slate-500 font-medium whitespace-nowrap">
                 {selectedIds.size} sel.
               </span>
-              <button onClick={selectAll} className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600 font-medium">
+              <button onClick={selectAll} className="min-h-10 px-3 text-xs border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-600 font-medium">
                 Todos
               </button>
+              {statusFilter === 'trash' && (
+                <button onClick={handleRestoreSelected} disabled={selectedIds.size === 0 || deleting} className="inline-flex min-h-10 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"><ArchiveRestore className="h-3.5 w-3.5" />Restaurar</button>
+              )}
               {statusFilter === 'active' && (
                 <button
                   onClick={() => openArchiveModal(null, true)}
@@ -2960,14 +3269,14 @@ export default function LeadsPage() {
                   Restaurar
                 </button>
               )}
-              {statusFilter !== 'blocked' && (
+              {statusFilter !== 'blocked' && statusFilter !== 'trash' && (
                 <button
                   onClick={() => openBlockModal(null, true)}
                   disabled={selectedIds.size === 0 || deleting}
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 font-medium"
                 >
                   <ShieldBan className="w-3 h-3" />
-                  Bloquear
+                  No contactar
                 </button>
               )}
               {statusFilter === 'blocked' && (
@@ -2977,10 +3286,10 @@ export default function LeadsPage() {
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 font-medium"
                 >
                   <ShieldOff className="w-3 h-3" />
-                  Desbloquear
+                  Permitir contacto
                 </button>
               )}
-              {googleConnected && (
+              {googleConnected && statusFilter !== 'trash' && (
                 <>
                   <button
                     onClick={handleGoogleBatchSyncFromLeads}
@@ -3000,16 +3309,16 @@ export default function LeadsPage() {
                   </button>
                 </>
               )}
-              <button
+              {statusFilter !== 'trash' && <button
                 onClick={handleDeleteSelected}
                 disabled={selectedIds.size === 0 || deleting}
                 className="px-2.5 py-1.5 text-xs bg-red-800 text-white rounded-lg hover:bg-red-900 disabled:opacity-50 font-medium"
               >
-                {deleting ? '...' : `Eliminar (${selectedIds.size})`}
-              </button>
+                {deleting ? '...' : `Papelera (${selectedIds.size})`}
+              </button>}
               <button
                 onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
-                className="w-8 h-8 flex items-center justify-center border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-500 hover:text-slate-700 transition-colors"
+                className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700"
                 title="Cancelar selección"
               >
                 <X className="w-4 h-4" />
@@ -3035,7 +3344,7 @@ export default function LeadsPage() {
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors"
                   >
                     <Plus className="w-4 h-4 text-emerald-500" />
-                    Nuevo lead
+                    Nueva oportunidad
                   </button>
                   <button
                     onClick={() => { fetchDevices(); setShowBroadcastModal(true); setShowMoreMenu(false) }}
@@ -3058,7 +3367,7 @@ export default function LeadsPage() {
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
                   >
                     <Settings className="w-4 h-4 text-slate-400" />
-                    Etapas
+                    Gestionar etapas
                   </button>
                   <div className="my-1 border-t border-slate-100" />
                   <button
@@ -3080,7 +3389,7 @@ export default function LeadsPage() {
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
                   >
                     <Download className="w-4 h-4 text-slate-400" />
-                    Exportar leads
+                    Exportar oportunidades
                   </button>
                   <button
                     onClick={() => { setShowBulkDocModal(true); setShowMoreMenu(false) }}
@@ -3096,42 +3405,8 @@ export default function LeadsPage() {
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 hover:bg-emerald-50 transition-colors"
                   >
                     <Calendar className="w-4 h-4 text-emerald-500" />
-                    Crear Evento desde Leads
+                    Crear evento desde oportunidades
                   </button>
-                  {devices.length > 0 && (
-                    <>
-                      <div className="my-1 border-t border-slate-100" />
-                      <div className="px-4 py-2">
-                        <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Filtrar por dispositivo</p>
-                        {devices.map(d => (
-                          <label key={d.id} className="flex items-center gap-2 py-1 cursor-pointer text-sm">
-                            <input
-                              type="checkbox"
-                              checked={filterDeviceIds.has(d.id)}
-                              onChange={() => {
-                                setFilterDeviceIds(prev => {
-                                  const next = new Set(prev)
-                                  if (next.has(d.id)) next.delete(d.id)
-                                  else next.add(d.id)
-                                  return next
-                                })
-                              }}
-                              className="w-3.5 h-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                            />
-                            <span className="text-slate-700 text-xs">{d.name || d.phone || 'Dispositivo'}</span>
-                          </label>
-                        ))}
-                        {filterDeviceIds.size > 0 && (
-                          <button
-                            onClick={() => setFilterDeviceIds(new Set())}
-                            className="w-full mt-1 text-xs text-slate-500 hover:text-slate-700 py-0.5"
-                          >
-                            Limpiar filtro
-                          </button>
-                        )}
-                      </div>
-                    </>
-                  )}
                 </div>
               )}
             </div>
@@ -3139,24 +3414,47 @@ export default function LeadsPage() {
         </div>
       </div>
 
+      {resultsError && (
+        <div className="mb-2 flex shrink-0 items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800" role="alert">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1">{resultsError}</span>
+          <button type="button" onClick={() => viewMode === 'list' ? fetchListLeads(true) : fetchLeadsPaginated()} className="min-h-10 rounded-xl bg-white px-3 font-semibold text-red-700 ring-1 ring-red-200 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">Reintentar</button>
+        </div>
+      )}
+      <p className="sr-only" aria-live="polite">{viewMode === 'list' ? listTotal : totalLeadCount} oportunidades encontradas.</p>
+
       {/* Row 2: Status tabs + Pipeline selector */}
-      <div className="flex items-center gap-1 mb-2 shrink-0">
+      <div className="mb-2 flex shrink-0 items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto pb-1">
+        <div className="flex items-center gap-1" role="tablist" aria-label="Ciclo de vida de las oportunidades">
         <button
           onClick={() => setStatusFilter('active')}
-          className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-lg transition ${
+          role="tab"
+          aria-selected={statusFilter === 'active'}
+          className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
             statusFilter === 'active'
               ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
               : 'text-slate-500 hover:bg-slate-50'
           }`}
         >
-          Activos
+          Abiertas
           <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
             statusFilter === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
           }`}>{leadCounts.active}</span>
         </button>
+        <button onClick={() => setStatusFilter('won')} role="tab" aria-selected={statusFilter === 'won'} className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${statusFilter === 'won' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}>
+          <CheckCircle2 className="h-3.5 w-3.5" />Ganadas
+          {leadCounts.won > 0 && <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${statusFilter === 'won' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>{leadCounts.won}</span>}
+        </button>
+        <button onClick={() => setStatusFilter('lost')} role="tab" aria-selected={statusFilter === 'lost'} className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${statusFilter === 'lost' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}>
+          <XCircle className="h-3.5 w-3.5" />Perdidas
+          {leadCounts.lost > 0 && <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${statusFilter === 'lost' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>{leadCounts.lost}</span>}
+        </button>
         <button
           onClick={() => setStatusFilter('archived')}
-          className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-lg transition ${
+          role="tab"
+          aria-selected={statusFilter === 'archived'}
+          className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${
             statusFilter === 'archived'
               ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
               : 'text-slate-500 hover:bg-slate-50'
@@ -3170,26 +3468,35 @@ export default function LeadsPage() {
             }`}>{leadCounts.archived}</span>
           )}
         </button>
-        <button
-          onClick={() => setStatusFilter('blocked')}
-          className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-lg transition ${
-            statusFilter === 'blocked'
-              ? 'bg-red-50 text-red-700 ring-1 ring-red-200'
-              : 'text-slate-500 hover:bg-slate-50'
-          }`}
-        >
-          <ShieldBan className="w-3 h-3" />
-          Bloqueados
-          {leadCounts.blocked > 0 && (
-            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
-              statusFilter === 'blocked' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'
-            }`}>{leadCounts.blocked}</span>
-          )}
+        <button onClick={() => setStatusFilter('trash')} role="tab" aria-selected={statusFilter === 'trash'} className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 ${statusFilter === 'trash' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}>
+          <Trash2 className="h-3.5 w-3.5" />Papelera
+          {leadCounts.trash > 0 && <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${statusFilter === 'trash' ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>{leadCounts.trash}</span>}
         </button>
+        </div>
+        <div className="mx-1 h-7 w-px shrink-0 bg-slate-200" aria-hidden="true" />
+        <div role="group" aria-label="Preferencia de comunicación">
+          <button
+            type="button"
+            onClick={() => setStatusFilter('blocked')}
+            aria-pressed={statusFilter === 'blocked'}
+            title="Filtro transversal: puede incluir oportunidades abiertas, ganadas, perdidas o archivadas"
+            className={`inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${
+              statusFilter === 'blocked'
+                ? 'bg-red-50 text-red-700 ring-1 ring-red-200'
+                : 'text-slate-500 hover:bg-slate-50'
+            }`}
+          >
+            <ShieldBan className="h-3.5 w-3.5" />
+            No contactables
+            {leadCounts.blocked > 0 && <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${statusFilter === 'blocked' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'}`}>{leadCounts.blocked}</span>}
+          </button>
+        </div>
+        </div>
         {pipelines.length > 0 && (
-          <div className="relative ml-auto">
+          <div className="relative shrink-0">
             <select
               value={activePipeline?.id || ''}
+              disabled={Boolean(debouncedSearchTerm)}
               onChange={(e) => {
                 const val = e.target.value
                 if (val === '__no_pipeline__') {
@@ -3199,7 +3506,8 @@ export default function LeadsPage() {
                   if (p) setActivePipeline(p)
                 }
               }}
-              className="pl-2 pr-6 py-1 bg-white border border-slate-200 rounded-lg focus:ring-1 focus:ring-emerald-500 appearance-none cursor-pointer text-xs text-slate-700"
+              className="h-10 max-w-[170px] appearance-none truncate rounded-xl border border-slate-200 bg-white pl-3 pr-8 text-xs font-medium text-slate-700 focus:ring-2 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+              title={debouncedSearchTerm ? 'La búsqueda consulta todos los pipelines' : 'Seleccionar pipeline'}
             >
               {pipelines.map(p => (
                 <option key={p.id} value={p.id}>{p.name}</option>
@@ -3216,14 +3524,34 @@ export default function LeadsPage() {
         <div className="flex items-center gap-2 px-3 py-1.5 mb-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
           <EyeOff className="w-3.5 h-3.5 shrink-0" />
           <span>
-            {hiddenByStatus} lead{hiddenByStatus !== 1 ? 's' : ''} {statusFilter === 'active' ? 'archivado' + (hiddenByStatus !== 1 ? 's' : '') + '/bloqueado' + (hiddenByStatus !== 1 ? 's' : '') : statusFilter === 'archived' ? 'activo' + (hiddenByStatus !== 1 ? 's' : '') + '/bloqueado' + (hiddenByStatus !== 1 ? 's' : '') : 'activo' + (hiddenByStatus !== 1 ? 's' : '') + '/archivado' + (hiddenByStatus !== 1 ? 's' : '')} coinciden con este filtro.
+            {hiddenByStatus} oportunidad{hiddenByStatus !== 1 ? 'es' : ''} coinciden con los filtros, pero pertenecen a otra vista del ciclo de vida.
           </span>
         </div>
       )}
 
       {/* Pipeline Kanban — Virtualized */}
       {viewMode === 'kanban' && (
-      <div className="flex-1 min-h-0 flex flex-col">
+      <div className="relative flex flex-1 min-h-0 flex-col">
+      {statusFilter === 'active' && draggedLeadId && terminalStages.length > 0 && (
+        <div className="pointer-events-none absolute inset-x-4 top-3 z-40 mx-auto grid max-w-xl gap-2 sm:grid-cols-2" aria-label="Destinos para cerrar un lead">
+          {terminalStages.map(stage => {
+            const won = stage.stage_type === 'won'
+            const activeDrop = dragOverColumn === stage.id
+            return (
+              <div
+                key={stage.id}
+                onDragOver={event => handleDragOver(event, stage.id)}
+                onDragLeave={handleDragLeave}
+                onDrop={event => handleDrop(event, stage.id)}
+                className={`pointer-events-auto flex min-h-12 items-center justify-center gap-2 rounded-2xl border px-4 text-xs font-bold shadow-xl backdrop-blur-sm transition ${won ? 'border-emerald-300 bg-emerald-50/95 text-emerald-800' : 'border-red-300 bg-red-50/95 text-red-800'} ${activeDrop ? 'scale-[1.02] ring-2 ring-offset-2 ' + (won ? 'ring-emerald-400' : 'ring-red-400') : ''}`}
+              >
+                {won ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <XCircle className="h-4 w-4" aria-hidden="true" />}
+                Suelta para marcar como {won ? 'ganado' : 'perdido'}
+              </div>
+            )
+          })}
+        </div>
+      )}
       {/* Top synced scrollbar */}
       <div
         ref={topScrollRef}
@@ -3255,6 +3583,9 @@ export default function LeadsPage() {
                     onToggleSelection={toggleSelection}
               onOpenDetail={openDetailPanel}
               onDelete={handleDeleteLead}
+              onRestore={handleRestoreLead}
+              onLifecycleAction={requestLifecycleAction}
+              isTrash={statusFilter === 'trash'}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
               onDragOver={handleDragOver}
@@ -3284,6 +3615,9 @@ export default function LeadsPage() {
               onToggleSelection={toggleSelection}
               onOpenDetail={openDetailPanel}
               onDelete={handleDeleteLead}
+              onRestore={handleRestoreLead}
+              onLifecycleAction={requestLifecycleAction}
+              isTrash={statusFilter === 'trash'}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
               onDragOver={handleDragOver}
@@ -3376,8 +3710,8 @@ export default function LeadsPage() {
               <div style={{ height: listVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
                 {listVirtualizer.getVirtualItems().map((virtualRow) => {
                   const lead = listLeads[virtualRow.index]
-                  const stageName = lead.stage_name || stages.find(s => s.id === lead.stage_id)?.name
-                  const stageColor = lead.stage_color || stages.find(s => s.id === lead.stage_id)?.color || '#94a3b8'
+                  const stageName = lead.stage_name || allStages.find(s => s.id === lead.stage_id)?.name
+                  const stageColor = lead.stage_color || allStages.find(s => s.id === lead.stage_id)?.color || '#94a3b8'
                   const obs = listObservations.get(lead.id)
                   const isExpanded = expandedListLeadId === lead.id
 
@@ -3418,10 +3752,8 @@ export default function LeadsPage() {
                               </span>
                             </div>
                             <div className="min-w-0">
-                              <p className="text-[13px] font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
-                              {lead.phone && (
-                                <p className="text-[11px] text-slate-500 mt-0.5">{lead.phone}</p>
-                              )}
+                              <p className="truncate text-[13px] font-semibold text-slate-900">{lead.name || 'Sin nombre'}</p>
+                              <p className="mt-0.5 truncate text-[11px] text-slate-500">{lead.phone || 'Sin teléfono'}</p>
                             </div>
                           </div>
                         </div>
@@ -3429,10 +3761,8 @@ export default function LeadsPage() {
                         {/* Stage */}
                         <div className="px-3 py-2.5 w-[110px]">
                           {stageName ? (
-                            <span
-                              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white"
-                              style={{ backgroundColor: stageColor }}
-                            >
+                            <span className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                              <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: stageColor }} aria-hidden="true" />
                               {stageName}
                             </span>
                           ) : (
@@ -3512,13 +3842,13 @@ export default function LeadsPage() {
 
                         {/* Actions */}
                         {!selectionMode && (
-                        <div className="px-3 py-2.5 w-[40px]">
+                        <div className="w-[52px] px-1 py-1.5">
                           <button
-                            onClick={(e) => { e.stopPropagation(); handleDeleteLead(lead.id) }}
-                            className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                            title="Eliminar"
+                            onClick={(e) => { e.stopPropagation(); statusFilter === 'trash' ? handleRestoreLead(lead.id) : handleDeleteLead(lead.id) }}
+                            className={`inline-flex h-10 w-10 items-center justify-center rounded-xl opacity-0 transition-all focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 group-hover:opacity-100 ${statusFilter === 'trash' ? 'text-slate-400 hover:bg-emerald-50 hover:text-emerald-700' : 'text-slate-300 hover:bg-red-50 hover:text-red-600'}`}
+                            aria-label={statusFilter === 'trash' ? `Restaurar ${lead.title || lead.name || 'oportunidad'}` : `Mover ${lead.title || lead.name || 'oportunidad'} a la papelera`}
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            {statusFilter === 'trash' ? <ArchiveRestore className="h-4 w-4" /> : <Trash2 className="h-4 w-4" />}
                           </button>
                         </div>
                         )}
@@ -3530,7 +3860,7 @@ export default function LeadsPage() {
             ) : (
               <div className="flex flex-col items-center justify-center py-16 text-slate-400">
                 <FileText className="w-10 h-10 mb-2 text-slate-300" />
-                <p className="text-sm">No se encontraron leads</p>
+                <p className="text-sm">No se encontraron oportunidades</p>
               </div>
             )}
             {listLoading && (
@@ -3560,10 +3890,32 @@ export default function LeadsPage() {
 
       {/* Add Lead Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md border border-slate-100">
-            <h2 className="text-lg font-semibold text-slate-900 mb-4">Nuevo Lead</h2>
-            <div className="space-y-3">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) closeAddLeadDialog() }}>
+          <div ref={addLeadDialogRef} role="dialog" aria-modal="true" aria-labelledby="create-lead-title" aria-describedby="create-lead-description" tabIndex={-1} className="flex h-full w-full max-w-xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-3xl sm:border sm:border-slate-100">
+            <header className="flex items-start gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><Plus className="h-5 w-5" /></div>
+              <div className="min-w-0 flex-1">
+                <h2 id="create-lead-title" className="text-lg font-bold text-slate-900">Nueva oportunidad</h2>
+                <p id="create-lead-description" className="mt-1 text-sm leading-relaxed text-slate-500">Describe la oportunidad comercial y la persona interesada por separado.</p>
+              </div>
+              <button type="button" onClick={closeAddLeadDialog} disabled={creatingLead} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50" aria-label="Cerrar"><X className="h-5 w-5" /></button>
+            </header>
+            <main className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="new-lead-title" className="mb-1.5 block text-xs font-bold text-slate-700">Concepto de la oportunidad *</label>
+                <input
+                  id="new-lead-title"
+                  ref={newLeadTitleRef}
+                  type="text"
+                  maxLength={160}
+                  value={formData.title}
+                  onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                  className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm font-semibold text-slate-900 placeholder:font-normal placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  placeholder="Ej. Inscripción al programa 2026"
+                />
+                <p className="mt-1.5 text-xs text-slate-400">Esto identifica la oportunidad; no reemplaza el nombre del contacto.</p>
+              </div>
               {/* Pipeline & Stage selector */}
               {activePipeline && activePipeline.stages && activePipeline.stages.length > 0 && (
                 <div>
@@ -3575,10 +3927,10 @@ export default function LeadsPage() {
                     <select
                       value={formData.stage_id || ''}
                       onChange={(e) => setFormData({ ...formData, stage_id: e.target.value })}
-                      className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
+                  className="h-11 flex-1 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500"
                     >
                       <option value="">Automático (configuración de cuenta)</option>
-                      {activePipeline.stages.map((st) => (
+                      {activePipeline.stages.filter(stage => stage.stage_type !== 'won' && stage.stage_type !== 'lost').map((st) => (
                         <option key={st.id} value={st.id}>{st.name}</option>
                       ))}
                     </select>
@@ -3586,13 +3938,13 @@ export default function LeadsPage() {
                 </div>
               )}
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Nombre *</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Nombre del contacto *</label>
                 <input
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
-                  placeholder="Nombre del lead"
+                  className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
+                  placeholder="Nombre de la persona"
                 />
               </div>
               <div>
@@ -3601,7 +3953,7 @@ export default function LeadsPage() {
                   type="tel"
                   value={formData.phone}
                   onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
+                  className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
                   placeholder="+51 999 888 777"
                 />
               </div>
@@ -3611,7 +3963,7 @@ export default function LeadsPage() {
                   type="email"
                   value={formData.email}
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
+                  className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
                   placeholder="correo@ejemplo.com"
                 />
               </div>
@@ -3622,7 +3974,7 @@ export default function LeadsPage() {
                     type="text"
                     value={formData.dni}
                     onChange={(e) => setFormData({ ...formData, dni: e.target.value })}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
                     placeholder="12345678"
                   />
                 </div>
@@ -3632,7 +3984,7 @@ export default function LeadsPage() {
                     type="date"
                     value={formData.birth_date}
                     onChange={(e) => setFormData({ ...formData, birth_date: e.target.value })}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
                   />
                 </div>
               </div>
@@ -3642,7 +3994,7 @@ export default function LeadsPage() {
                   type="text"
                   value={formData.tags}
                   onChange={(e) => setFormData({ ...formData, tags: e.target.value })}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
+                  className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
                   placeholder="ventas, premium (separadas por coma)"
                 />
               </div>
@@ -3657,137 +4009,98 @@ export default function LeadsPage() {
                 />
               </div>
             </div>
-            <div className="flex gap-3 mt-5">
+            </main>
+            <footer className="flex gap-3 border-t border-slate-200 bg-white px-5 py-4 sm:px-6">
               <button
-                onClick={() => { setShowAddModal(false); setFormData({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' }) }}
-                className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
+                type="button"
+                onClick={closeAddLeadDialog}
+                disabled={creatingLead}
+                className="min-h-11 flex-1 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-600 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
-                onClick={handleCreateLead}
-                disabled={!formData.name}
-                className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm"
+                onClick={() => handleCreateLead()}
+                disabled={!formData.title.trim() || !formData.name.trim() || creatingLead}
+                className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
               >
-                Crear Lead
+                {creatingLead ? 'Creando…' : 'Crear oportunidad'}
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {duplicateConfirmation && (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+          <div ref={duplicateDialogRef} role="alertdialog" aria-modal="true" aria-labelledby="duplicate-opportunity-title" tabIndex={-1} className="w-full max-w-md rounded-3xl border border-amber-200 bg-white p-6 shadow-2xl">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-700">
+              <AlertTriangle className="h-6 w-6" aria-hidden="true" />
+            </div>
+            <h2 id="duplicate-opportunity-title" className="mt-4 text-lg font-bold text-slate-900">Posible oportunidad duplicada</h2>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600">
+              {duplicateConfirmation.kind === 'single'
+                ? `Encontramos ${duplicateConfirmation.count} oportunidad${duplicateConfirmation.count === 1 ? '' : 'es'} abierta${duplicateConfirmation.count === 1 ? '' : 's'} con el mismo concepto para este contacto.`
+                : `Algunos de los contactos seleccionados ya tienen una oportunidad abierta con el mismo concepto.`}
+            </p>
+            <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-600">Puedes continuar si se trata de una compra, inscripción o necesidad realmente distinta. El contacto seguirá siendo uno solo.</p>
+            <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row">
+              <button ref={duplicateCancelRef} type="button" onClick={closeDuplicateConfirmation} className="min-h-11 flex-1 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">Volver y revisar</button>
+              <button type="button" onClick={confirmDuplicateCreation} className="min-h-11 flex-1 rounded-xl bg-amber-600 px-4 text-sm font-bold text-white hover:bg-amber-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2">Crear de todas formas</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {lifecycleRequest && (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div ref={lifecycleDialogRef} role="dialog" aria-modal="true" aria-labelledby="lifecycle-dialog-title" tabIndex={-1} className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
+            <div className={`flex h-12 w-12 items-center justify-center rounded-2xl ${lifecycleRequest.mode === 'won' ? 'bg-emerald-50 text-emerald-700' : lifecycleRequest.mode === 'lost' ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
+              {lifecycleRequest.mode === 'won' ? <CheckCircle2 className="h-6 w-6" /> : lifecycleRequest.mode === 'lost' ? <XCircle className="h-6 w-6" /> : <ArchiveRestore className="h-6 w-6" />}
+            </div>
+            <h2 id="lifecycle-dialog-title" className="mt-4 text-lg font-bold text-slate-900">
+              {lifecycleRequest.mode === 'won' ? 'Marcar oportunidad como ganada' : lifecycleRequest.mode === 'lost' ? 'Marcar oportunidad como perdida' : 'Reabrir oportunidad'}
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600">
+              {lifecycleRequest.mode === 'won'
+                ? `El lead de “${lifecycleRequest.lead.name || 'Sin nombre'}” se cerrará como resultado ganado y dejará el Kanban activo.`
+                : lifecycleRequest.mode === 'lost'
+                ? `Registra el motivo para aprender de este resultado sin perder el historial de “${lifecycleRequest.lead.name || 'Sin nombre'}”.`
+                : `El lead volverá a “${lifecycleRequest.stage.name}” y quedará abierto para continuar el seguimiento.`}
+            </p>
+            {lifecycleRequest.mode === 'lost' && (
+              <div className="mt-4">
+                <label htmlFor="lost-reason" className="mb-1.5 block text-xs font-bold text-slate-700">Motivo de pérdida *</label>
+                <textarea id="lost-reason" autoFocus value={lifecycleReason} onChange={event => { setLifecycleReason(event.target.value); setLifecycleError('') }} rows={4} maxLength={500} placeholder="Ej. Eligió otra solución, presupuesto insuficiente…" className="w-full resize-none rounded-xl border border-slate-300 px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-red-500" />
+                <p className="mt-1 text-right text-xs tabular-nums text-slate-400">{lifecycleReason.length}/500</p>
+              </div>
+            )}
+            {lifecycleError && <p className="mt-3 flex items-center gap-2 text-xs font-semibold text-red-700" role="alert"><AlertCircle className="h-4 w-4" />{lifecycleError}</p>}
+            <div className="mt-6 flex gap-2">
+              <button type="button" autoFocus={lifecycleRequest.mode !== 'lost'} onClick={closeLifecycleDialog} disabled={savingLifecycle} className="min-h-11 flex-1 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Cancelar</button>
+              <button type="button" onClick={confirmLifecycleChange} disabled={savingLifecycle || (lifecycleRequest.mode === 'lost' && !lifecycleReason.trim())} className={`inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl px-4 text-sm font-bold text-white disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${lifecycleRequest.mode === 'lost' ? 'bg-red-600 hover:bg-red-700 focus-visible:ring-red-500' : 'bg-emerald-600 hover:bg-emerald-700 focus-visible:ring-emerald-500'}`}>
+                {savingLifecycle && <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" />}
+                {savingLifecycle ? 'Guardando…' : lifecycleRequest.mode === 'won' ? 'Marcar como ganada' : lifecycleRequest.mode === 'lost' ? 'Marcar como perdida' : 'Reabrir'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Stage Management Modal */}
-      {showStageModal && activePipeline && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md max-h-[85vh] overflow-y-auto border border-gray-100">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">Gestionar Etapas</h2>
-                <p className="text-sm text-gray-500 mt-0.5">{activePipeline.name}</p>
-              </div>
-              <button onClick={() => setShowStageModal(false)} className="p-1.5 hover:bg-gray-100 rounded-lg transition">
-                <X className="w-5 h-5 text-gray-400" />
-              </button>
-            </div>
-
-            {/* Current stages with drag reorder */}
-            <div className="space-y-1.5 mb-5">
-              {allStages.map((stage, idx) => (
-                <div
-                  key={stage.id}
-                  draggable={editingStageId !== stage.id}
-                  onDragStart={() => setDragSrcIdx(idx)}
-                  onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx) }}
-                  onDragEnd={() => { if (dragSrcIdx !== null && dragOverIdx !== null) handleReorderStages(dragSrcIdx, dragOverIdx); setDragSrcIdx(null); setDragOverIdx(null) }}
-                  className={`p-2.5 rounded-xl transition-all ${
-                    dragOverIdx === idx ? 'bg-green-50 ring-2 ring-green-300' : 'bg-gray-50 hover:bg-gray-100'
-                  } ${hiddenStageIds.has(stage.id) ? 'opacity-50' : ''}`}
-                >
-                  {editingStageId === stage.id ? (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="color"
-                        value={editStageColor}
-                        onChange={(e) => setEditStageColor(e.target.value)}
-                        className="w-8 h-8 rounded border border-gray-300 cursor-pointer shrink-0"
-                      />
-                      <input
-                        type="text"
-                        value={editStageName}
-                        onChange={(e) => setEditStageName(e.target.value)}
-                        className="flex-1 px-2 py-1 border border-gray-300 rounded-lg text-sm text-gray-900 focus:ring-2 focus:ring-green-500"
-                        onKeyDown={(e) => e.key === 'Enter' && handleUpdateStage(stage.id)}
-                      />
-                      <button onClick={() => handleUpdateStage(stage.id)} className="px-2.5 py-1 bg-green-600 text-white rounded-lg text-xs hover:bg-green-700">
-                        Guardar
-                      </button>
-                      <button onClick={() => setEditingStageId(null)} className="p-1 text-gray-400 hover:text-gray-600">
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <GripVertical className="w-4 h-4 text-gray-300 cursor-grab shrink-0" />
-                      <div className="w-3.5 h-3.5 rounded-full shrink-0" style={{ backgroundColor: stage.color }} />
-                      <span className="flex-1 text-sm font-medium text-gray-800 truncate">{stage.name}</span>
-                      <span className="text-xs text-gray-400 shrink-0">{stage.lead_count}</span>
-                      <button
-                        onClick={() => toggleStageVisibility(stage.id)}
-                        className="p-1 text-gray-400 hover:text-gray-600"
-                        title={hiddenStageIds.has(stage.id) ? 'Mostrar etapa' : 'Ocultar etapa'}
-                      >
-                        {hiddenStageIds.has(stage.id) ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
-                      <button
-                        onClick={() => { setEditingStageId(stage.id); setEditStageName(stage.name); setEditStageColor(stage.color) }}
-                        className="p-1 text-gray-400 hover:text-blue-500"
-                        title="Editar"
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteStage(stage.id)}
-                        className="p-1 text-gray-400 hover:text-red-500"
-                        title="Eliminar"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            {/* Add new stage */}
-            <div className="border-t border-gray-200 pt-4">
-              <h4 className="text-sm font-semibold text-gray-700 mb-3">Agregar nueva etapa</h4>
-              <div className="flex gap-2">
-                <input
-                  type="color"
-                  value={newStageColor}
-                  onChange={(e) => setNewStageColor(e.target.value)}
-                  className="w-10 h-10 rounded-lg border border-gray-300 cursor-pointer"
-                />
-                <input
-                  type="text"
-                  value={newStageName}
-                  onChange={(e) => setNewStageName(e.target.value)}
-                  placeholder="Nombre de la etapa"
-                  className="flex-1 px-3 py-2 border border-gray-200 rounded-xl text-sm text-gray-900 placeholder:text-gray-400 focus:ring-2 focus:ring-green-500"
-                  onKeyDown={(e) => e.key === 'Enter' && handleAddStage()}
-                />
-                <button
-                  onClick={handleAddStage}
-                  disabled={!newStageName.trim()}
-                  className="px-4 py-2 bg-green-600 text-white rounded-xl hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
-                >
-                  Agregar
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <PipelineStageManager
+        open={showStageModal && Boolean(activePipeline && activePipeline.id !== '__no_pipeline__')}
+        pipeline={activePipeline?.id === '__no_pipeline__' ? null : activePipeline}
+        hiddenStageIds={hiddenStageIds}
+        onToggleVisibility={toggleStageVisibility}
+        onClose={() => setShowStageModal(false)}
+        onSaved={async (updatedPipeline) => {
+          setActivePipeline(updatedPipeline)
+          setPipelines(current => current.map(item => item.id === updatedPipeline.id ? updatedPipeline : item))
+          const validStageIds = new Set((updatedPipeline.stages || []).map(stage => stage.id))
+          setFilterStageIds(current => new Set(Array.from(current).filter(stageId => validStageIds.has(stageId))))
+          await Promise.all([fetchPipelines(updatedPipeline.id), fetchLeadsPaginated(), fetchLeadCounts()])
+        }}
+      />
 
       {/* Lead Detail Panel (Slide-over) with Inline Chat */}
       {(showDetailPanel || showInlineChat) && detailLead && (
@@ -3822,6 +4135,8 @@ export default function LeadsPage() {
                   setDetailLead(updatedLead as any)
                   updateLeadInStages(updatedLead.id, () => updatedLead as any)
                 }}
+                onStageChangeRequest={(lead, stage) => requestLeadStageChange(lead, stage)}
+                onLifecycleAction={requestLifecycleAction}
                 onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
                 onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
                 onObservationChange={(leadId: string) => {
@@ -3947,12 +4262,11 @@ export default function LeadsPage() {
           if (!importingContacts) setShowContactImportModal(false)
         }}
         onConfirm={handleCreateLeadsFromContacts}
-        title="Crear leads desde contactos"
-        subtitle="Selecciona contactos existentes que todavía no tienen un lead activo"
-        confirmLabel={importingContacts ? 'Creando...' : 'Crear leads'}
+        title="Crear oportunidades desde contactos"
+        subtitle="Un contacto puede tener varias oportunidades. Clarin te advertirá si ya tiene una abierta con el mismo concepto."
+        confirmLabel={importingContacts ? 'Creando…' : 'Crear oportunidades'}
         sourceFilter="contact"
         advancedFilters
-        withoutActiveLead
       />
 
       {/* Broadcast from Leads Modal */}
@@ -3962,23 +4276,21 @@ export default function LeadsPage() {
         onSubmit={handleCreateBroadcastFromLeads}
         devices={devices}
         submitting={submittingBroadcast}
-        title="Envío Masivo desde Leads"
-        subtitle={`Se incluirán todos los ${totalLeadCount} leads con teléfono (filtro aplicado en servidor)`}
+        title="Envío masivo desde oportunidades"
+        subtitle={`${totalLeadCount} oportunidades coinciden; cada contacto elegible recibirá como máximo un mensaje.`}
         submitLabel={submittingBroadcast ? 'Creando...' : 'Crear y agregar destinatarios'}
         initialName={`Leads - ${new Date().toLocaleDateString('es-PE', { day: 'numeric', month: 'short' })}`}
         infoPanel={
           <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-800">
             <div className="flex items-center gap-2 mb-1">
               <Radio className="w-3.5 h-3.5 text-emerald-600" />
-              <span className="font-medium">Destinatarios desde Leads</span>
+              <span className="font-medium">Contactos únicos desde oportunidades</span>
             </div>
             <p className="text-emerald-600">
-              Se agregarán automáticamente <strong>todos los leads con teléfono</strong> que coincidan con los filtros actuales
-              {filterStageIds.size > 0 || filterTagNames.size > 0 || debouncedSearchTerm || filterDatePreset
-                ? ' (filtrados)' : ''} como destinatarios.
+              Se resolverán los contactos de las oportunidades que coincidan con los filtros actuales y se deduplicarán por persona y canal.
             </p>
             <p className="text-slate-500 mt-1">
-              Total de leads en filtro actual: <strong>{totalLeadCount}</strong> (los sin teléfono se excluyen automáticamente).
+              Oportunidades coincidentes: <strong>{totalLeadCount}</strong>. Se excluyen contactos sin teléfono o marcados “No contactar”.
             </p>
           </div>
         }
@@ -3990,8 +4302,8 @@ export default function LeadsPage() {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-bold text-slate-900">Crear Evento desde Leads</h3>
-                <p className="text-xs text-slate-500 mt-0.5">Se agregarán los leads del filtro actual como participantes</p>
+                <h3 className="text-lg font-bold text-slate-900">Crear evento desde oportunidades</h3>
+                <p className="text-xs text-slate-500 mt-0.5">Se incorporará una sola participación por contacto, aunque tenga varias oportunidades coincidentes.</p>
               </div>
               <button onClick={() => setShowCreateEventModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100">
                 <X className="w-5 h-5" />
@@ -4094,27 +4406,27 @@ export default function LeadsPage() {
 
       {/* Block Reason Modal */}
       {showBlockModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div ref={blockDialogRef} role="dialog" aria-modal="true" aria-labelledby="lead-do-not-contact-title" tabIndex={-1} className="w-full max-w-md overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
             <div className="px-6 py-4 border-b border-slate-200">
-              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+              <h3 id="lead-do-not-contact-title" className="text-lg font-semibold text-slate-900 flex items-center gap-2">
                 <ShieldBan className="w-5 h-5 text-red-500" />
-                Bloquear {blockBatchMode ? `${selectedIds.size} lead(s)` : 'lead'}
+                {blockBatchMode ? `No contactar a ${selectedIds.size} contacto(s)` : 'Marcar como no contactable'}
               </h3>
-              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del bloqueo. Los leads bloqueados no recibirán mensajes ni participarán en campañas o eventos.</p>
+              <p className="text-sm text-slate-500 mt-1">Esta preferencia pertenece al contacto y evita nuevos mensajes desde campañas, eventos y automatizaciones. No elimina su historial ni sus participaciones.</p>
             </div>
             <div className="px-6 py-4 space-y-2">
               {[
-                'No está interesado',
                 'Solicita no ser contactado',
                 'Agresivo o abusivo',
                 'Número equivocado',
                 'Spam o fraude',
-              ].map(reason => (
+              ].map((reason, index) => (
                 <button
+                  ref={index === 0 ? blockFirstChoiceRef : undefined}
                   key={reason}
                   onClick={() => setBlockReason(reason)}
-                  className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${
+                  className={`min-h-11 w-full rounded-xl px-4 py-2.5 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${
                     blockReason === reason
                       ? 'bg-red-50 text-red-700 ring-1 ring-red-200 font-medium'
                       : 'text-slate-700 hover:bg-slate-50'
@@ -4127,26 +4439,29 @@ export default function LeadsPage() {
                 <input
                   type="text"
                   placeholder="Otro motivo..."
-                  value={!['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''}
+                  value={!['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''}
                   onChange={(e) => setBlockReason(e.target.value)}
-                  onFocus={() => { if (['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }}
-                  className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                  onFocus={() => { if (['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }}
+                  className="h-11 w-full rounded-xl border border-slate-200 px-4 text-sm focus:border-red-500 focus:ring-2 focus:ring-red-500"
                 />
               </div>
+              {blockPreferenceError && <p className="flex items-center gap-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-medium text-red-700" role="alert"><AlertCircle className="h-4 w-4 shrink-0" />{blockPreferenceError}</p>}
             </div>
             <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
               <button
-                onClick={() => setShowBlockModal(false)}
-                className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                onClick={closeBlockDialog}
+                disabled={savingBlockPreference}
+                className="h-11 rounded-xl px-4 text-sm text-slate-600 transition hover:bg-slate-100 disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
                 onClick={confirmBlock}
-                disabled={!blockReason}
-                className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition"
+                disabled={!blockReason || savingBlockPreference}
+                className="inline-flex h-11 items-center gap-2 rounded-xl bg-red-600 px-4 text-sm font-medium text-white transition hover:bg-red-700 disabled:opacity-50"
               >
-                Bloquear
+                {savingBlockPreference && <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" />}
+                {savingBlockPreference ? 'Guardando…' : 'Confirmar'}
               </button>
             </div>
           </div>
@@ -4162,7 +4477,7 @@ export default function LeadsPage() {
                 <Archive className="w-5 h-5 text-amber-500" />
                 Archivar {archiveBatchMode ? `${selectedIds.size} lead(s)` : 'lead'}
               </h3>
-              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del archivado. Los leads archivados no aparecerán en la vista principal ni participarán en eventos.</p>
+              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo. La oportunidad saldrá de la vista principal, pero el contacto, sus eventos y todo su historial permanecerán intactos.</p>
             </div>
             <div className="px-6 py-4 space-y-2">
               {[

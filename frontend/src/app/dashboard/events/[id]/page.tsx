@@ -8,7 +8,7 @@ import {
   Filter, Send, Maximize2, CalendarDays, Download,
   FileSpreadsheet, FileText, FileDown, Loader2, StickyNote,
   Tag, CheckSquare, XCircle, Code, AlertCircle, AlertTriangle, BookOpen, Camera, Edit3,
-  ChevronRight, PenLine, Settings, Lock, Archive, ArchiveRestore, ShieldBan, ShieldOff,
+  ChevronRight, PenLine, Settings, Lock, ShieldBan,
   MoreHorizontal, ChevronDown, RefreshCw, Copy, ArrowUp, ArrowDown
 } from 'lucide-react'
 import { format, formatDistanceToNow } from 'date-fns'
@@ -18,13 +18,12 @@ import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCamp
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
+import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import FormulaEditor from '@/components/FormulaEditor'
-import TagInput, { TagItem as TagInputItem } from '@/components/TagInput'
 import { Chat } from '@/types/chat'
 import { exportToExcel, exportToCSV } from '@/utils/eventExport'
 import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/eventWordReport'
-import { parseFormula, evaluateFormula } from '@/utils/formulaEvaluator'
 import { subscribeWebSocket } from '@/lib/api'
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import { useKanbanPan } from '@/lib/useKanbanPan'
@@ -83,12 +82,11 @@ interface TagItem {
 }
 
 interface Participant {
-  id: string; event_id: string; contact_id?: string; lead_id?: string; name: string
+  id: string; event_id: string; contact_id?: string; name: string
   last_name?: string; short_name?: string; phone?: string; email?: string
   age?: number; status: string; notes?: string; dni?: string; birth_date?: string
   company?: string; address?: string; distrito?: string; ocupacion?: string
   stage_id?: string; stage_name?: string; stage_color?: string
-  lead_pipeline_id?: string; lead_stage_id?: string; lead_stage_name?: string; lead_stage_color?: string
   next_action?: string; next_action_date?: string; invited_at?: string
   confirmed_at?: string; attended_at?: string; last_interaction?: string
   tags?: TagItem[]
@@ -149,8 +147,8 @@ function hexBgLight(hex: string) { const { r, g, b } = hexToRgb(hex); return `rg
 /** Map a Participant to a Lead-like object for LeadDetailPanel */
 function participantToLead(p: Participant): any {
   return {
-    id: p.lead_id || p.id,
-    original_lead_id: p.lead_id || null,
+    id: p.id,
+    original_lead_id: null,
     name: p.name || '',
     last_name: p.last_name || null,
     short_name: p.short_name || null,
@@ -168,10 +166,6 @@ function participantToLead(p: Participant): any {
     stage_id: p.stage_id || null,
     stage_name: p.stage_name || null,
     stage_color: p.stage_color || null,
-    lead_pipeline_id: p.lead_pipeline_id || null,
-    lead_stage_id: p.lead_stage_id || null,
-    lead_stage_name: p.lead_stage_name || null,
-    lead_stage_color: p.lead_stage_color || null,
     notes: p.notes || '',
     tags: [],
     structured_tags: p.tags?.map(t => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color })) || null,
@@ -233,7 +227,7 @@ const ParticipantCard = memo(function ParticipantCard({
             {p.name || 'Sin nombre'} {p.last_name || ''}
           </p>
           {p.duplicate_contact && (
-            <span title="Este contacto tiene otro lead en el evento" className="ml-1 text-amber-500">
+            <span title="Este contacto aparece más de una vez en el evento" className="ml-1 text-amber-500">
               <AlertTriangle className="w-3.5 h-3.5" />
             </span>
           )}
@@ -525,30 +519,11 @@ export default function EventDetailPage() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [addTab, setAddTab] = useState<'search' | 'manual'>('search')
   const [manualForm, setManualForm] = useState({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
-  const [leadForm, setLeadForm] = useState({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
-  const [manualFormTags, setManualFormTags] = useState<TagInputItem[]>([])
-  const [leadPipelines, setLeadPipelines] = useState<{ id: string; name: string; stages: { id: string; name: string }[] }[]>([])
-  const [creatingLead, setCreatingLead] = useState(false)
-
-  // Quick confirmation (contact → lead)
-  const [pendingContact, setPendingContact] = useState<SelectedPerson | null>(null)
-  const [pendingTags, setPendingTags] = useState<TagInputItem[]>([])
-  const [creatingFromConfirm, setCreatingFromConfirm] = useState(false)
-
-  // Lead picker (contact with existing leads)
-  const [contactLeads, setContactLeads] = useState<{
-    id: string; name: string | null; phone: string | null; email: string | null;
-    pipeline_name: string | null; stage_name: string | null; stage_color: string | null;
-    is_archived: boolean; is_blocked: boolean; created_at: string;
-    tags: { id: string; name: string; color: string }[];
-  }[]>([])
-  const [showLeadPicker, setShowLeadPicker] = useState(false)
-  const [selectedExistingLead, setSelectedExistingLead] = useState<{
-    id: string; name: string | null; phone: string | null; email: string | null;
-    contact_id?: string;
-    tags: { id: string; name: string; color: string }[];
-  } | null>(null)
-  const [loadingContactLeads, setLoadingContactLeads] = useState(false)
+  const [addingParticipant, setAddingParticipant] = useState(false)
+  const manualContactDialogRef = useRef<HTMLDivElement>(null)
+  const manualContactNameRef = useRef<HTMLInputElement>(null)
+  const doNotContactDialogRef = useRef<HTMLDivElement>(null)
+  const doNotContactFirstChoiceRef = useRef<HTMLButtonElement>(null)
 
   // Export
   const [showExportModal, setShowExportModal] = useState(false)
@@ -1333,269 +1308,59 @@ export default function EventDetailPage() {
   }, [allLoadedParticipants])
 
   const handleAddFromSelector = async (selected: SelectedPerson[]) => {
-    if (selected.length === 0) return
-    // Single contact (not lead) → check for existing leads first
-    const contacts = selected.filter(p => p.source_type === 'contact')
-    const leads = selected.filter(p => p.source_type === 'lead')
-    if (contacts.length === 1 && leads.length === 0) {
-      const contact = contacts[0]
-      setShowAddModal(false)
-      fetchLeadPipelines()
-
-      // Fetch contact's active leads
-      setLoadingContactLeads(true)
-      try {
-        const res = await fetch(`/api/contacts/${contact.id}/leads`, {
-          headers: { Authorization: `Bearer ${getToken()}` },
-        })
-        const data = await res.json()
-        const activeLeads = (data.leads || []).filter((l: { is_archived: boolean; is_blocked: boolean }) => !l.is_archived && !l.is_blocked)
-
-        if (activeLeads.length > 0) {
-          // Has active leads → show lead picker
-          setPendingContact(contact)
-          setContactLeads(activeLeads)
-          setShowLeadPicker(true)
-          setPendingTags(contact.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
-        } else {
-          // No active leads → go straight to create lead confirmation with inherited tags
-          setPendingContact(contact)
-          setPendingTags(contact.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
-        }
-      } catch {
-        // On error, fall back to direct creation flow
-        setPendingContact(contact)
-        setPendingTags(contact.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
-      }
-      setLoadingContactLeads(false)
-      return
-    }
+    if (selected.length === 0 || addingParticipant) return
     const parts = selected.map(p => ({
-      contact_id: p.source_type === 'contact' ? p.id : undefined,
-      lead_id: p.source_type === 'lead' ? p.id : undefined,
+      contact_id: p.id,
       name: p.name, phone: p.phone || '', email: p.email || '',
     }))
-    const res = await fetch(`/api/events/${eventId}/participants/bulk`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ participants: parts }),
-    })
-    const data = await res.json()
-    if (!data.success) { alert(data.error || 'Error al agregar participantes'); return }
-    setShowAddModal(false)
-    fetchParticipantsPaginated()
-    fetchEvent()
+    setAddingParticipant(true)
+    try {
+      const res = await fetch(`/api/events/${eventId}/participants/bulk`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participants: parts }),
+      })
+      const data = await res.json()
+      if (!data.success) { alert(data.error || 'Error al agregar participantes'); return }
+      setShowAddModal(false)
+      fetchParticipantsPaginated()
+      fetchEvent()
+    } catch (error) {
+      console.error('[AddEventContacts]', error)
+      alert('No se pudieron agregar los contactos. Intenta nuevamente.')
+    } finally {
+      setAddingParticipant(false)
+    }
   }
 
   const handleAddManual = async () => {
+    if (!manualForm.name.trim() || addingParticipant) return
     const body: Record<string, unknown> = {
       name: manualForm.name, last_name: manualForm.last_name,
       short_name: manualForm.short_name || undefined,
       phone: manualForm.phone || undefined, email: manualForm.email || undefined,
     }
     if (manualForm.age) body.age = parseInt(manualForm.age)
-    const res = await fetch(`/api/events/${eventId}/participants`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    const data = await res.json()
-    if (!data.success) { alert(data.error || 'Error al agregar participante'); return }
-    setShowAddModal(false)
-    setManualForm({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
-    fetchParticipantsPaginated()
-    fetchEvent()
-  }
-
-  // ─── Create Lead & Add as Participant ──────────────────────────────────────
-  const fetchLeadPipelines = useCallback(async () => {
+    setAddingParticipant(true)
     try {
-      const res = await fetch('/api/pipelines', { headers: { Authorization: `Bearer ${getToken()}` } })
+      const res = await fetch(`/api/events/${eventId}/participants`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
       const data = await res.json()
-      if (data.success && data.pipelines) setLeadPipelines(data.pipelines)
-    } catch { /* ignore */ }
-  }, [])
-
-  const handleCreateLeadAndAdd = async () => {
-    if (!leadForm.name) return
-    setCreatingLead(true)
-    try {
-      const stageId = leadForm.stage_id || undefined
-      // Step 1: Create the lead (backend auto-creates/links contact)
-      const leadRes = await fetch('/api/leads', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: leadForm.name,
-          phone: leadForm.phone || undefined,
-          email: leadForm.email || undefined,
-          notes: leadForm.notes || undefined,
-          dni: leadForm.dni || undefined,
-          birth_date: leadForm.birth_date || undefined,
-          tags: manualFormTags.map(t => t.name),
-          stage_id: stageId || undefined,
-        }),
-      })
-      const leadData = await leadRes.json()
-      if (!leadData.success) { alert(leadData.error || 'Error al crear lead'); setCreatingLead(false); return }
-      const lead = leadData.lead
-      // Step 2: Add as event participant with lead_id
-      const partRes = await fetch(`/api/events/${eventId}/participants`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          lead_id: lead.id,
-          contact_id: lead.contact_id || undefined,
-          name: lead.name,
-          last_name: lead.last_name || undefined,
-          phone: lead.phone || undefined,
-          email: lead.email || undefined,
-        }),
-      })
-      const partData = await partRes.json()
-      if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingLead(false); return }
+      if (!data.success) { alert(data.error || 'Error al agregar participante'); return }
       setShowAddModal(false)
-      setLeadForm({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' })
-      setManualFormTags([])
+      setManualForm({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
       fetchParticipantsPaginated()
       fetchEvent()
-    } catch (e) { console.error(e); alert('Error de conexión') }
-    setCreatingLead(false)
+    } catch (error) {
+      console.error('[CreateEventContact]', error)
+      alert('No se pudo registrar el contacto. Intenta nuevamente.')
+    } finally {
+      setAddingParticipant(false)
+    }
   }
-
-  // ─── Formula validation for tag assignment ────────────────────────────────
-  const eventFormulaNode = useMemo(() => {
-    if (!event?.tag_formula || event.tag_formula_type !== 'advanced') return null
-    try { return parseFormula(event.tag_formula) } catch { return null }
-  }, [event?.tag_formula, event?.tag_formula_type])
-
-  const hasEventFormula = !!eventFormulaNode
-
-  const pendingFormulaMatch = useMemo(() => {
-    if (!eventFormulaNode) return true // no formula = always matches
-    return evaluateFormula(eventFormulaNode, pendingTags.map(t => t.name))
-  }, [eventFormulaNode, pendingTags])
-
-  const leadFormTagNames = useMemo(() => {
-    return manualFormTags.map(t => t.name)
-  }, [manualFormTags])
-
-  const leadFormFormulaMatch = useMemo(() => {
-    if (!eventFormulaNode) return true
-    return evaluateFormula(eventFormulaNode, leadFormTagNames)
-  }, [eventFormulaNode, leadFormTagNames])
-
-  // ─── Select existing lead from lead picker ─────────────────────────────────
-  const handleSelectExistingLead = (lead: typeof contactLeads[0]) => {
-    setSelectedExistingLead({
-      id: lead.id,
-      name: lead.name,
-      phone: lead.phone,
-      email: lead.email,
-      tags: lead.tags || [],
-    })
-    // Pre-populate tags from the lead's tags
-    setPendingTags(lead.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
-    setShowLeadPicker(false)
-  }
-
-  const handleLeadPickerCreateNew = () => {
-    // User wants to create a new lead — tags already pre-populated from contact
-    setSelectedExistingLead(null)
-    setPendingTags(pendingContact?.tags?.map(t => ({ id: t.id, account_id: '', name: t.name, color: t.color })) || [])
-    setShowLeadPicker(false)
-  }
-
-  // ─── Confirm: create lead or add existing lead ────────────────────────────
-  const handleConfirmCreateLead = async () => {
-    if (!pendingContact) return
-    if (hasEventFormula && !pendingFormulaMatch) return
-    setCreatingFromConfirm(true)
-    try {
-      if (selectedExistingLead) {
-        // ── Add existing lead as participant ──
-        // Sync tags to the contact: remove old, add new
-        const currentTagIds = new Set((pendingContact.tags || []).map(t => t.id))
-        const newTagIds = new Set(pendingTags.map(t => t.id))
-
-        // Remove tags no longer present
-        for (const tag of (pendingContact.tags || [])) {
-          if (!newTagIds.has(tag.id)) {
-            await fetch('/api/tags/remove', {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ entity_type: 'contact', entity_id: pendingContact.id, tag_id: tag.id }),
-            })
-          }
-        }
-        // Add new tags
-        for (const tag of pendingTags) {
-          if (!currentTagIds.has(tag.id)) {
-            await fetch('/api/tags/assign', {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ entity_type: 'contact', entity_id: pendingContact.id, tag_id: tag.id }),
-            })
-          }
-        }
-
-        // Then add participant
-        const partRes = await fetch(`/api/events/${eventId}/participants`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            lead_id: selectedExistingLead.id,
-            contact_id: pendingContact.id,
-            name: selectedExistingLead.name || pendingContact.name,
-            phone: selectedExistingLead.phone || pendingContact.phone || undefined,
-            email: selectedExistingLead.email || pendingContact.email || undefined,
-          }),
-        })
-        const partData = await partRes.json()
-        if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingFromConfirm(false); return }
-      } else {
-        // ── Create new lead and add as participant ──
-        const stageId = leadForm.stage_id || undefined
-        const leadRes = await fetch('/api/leads', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: pendingContact.name,
-            phone: pendingContact.phone || undefined,
-            email: pendingContact.email || undefined,
-            tags: pendingTags.map(t => t.name),
-            stage_id: stageId || undefined,
-          }),
-        })
-        const leadData = await leadRes.json()
-        if (!leadData.success) { alert(leadData.error || 'Error al crear lead'); setCreatingFromConfirm(false); return }
-        const lead = leadData.lead
-        const partRes = await fetch(`/api/events/${eventId}/participants`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            lead_id: lead.id,
-            contact_id: lead.contact_id || undefined,
-            name: lead.name,
-            last_name: lead.last_name || undefined,
-            phone: lead.phone || undefined,
-            email: lead.email || undefined,
-          }),
-        })
-        const partData = await partRes.json()
-        if (!partData.success) { alert(partData.error || 'Error al agregar participante'); setCreatingFromConfirm(false); return }
-      }
-      setPendingContact(null)
-      setPendingTags([])
-      setSelectedExistingLead(null)
-      setContactLeads([])
-      setLeadForm(f => ({ ...f, stage_id: '' }))
-      fetchParticipantsPaginated()
-      fetchEvent()
-    } catch (e) { console.error(e); alert('Error de conexión') }
-    setCreatingFromConfirm(false)
-  }
-
   // ─── Delete ─────────────────────────────────────────────────────────────────
   const handleDeleteParticipant = useCallback(async (pid: string) => {
     if (!confirm('¿Eliminar este participante?')) return
@@ -1683,79 +1448,69 @@ export default function EventDetailPage() {
   }
 
   // ─── Archive / Block ───────────────────────────────────────────────────────
-  const [showArchiveModal, setShowArchiveModal] = useState(false)
-  const [archiveReason, setArchiveReason] = useState('')
-  const [archiveTargetId, setArchiveTargetId] = useState<string | null>(null)
   const [showBlockModal, setShowBlockModal] = useState(false)
   const [blockReason, setBlockReason] = useState('')
   const [blockTargetId, setBlockTargetId] = useState<string | null>(null)
+  const [blockError, setBlockError] = useState('')
+  const [savingBlock, setSavingBlock] = useState(false)
 
-  const openArchiveModal = (leadId: string) => {
-    setArchiveTargetId(leadId)
-    setArchiveReason('')
-    setShowArchiveModal(true)
-  }
+  useAccessibleDialog(
+    showAddModal && addTab === 'manual',
+    manualContactDialogRef,
+    () => { if (!addingParticipant) setShowAddModal(false) },
+    manualContactNameRef,
+  )
+  useAccessibleDialog(
+    showBlockModal,
+    doNotContactDialogRef,
+    () => { if (!savingBlock) setShowBlockModal(false) },
+    doNotContactFirstChoiceRef,
+  )
 
-  const confirmArchive = async () => {
-    if (!archiveReason || !archiveTargetId) return
-    try {
-      await fetch(`/api/leads/${archiveTargetId}/archive`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ archive: true, reason: archiveReason }),
-      })
-      setShowArchiveModal(false)
-      setShowDetailPanel(false)
-      setShowInlineChat(false)
-      fetchEvent()
-    } catch (err) { console.error('Failed to archive:', err) }
-  }
-
-  const openBlockModal = (leadId: string) => {
-    setBlockTargetId(leadId)
+  const openBlockModal = (contactId: string) => {
+    setBlockTargetId(contactId)
     setBlockReason('')
+    setBlockError('')
     setShowBlockModal(true)
   }
 
   const confirmBlock = async () => {
-    if (!blockReason || !blockTargetId) return
+    if (!blockReason || !blockTargetId || savingBlock) return
+    setSavingBlock(true)
+    setBlockError('')
     try {
-      await fetch(`/api/leads/${blockTargetId}/block`, {
+      const response = await fetch(`/api/contacts/${blockTargetId}/do-not-contact`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ block: true, reason: blockReason }),
+        body: JSON.stringify({ blocked: true, reason: blockReason }),
       })
+      const data = await response.json()
+      if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar el contacto')
       setShowBlockModal(false)
       setShowDetailPanel(false)
       setShowInlineChat(false)
       fetchEvent()
-    } catch (err) { console.error('Failed to block:', err) }
+    } catch (err) {
+      console.error('Failed to block:', err)
+      setBlockError(err instanceof Error ? err.message : 'No se pudo actualizar el contacto')
+    } finally {
+      setSavingBlock(false)
+    }
   }
 
-  const handleUnblock = async (leadId: string) => {
+  const handleUnblock = async (contactId: string) => {
     try {
-      await fetch(`/api/leads/${leadId}/block`, {
+      const response = await fetch(`/api/contacts/${contactId}/do-not-contact`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ block: false }),
+        body: JSON.stringify({ blocked: false }),
       })
+      const data = await response.json()
+      if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar el contacto')
       setShowDetailPanel(false)
       setShowInlineChat(false)
       fetchEvent()
     } catch (err) { console.error('Failed to unblock:', err) }
-  }
-
-  const handleRestoreLead = async (leadId: string) => {
-    try {
-      await fetch(`/api/leads/${leadId}/archive`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ archive: false }),
-      })
-      setShowDetailPanel(false)
-      setShowInlineChat(false)
-      fetchEvent()
-    } catch (err) { console.error('Failed to restore:', err) }
   }
 
   // ─── Campaign ──────────────────────────────────────────────────────────────
@@ -2124,7 +1879,7 @@ export default function EventDetailPage() {
   const participantDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
-      const msg = data as { event?: string; action?: string; event_id?: string; lead_id?: string }
+      const msg = data as { event?: string; action?: string; event_id?: string }
       if (msg.event === 'event_participant_update' && msg.event_id === eventId) {
         // Skip refetch if we just changed a stage ourselves (prevents reverting optimistic update)
         if (msg.action === 'stage_changed' && ownStageChangeRef.current) return
@@ -2174,7 +1929,6 @@ export default function EventDetailPage() {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (showGoogleSyncModal) { setShowGoogleSyncModal(false); return }
-      if (pendingContact) { setPendingContact(null); setPendingTags([]); return }
       if (showExportModal) { setShowExportModal(false); return }
       if (showDeviceSelector) { setShowDeviceSelector(false); return }
       if (showInlineChat) { setShowInlineChat(false); return }
@@ -2189,7 +1943,7 @@ export default function EventDetailPage() {
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showGoogleSyncModal, pendingContact, showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showStageEditorModal, cancelStageEditMode, showDetailPanel, viewMode, router, folderParam])
+  }, [showGoogleSyncModal, showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showStageEditorModal, cancelStageEditMode, showDetailPanel, viewMode, router, folderParam])
 
   // Close more menu on outside click
   useEffect(() => {
@@ -2811,13 +2565,13 @@ export default function EventDetailPage() {
                 </button>
               )}
 
-              {/* 4. Crear lead */}
+              {/* 4. Registrar contacto */}
               <button
-                onClick={() => { setAddTab('manual'); fetchLeadPipelines(); setShowAddModal(true); setShowMoreMenu(false) }}
+                onClick={() => { setAddTab('manual'); setShowAddModal(true); setShowMoreMenu(false) }}
                 className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
               >
                 <Plus className="w-4 h-4 text-slate-400" />
-                Crear lead
+                Registrar contacto
               </button>
 
               {/* 5. Editar etapas */}
@@ -3999,7 +3753,6 @@ export default function EventDetailPage() {
         <ObservationHistoryModal
           isOpen={true}
           onClose={() => setListHistoryParticipant(null)}
-          leadId={listHistoryParticipant.lead_id || listHistoryParticipant.id}
           participantId={listHistoryParticipant.id}
           eventId={eventId}
           contactId={listHistoryParticipant.contact_id}
@@ -4038,36 +3791,6 @@ export default function EventDetailPage() {
                 eventId={eventId}
                 eventStages={displayStages.map(s => ({ id: s.id, pipeline_id: s.pipeline_id || '', name: s.name, color: s.color, position: s.position, lead_count: 0 }))}
                 participantId={detailParticipant.id}
-                onBeforeTagAssign={async (tagId: string) => {
-                  const token = localStorage.getItem('token')
-                  try {
-                    const res = await fetch(`/api/events/${eventId}/participants/${detailParticipant.id}/check-tag-impact`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                      body: JSON.stringify({ tag_id: tagId, action: 'add' }),
-                    })
-                    const data = await res.json()
-                    if (data.would_remove_from_event) {
-                      return confirm('⚠️ Agregar esta etiqueta hará que el participante ya NO cumpla con la fórmula del evento y será removido. ¿Deseas continuar?')
-                    }
-                  } catch (e) { console.error(e) }
-                  return true
-                }}
-                onBeforeTagRemove={async (tagId: string) => {
-                  const token = localStorage.getItem('token')
-                  try {
-                    const res = await fetch(`/api/events/${eventId}/participants/${detailParticipant.id}/check-tag-impact`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                      body: JSON.stringify({ tag_id: tagId, action: 'remove' }),
-                    })
-                    const data = await res.json()
-                    if (data.would_remove_from_event) {
-                      return confirm('⚠️ Quitar esta etiqueta hará que el participante ya NO cumpla con la fórmula del evento y será removido. ¿Deseas continuar?')
-                    }
-                  } catch (e) { console.error(e) }
-                  return true
-                }}
                 onLeadChange={(updatedLead: any) => {
                   // Map back from Lead shape to Participant update
                   updateParticipantInStages(detailParticipant.id, p => ({
@@ -4088,10 +3811,6 @@ export default function EventDetailPage() {
                     stage_id: updatedLead.stage_id || p.stage_id,
                     stage_name: updatedLead.stage_name || p.stage_name,
                     stage_color: updatedLead.stage_color || p.stage_color,
-                    lead_pipeline_id: updatedLead.lead_pipeline_id ?? p.lead_pipeline_id,
-                    lead_stage_id: updatedLead.lead_stage_id ?? p.lead_stage_id,
-                    lead_stage_name: updatedLead.lead_stage_name ?? p.lead_stage_name,
-                    lead_stage_color: updatedLead.lead_stage_color ?? p.lead_stage_color,
                     structured_tags: updatedLead.structured_tags,
                     tags: updatedLead.structured_tags?.map((t: any) => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color, created_at: '' })),
                   }))
@@ -4113,10 +3832,6 @@ export default function EventDetailPage() {
                     stage_id: updatedLead.stage_id || prev.stage_id,
                     stage_name: updatedLead.stage_name || prev.stage_name,
                     stage_color: updatedLead.stage_color || prev.stage_color,
-                    lead_pipeline_id: updatedLead.lead_pipeline_id ?? prev.lead_pipeline_id,
-                    lead_stage_id: updatedLead.lead_stage_id ?? prev.lead_stage_id,
-                    lead_stage_name: updatedLead.lead_stage_name ?? prev.lead_stage_name,
-                    lead_stage_color: updatedLead.lead_stage_color ?? prev.lead_stage_color,
                     tags: updatedLead.structured_tags?.map((t: any) => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color, created_at: '' })),
                   } : null)
                 }}
@@ -4161,12 +3876,12 @@ export default function EventDetailPage() {
                 }}
                 onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
                 onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-                onArchive={(leadId: string, archive: boolean) => {
-                  if (archive) openArchiveModal(leadId)
-                  else handleRestoreLead(leadId)
+                onBlock={() => {
+                  if (detailParticipant.contact_id) openBlockModal(detailParticipant.contact_id)
                 }}
-                onBlock={(leadId: string) => openBlockModal(leadId)}
-                onUnblock={(leadId: string) => handleUnblock(leadId)}
+                onUnblock={() => {
+                  if (detailParticipant.contact_id) handleUnblock(detailParticipant.contact_id)
+                }}
                 onObservationChange={() => {
                   if (viewMode === 'list') {
                     setListObservations(new Map())
@@ -4185,60 +3900,31 @@ export default function EventDetailPage() {
           </div>
         </div>
       )}
-
-      {/* ═══ Archive Reason Modal ═══ */}
-      {showArchiveModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
-            <div className="px-6 py-4 border-b border-slate-200">
-              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-                <Archive className="w-5 h-5 text-amber-500" />
-                Archivar lead
-              </h3>
-              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del archivado.</p>
-            </div>
-            <div className="px-6 py-4 space-y-2">
-              {['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].map(reason => (
-                <button key={reason} onClick={() => setArchiveReason(reason)} className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${archiveReason === reason ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200 font-medium' : 'text-slate-700 hover:bg-slate-50'}`}>
-                  {reason}
-                </button>
-              ))}
-              <div className="pt-2">
-                <input type="text" placeholder="Otro motivo..." value={!['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].includes(archiveReason) ? archiveReason : ''} onChange={(e) => setArchiveReason(e.target.value)} onFocus={() => { if (['Ya no aplica al programa', 'Proceso finalizado', 'Lead duplicado', 'Datos incorrectos', 'No responde'].includes(archiveReason)) setArchiveReason('') }} className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500" />
-              </div>
-            </div>
-            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
-              <button onClick={() => setShowArchiveModal(false)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">Cancelar</button>
-              <button onClick={confirmArchive} disabled={!archiveReason} className="px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-lg hover:bg-amber-700 disabled:opacity-50 transition">Archivar</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ═══ Block Reason Modal ═══ */}
+      {/* ═══ Contact communication preference ═══ */}
       {showBlockModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div ref={doNotContactDialogRef} role="dialog" aria-modal="true" aria-labelledby="do-not-contact-title" tabIndex={-1} className="w-full max-w-md overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
             <div className="px-6 py-4 border-b border-slate-200">
-              <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+              <h3 id="do-not-contact-title" className="text-lg font-semibold text-slate-900 flex items-center gap-2">
                 <ShieldBan className="w-5 h-5 text-red-500" />
-                Bloquear lead
+                Marcar como no contactable
               </h3>
-              <p className="text-sm text-slate-500 mt-1">Selecciona el motivo del bloqueo. Los leads bloqueados no serán contactados.</p>
+              <p className="text-sm text-slate-500 mt-1">Esta preferencia pertenece al contacto y evita mensajes desde campañas, eventos y automatizaciones.</p>
             </div>
             <div className="px-6 py-4 space-y-2">
-              {['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].map(reason => (
-                <button key={reason} onClick={() => setBlockReason(reason)} className={`w-full text-left px-4 py-2.5 rounded-lg text-sm transition ${blockReason === reason ? 'bg-red-50 text-red-700 ring-1 ring-red-200 font-medium' : 'text-slate-700 hover:bg-slate-50'}`}>
+              {['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].map((reason, index) => (
+                <button ref={index === 0 ? doNotContactFirstChoiceRef : undefined} key={reason} onClick={() => setBlockReason(reason)} className={`min-h-11 w-full text-left px-4 py-2.5 rounded-xl text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${blockReason === reason ? 'bg-red-50 text-red-700 ring-1 ring-red-200 font-medium' : 'text-slate-700 hover:bg-slate-50'}`}>
                   {reason}
                 </button>
               ))}
               <div className="pt-2">
-                <input type="text" placeholder="Otro motivo..." value={!['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''} onChange={(e) => setBlockReason(e.target.value)} onFocus={() => { if (['No está interesado', 'Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }} className="w-full px-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500" />
+                <input type="text" placeholder="Otro motivo..." value={!['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''} onChange={(e) => setBlockReason(e.target.value)} onFocus={() => { if (['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }} className="h-11 w-full px-4 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500" />
               </div>
+              {blockError && <p className="flex items-center gap-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-medium text-red-700" role="alert"><AlertCircle className="h-4 w-4 shrink-0" />{blockError}</p>}
             </div>
             <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
-              <button onClick={() => setShowBlockModal(false)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">Cancelar</button>
-              <button onClick={confirmBlock} disabled={!blockReason} className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 transition">Bloquear</button>
+              <button onClick={() => setShowBlockModal(false)} disabled={savingBlock} className="h-11 px-4 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition disabled:opacity-50">Cancelar</button>
+              <button onClick={confirmBlock} disabled={!blockReason || savingBlock} className="inline-flex h-11 items-center gap-2 px-4 bg-red-600 text-white text-sm font-medium rounded-xl hover:bg-red-700 disabled:opacity-50 transition">{savingBlock && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}{savingBlock ? 'Guardando…' : 'Confirmar'}</button>
             </div>
           </div>
         </div>
@@ -4249,301 +3935,148 @@ export default function EventDetailPage() {
         open={showAddModal && addTab === 'search'}
         onClose={() => setShowAddModal(false)}
         onConfirm={handleAddFromSelector}
-        title="Agregar Participantes"
-        subtitle="Busca entre tus contactos y leads para agregar al evento"
-        confirmLabel="Agregar"
+        title="Agregar contactos"
+        subtitle="Selecciona uno o varios contactos para incorporarlos como participantes. No se crearán oportunidades automáticamente."
+        confirmLabel={addingParticipant ? 'Agregando…' : 'Agregar al evento'}
         excludeIds={existingContactIds}
+        sourceFilter="contact"
       />
 
-      {/* ═══ Add Participant — Manual ═══ */}
+      {/* ═══ Add Participant — Manual contact ═══ */}
       {showAddModal && addTab === 'manual' && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col border border-slate-100">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+          <div
+            ref={manualContactDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-event-contact-title"
+            className="flex max-h-[92vh] w-full max-w-xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-5">
               <div>
-                <h2 className="text-lg font-semibold text-slate-900">Nuevo Lead</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Se creará como lead y se agregará al evento</p>
+                <h2 id="new-event-contact-title" className="text-lg font-semibold text-slate-950">Registrar contacto</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Se creará o reutilizará el contacto y se añadirá como participante. Esto no crea una oportunidad comercial.
+                </p>
               </div>
-              <button onClick={() => setShowAddModal(false)} className="p-1 text-slate-400 hover:text-slate-600 rounded"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-6">
-              <div className="space-y-3">
-                {/* Pipeline & Stage */}
-                {leadPipelines.length > 0 && leadPipelines[0].stages?.length > 0 && (
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">Pipeline / Etapa</label>
-                    <div className="flex gap-2">
-                      <div className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 truncate">
-                        {leadPipelines[0].name}
-                      </div>
-                      <select
-                        value={leadForm.stage_id || ''}
-                        onChange={(e) => setLeadForm(f => ({ ...f, stage_id: e.target.value }))}
-                        className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
-                      >
-                        <option value="">Automático (configuración de cuenta)</option>
-                        {leadPipelines[0].stages.map((st: { id: string; name: string }) => (
-                          <option key={st.id} value={st.id}>{st.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                )}
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Nombre *</label>
-                  <input value={leadForm.name} onChange={e => setLeadForm(f => ({ ...f, name: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="Nombre del lead" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Teléfono</label>
-                  <input value={leadForm.phone} onChange={e => setLeadForm(f => ({ ...f, phone: e.target.value }))} type="tel" className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="944903497" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Email</label>
-                  <input value={leadForm.email} onChange={e => setLeadForm(f => ({ ...f, email: e.target.value }))} type="email" className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="correo@ejemplo.com" />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">DNI</label>
-                    <input value={leadForm.dni} onChange={e => setLeadForm(f => ({ ...f, dni: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" placeholder="12345678" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">Fecha de nacimiento</label>
-                    <input value={leadForm.birth_date} onChange={e => setLeadForm(f => ({ ...f, birth_date: e.target.value }))} type="date" className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400" />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    Etiquetas {hasEventFormula && <span className="text-slate-400 font-normal">— requeridas por la fórmula</span>}
-                  </label>
-                  <div className={`rounded-xl transition-all ${hasEventFormula ? (leadFormFormulaMatch && manualFormTags.length > 0 ? 'ring-2 ring-emerald-400' : 'ring-2 ring-red-400') : ''}`}>
-                    <TagInput
-                      entityType="lead"
-                      entityId=""
-                      assignedTags={manualFormTags}
-                      onTagsChange={setManualFormTags}
-                      localMode
-                    />
-                  </div>
-                  {hasEventFormula && !leadFormFormulaMatch && manualFormTags.length > 0 && (
-                    <p className="text-xs text-red-500 mt-1">Las etiquetas no coinciden con la fórmula del evento</p>
-                  )}
-                  {hasEventFormula && leadFormFormulaMatch && manualFormTags.length > 0 && (
-                    <p className="text-xs text-emerald-600 mt-1">✓ Coincide con la fórmula del evento</p>
-                  )}
-                  {hasEventFormula && manualFormTags.length === 0 && (
-                    <p className="text-xs text-amber-500 mt-1">Agrega etiquetas que coincidan con la fórmula del evento</p>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Notas</label>
-                  <textarea value={leadForm.notes} onChange={e => setLeadForm(f => ({ ...f, notes: e.target.value }))} rows={3} className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none" placeholder="Notas adicionales..." />
-                </div>
-              </div>
-              <button onClick={() => setAddTab('search')} className="mt-4 text-sm text-emerald-600 hover:text-emerald-700 font-medium">
-                Buscar contacto/lead existente
-              </button>
-            </div>
-            <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
-              <button onClick={() => { setShowAddModal(false); setLeadForm({ name: '', phone: '', email: '', notes: '', tags: '', stage_id: '', dni: '', birth_date: '' }); setManualFormTags([]) }} className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
-                Cancelar
-              </button>
-              <button onClick={handleCreateLeadAndAdd} disabled={!leadForm.name || creatingLead || (hasEventFormula && !leadFormFormulaMatch)} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">
-                {creatingLead ? 'Creando...' : 'Crear Lead'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ═══ Lead Picker — Select Existing Lead or Create New ═══ */}
-      {showLeadPicker && pendingContact && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setShowLeadPicker(false); setPendingContact(null); setPendingTags([]); setContactLeads([]) }}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-100" onClick={e => e.stopPropagation()}>
-            <div className="px-6 py-4 border-b border-slate-100">
-              <h2 className="text-lg font-semibold text-slate-900">Seleccionar Lead</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Este contacto ya tiene leads activos. Selecciona uno o crea uno nuevo.</p>
-            </div>
-            <div className="p-6 space-y-3">
-              {/* Contact info */}
-              <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
-                <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-sm">
-                  {(pendingContact.name || '?')[0]?.toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-900 truncate">{pendingContact.name || 'Sin nombre'}</p>
-                  {pendingContact.phone && <p className="text-xs text-slate-500">{pendingContact.phone}</p>}
-                </div>
-              </div>
-
-              {/* List of leads */}
-              <div className="space-y-2 max-h-60 overflow-y-auto">
-                {contactLeads.map(lead => (
-                  <button
-                    key={lead.id}
-                    onClick={() => handleSelectExistingLead(lead)}
-                    className="w-full flex items-center gap-3 p-3 border border-slate-200 rounded-xl hover:bg-emerald-50 hover:border-emerald-300 transition text-left group"
-                  >
-                    <div className="w-9 h-9 rounded-full bg-slate-100 group-hover:bg-emerald-100 flex items-center justify-center text-slate-600 group-hover:text-emerald-700 font-bold text-xs transition">
-                      <Users className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-slate-900 truncate">{lead.name || 'Sin nombre'}</p>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        {lead.pipeline_name && (
-                          <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded-md truncate max-w-[120px]">
-                            {lead.pipeline_name}
-                          </span>
-                        )}
-                        {lead.stage_name && (
-                          <span
-                            className="text-[10px] px-1.5 py-0.5 rounded-md truncate max-w-[100px]"
-                            style={{ backgroundColor: (lead.stage_color || '#e2e8f0') + '20', color: lead.stage_color || '#64748b' }}
-                          >
-                            {lead.stage_name}
-                          </span>
-                        )}
-                      </div>
-                      {lead.tags && lead.tags.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1">
-                          {lead.tags.slice(0, 4).map(tag => (
-                            <span key={tag.id} className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ backgroundColor: (tag.color || '#e2e8f0') + '20', color: tag.color || '#64748b' }}>
-                              {tag.name}
-                            </span>
-                          ))}
-                          {lead.tags.length > 4 && (
-                            <span className="text-[10px] text-slate-400">+{lead.tags.length - 4}</span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-emerald-500 transition" />
-                  </button>
-                ))}
-              </div>
-
-              {/* Create new lead option */}
               <button
-                onClick={handleLeadPickerCreateNew}
-                className="w-full flex items-center gap-3 p-3 border-2 border-dashed border-slate-200 rounded-xl hover:border-emerald-300 hover:bg-emerald-50/50 transition text-left group"
+                type="button"
+                onClick={() => setShowAddModal(false)}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                aria-label="Cerrar registro de contacto"
               >
-                <div className="w-9 h-9 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-600">
-                  <Plus className="w-4 h-4" />
-                </div>
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-emerald-700">Crear nuevo lead</p>
-                  <p className="text-[10px] text-slate-400">Se creará un nuevo lead para este contacto</p>
-                </div>
+                <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="px-6 py-3 border-t border-slate-100">
-              <button
-                onClick={() => { setShowLeadPicker(false); setPendingContact(null); setPendingTags([]); setContactLeads([]) }}
-                className="w-full px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
-              >
-                Cancelar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* ═══ Quick Confirmation — Create Lead from Contact ═══ */}
-      {pendingContact && !showLeadPicker && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setPendingContact(null); setPendingTags([]); setSelectedExistingLead(null); setContactLeads([]) }}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-100" onClick={e => e.stopPropagation()}>
-            <div className="px-6 py-4 border-b border-slate-100">
-              <h2 className="text-lg font-semibold text-slate-900">
-                {selectedExistingLead ? 'Agregar Lead al Evento' : 'Crear Lead y Agregar'}
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                {selectedExistingLead
-                  ? 'Se agregará el lead seleccionado al evento'
-                  : 'Se creará un lead para este contacto y se agregará al evento'}
-              </p>
-            </div>
-            <div className="p-6 space-y-4">
-              {/* Contact/Lead info */}
-              <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
-                <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-sm">
-                  {((selectedExistingLead?.name || pendingContact.name) || '?')[0]?.toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-900 truncate">{(selectedExistingLead?.name || pendingContact.name) || 'Sin nombre'}</p>
-                  {(selectedExistingLead?.phone || pendingContact.phone) && <p className="text-xs text-slate-500">{selectedExistingLead?.phone || pendingContact.phone}</p>}
-                  {selectedExistingLead && (
-                    <span className="text-[10px] px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded-md mt-0.5 inline-block">Lead existente</span>
-                  )}
-                </div>
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-sm text-emerald-800">
+                La incorporación manual es independiente de la regla automática de etiquetas y permanecerá en el historial del evento.
               </div>
 
-              {/* Pipeline & Stage — only for new leads */}
-              {!selectedExistingLead && leadPipelines.length > 0 && leadPipelines[0].stages?.length > 0 && (
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Pipeline / Etapa</label>
-                  <div className="flex gap-2">
-                    <div className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 truncate">
-                      {leadPipelines[0].name}
-                    </div>
-                    <select
-                      value={leadForm.stage_id || ''}
-                      onChange={(e) => setLeadForm(f => ({ ...f, stage_id: e.target.value }))}
-                      className="flex-1 px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 bg-white"
-                    >
-                      <option value="">Automático (configuración de cuenta)</option>
-                      {leadPipelines[0].stages.map((st: { id: string; name: string }) => (
-                        <option key={st.id} value={st.id}>{st.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              )}
-
-              {/* Tags with formula validation */}
-              <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">
-                  Etiquetas {hasEventFormula && <span className="text-slate-400 font-normal">— requeridas por la fórmula</span>}
-                </label>
-                <div className={`rounded-xl transition-all ${hasEventFormula ? (pendingFormulaMatch ? 'ring-2 ring-emerald-400' : 'ring-2 ring-red-400') : ''}`}>
-                  <TagInput
-                    entityType="lead"
-                    entityId=""
-                    assignedTags={pendingTags}
-                    onTagsChange={setPendingTags}
-                    localMode
+              <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label className="sm:col-span-2">
+                  <span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre <span className="text-red-500">*</span></span>
+                  <input
+                    value={manualForm.name}
+                    onChange={event => setManualForm(form => ({ ...form, name: event.target.value }))}
+                    ref={manualContactNameRef}
+                    autoComplete="name"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    placeholder="Nombre del contacto"
                   />
-                </div>
-                {hasEventFormula && !pendingFormulaMatch && pendingTags.length > 0 && (
-                  <p className="text-xs text-red-500 mt-1">Las etiquetas no coinciden con la fórmula del evento</p>
-                )}
-                {hasEventFormula && pendingFormulaMatch && pendingTags.length > 0 && (
-                  <p className="text-xs text-emerald-600 mt-1">✓ Coincide con la fórmula del evento</p>
-                )}
-                {hasEventFormula && pendingTags.length === 0 && (
-                  <p className="text-xs text-amber-500 mt-1">Agrega etiquetas que coincidan con la fórmula del evento</p>
-                )}
+                </label>
+                <label>
+                  <span className="mb-1.5 block text-sm font-medium text-slate-700">Apellido</span>
+                  <input
+                    value={manualForm.last_name}
+                    onChange={event => setManualForm(form => ({ ...form, last_name: event.target.value }))}
+                    autoComplete="family-name"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    placeholder="Apellido"
+                  />
+                </label>
+                <label>
+                  <span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre corto</span>
+                  <input
+                    value={manualForm.short_name}
+                    onChange={event => setManualForm(form => ({ ...form, short_name: event.target.value }))}
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    placeholder="Cómo prefieres identificarlo"
+                  />
+                </label>
+                <label>
+                  <span className="mb-1.5 block text-sm font-medium text-slate-700">Teléfono</span>
+                  <input
+                    type="tel"
+                    inputMode="tel"
+                    value={manualForm.phone}
+                    onChange={event => setManualForm(form => ({ ...form, phone: event.target.value }))}
+                    autoComplete="tel"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    placeholder="944 903 497"
+                  />
+                </label>
+                <label>
+                  <span className="mb-1.5 block text-sm font-medium text-slate-700">Correo</span>
+                  <input
+                    type="email"
+                    value={manualForm.email}
+                    onChange={event => setManualForm(form => ({ ...form, email: event.target.value }))}
+                    autoComplete="email"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    placeholder="correo@ejemplo.com"
+                  />
+                </label>
+                <label>
+                  <span className="mb-1.5 block text-sm font-medium text-slate-700">Edad</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="130"
+                    value={manualForm.age}
+                    onChange={event => setManualForm(form => ({ ...form, age: event.target.value }))}
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    placeholder="Edad"
+                  />
+                </label>
               </div>
-            </div>
-            <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
+
               <button
-                onClick={() => { setPendingContact(null); setPendingTags([]); setSelectedExistingLead(null); setContactLeads([]) }}
-                className="flex-1 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm"
+                type="button"
+                onClick={() => setAddTab('search')}
+                className="mt-5 inline-flex h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-emerald-700 transition hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              >
+                <Search className="h-4 w-4" />
+                Buscar un contacto existente
+              </button>
+            </div>
+
+            <div className="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50/70 px-6 py-4 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddModal(false)
+                  setManualForm({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
+                }}
+                disabled={addingParticipant}
+                className="h-11 rounded-xl border border-slate-200 bg-white px-5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
               >
                 Cancelar
               </button>
               <button
-                onClick={handleConfirmCreateLead}
-                disabled={creatingFromConfirm || (hasEventFormula && !pendingFormulaMatch)}
-                className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm"
+                type="button"
+                onClick={handleAddManual}
+                disabled={!manualForm.name.trim() || addingParticipant}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
               >
-                {creatingFromConfirm
-                  ? (selectedExistingLead ? 'Agregando...' : 'Creando...')
-                  : (selectedExistingLead ? 'Agregar al Evento' : 'Crear Lead y Agregar')}
+                {addingParticipant ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
+                {addingParticipant ? 'Registrando…' : 'Registrar y agregar'}
               </button>
             </div>
           </div>
         </div>
       )}
-
       {/* ═══ Device Selector ═══ */}
       {showDeviceSelector && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">

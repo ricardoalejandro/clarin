@@ -13,11 +13,15 @@ interface ImportCSVModalProps {
 interface ImportPreviewRow {
   row: number
   action: 'create' | 'update_existing' | 'skip' | string
+  reason_code?: string
   reason?: string
   name?: string
   phone?: string
   kommo_id?: number
   existing_lead_id?: string
+  existing_contact?: boolean
+  will_create_contact?: boolean
+  active_lead_count?: number
 }
 
 interface ImportSummary {
@@ -34,6 +38,12 @@ interface ImportSummary {
   duplicates: number
   error_count: number
   new_contacts: number
+  needs_review: number
+  new_opportunities: number
+  existing_kommo: number
+  duplicate_contact_leads: number
+  invalid_rows: number
+  duplicate_policy?: string
   safe_mode: boolean
   incoming_destination?: string
   rows?: ImportPreviewRow[] | null
@@ -56,6 +66,12 @@ const TAG_PRESET_COLORS = [
   '#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4',
   '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#6b7280',
 ]
+
+const KOMMO_IQUITOS_V2_HEADERS = [
+  'ID', 'Nombre del lead', 'Compañía', 'Contacto principal', 'Compañía del lead', 'Responsable', 'Estatus del lead', 'Embudo de ventas', 'Presupuesto', 'Fecha de creación', 'Creado por', 'Última modificación el', 'Modificado por', 'Etiquetas del lead', 'Tareas próximas', 'Cerrado el', 'Próxima cita', 'BOT 1.0', 'Atención', '✅ RED SOCIAL', '‼️MOTIVO PERDIDA', '✅ SEDE', '✅ Acepto invitación?', '✅ Acepto Clase Gratuita', '✅ Desea inscripción?', '✅ Tipo de cliente', '✅ Campaña', '✅ Consulta', '✅ Fecha', 'PRUEBA', 'STATUS', 'DETEC CAM', 'GRUPO', 'OTRAS', '✅ Exportado', 'utm_content', 'utm_medium', 'utm_campaign', 'utm_source', 'utm_term', 'utm_referrer', 'referrer', 'gclientid', 'gclid', 'fbclid', 'ttad_name', 'ttad_id', 'Cargo (contacto)', 'Correo (contacto)', 'E-mail priv. (contacto)', 'Otro e-mail (contacto)', 'Teléfono oficina (contacto)', 'Teléfono oficina directo (contacto)', 'Teléfono celular (contacto)', 'Fax (contacto)', 'Teléfono de casa (contacto)', 'Otro teléfono (contacto)', 'Nota 1', 'Nota 2', 'Nota 3', 'Nota 4', 'Nota 5',
+]
+
+const normalizeStrictHeader = (value: unknown) => String(value ?? '').replace(/^\uFEFF/, '').trim().normalize('NFC')
 
 const isExcelFile = (file: File) => EXCEL_EXTENSIONS.test(file.name) || EXCEL_MIME_TYPES.has(file.type)
 
@@ -108,6 +124,12 @@ const normalizeImportSummary = (summary?: Partial<ImportSummary> | null): Import
   duplicates: summary?.duplicates || 0,
   error_count: summary?.error_count || 0,
   new_contacts: summary?.new_contacts || 0,
+  needs_review: summary?.needs_review || 0,
+  new_opportunities: summary?.new_opportunities ?? summary?.new ?? 0,
+  existing_kommo: summary?.existing_kommo || 0,
+  duplicate_contact_leads: summary?.duplicate_contact_leads || 0,
+  invalid_rows: summary?.invalid_rows || 0,
+  duplicate_policy: summary?.duplicate_policy,
   safe_mode: summary?.safe_mode !== false,
   incoming_destination: summary?.incoming_destination,
   rows: Array.isArray(summary?.rows) ? summary.rows : [],
@@ -128,6 +150,8 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   const [preview, setPreview] = useState<ImportSummary | null>(null)
   const [result, setResult] = useState<ImportSummary | null>(null)
   const [error, setError] = useState('')
+  const [formatDiagnostic, setFormatDiagnostic] = useState('')
+  const [previewFilter, setPreviewFilter] = useState<'all' | 'create' | 'existing' | 'duplicate' | 'invalid'>('all')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -217,6 +241,25 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     const XLSX = await import('xlsx')
     const buffer = await sourceFile.arrayBuffer()
     const workbook = XLSX.read(buffer, { type: 'array', cellDates: false })
+
+    if (defaultType !== 'contacts') {
+      if (!/\.xlsx$/i.test(sourceFile.name)) {
+        throw new Error('FORMATO_KOMMO_INCOMPATIBLE: el importador de leads acepta únicamente el archivo .xlsx exportado por Kommo.')
+      }
+      if (workbook.SheetNames.length !== 1 || workbook.SheetNames[0] !== 'Sheet1') {
+        throw new Error(`FORMATO_KOMMO_INCOMPATIBLE: se esperaba una sola hoja llamada “Sheet1” y se detectó: ${workbook.SheetNames.join(', ') || 'ninguna'}.`)
+      }
+      const worksheet = workbook.Sheets.Sheet1
+      const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, { header: 1, raw: false, defval: '' })
+      const detected = (rows[0] || []).map(normalizeStrictHeader)
+      if (detected.length !== KOMMO_IQUITOS_V2_HEADERS.length) {
+        throw new Error(`FORMATO_KOMMO_INCOMPATIBLE: se esperaban ${KOMMO_IQUITOS_V2_HEADERS.length} columnas y se detectaron ${detected.length}. La importación fue bloqueada.`)
+      }
+      const mismatch = KOMMO_IQUITOS_V2_HEADERS.findIndex((header, index) => normalizeStrictHeader(header) !== detected[index])
+      if (mismatch >= 0) {
+        throw new Error(`FORMATO_KOMMO_INCOMPATIBLE: la columna ${mismatch + 1} debía ser “${KOMMO_IQUITOS_V2_HEADERS[mismatch]}” y se detectó “${detected[mismatch] || '(vacía)'}”. La importación fue bloqueada.`)
+      }
+    }
     const sheetName = workbook.SheetNames[0]
     if (!sheetName) {
       throw new Error('El Excel no contiene hojas para importar.')
@@ -235,23 +278,45 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     const formData = new FormData()
     formData.append('file', csvFile)
     formData.append('import_type', defaultType)
+    if (defaultType !== 'contacts') {
+      formData.append('format_mode', 'kommo_strict')
+    }
     if (defaultType !== 'contacts' && importTagMode === 'custom' && importTag.trim()) {
       formData.append('import_tag', importTag.trim())
     }
     return formData
   }
 
-  const handleFileChange = (nextFile: File | null) => {
+  const handleFileChange = async (nextFile: File | null) => {
     setPreview(null)
     setResult(null)
     setError('')
+    setFormatDiagnostic('')
+    setPreviewFilter('all')
     if (nextFile && !isExcelFile(nextFile)) {
       setFile(null)
       setError('Esta importación acepta solamente archivos Excel (.xlsx o .xls).')
       if (fileInputRef.current) fileInputRef.current.value = ''
       return
     }
-    setFile(nextFile)
+    if (!nextFile) {
+      setFile(null)
+      return
+    }
+    try {
+      await excelToCSVFile(nextFile)
+      setFile(nextFile)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'No se pudo validar el formato del Excel.'
+      setFile(null)
+      if (message.startsWith('FORMATO_KOMMO_INCOMPATIBLE')) {
+        setFormatDiagnostic(message)
+        setError('')
+      } else {
+        setError(message)
+      }
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
   }
 
   const handlePreview = async () => {
@@ -273,6 +338,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
       const data = await res.json()
       if (data.success) {
         setPreview(normalizeImportSummary(data.preview))
+        setPreviewFilter('all')
       } else {
         setError(data.error || 'No se pudo analizar el Excel')
       }
@@ -287,6 +353,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     if (!file) return
     setUploading(true)
     setError('')
+    setFormatDiagnostic('')
 
     const token = localStorage.getItem('token')
     try {
@@ -327,14 +394,16 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   }
 
   const actionLabel = (action: string) => {
-    if (action === 'create') return 'Nuevo'
+    if (action === 'create') return 'Se creará'
     if (action === 'update_existing') return 'Existente'
+    if (action === 'duplicate_contact_lead') return 'Duplicado'
     return 'Omitido'
   }
 
   const actionClass = (action: string) => {
     if (action === 'create') return 'bg-emerald-50 text-emerald-700 border-emerald-100'
     if (action === 'update_existing') return 'bg-blue-50 text-blue-700 border-blue-100'
+    if (action === 'duplicate_contact_lead') return 'bg-amber-50 text-amber-700 border-amber-200'
     return 'bg-amber-50 text-amber-700 border-amber-100'
   }
 
@@ -352,7 +421,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   const needsImportTagSelection = defaultType !== 'contacts' && importTagMode === 'custom' && !importTag.trim()
   const canPreview = Boolean(file) && !previewing && !needsImportTagSelection
 
-  const SummaryStats = ({ data, final = false }: { data: ImportSummary; final?: boolean }) => (
+  const SummaryStats = ({ data, final = false }: { data: ImportSummary; final?: boolean }) => final || defaultType === 'contacts' ? (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
       <div className="rounded-lg border border-slate-200 p-3">
         <p className="text-[11px] uppercase font-semibold text-slate-400">{final ? 'Creados' : 'Nuevos'}</p>
@@ -371,11 +440,33 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
         <p className="text-xl font-semibold text-slate-900">{data.duplicates}</p>
       </div>
     </div>
+  ) : (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+      {[
+        ['Oportunidades a crear', data.new_opportunities, 'text-emerald-700'],
+        ['Contactos nuevos', data.new_contacts, 'text-cyan-700'],
+        ['Ya existen en Kommo', data.existing_kommo, 'text-blue-700'],
+        ['Duplicados evitados', data.duplicate_contact_leads, 'text-amber-700'],
+        ['Filas inválidas', data.invalid_rows, 'text-rose-700'],
+      ].map(([label, value, color]) => (
+        <div key={String(label)} className="rounded-xl border border-slate-200 bg-white p-3">
+          <p className="text-[10px] font-semibold uppercase leading-tight text-slate-400">{label}</p>
+          <p className={`mt-1 text-xl font-semibold ${color}`}>{value}</p>
+        </div>
+      ))}
+    </div>
   )
 
   const resultErrors = Array.isArray(result?.errors) ? result.errors : []
   const previewErrors = Array.isArray(preview?.errors) ? preview.errors : []
   const previewRows = Array.isArray(preview?.rows) ? preview.rows : []
+  const visiblePreviewRows = previewRows.filter(row => {
+    if (previewFilter === 'all') return true
+    if (previewFilter === 'create') return row.action === 'create'
+    if (previewFilter === 'duplicate') return row.action === 'duplicate_contact_lead' || row.reason_code?.startsWith('duplicate_')
+    if (previewFilter === 'invalid') return row.reason_code?.startsWith('invalid_')
+    return row.action === 'update_existing' || row.reason_code?.startsWith('existing_')
+  })
 
   return (
     <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -394,6 +485,14 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
           <div className="mb-4 flex items-start gap-2 rounded-xl border border-red-100 bg-red-50 p-3 text-sm text-red-700">
             <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
             <span>{error}</span>
+          </div>
+        )}
+
+        {formatDiagnostic && (
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+            <p className="font-semibold">Archivo incompatible: importación bloqueada</p>
+            <p className="mt-1 leading-relaxed">{formatDiagnostic.replace('FORMATO_KOMMO_INCOMPATIBLE: ', '')}</p>
+            <p className="mt-2 text-xs text-red-700">No se modificó ningún dato. Genera un nuevo export de Kommo y reporta este diagnóstico al equipo técnico si el formato continúa distinto.</p>
           </div>
         )}
 
@@ -431,6 +530,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
               <div>
                 <p className="font-medium">Modo seguro activo</p>
                 <p className="text-emerald-700">Los leads existentes no se moverán de etapa ni perderán notas, tareas u observaciones.</p>
+                <p className="text-emerald-700">Si el contacto ya tiene una oportunidad abierta, la fila se omitirá como duplicada.</p>
                 <p className="text-emerald-700">Los leads nuevos se crearán aunque superen 24h desde Kommo.</p>
                 <p className="text-emerald-700">La ventana de 24h sólo limita reimportaciones sobre leads existentes; si aplica, sincroniza estado Kommo y fecha.</p>
                 {preview.incoming_destination && (
@@ -447,13 +547,32 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
 
             <SummaryStats data={preview} />
 
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              Se crearán <span className="font-semibold text-emerald-700">{preview.new_opportunities} oportunidades</span> y <span className="font-semibold text-cyan-700">{preview.new_contacts} contactos</span>. Se omitirán <span className="font-semibold">{preview.skipped} filas</span>, incluidos {preview.duplicate_contact_leads} duplicados evitados.
+            </div>
+
             <div className="rounded-xl border border-slate-200 overflow-hidden">
-              <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                <p className="text-xs font-semibold text-slate-500 uppercase">Vista previa</p>
-                <p className="text-xs text-slate-400">{preview.total_rows} filas detectadas</p>
+              <div className="space-y-2 border-b border-slate-200 bg-slate-50 px-3 py-2.5">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-slate-500 uppercase">Vista previa</p>
+                  <p className="text-xs text-slate-400">{preview.total_rows} filas detectadas</p>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {([
+                    ['all', 'Todos', preview.total_rows],
+                    ['create', 'Se crearán', preview.new_opportunities],
+                    ['existing', 'Existentes', preview.existing_kommo],
+                    ['duplicate', 'Duplicados', preview.duplicates],
+                    ['invalid', 'Inválidos', preview.invalid_rows],
+                  ] as const).map(([value, label, count]) => (
+                    <button key={value} type="button" onClick={() => setPreviewFilter(value)} className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition ${previewFilter === value ? 'border-slate-700 bg-slate-800 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'}`}>
+                      {label} · {count}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">
-                {previewRows.map((row) => (
+                {visiblePreviewRows.map((row) => (
                   <div key={`${row.row}-${row.action}-${row.phone}`} className="px-3 py-2.5 flex items-start gap-3">
                     <span className="text-xs text-slate-400 w-10 shrink-0">#{row.row}</span>
                     <span className={`text-[11px] px-2 py-0.5 rounded-full border shrink-0 ${actionClass(row.action)}`}>{actionLabel(row.action)}</span>
@@ -470,6 +589,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                     </div>
                   </div>
                 ))}
+                {visiblePreviewRows.length === 0 && <p className="px-4 py-8 text-center text-sm text-slate-400">No hay filas en esta categoría.</p>}
               </div>
             </div>
 
@@ -490,7 +610,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 {uploading ? (
                   <span className="flex items-center justify-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Importando...</span>
                 ) : (
-                  'Importar en modo seguro'
+                  preview.new_opportunities > 0 ? `Crear ${preview.new_opportunities} oportunidades` : 'Procesar importación'
                 )}
               </button>
             </div>
@@ -501,7 +621,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
               <input
                 ref={fileInputRef}
                 type="file"
-                accept={EXCEL_ACCEPT}
+                accept={defaultType === 'contacts' ? EXCEL_ACCEPT : '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
                 className="hidden"
                 onChange={e => handleFileChange(e.target.files?.[0] || null)}
               />
@@ -533,19 +653,28 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
 
             <div className="bg-gray-50 rounded-xl p-3.5 text-xs text-gray-600 space-y-1">
               <div className="flex items-center justify-between mb-1">
-                <p className="font-medium text-gray-700">Columnas reconocidas:</p>
-                <button
+                <p className="font-medium text-gray-700">{defaultType === 'contacts' ? 'Columnas reconocidas:' : 'Formato Kommo requerido:'}</p>
+                {defaultType === 'contacts' && <button
                   type="button"
                   onClick={() => buildExcelTemplate(defaultType).catch(() => setError('No se pudo generar la plantilla Excel'))}
                   className="flex items-center gap-1 text-green-600 hover:text-green-700 font-medium transition-colors"
                 >
                   <Download className="w-3 h-3" />
                   Descargar plantilla
-                </button>
+                </button>}
               </div>
-              <p><span className="text-green-600 font-medium">Requerida:</span> phone / telefono / celular, o columna telefónica de Kommo</p>
-              <p><span className="text-gray-500 font-medium">Kommo:</span> ID, Contacto principal, Correo, Etiquetas del lead, Estatus del lead, Embudo de ventas</p>
-              <p><span className="text-gray-500 font-medium">Seguro:</span> los nuevos se crean siempre; al reimportar, los existentes sólo pueden cambiar o quitar etiquetas de estado Kommo y fecha dentro de 24h</p>
+              {defaultType === 'contacts' ? (
+                <>
+                  <p><span className="text-green-600 font-medium">Requerida:</span> phone / telefono / celular</p>
+                  <p><span className="text-gray-500 font-medium">Opcionales:</span> nombre, correo, empresa, notas y datos personales</p>
+                </>
+              ) : (
+                <>
+                  <p>Archivo <span className="font-medium text-slate-700">.xlsx</span>, una sola hoja <span className="font-medium text-slate-700">Sheet1</span> y las 62 columnas aprobadas en su orden exacto.</p>
+                  <p>Cualquier columna agregada, eliminada, renombrada o reordenada bloqueará la importación.</p>
+                </>
+              )}
+              <p><span className="text-gray-500 font-medium">Seguro:</span> las oportunidades elegibles se crean siempre; si el contacto ya tiene una abierta se omite, y los IDs Kommo existentes sólo pueden actualizar etiquetas dentro de 24h</p>
             </div>
 
             {defaultType !== 'contacts' && (

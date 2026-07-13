@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -35,6 +36,10 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
+
+// ErrOutboundSuppressed is returned before any WhatsApp transmission when the
+// recipient identity is protected by Contact DNC or its durable tombstone.
+var ErrOutboundSuppressed = errors.New("contacto marcado como no contactar")
 
 // strPtr returns a pointer to a string
 func strPtr(s string) *string {
@@ -2501,6 +2506,9 @@ func (p *DevicePool) EditMessage(ctx context.Context, deviceID uuid.UUID, chatJI
 	} else {
 		chat = types.NewJID(chatJID, types.DefaultUserServer)
 	}
+	if err := p.ensureOutboundAllowed(ctx, instance, chat); err != nil {
+		return err
+	}
 
 	editedMsg := instance.Client.BuildEdit(chat, messageID, &waE2E.Message{
 		Conversation: proto.String(newBody),
@@ -2603,6 +2611,9 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 }
 
 func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *DeviceInstance, jid types.JID, msg *waE2E.Message, label string) (whatsmeow.SendResponse, types.JID, error) {
+	if err := p.ensureOutboundAllowed(ctx, instance, jid); err != nil {
+		return whatsmeow.SendResponse{}, jid, err
+	}
 	resp, err := instance.Client.SendMessage(ctx, jid, msg)
 	if err == nil {
 		return resp, jid, nil
@@ -2619,6 +2630,9 @@ func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *D
 		}
 		return resp, jid, err
 	}
+	if guardErr := p.ensureOutboundAllowed(ctx, instance, lidJID); guardErr != nil {
+		return resp, jid, guardErr
+	}
 
 	log.Printf("[%s] WhatsApp returned 463 for %s, retrying via LID %s", label, jid.ToNonAD().String(), lidJID.ToNonAD().String())
 	lidResp, retryErr := instance.Client.SendMessage(ctx, lidJID, msg)
@@ -2626,6 +2640,36 @@ func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *D
 		return resp, jid, fmt.Errorf("%w; LID retry to %s also failed: %v", err, lidJID.ToNonAD().String(), retryErr)
 	}
 	return lidResp, lidJID, nil
+}
+
+// ensureOutboundAllowed is the final fail-closed guard shared by manual sends,
+// campaigns, automations and dynamic activities. Handler checks remain useful
+// for friendly UX, but no caller can bypass this point by invoking DevicePool.
+func (p *DevicePool) ensureOutboundAllowed(ctx context.Context, instance *DeviceInstance, recipient types.JID) error {
+	if instance == nil || instance.AccountID == uuid.Nil {
+		return fmt.Errorf("no se pudo validar la cuenta del dispositivo")
+	}
+	identities := []string{recipient.ToNonAD().String(), recipient.User}
+	if p.store != nil && p.store.LIDMap != nil {
+		switch recipient.Server {
+		case types.HiddenUserServer:
+			if phoneJID, err := p.store.LIDMap.GetPNForLID(ctx, recipient.ToNonAD()); err == nil && !phoneJID.IsEmpty() {
+				identities = append(identities, phoneJID.ToNonAD().String(), phoneJID.User)
+			}
+		case types.DefaultUserServer:
+			if lidJID, err := p.store.LIDMap.GetLIDForPN(ctx, recipient.ToNonAD()); err == nil && !lidJID.IsEmpty() {
+				identities = append(identities, lidJID.ToNonAD().String(), lidJID.User)
+			}
+		}
+	}
+	blocked, err := p.repos.Contact.IsOutboundSuppressed(ctx, instance.AccountID, identities)
+	if err != nil {
+		return fmt.Errorf("no se pudo verificar la preferencia de contacto: %w", err)
+	}
+	if blocked {
+		return ErrOutboundSuppressed
+	}
+	return nil
 }
 
 // SendReplyMessage sends a text message as a reply to another message
@@ -2767,6 +2811,9 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 		}
 	} else {
 		jid = types.NewJID(to, types.DefaultUserServer)
+	}
+	if err := p.ensureOutboundAllowed(ctx, instance, jid); err != nil {
+		return err
 	}
 
 	targetSender, err := reactionTargetSenderJID(jid, targetSenderJID, targetFromMe)

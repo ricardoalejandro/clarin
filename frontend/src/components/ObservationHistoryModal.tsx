@@ -20,9 +20,9 @@ export interface HistoryObservation {
 interface ObservationHistoryModalProps {
   isOpen: boolean
   onClose: () => void
-  /** lead_id for API calls */
-  leadId: string
-  /** Event participant ID — when present, history is resolved through the participant/contact/lead graph */
+  /** Lead ID for CRM lead history. Not used by event participants. */
+  leadId?: string | null
+  /** Event participant ID — when present, history is resolved through participant/contact. */
   participantId?: string | null
   /** Event ID used when creating participant observations */
   eventId?: string | null
@@ -97,7 +97,10 @@ export default function ObservationHistoryModal({
         ? `/api/interactions?participant_id=${participantId}&limit=200`
         : contactId
         ? `/api/contacts/${contactId}/interactions?limit=200`
-        : `/api/leads/${leadId}/interactions?limit=200`
+        : leadId
+        ? `/api/leads/${leadId}/interactions?limit=200`
+        : null
+      if (!url) return
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       const data = await res.json()
       if (data.success) {
@@ -128,12 +131,12 @@ export default function ObservationHistoryModal({
   }, [isOpen, observations.length, filterType, filterFrom, filterTo])
 
   const handleAdd = async () => {
-    if (!newText.trim()) return
+    if (!newText.trim() || (!participantId && !contactId && !leadId)) return
     setSaving(true)
     const token = localStorage.getItem('token')
     try {
       const body = participantId
-        ? { event_id: eventId || undefined, participant_id: participantId, contact_id: contactId || undefined, lead_id: leadId, type: newType, notes: newText.trim() }
+        ? { event_id: eventId || undefined, participant_id: participantId, contact_id: contactId || undefined, type: newType, notes: newText.trim() }
         : contactId
         ? { contact_id: contactId, type: newType, notes: newText.trim() }
         : { lead_id: leadId, type: newType, notes: newText.trim() }

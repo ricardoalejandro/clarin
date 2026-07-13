@@ -298,35 +298,39 @@ const (
 
 // Contact represents a WhatsApp contact
 type Contact struct {
-	ID              uuid.UUID  `json:"id"`
-	AccountID       uuid.UUID  `json:"account_id"`
-	DeviceID        *uuid.UUID `json:"device_id,omitempty"`
-	JID             string     `json:"jid"`
-	Phone           *string    `json:"phone,omitempty"`
-	Name            *string    `json:"name,omitempty"`
-	LastName        *string    `json:"last_name,omitempty"`
-	ShortName       *string    `json:"short_name,omitempty"`
-	CustomName      *string    `json:"custom_name,omitempty"`
-	PushName        *string    `json:"push_name,omitempty"`
-	AvatarURL       *string    `json:"avatar_url,omitempty"`
-	AvatarCheckedAt *time.Time `json:"avatar_checked_at,omitempty"`
-	Email           *string    `json:"email,omitempty"`
-	Company         *string    `json:"company,omitempty"`
-	Age             *int       `json:"age,omitempty"`
-	DNI             *string    `json:"dni,omitempty"`
-	BirthDate       *time.Time `json:"birth_date,omitempty"`
-	Address         *string    `json:"address,omitempty"`
-	Distrito        *string    `json:"distrito,omitempty"`
-	Ocupacion       *string    `json:"ocupacion,omitempty"`
-	Tags            []string   `json:"tags,omitempty"`
-	Notes           *string    `json:"notes,omitempty"`
-	Source          *string    `json:"source,omitempty"`
-	IsGroup         bool       `json:"is_group"`
-	KommoID         *int64     `json:"kommo_id,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	LastActivity    *time.Time `json:"last_activity,omitempty"`
-	LeadCount       int        `json:"lead_count"`
+	ID                 uuid.UUID  `json:"id"`
+	AccountID          uuid.UUID  `json:"account_id"`
+	DeviceID           *uuid.UUID `json:"device_id,omitempty"`
+	JID                string     `json:"jid"`
+	Phone              *string    `json:"phone,omitempty"`
+	Name               *string    `json:"name,omitempty"`
+	LastName           *string    `json:"last_name,omitempty"`
+	ShortName          *string    `json:"short_name,omitempty"`
+	CustomName         *string    `json:"custom_name,omitempty"`
+	PushName           *string    `json:"push_name,omitempty"`
+	AvatarURL          *string    `json:"avatar_url,omitempty"`
+	AvatarCheckedAt    *time.Time `json:"avatar_checked_at,omitempty"`
+	Email              *string    `json:"email,omitempty"`
+	Company            *string    `json:"company,omitempty"`
+	Age                *int       `json:"age,omitempty"`
+	DNI                *string    `json:"dni,omitempty"`
+	BirthDate          *time.Time `json:"birth_date,omitempty"`
+	Address            *string    `json:"address,omitempty"`
+	Distrito           *string    `json:"distrito,omitempty"`
+	Ocupacion          *string    `json:"ocupacion,omitempty"`
+	Tags               []string   `json:"tags,omitempty"`
+	Notes              *string    `json:"notes,omitempty"`
+	Source             *string    `json:"source,omitempty"`
+	IsGroup            bool       `json:"is_group"`
+	KommoID            *int64     `json:"kommo_id,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	LastActivity       *time.Time `json:"last_activity,omitempty"`
+	LeadCount          int        `json:"lead_count"`
+	DoNotContact       bool       `json:"do_not_contact"`
+	DoNotContactAt     *time.Time `json:"do_not_contact_at,omitempty"`
+	DoNotContactBy     *uuid.UUID `json:"do_not_contact_by,omitempty"`
+	DoNotContactReason string     `json:"do_not_contact_reason,omitempty"`
 
 	// Google Contacts sync
 	GoogleSync         bool       `json:"google_sync"`
@@ -784,6 +788,7 @@ type Lead struct {
 	ID             uuid.UUID              `json:"id"`
 	AccountID      uuid.UUID              `json:"account_id"`
 	ContactID      *uuid.UUID             `json:"contact_id,omitempty"`
+	Title          string                 `json:"title"`
 	JID            string                 `json:"jid"`
 	Name           *string                `json:"name,omitempty"`
 	LastName       *string                `json:"last_name,omitempty"`
@@ -797,7 +802,7 @@ type Lead struct {
 	Address        *string                `json:"address,omitempty"`
 	Distrito       *string                `json:"distrito,omitempty"`
 	Ocupacion      *string                `json:"ocupacion,omitempty"`
-	Status         *string                `json:"status,omitempty"` // legacy, kept for backward compat
+	Status         *string                `json:"status,omitempty"` // open, won, lost
 	PipelineID     *uuid.UUID             `json:"pipeline_id,omitempty"`
 	StageID        *uuid.UUID             `json:"stage_id,omitempty"`
 	Source         *string                `json:"source,omitempty"`
@@ -813,20 +818,28 @@ type Lead struct {
 	BlockedAt      *time.Time             `json:"blocked_at,omitempty"`
 	BlockReason    string                 `json:"block_reason,omitempty"`
 	KommoDeletedAt *time.Time             `json:"kommo_deleted_at,omitempty"`
+	ClosedAt       *time.Time             `json:"closed_at,omitempty"`
+	ClosedBy       *uuid.UUID             `json:"closed_by,omitempty"`
+	CloseReason    string                 `json:"close_reason,omitempty"`
+	DeletedAt      *time.Time             `json:"deleted_at,omitempty"`
+	DeletedBy      *uuid.UUID             `json:"deleted_by,omitempty"`
+	DeleteReason   string                 `json:"delete_reason,omitempty"`
 	CreatedAt      time.Time              `json:"created_at"`
 	UpdatedAt      time.Time              `json:"updated_at"`
 
 	// Relations (populated on demand)
-	Contact           *Contact            `json:"contact,omitempty"`
-	StructuredTags    []*Tag              `json:"structured_tags,omitempty"`
-	CustomFieldValues []*CustomFieldValue `json:"custom_field_values,omitempty"`
-	StageName         *string             `json:"stage_name,omitempty"`
-	StageColor        *string             `json:"stage_color,omitempty"`
-	StagePosition     *int                `json:"stage_position,omitempty"`
+	Contact              *Contact            `json:"contact,omitempty"`
+	StructuredTags       []*Tag              `json:"structured_tags,omitempty"`
+	CustomFieldValues    []*CustomFieldValue `json:"custom_field_values,omitempty"`
+	StageName            *string             `json:"stage_name,omitempty"`
+	StageColor           *string             `json:"stage_color,omitempty"`
+	StagePosition        *int                `json:"stage_position,omitempty"`
+	PersonalFieldChanges map[string]bool     `json:"-"`
 }
 
 // LeadStatus constants
 const (
+	LeadStatusOpen      = "open"
 	LeadStatusNew       = "new"
 	LeadStatusContacted = "contacted"
 	LeadStatusQualified = "qualified"
@@ -855,9 +868,31 @@ type PipelineStage struct {
 	Name       string    `json:"name"`
 	Color      string    `json:"color"`
 	Position   int       `json:"position"`
+	StageType  string    `json:"stage_type"`
 	KommoID    *int64    `json:"kommo_id,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	LeadCount  int       `json:"lead_count,omitempty"`
+}
+
+const (
+	PipelineStageTypeActive = "active"
+	PipelineStageTypeWon    = "won"
+	PipelineStageTypeLost   = "lost"
+)
+
+// PipelineTemplate is an immutable, versioned suggestion used by the pipeline
+// creation wizard. Templates are application metadata, never tenant data.
+type PipelineTemplate struct {
+	ID          string                  `json:"id"`
+	Name        string                  `json:"name"`
+	Description string                  `json:"description"`
+	Stages      []PipelineTemplateStage `json:"stages"`
+}
+
+type PipelineTemplateStage struct {
+	Name      string `json:"name"`
+	Color     string `json:"color"`
+	StageType string `json:"stage_type"`
 }
 
 // LeadFilter defines filter options for listing leads
@@ -1082,6 +1117,10 @@ type EventParticipant struct {
 	IsBlocked  bool `json:"is_blocked,omitempty"`
 	// Duplicate detection (populated on demand)
 	DuplicateContact bool `json:"duplicate_contact,omitempty"`
+	// PersonalFieldChanges records field presence in participant PATCH requests.
+	// It prevents event-only edits—or editing just one personal field—from
+	// overwriting unrelated Contact source-of-truth values.
+	PersonalFieldChanges map[string]bool `json:"-"`
 }
 
 // Participant status constants

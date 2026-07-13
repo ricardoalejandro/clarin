@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Search, X, Filter, Users, CheckCircle2, User, Tag, ChevronDown, CheckSquare, FileText, Code, Calendar, Smartphone } from 'lucide-react'
 import FormulaEditor from '@/components/FormulaEditor'
+import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 
 interface PersonResult {
   id: string
@@ -125,15 +126,11 @@ export default function ContactSelector({
 
   const filterRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const peopleRequestRef = useRef(0)
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : ''
 
-  // Close on Escape
-  useEffect(() => {
-    if (!open) return
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', h)
-    return () => document.removeEventListener('keydown', h)
-  }, [open, onClose])
+  useAccessibleDialog(open, dialogRef, onClose, searchRef)
 
   // Debounce search
   useEffect(() => {
@@ -144,10 +141,10 @@ export default function ContactSelector({
   // Focus search on open
   useEffect(() => {
     if (open) {
-      setTimeout(() => searchRef.current?.focus(), 100)
       fetchTags()
       if (useAdvanced) fetchDevices()
     } else {
+      peopleRequestRef.current += 1
       // Reset state on close
       setSearch('')
       setDebouncedSearch('')
@@ -206,6 +203,7 @@ export default function ContactSelector({
   }, [token])
 
   const fetchPeople = useCallback(async () => {
+    const requestId = ++peopleRequestRef.current
     setLoading(true)
     try {
       if (useAdvanced) {
@@ -241,7 +239,7 @@ export default function ContactSelector({
           headers: { Authorization: `Bearer ${token}` },
         })
         const data = await res.json()
-        if (data.success) {
+        if (requestId === peopleRequestRef.current && data.success) {
           // Map Contact → PersonResult
           const contacts = (data.contacts || []) as any[]
           const mapped: PersonResult[] = contacts.map((c: any) => ({
@@ -271,7 +269,7 @@ export default function ContactSelector({
           headers: { Authorization: `Bearer ${token}` },
         })
         const data = await res.json()
-        if (data.success) {
+        if (requestId === peopleRequestRef.current && data.success) {
           const filtered = excludeIds
             ? (data.people || []).filter((p: PersonResult) => !excludeIds.has(p.id))
             : data.people || []
@@ -279,7 +277,11 @@ export default function ContactSelector({
           setTotal(data.total || 0)
         }
       }
-    } catch (e) { console.error(e) } finally { setLoading(false) }
+    } catch (e) {
+      if (requestId === peopleRequestRef.current) console.error(e)
+    } finally {
+      if (requestId === peopleRequestRef.current) setLoading(false)
+    }
   }, [debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
 
   const toggleSelect = (person: PersonResult) => {
@@ -331,15 +333,15 @@ export default function ContactSelector({
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-0 backdrop-blur-sm sm:p-4">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="contact-selector-title" aria-describedby="contact-selector-description" tabIndex={-1} className="flex h-full max-h-none w-full max-w-5xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-3xl">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
-            <p className="text-sm text-gray-500 mt-0.5">{subtitle}</p>
+            <h2 id="contact-selector-title" className="text-lg font-semibold text-gray-900">{title}</h2>
+            <p id="contact-selector-description" className="text-sm text-gray-500 mt-0.5">{subtitle}</p>
           </div>
-          <button onClick={onClose} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+          <button onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar selector de contactos">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -353,14 +355,15 @@ export default function ContactSelector({
                 ref={searchRef}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                onFocus={() => setShowFilterDropdown(true)}
                 onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
                 placeholder="Buscar por nombre, teléfono, email..."
                 className="w-full pl-10 pr-10 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 text-sm"
               />
               <button
                 onClick={() => setShowFilterDropdown(!showFilterDropdown)}
-                className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md transition ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+                className={`absolute right-1 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+                aria-label="Abrir filtros de contactos"
+                aria-expanded={showFilterDropdown}
               >
                 <Filter className="w-4 h-4" />
                 {activeFilterCount > 0 && (
@@ -900,13 +903,13 @@ export default function ContactSelector({
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
-          <button onClick={onClose} className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors text-sm">
+          <button onClick={onClose} className="min-h-11 rounded-xl px-4 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
             Cancelar
           </button>
           <button
             onClick={handleConfirm}
             disabled={selected.size === 0}
-            className="px-6 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 font-medium text-sm transition-colors shadow-sm"
+            className="min-h-11 rounded-xl bg-green-600 px-6 text-sm font-medium text-white shadow-sm transition-colors hover:bg-green-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 focus-visible:ring-offset-2"
           >
             {confirmLabel} {selected.size > 0 ? `(${selected.size})` : ''}
           </button>

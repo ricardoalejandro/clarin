@@ -6,7 +6,7 @@ import {
   CalendarDays, Plus, Search, MapPin, Users, Clock, Edit2, Trash2,
   Eye, LayoutGrid, List, ChevronRight, Home, FolderPlus, MoreHorizontal,
   LayoutTemplate, FolderOpen, ArrowLeft, MoveRight, Tag, X, ChevronDown, Check,
-  Code, FileText, AlertCircle, CheckCircle2, Copy,
+  Code, FileText, AlertCircle, CheckCircle2, Copy, GripVertical,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -416,6 +416,13 @@ export default function EventsPage() {
   const handleDragStart = (e: React.DragEvent, eventID: string) => {
     dragEventIDRef.current = eventID
     e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('application/x-clarin-event', eventID)
+    e.dataTransfer.setData('text/plain', eventID)
+  }
+
+  const handleDragEnd = () => {
+    dragEventIDRef.current = null
+    setDragOverFolderID(null)
   }
 
   const handleFolderDragOver = (e: React.DragEvent, folderID: string) => {
@@ -427,7 +434,7 @@ export default function EventsPage() {
   const handleFolderDrop = async (e: React.DragEvent, targetFolderID: string) => {
     e.preventDefault()
     setDragOverFolderID(null)
-    const eventID = dragEventIDRef.current
+    const eventID = e.dataTransfer.getData('application/x-clarin-event') || dragEventIDRef.current
     if (!eventID) return
     dragEventIDRef.current = null
     await moveEventToFolder(eventID, targetFolderID)
@@ -770,10 +777,10 @@ export default function EventsPage() {
             <div className="p-6 overflow-y-auto bg-slate-50/50">
               <div className="flex items-center gap-2 mb-1">
                 <Tag className="w-4 h-4 text-emerald-600" />
-                <span className="text-sm font-semibold text-slate-800">Fórmula de etiquetas (auto-sync)</span>
+                <span className="text-sm font-semibold text-slate-800">Incorporación automática de contactos</span>
               </div>
               <p className="text-xs text-slate-500 mb-4">
-                Define qué leads se agregan como participantes automáticamente.
+                Define qué contactos se incorporan al evento. La regla solo agrega participantes; nunca elimina el historial existente.
               </p>
 
               {/* Simple / Advanced toggle tabs */}
@@ -827,7 +834,7 @@ export default function EventsPage() {
                       </button>
                     </div>
                     <span className="text-[10px] text-slate-400">
-                      {formData.formula_mode === 'AND' ? 'Lead debe tener TODAS' : 'Lead debe tener al menos UNA'}
+                      {formData.formula_mode === 'AND' ? 'El contacto debe tener TODAS' : 'El contacto debe tener al menos UNA'}
                     </span>
                   </div>
 
@@ -1010,9 +1017,9 @@ export default function EventsPage() {
                     <div className="grid grid-cols-1 gap-1 text-xs text-slate-600">
                       <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;etiqueta&quot;</code> — coincidencia exacta</div>
                       <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;mar%&quot;</code> — empieza con &quot;mar&quot; (comodín)</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">and</code> — el lead debe tener ambas</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">or</code> — el lead debe tener al menos una</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not</code> — excluir leads con esta etiqueta</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">and</code> — el contacto debe tener ambas</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">or</code> — el contacto debe tener al menos una</div>
+                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not</code> — excluir contactos con esta etiqueta</div>
                       <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not in (...)</code> — excluir una lista</div>
                       <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">( )</code> — agrupar expresiones</div>
                     </div>
@@ -1281,7 +1288,7 @@ export default function EventsPage() {
               {sortedEvents.map(ev => {
                 const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
                 return (
-                  <tr key={ev.id} draggable onDragStart={e => handleDragStart(e, ev.id)}
+                  <tr key={ev.id}
                     className="hover:bg-slate-50 transition-colors cursor-pointer"
                     onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}>
                     <td className="px-4 py-3">
@@ -1319,6 +1326,17 @@ export default function EventsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
+                        <button
+                          draggable
+                          onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
+                          onDragEnd={handleDragEnd}
+                          onClick={e => e.stopPropagation()}
+                          className="flex h-9 w-9 cursor-grab items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
+                          title="Arrastrar para mover"
+                          aria-label={`Mover ${ev.name} arrastrando`}
+                        >
+                          <GripVertical className="h-4 w-4" />
+                        </button>
                         <button onClick={e => { e.stopPropagation(); router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`) }}
                           className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Ver detalle">
                           <Eye className="w-4 h-4" />
@@ -1376,7 +1394,7 @@ export default function EventsPage() {
           {filteredEvents.map(ev => {
             const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
             return (
-              <div key={ev.id} draggable onDragStart={e => handleDragStart(e, ev.id)}
+              <div key={ev.id}
                 className="bg-white border border-slate-200 rounded-xl overflow-hidden hover:shadow-md hover:border-slate-300 transition-all group cursor-pointer"
                 onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}>
                 <div className="h-1.5" style={{ backgroundColor: ev.color }} />
@@ -1394,6 +1412,17 @@ export default function EventsPage() {
                       title="Duplicar"
                     >
                       <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      draggable
+                      onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
+                      onDragEnd={handleDragEnd}
+                      onClick={e => e.stopPropagation()}
+                      className="flex-shrink-0 cursor-grab rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
+                      title="Arrastrar para mover"
+                      aria-label={`Mover ${ev.name} arrastrando`}
+                    >
+                      <GripVertical className="h-3.5 w-3.5" />
                     </button>
                   </div>
                   {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) && (
@@ -1428,8 +1457,8 @@ export default function EventsPage() {
             const counts = ev.participant_counts || {}
             const total = ev.total_participants || 0
             return (
-              <div key={ev.id} draggable onDragStart={e => handleDragStart(e, ev.id)}
-                className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-md hover:border-slate-300 transition-all group cursor-grab active:cursor-grabbing">
+              <div key={ev.id}
+                className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-md hover:border-slate-300 transition-all group">
                 <div className="h-1.5" style={{ backgroundColor: ev.color }} />
                 <div className="p-5">
                   <div className="flex items-start justify-between mb-3">
@@ -1441,6 +1470,16 @@ export default function EventsPage() {
                       {statusOpt && (
                         <span className={`${statusOpt.color} text-xs font-medium px-2 py-1 rounded-full`}>{statusOpt.label}</span>
                       )}
+                      <button
+                        draggable
+                        onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
+                        onDragEnd={handleDragEnd}
+                        className="cursor-grab rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
+                        title="Arrastrar para mover"
+                        aria-label={`Mover ${ev.name} arrastrando`}
+                      >
+                        <GripVertical className="h-4 w-4" />
+                      </button>
                       <div className="relative">
                         <button data-menu-toggle onClick={e => { e.stopPropagation(); setMenuEventID(menuEventID === ev.id ? null : ev.id) }}
                           className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg opacity-0 group-hover:opacity-100 transition-all">
@@ -1567,7 +1606,7 @@ export default function EventsPage() {
           onDrop={async e => {
             e.preventDefault()
             setDragOverFolderID(null)
-            const eventID = dragEventIDRef.current
+            const eventID = e.dataTransfer.getData('application/x-clarin-event') || dragEventIDRef.current
             if (!eventID) return
             dragEventIDRef.current = null
             await moveEventToFolder(eventID, folderPath.length > 1 ? folderPath[folderPath.length - 2].id : null)

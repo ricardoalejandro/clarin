@@ -19,6 +19,9 @@ import {
   type NotificationSettings,
 } from '@/lib/notificationSounds'
 import { useNotifications } from '@/components/NotificationProvider'
+import PipelineCreationWizard from '@/components/pipelines/PipelineCreationWizard'
+import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
+import type { Pipeline } from '@/types/contact'
 
 interface Account {
   id: string
@@ -1107,25 +1110,13 @@ export default function SettingsPage() {
   const router = useRouter()
 
   // Pipeline management state
-  interface ManagedPipeline {
-    id: string
-    name: string
-    description: string | null
-    is_default: boolean
-    stages: { id: string; name: string; color: string; position: number }[] | null
-  }
-  const [managedPipelines, setManagedPipelines] = useState<ManagedPipeline[]>([])
+  const [managedPipelines, setManagedPipelines] = useState<Pipeline[]>([])
   const [loadingPipelines, setLoadingPipelines] = useState(false)
   const [expandedPipelineId, setExpandedPipelineId] = useState<string | null>(null)
-  const [showNewPipelineForm, setShowNewPipelineForm] = useState(false)
-  const [newPipelineName, setNewPipelineName] = useState('')
-  const [savingPipeline, setSavingPipeline] = useState(false)
+  const [showPipelineWizard, setShowPipelineWizard] = useState(false)
+  const [stageManagerPipeline, setStageManagerPipeline] = useState<Pipeline | null>(null)
   const [editingPipelineId, setEditingPipelineId] = useState<string | null>(null)
   const [editPipelineName, setEditPipelineName] = useState('')
-  const [newStageName, setNewStageName] = useState('')
-  const [newStageColor, setNewStageColor] = useState('#6366f1')
-  const [addingStageForPipeline, setAddingStageForPipeline] = useState<string | null>(null)
-  const [savingNewStage, setSavingNewStage] = useState(false)
 
   const fetchSettings = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -1256,29 +1247,6 @@ export default function SettingsPage() {
     } catch {} finally { setLoadingPipelines(false) }
   }
 
-  const handleCreatePipeline = async () => {
-    if (!newPipelineName.trim()) return
-    setSavingPipeline(true)
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch('/api/pipelines', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ name: newPipelineName.trim() }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        showMessage('success', `Pipeline "${newPipelineName.trim()}" creado`)
-        setNewPipelineName('')
-        setShowNewPipelineForm(false)
-        fetchManagedPipelines()
-        fetchPipelineStages()
-      } else {
-        showMessage('error', data.error || 'Error al crear pipeline')
-      }
-    } catch { showMessage('error', 'Error de conexión') } finally { setSavingPipeline(false) }
-  }
-
   const handleUpdatePipeline = async (id: string) => {
     if (!editPipelineName.trim()) return
     const token = localStorage.getItem('token')
@@ -1315,49 +1283,6 @@ export default function SettingsPage() {
         fetchPipelineStages()
       } else {
         showMessage('error', data.error || 'Error al eliminar')
-      }
-    } catch { showMessage('error', 'Error de conexión') }
-  }
-
-  const handleCreateStage = async (pipelineId: string) => {
-    if (!newStageName.trim()) return
-    setSavingNewStage(true)
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch(`/api/pipelines/${pipelineId}/stages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ name: newStageName.trim(), color: newStageColor }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        showMessage('success', `Etapa "${newStageName.trim()}" creada`)
-        setNewStageName('')
-        setNewStageColor('#6366f1')
-        setAddingStageForPipeline(null)
-        fetchManagedPipelines()
-        fetchPipelineStages()
-      } else {
-        showMessage('error', data.error || 'Error al crear etapa')
-      }
-    } catch { showMessage('error', 'Error de conexión') } finally { setSavingNewStage(false) }
-  }
-
-  const handleDeleteStage = async (pipelineId: string, stageId: string, stageName: string) => {
-    if (!confirm(`¿Eliminar la etapa "${stageName}"?`)) return
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch(`/api/pipelines/${pipelineId}/stages/${stageId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) {
-        showMessage('success', `Etapa "${stageName}" eliminada`)
-        fetchManagedPipelines()
-        fetchPipelineStages()
-      } else {
-        showMessage('error', data.error || 'Error al eliminar etapa')
       }
     } catch { showMessage('error', 'Error de conexión') }
   }
@@ -2155,57 +2080,28 @@ export default function SettingsPage() {
                     <h3 className="text-sm font-medium text-slate-900">Pipelines y Etapas</h3>
                   </div>
                   <button
-                    onClick={() => { setShowNewPipelineForm(true); setNewPipelineName('') }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-xs rounded-lg hover:bg-emerald-700 transition font-medium shadow-sm"
+                    onClick={() => setShowPipelineWizard(true)}
+                    className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
                   >
-                    <Plus className="w-3.5 h-3.5" /> Nuevo Pipeline
+                    <Plus className="h-4 w-4" /> Nuevo pipeline
                   </button>
                 </div>
                 <p className="text-xs text-slate-500 mb-4">
-                  Administra los pipelines y etapas para organizar tus leads. Puedes crear pipelines manualmente sin necesidad de sincronizar con Kommo.
+                  Diseña recorridos claros para tus oportunidades. Usa una plantilla sugerida o configura cada etapa a tu medida.
                 </p>
-
-                {/* New Pipeline Form */}
-                {showNewPipelineForm && (
-                  <div className="mb-4 p-4 bg-emerald-50 rounded-xl border border-emerald-200">
-                    <p className="text-xs font-medium text-emerald-800 mb-2">Crear nuevo pipeline</p>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={newPipelineName}
-                        onChange={(e) => setNewPipelineName(e.target.value)}
-                        placeholder="Nombre del pipeline"
-                        className="flex-1 px-3 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400"
-                        onKeyDown={(e) => e.key === 'Enter' && handleCreatePipeline()}
-                        autoFocus
-                      />
-                      <button
-                        onClick={handleCreatePipeline}
-                        disabled={!newPipelineName.trim() || savingPipeline}
-                        className="px-4 py-2 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition font-medium"
-                      >
-                        {savingPipeline ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Crear'}
-                      </button>
-                      <button
-                        onClick={() => setShowNewPipelineForm(false)}
-                        className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                )}
 
                 {/* Pipeline List */}
                 {loadingPipelines ? (
-                  <div className="flex items-center justify-center py-6">
-                    <Loader2 className="w-5 h-5 animate-spin text-emerald-600" />
+                  <div className="flex items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 py-10" aria-busy="true">
+                    <Loader2 className="h-5 w-5 animate-spin text-emerald-600 motion-reduce:animate-none" />
+                    <span className="ml-2 text-sm font-medium text-slate-500">Cargando pipelines…</span>
                   </div>
                 ) : managedPipelines.length === 0 ? (
-                  <div className="text-center py-8 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                  <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-5 py-10 text-center">
                     <GripVertical className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                    <p className="text-sm text-slate-500">No hay pipelines creados</p>
-                    <p className="text-xs text-slate-400 mt-1">Crea tu primer pipeline para organizar tus leads en etapas</p>
+                    <p className="text-sm font-semibold text-slate-700">Todavía no hay pipelines</p>
+                    <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-500">Crea el primero con un asistente que te ayudará a elegir y personalizar las etapas.</p>
+                    <button onClick={() => setShowPipelineWizard(true)} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"><Plus className="h-4 w-4" />Crear mi primer pipeline</button>
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -2213,16 +2109,11 @@ export default function SettingsPage() {
                       const isExpPipeline = expandedPipelineId === pipeline.id
                       const stages = pipeline.stages || []
                       return (
-                        <div key={pipeline.id} className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+                        <div key={pipeline.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
                           {/* Pipeline header */}
-                          <div
-                            className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-slate-50 transition"
-                            onClick={() => setExpandedPipelineId(isExpPipeline ? null : pipeline.id)}
-                          >
-                            <div className="flex items-center gap-3">
-                              {isExpPipeline ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
-                              {editingPipelineId === pipeline.id ? (
-                                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex min-h-14 items-center justify-between gap-2 px-2 py-2 transition hover:bg-slate-50 sm:px-3">
+                            {editingPipelineId === pipeline.id ? (
+                                <div className="flex min-w-0 flex-1 items-center gap-2 px-1">
                                   <input
                                     type="text"
                                     value={editPipelineName}
@@ -2231,29 +2122,37 @@ export default function SettingsPage() {
                                     onKeyDown={(e) => { if (e.key === 'Enter') handleUpdatePipeline(pipeline.id); if (e.key === 'Escape') setEditingPipelineId(null) }}
                                     autoFocus
                                   />
-                                  <button onClick={() => handleUpdatePipeline(pipeline.id)} className="p-1 text-emerald-600 hover:text-emerald-700"><Save className="w-3.5 h-3.5" /></button>
-                                  <button onClick={() => setEditingPipelineId(null)} className="p-1 text-slate-400 hover:text-slate-600"><X className="w-3.5 h-3.5" /></button>
+                                  <button onClick={() => handleUpdatePipeline(pipeline.id)} className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-emerald-600 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Guardar nombre"><Save className="w-4 h-4" /></button>
+                                  <button onClick={() => setEditingPipelineId(null)} className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cancelar edición"><X className="w-4 h-4" /></button>
                                 </div>
-                              ) : (
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setExpandedPipelineId(isExpPipeline ? null : pipeline.id)}
+                                className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-xl px-2 text-left hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                aria-expanded={isExpPipeline}
+                                aria-controls={`pipeline-stages-${pipeline.id}`}
+                              >
+                                {isExpPipeline ? <ChevronDown className="w-4 h-4 shrink-0 text-slate-400" /> : <ChevronRight className="w-4 h-4 shrink-0 text-slate-400" />}
                                 <div>
-                                  <span className="text-sm font-medium text-slate-900">{pipeline.name}</span>
+                                  <span className="text-sm font-semibold text-slate-900">{pipeline.name}</span>
                                   <span className="ml-2 text-[10px] text-slate-400">{stages.length} etapa{stages.length !== 1 ? 's' : ''}</span>
                                 </div>
-                              )}
-                            </div>
+                              </button>
+                            )}
                             {editingPipelineId !== pipeline.id && (
-                              <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex shrink-0 items-center gap-1">
                                 <button
                                   onClick={() => { setEditingPipelineId(pipeline.id); setEditPipelineName(pipeline.name) }}
-                                  className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition"
-                                  title="Renombrar"
+                                  className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                  aria-label={`Renombrar ${pipeline.name}`}
                                 >
                                   <Pencil className="w-3.5 h-3.5" />
                                 </button>
                                 <button
                                   onClick={() => handleDeletePipeline(pipeline.id, pipeline.name)}
-                                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
-                                  title="Eliminar pipeline"
+                                  className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 transition hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                                  aria-label={`Eliminar ${pipeline.name}`}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -2263,77 +2162,31 @@ export default function SettingsPage() {
 
                           {/* Stages */}
                           {isExpPipeline && (
-                            <div className="border-t border-slate-100 bg-slate-50/50">
+                            <div id={`pipeline-stages-${pipeline.id}`} className="border-t border-slate-100 bg-slate-50/50">
                               {stages.length === 0 ? (
-                                <div className="px-4 py-4 text-center">
-                                  <p className="text-xs text-slate-400">Sin etapas — agrega una para empezar</p>
+                                <div className="px-4 py-6 text-center">
+                                  <p className="text-sm font-semibold text-slate-600">Este pipeline aún no tiene etapas</p>
+                                  <p className="mt-1 text-xs text-slate-400">Elige una plantilla o configúralo manualmente.</p>
                                 </div>
                               ) : (
                                 <div className="divide-y divide-slate-100">
-                                  {stages.sort((a, b) => a.position - b.position).map((stage, idx) => (
+                                  {[...stages].sort((a, b) => a.position - b.position).map((stage, idx) => (
                                     <div key={stage.id} className="flex items-center justify-between px-4 py-2.5 hover:bg-white transition group">
                                       <div className="flex items-center gap-3">
                                         <span className="text-[10px] text-slate-400 w-4 text-center">{idx + 1}</span>
                                         <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: stage.color }} />
                                         <span className="text-sm text-slate-700">{stage.name}</span>
+                                        {stage.stage_type && stage.stage_type !== 'active' && <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${stage.stage_type === 'won' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>{stage.stage_type === 'won' ? 'Ganado' : 'Perdido'}</span>}
                                       </div>
-                                      <button
-                                        onClick={() => handleDeleteStage(pipeline.id, stage.id, stage.name)}
-                                        className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                                        title="Eliminar etapa"
-                                      >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                      </button>
+                                      {stage.lead_count !== undefined && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold tabular-nums text-slate-500">{stage.lead_count}</span>}
                                     </div>
                                   ))}
                                 </div>
                               )}
-
-                              {/* Add Stage Form */}
-                              {addingStageForPipeline === pipeline.id ? (
-                                <div className="px-4 py-3 border-t border-slate-100 bg-emerald-50/50">
-                                  <div className="flex items-center gap-2">
-                                    <input
-                                      type="color"
-                                      value={newStageColor}
-                                      onChange={(e) => setNewStageColor(e.target.value)}
-                                      className="w-8 h-8 p-0.5 border border-slate-200 rounded-lg cursor-pointer"
-                                      title="Color de la etapa"
-                                    />
-                                    <input
-                                      type="text"
-                                      value={newStageName}
-                                      onChange={(e) => setNewStageName(e.target.value)}
-                                      placeholder="Nombre de la etapa"
-                                      className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
-                                      onKeyDown={(e) => e.key === 'Enter' && handleCreateStage(pipeline.id)}
-                                      autoFocus
-                                    />
-                                    <button
-                                      onClick={() => handleCreateStage(pipeline.id)}
-                                      disabled={!newStageName.trim() || savingNewStage}
-                                      className="px-3 py-1.5 bg-emerald-600 text-white text-xs rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition font-medium"
-                                    >
-                                      {savingNewStage ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Agregar'}
-                                    </button>
-                                    <button
-                                      onClick={() => { setAddingStageForPipeline(null); setNewStageName(''); setNewStageColor('#6366f1') }}
-                                      className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition"
-                                    >
-                                      <X className="w-3.5 h-3.5" />
-                                    </button>
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="px-4 py-2 border-t border-slate-100">
-                                  <button
-                                    onClick={() => { setAddingStageForPipeline(pipeline.id); setNewStageName(''); setNewStageColor('#6366f1') }}
-                                    className="inline-flex items-center gap-1.5 text-xs text-emerald-600 hover:text-emerald-700 font-medium transition"
-                                  >
-                                    <Plus className="w-3.5 h-3.5" /> Agregar etapa
-                                  </button>
-                                </div>
-                              )}
+                              <div className="flex items-center justify-between gap-3 border-t border-slate-100 bg-white px-4 py-3">
+                                <p className="hidden text-xs text-slate-500 sm:block">Edita, reordena y previsualiza sin afectar el pipeline hasta guardar.</p>
+                                <button onClick={() => setStageManagerPipeline(pipeline)} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 sm:w-auto"><Settings className="h-4 w-4" />Gestionar etapas</button>
+                              </div>
                             </div>
                           )}
                         </div>
@@ -2346,14 +2199,14 @@ export default function SettingsPage() {
               <div className="pt-6 border-t border-slate-200">
                 <h3 className="text-sm font-medium text-red-600 mb-2">Zona de Peligro</h3>
                 <p className="text-xs text-slate-500 mb-4">
-                  Estas acciones son irreversibles. Por favor, ten cuidado.
+                  Las oportunidades se moverán a la papelera y podrán restaurarse durante 30 días. El borrado total de contactos sí afecta sus relaciones.
                 </p>
                 <div className="flex flex-wrap gap-3">
                   <button
                     onClick={async () => {
-                      const confirmText = prompt('Para eliminar TODOS los leads de esta cuenta, escribe "ELIMINAR" (en mayúsculas). No se eliminarán contactos ni chats:')
-                      if (confirmText !== 'ELIMINAR') {
-                        if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe ELIMINAR para confirmar.')
+                      const confirmText = prompt('Para mover TODAS las oportunidades de esta cuenta a la papelera, escribe "PAPELERA" (en mayúsculas). No se eliminarán contactos ni chats:')
+                      if (confirmText !== 'PAPELERA') {
+                        if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe PAPELERA para confirmar.')
                         return
                       }
                       const token = localStorage.getItem('token')
@@ -2365,7 +2218,7 @@ export default function SettingsPage() {
                         })
                         const data = await res.json()
                         if (data.success) {
-                          showMessage('success', 'Todos los leads han sido eliminados.')
+                          showMessage('success', 'Todas las oportunidades se movieron a la papelera.')
                         } else {
                           showMessage('error', data.error || 'Error al eliminar leads')
                         }
@@ -2375,7 +2228,7 @@ export default function SettingsPage() {
                     }}
                     className="px-4 py-2 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 text-sm transition"
                   >
-                    Eliminar todos los leads
+                    Mover oportunidades a papelera
                   </button>
                   <button
                     onClick={async () => {
@@ -3447,6 +3300,27 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+
+      <PipelineCreationWizard
+        open={showPipelineWizard}
+        onClose={() => setShowPipelineWizard(false)}
+        onCreated={async (pipeline) => {
+          setExpandedPipelineId(pipeline.id)
+          showMessage('success', `Pipeline “${pipeline.name}” creado`)
+          await Promise.all([fetchManagedPipelines(), fetchPipelineStages()])
+        }}
+      />
+
+      <PipelineStageManager
+        open={Boolean(stageManagerPipeline)}
+        pipeline={stageManagerPipeline}
+        incomingStageId={incomingStageId}
+        onClose={() => setStageManagerPipeline(null)}
+        onSaved={async (updatedPipeline) => {
+          setStageManagerPipeline(updatedPipeline)
+          await Promise.all([fetchManagedPipelines(), fetchPipelineStages()])
+        }}
+      />
     </div>
   )
 }

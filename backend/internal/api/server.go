@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -371,34 +372,38 @@ func (s *Server) setupRoutes() {
 	leads.Get("/list-paginated", s.handleGetLeadsListPaginated)
 	leads.Get("/counts", s.handleGetLeadCounts)
 	leads.Get("/by-stage/:stageId", s.handleGetLeadsByStage)
-	leads.Post("/", s.handleCreateLead)
+	leads.Post("/", s.handleCreateLeadProfessional)
 	leads.Post("/from-contacts", s.handleCreateLeadsFromContacts)
-	leads.Delete("/batch", s.handleDeleteLeadsBatch)
+	leads.Delete("/batch", s.handleTrashLeadsBatch)
 	leads.Post("/observations/batch", s.handleBatchLeadObservations)
-	leads.Patch("/batch/archive", s.handleArchiveLeadsBatch)
-	leads.Patch("/batch/block", s.handleBlockLeadsBatch)
+	leads.Patch("/batch/archive", s.handleArchiveLeadsBatchSafe)
+	leads.Patch("/batch/block", s.handleBlockLeadsBatchCompatibility)
+	leads.Patch("/:id/restore", s.handleRestoreLead)
+	leads.Delete("/:id/purge", s.handlePurgeLead)
 	leads.Get("/:id", s.handleGetLead)
 	leads.Put("/:id", s.handleUpdateLead)
-	leads.Delete("/:id", s.handleDeleteLead)
-	leads.Patch("/:id/status", s.handleUpdateLeadStatus)
-	leads.Patch("/:id/stage", s.handleUpdateLeadStage)
+	leads.Delete("/:id", s.handleTrashLead)
+	leads.Patch("/:id/status", s.handleRejectDirectLeadStatus)
+	leads.Patch("/:id/stage", s.handleMoveLeadToStage)
 	leads.Get("/:id/interactions", s.handleGetLeadInteractions)
 	if kommo.APICommunicationEnabled {
 		leads.Post("/:id/sync-kommo", s.requirePlanFeature("kommo_sync"), s.handleSyncLeadFromKommo)
 	}
-	leads.Patch("/:id/archive", s.handleArchiveLead)
-	leads.Patch("/:id/block", s.handleBlockLead)
+	leads.Patch("/:id/archive", s.handleArchiveLeadSafe)
+	leads.Patch("/:id/block", s.handleBlockLeadCompatibility)
 
 	// Pipeline routes
+	protected.Get("/pipeline-templates", s.requirePermission(domain.PermLeads), s.handleGetPipelineTemplates)
 	pipelines := protected.Group("/pipelines", s.requirePermission(domain.PermLeads))
 	pipelines.Get("/", s.handleGetPipelines)
-	pipelines.Post("/", s.handleCreatePipeline)
+	pipelines.Post("/", s.handleCreatePipelineProfessional)
 	pipelines.Put("/:id", s.handleUpdatePipeline)
 	pipelines.Delete("/:id", s.handleDeletePipeline)
-	pipelines.Post("/:id/stages", s.handleCreatePipelineStage)
-	pipelines.Put("/:id/stages/reorder", s.handleReorderPipelineStages)
-	pipelines.Put("/:id/stages/:stageId", s.handleUpdatePipelineStage)
-	pipelines.Delete("/:id/stages/:stageId", s.handleDeletePipelineStage)
+	pipelines.Post("/:id/stages", s.handleCreatePipelineStageSafe)
+	pipelines.Put("/:id/stages/layout", s.handleSavePipelineStageLayout)
+	pipelines.Put("/:id/stages/reorder", s.handleReorderPipelineStagesSafe)
+	pipelines.Put("/:id/stages/:stageId", s.handleUpdatePipelineStageSafe)
+	pipelines.Delete("/:id/stages/:stageId", s.handleDeletePipelineStageSafe)
 
 	// Tag routes
 	tags := protected.Group("/tags", s.requirePermission(domain.PermTags))
@@ -488,6 +493,7 @@ func (s *Server) setupRoutes() {
 	contacts.Delete("/batch", s.handleDeleteContactsBatch)
 	contacts.Get("/:id", s.handleGetContact)
 	contacts.Get("/:id/leads", s.handleGetContactLeads)
+	contacts.Patch("/:id/do-not-contact", s.handleSetContactDoNotContact)
 	contacts.Put("/:id", s.handleUpdateContact)
 	contacts.Post("/:id/reset", s.handleResetContactFromDevice)
 	if kommo.APICommunicationEnabled {
@@ -1411,7 +1417,7 @@ func (s *Server) handleSetIncomingStage(c *fiber.Ctx) error {
 			SELECT EXISTS(
 				SELECT 1 FROM pipeline_stages ps
 				JOIN pipelines p ON p.id = ps.pipeline_id
-				WHERE ps.id = $1 AND p.account_id = $2
+				WHERE ps.id = $1 AND p.account_id = $2 AND ps.stage_type = 'active'
 			)
 		`, stageID, accountID).Scan(&exists)
 		if err != nil || !exists {
@@ -1513,6 +1519,13 @@ func cleanDeviceString(value *string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+func stringValueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func cleanDeviceStringDefault(value *string, fallback string) *string {
@@ -2189,6 +2202,15 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 	if req.Phone == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Phone number is required"})
 	}
+	if req.InitialMessage != "" {
+		destination := kommo.NormalizePhone(req.Phone) + "@s.whatsapp.net"
+		if err := s.ensureOutboundContactAllowed(c.Context(), accountID, destination); err != nil {
+			if apiErr, ok := err.(*fiber.Error); ok {
+				return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "do_not_contact"})
+			}
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+	}
 
 	// Create chat
 	chat, err := s.services.Chat.CreateNewChat(c.Context(), accountID, deviceID, req.Phone)
@@ -2410,6 +2432,12 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	if err := s.ensureOutboundContactAllowed(c.Context(), accountID, req.To); err != nil {
+		if apiErr, ok := err.(*fiber.Error); ok {
+			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "do_not_contact"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 
 	var message *domain.Message
 
@@ -2465,7 +2493,12 @@ func (s *Server) handleSendContact(c *fiber.Ctx) error {
 	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
-
+	if err := s.ensureOutboundContactAllowed(c.Context(), accountID, req.To); err != nil {
+		if apiErr, ok := err.(*fiber.Error); ok {
+			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "do_not_contact"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 	if req.ContactName == "" || req.ContactPhone == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "contact_name and contact_phone are required"})
 	}
@@ -2502,6 +2535,12 @@ func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
 	}
 	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	}
+	if err := s.ensureOutboundContactAllowed(c.Context(), accountID, req.To); err != nil {
+		if apiErr, ok := err.(*fiber.Error); ok {
+			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "do_not_contact"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	chatID, err := uuid.Parse(req.ChatID)
@@ -3863,14 +3902,15 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 				       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
 				       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
 				       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
-				       l.status, l.source, COALESCE(c.notes, l.notes),
+				       l.status, l.source, l.notes,
 				       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 				       ps.name, ps.color, ps.position, l.kommo_id,
-				       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at
+				       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+				       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 				FROM leads l
 				LEFT JOIN contacts c ON c.id = l.contact_id
 				LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
-				WHERE l.account_id = $1
+				WHERE l.account_id = $1 AND l.deleted_at IS NULL
 				  AND l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($2))
 				ORDER BY l.created_at DESC
 			`, accountID, deviceUUIDs)
@@ -3887,6 +3927,7 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 					&lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID, &lead.CreatedAt, &lead.UpdatedAt,
 					&lead.StageName, &lead.StageColor, &lead.StagePosition, &lead.KommoID,
 					&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+					&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 				); scanErr != nil {
 					leadsErr = scanErr
 					return
@@ -4244,20 +4285,16 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	// Build WHERE clause dynamically
 	args := []interface{}{accountID}
 	argIdx := 2
-	whereClauses := []string{"l.account_id = $1"}
-
-	// Status filter: active (default), archived, blocked, all
-	statusFilter := c.Query("status_filter", "active")
-	switch statusFilter {
-	case "archived":
-		whereClauses = append(whereClauses, "l.is_archived = true AND l.is_blocked = false")
-	case "blocked":
-		whereClauses = append(whereClauses, "l.is_blocked = true")
-	case "all":
-		// no filter
-	default: // active
-		whereClauses = append(whereClauses, "l.is_archived = false AND l.is_blocked = false")
+	whereClauses := []string{
+		"l.account_id = $1",
+		"l.contact_id IS NOT NULL",
+		"l.deleted_at IS NULL",
+		"l.is_archived = FALSE",
+		"l.status = 'open'",
+		"COALESCE(c.do_not_contact,FALSE) = FALSE",
 	}
+
+	addLeadLifecycleWhere(c, &whereClauses)
 
 	if pipelineID == "__no_pipeline__" {
 		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
@@ -4272,8 +4309,8 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
 		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx, argIdx,
+			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(l.title) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx, argIdx, argIdx,
 		))
 		args = append(args, searchPattern)
 		argIdx++
@@ -4332,6 +4369,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		Name       string
 		Color      string
 		Position   int
+		StageType  string
 	}
 	var stagesList []stageInfo
 	var stagesErr error
@@ -4369,8 +4407,10 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			return
 		}
 		rows, err := s.repos.DB().Query(c.Context(),
-			`SELECT id, pipeline_id, name, color, position FROM pipeline_stages WHERE pipeline_id = $1 ORDER BY position`,
-			pid,
+			`SELECT ps.id, ps.pipeline_id, ps.name, ps.color, ps.position, ps.stage_type
+			 FROM pipeline_stages ps JOIN pipelines p ON p.id=ps.pipeline_id
+			 WHERE ps.pipeline_id=$1 AND p.account_id=$2 ORDER BY ps.position`,
+			pid, accountID,
 		)
 		if err != nil {
 			stagesErr = err
@@ -4379,7 +4419,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		defer rows.Close()
 		for rows.Next() {
 			var si stageInfo
-			if err := rows.Scan(&si.ID, &si.PipelineID, &si.Name, &si.Color, &si.Position); err != nil {
+			if err := rows.Scan(&si.ID, &si.PipelineID, &si.Name, &si.Color, &si.Position, &si.StageType); err != nil {
 				stagesErr = err
 				return
 			}
@@ -4416,10 +4456,11 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 				       COALESCE(c.custom_name, c.name, l.name) AS name, COALESCE(c.last_name, l.last_name) AS last_name, COALESCE(c.short_name, l.short_name) AS short_name,
 				       COALESCE(c.phone, l.phone) AS phone, COALESCE(c.email, l.email) AS email, COALESCE(c.company, l.company) AS company,
 				       COALESCE(c.age, l.age) AS age, COALESCE(c.dni, l.dni) AS dni, COALESCE(c.birth_date, l.birth_date) AS birth_date, COALESCE(c.address, l.address) AS address, COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')) AS distrito, COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')) AS ocupacion,
-				       l.status, l.source, COALESCE(c.notes, l.notes) AS notes,
+				       l.status, l.source, l.notes AS notes,
 				       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 				       l.created_at, l.updated_at, l.kommo_id,
-				       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at,
+				       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE) AS is_blocked, COALESCE(c.do_not_contact_at,l.blocked_at) AS blocked_at, COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason) AS block_reason, l.kommo_deleted_at,
+				       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason,
 				       ps.name AS stage_name, ps.color AS stage_color, ps.position AS stage_position,
 				       ROW_NUMBER() OVER (PARTITION BY l.stage_id ORDER BY l.created_at DESC) AS rn
 				FROM leads l
@@ -4432,6 +4473,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			       tags, custom_fields, assigned_to, pipeline_id, stage_id,
 			       created_at, updated_at, kommo_id,
 			       is_archived, archived_at, is_blocked, blocked_at, block_reason, kommo_deleted_at,
+			       title, closed_at, closed_by, close_reason, deleted_at, deleted_by, delete_reason,
 			       stage_name, stage_color, stage_position
 			FROM ranked WHERE rn <= %d
 			ORDER BY stage_position NULLS LAST, created_at DESC
@@ -4450,6 +4492,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 				&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
 				&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
 				&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+				&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 				&lead.StageName, &lead.StageColor, &lead.StagePosition,
 			); err != nil {
 				leadsErr = err
@@ -4517,7 +4560,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	// Hidden by status: count leads matching filters (ignoring status) to show how many are hidden
 	hiddenByStatus := 0
 	hasFormulaOrTagFilter := tagFormulaRaw != "" || len(tagNames) > 0 || len(excludeTagNames) > 0
-	if statusFilter != "all" && hasFormulaOrTagFilter {
+	if strings.ToLower(c.Query("lifecycle")) != "all" && strings.ToLower(c.Query("status_filter")) != "all" && hasFormulaOrTagFilter {
 		hArgs := []interface{}{accountID}
 		hIdx := 2
 		hClauses := []string{"l.account_id = $1"}
@@ -4534,8 +4577,8 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		if search != "" {
 			searchPattern := "%" + strings.ToLower(search) + "%"
 			hClauses = append(hClauses, fmt.Sprintf(
-				"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-				hIdx, hIdx, hIdx, hIdx, hIdx,
+				"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(l.title) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
+				hIdx, hIdx, hIdx, hIdx, hIdx, hIdx,
 			))
 			hArgs = append(hArgs, searchPattern)
 			hIdx++
@@ -4613,6 +4656,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		Name       string         `json:"name"`
 		Color      string         `json:"color"`
 		Position   int            `json:"position"`
+		StageType  string         `json:"stage_type"`
 		TotalCount int            `json:"total_count"`
 		Leads      []*domain.Lead `json:"leads"`
 		HasMore    bool           `json:"has_more"`
@@ -4626,6 +4670,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			Name:       si.Name,
 			Color:      si.Color,
 			Position:   si.Position,
+			StageType:  si.StageType,
 			TotalCount: countMap[si.ID],
 			Leads:      make([]*domain.Lead, 0),
 		}
@@ -4653,10 +4698,11 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 			       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
 			       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
 			       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
-			       l.status, l.source, COALESCE(c.notes, l.notes),
+			       l.status, l.source, l.notes,
 			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 			       l.created_at, l.updated_at, l.kommo_id,
-			       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at
+			       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+			       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 			FROM leads l
 			LEFT JOIN contacts c ON c.id = l.contact_id
 			WHERE %s AND l.stage_id IS NULL
@@ -4674,6 +4720,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 					&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
 					&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
 					&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+					&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 				); err == nil {
 					lead.StructuredTags = tagMap[lead.ID]
 					unassignedLeads = append(unassignedLeads, lead)
@@ -4747,18 +4794,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 	argIdx := 2
 	whereClauses := []string{"l.account_id = $1"}
 
-	// Status filter
-	statusFilter2 := c.Query("status_filter", "active")
-	switch statusFilter2 {
-	case "archived":
-		whereClauses = append(whereClauses, "l.is_archived = true AND l.is_blocked = false")
-	case "blocked":
-		whereClauses = append(whereClauses, "l.is_blocked = true")
-	case "all":
-		// no filter
-	default:
-		whereClauses = append(whereClauses, "l.is_archived = false AND l.is_blocked = false")
-	}
+	addLeadLifecycleWhere(c, &whereClauses)
 
 	// Handle stage: "unassigned" or UUID
 	isUnassigned := stageIDParam == "unassigned"
@@ -4787,8 +4823,8 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
 		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx, argIdx,
+			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(l.title) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx, argIdx, argIdx,
 		))
 		args = append(args, searchPattern)
 		argIdx++
@@ -4838,10 +4874,11 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
 		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
 		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
-		       l.status, l.source, COALESCE(c.notes, l.notes),
+		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 		       l.created_at, l.updated_at, l.kommo_id,
-		       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at,
+		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason,
 		       ps.name, ps.color, ps.position
 		FROM leads l
 		LEFT JOIN contacts c ON c.id = l.contact_id
@@ -4866,6 +4903,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 			&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
 			&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
 			&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+			&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 			&lead.StageName, &lead.StageColor, &lead.StagePosition,
 		); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -4949,18 +4987,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 	argIdx := 2
 	whereClauses := []string{"l.account_id = $1"}
 
-	// Status filter
-	statusFilter3 := c.Query("status_filter", "active")
-	switch statusFilter3 {
-	case "archived":
-		whereClauses = append(whereClauses, "l.is_archived = true AND l.is_blocked = false")
-	case "blocked":
-		whereClauses = append(whereClauses, "l.is_blocked = true")
-	case "all":
-		// no filter
-	default:
-		whereClauses = append(whereClauses, "l.is_archived = false AND l.is_blocked = false")
-	}
+	addLeadLifecycleWhere(c, &whereClauses)
 
 	if pipelineID == "__no_pipeline__" {
 		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
@@ -4974,8 +5001,8 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
 		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx, argIdx,
+			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(l.title) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
+			argIdx, argIdx, argIdx, argIdx, argIdx, argIdx,
 		))
 		args = append(args, searchPattern)
 		argIdx++
@@ -5068,10 +5095,11 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 			       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
 			       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
 			       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
-			       l.status, l.source, COALESCE(c.notes, l.notes),
+			       l.status, l.source, l.notes,
 			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 			       l.created_at, l.updated_at, l.kommo_id,
-			       l.is_archived, l.archived_at, l.is_blocked, l.blocked_at, l.block_reason, l.kommo_deleted_at,
+			       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+			       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason,
 			       ps.name, ps.color, ps.position
 			FROM leads l
 			LEFT JOIN contacts c ON c.id = l.contact_id
@@ -5094,6 +5122,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 				&lead.Tags, &lead.CustomFields, &lead.AssignedTo, &lead.PipelineID, &lead.StageID,
 				&lead.CreatedAt, &lead.UpdatedAt, &lead.KommoID,
 				&lead.IsArchived, &lead.ArchivedAt, &lead.IsBlocked, &lead.BlockedAt, &lead.BlockReason, &lead.KommoDeletedAt,
+				&lead.Title, &lead.ClosedAt, &lead.ClosedBy, &lead.CloseReason, &lead.DeletedAt, &lead.DeletedBy, &lead.DeleteReason,
 				&lead.StageName, &lead.StageColor, &lead.StagePosition,
 			); err != nil {
 				leadsErr = err
@@ -5344,8 +5373,10 @@ func (s *Server) handleCreateLeadsFromContacts(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
 	var req struct {
-		ContactIDs []uuid.UUID `json:"contact_ids"`
-		StageID    *uuid.UUID  `json:"stage_id"`
+		ContactIDs       []uuid.UUID `json:"contact_ids"`
+		StageID          *uuid.UUID  `json:"stage_id"`
+		Title            string      `json:"title"`
+		ConfirmDuplicate bool        `json:"confirm_duplicate"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -5371,6 +5402,34 @@ func (s *Server) handleCreateLeadsFromContacts(c *fiber.Ctx) error {
 		pipelineID, stageID, err = s.repos.Pipeline.ResolveIncomingLeadDestination(c.Context(), accountID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = "Oportunidad"
+	}
+	if !req.ConfirmDuplicate {
+		seenPreflight := make(map[uuid.UUID]struct{}, len(req.ContactIDs))
+		warnings := make([]fiber.Map, 0)
+		for _, contactID := range req.ContactIDs {
+			if _, exists := seenPreflight[contactID]; exists {
+				continue
+			}
+			seenPreflight[contactID] = struct{}{}
+			contact, contactErr := s.services.Contact.GetByID(c.Context(), contactID)
+			if contactErr != nil || contact == nil || contact.AccountID != accountID || contact.IsGroup {
+				continue
+			}
+			duplicates, duplicateErr := s.repos.Lead.HasOpenDuplicate(c.Context(), accountID, contactID, title, nil)
+			if duplicateErr != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": duplicateErr.Error()})
+			}
+			if len(duplicates) > 0 {
+				warnings = append(warnings, fiber.Map{"contact_id": contactID, "candidates": duplicates})
+			}
+		}
+		if len(warnings) > 0 {
+			return c.Status(409).JSON(fiber.Map{"success": false, "code": "possible_duplicate", "error": "Algunos contactos ya tienen una oportunidad abierta con este concepto", "warnings": warnings})
 		}
 	}
 
@@ -5399,23 +5458,15 @@ func (s *Server) handleCreateLeadsFromContacts(c *fiber.Ctx) error {
 			continue
 		}
 
-		var hasActiveLead bool
-		if err := s.repos.DB().QueryRow(c.Context(), `
-			SELECT EXISTS(
-				SELECT 1 FROM leads
-				WHERE account_id = $1
-				  AND contact_id = $2
-				  AND is_archived = false
-				  AND is_blocked = false
-			)
-		`, accountID, contact.ID).Scan(&hasActiveLead); err != nil {
+		duplicates, duplicateErr := s.repos.Lead.HasOpenDuplicate(c.Context(), accountID, contact.ID, title, nil)
+		if duplicateErr != nil {
 			skipped++
-			errors = append(errors, fiber.Map{"contact_id": contactID, "error": err.Error()})
+			errors = append(errors, fiber.Map{"contact_id": contactID, "error": duplicateErr.Error()})
 			continue
 		}
-		if hasActiveLead {
+		if len(duplicates) > 0 && !req.ConfirmDuplicate {
 			skipped++
-			errors = append(errors, fiber.Map{"contact_id": contactID, "error": "el contacto ya tiene un lead activo"})
+			errors = append(errors, fiber.Map{"contact_id": contactID, "code": "possible_duplicate", "error": "ya existe una oportunidad abierta con este concepto", "candidates": duplicates})
 			continue
 		}
 
@@ -5424,6 +5475,7 @@ func (s *Server) handleCreateLeadsFromContacts(c *fiber.Ctx) error {
 		lead := &domain.Lead{
 			AccountID:    accountID,
 			ContactID:    &contact.ID,
+			Title:        title,
 			JID:          contact.JID,
 			Name:         strPtr(displayName),
 			LastName:     contact.LastName,
@@ -5437,9 +5489,9 @@ func (s *Server) handleCreateLeadsFromContacts(c *fiber.Ctx) error {
 			Address:      contact.Address,
 			Distrito:     contact.Distrito,
 			Ocupacion:    contact.Ocupacion,
-			Status:       strPtr(domain.LeadStatusNew),
+			Status:       strPtr(domain.LeadStatusOpen),
 			Source:       &source,
-			Notes:        contact.Notes,
+			Notes:        nil,
 			Tags:         contact.Tags,
 			PipelineID:   pipelineID,
 			StageID:      stageID,
@@ -5571,6 +5623,7 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 
 	// Parse update request
 	var req struct {
+		Title        *string                `json:"title"`
 		Name         *string                `json:"name"`
 		LastName     *string                `json:"last_name"`
 		ShortName    *string                `json:"short_name"`
@@ -5594,6 +5647,36 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	lead.PersonalFieldChanges = map[string]bool{
+		"name": req.Name != nil, "last_name": req.LastName != nil, "short_name": req.ShortName != nil,
+		"phone": req.Phone != nil, "email": req.Email != nil, "company": req.Company != nil,
+		"age": req.Age != nil, "dni": req.DNI != nil, "birth_date": req.BirthDate != nil,
+		"address": req.Address != nil, "distrito": req.Distrito != nil, "ocupacion": req.Ocupacion != nil,
+	}
+	if req.Name == nil && req.LastName == nil && req.ShortName == nil && req.Phone == nil && req.Email == nil &&
+		req.Company == nil && req.Age == nil && req.DNI == nil && req.BirthDate == nil && req.Address == nil &&
+		req.Distrito == nil && req.Ocupacion == nil {
+		lead.PersonalFieldChanges = nil
+	}
+	if req.Status != nil || req.StageID != nil || req.PipelineID != nil {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": "El ciclo de vida solo puede cambiarse moviendo la oportunidad a una etapa"})
+	}
+	if req.Title != nil {
+		title := strings.TrimSpace(*req.Title)
+		if title == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "El concepto de la oportunidad es obligatorio"})
+		}
+		if lead.ContactID != nil && !strings.EqualFold(strings.Join(strings.Fields(lead.Title), " "), strings.Join(strings.Fields(title), " ")) {
+			duplicates, duplicateErr := s.repos.Lead.HasOpenDuplicate(c.Context(), accountID, *lead.ContactID, title, &lead.ID)
+			if duplicateErr != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": duplicateErr.Error()})
+			}
+			if len(duplicates) > 0 {
+				return c.Status(409).JSON(fiber.Map{"success": false, "code": "possible_duplicate", "error": "Ya existe una oportunidad abierta con este concepto", "candidates": duplicates})
+			}
+		}
+		lead.Title = title
 	}
 
 	// Update fields if provided
@@ -5656,7 +5739,11 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	if req.BirthDate != nil {
 		if *req.BirthDate == "" {
 			lead.BirthDate = nil
-		} else if t, err := time.Parse("2006-01-02", *req.BirthDate); err == nil {
+		} else {
+			t, parseErr := time.Parse("2006-01-02", *req.BirthDate)
+			if parseErr != nil {
+				return c.Status(422).JSON(fiber.Map{"success": false, "error": "birth_date must use YYYY-MM-DD"})
+			}
 			lead.BirthDate = &t
 		}
 	}
@@ -5679,13 +5766,6 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 			lead.Ocupacion = nil
 		} else {
 			lead.Ocupacion = req.Ocupacion
-		}
-	}
-	if req.Status != nil {
-		if *req.Status == "" {
-			lead.Status = nil
-		} else {
-			lead.Status = req.Status
 		}
 	}
 	if req.Source != nil {
@@ -5711,22 +5791,17 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	if req.AssignedTo != nil {
 		if *req.AssignedTo == "" {
 			lead.AssignedTo = nil
-		} else if uid, err := uuid.Parse(*req.AssignedTo); err == nil {
+		} else if uid, parseErr := uuid.Parse(*req.AssignedTo); parseErr == nil {
+			var valid bool
+			if queryErr := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$2)`, accountID, uid).Scan(&valid); queryErr != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": queryErr.Error()})
+			}
+			if !valid {
+				return c.Status(422).JSON(fiber.Map{"success": false, "error": "El responsable no pertenece a la cuenta"})
+			}
 			lead.AssignedTo = &uid
-		}
-	}
-	if req.StageID != nil {
-		if *req.StageID == "" {
-			lead.StageID = nil
-		} else if uid, err := uuid.Parse(*req.StageID); err == nil {
-			lead.StageID = &uid
-		}
-	}
-	if req.PipelineID != nil {
-		if *req.PipelineID == "" {
-			lead.PipelineID = nil
-		} else if uid, err := uuid.Parse(*req.PipelineID); err == nil {
-			lead.PipelineID = &uid
+		} else {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid assigned_to"})
 		}
 	}
 
@@ -5742,16 +5817,6 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 			lead.StagePosition = refreshed.StagePosition
 			lead.PipelineID = refreshed.PipelineID
 			lead.StageID = refreshed.StageID
-		}
-	}
-
-	// Sync shared fields to linked contact
-	_ = s.services.Lead.SyncToContact(c.Context(), lead)
-
-	// Propagate name changes to event_participants and campaign_recipients
-	if lead.ContactID != nil {
-		if contact, _ := s.repos.Contact.GetByID(c.Context(), *lead.ContactID); contact != nil {
-			_ = s.services.Contact.SyncToParticipants(c.Context(), contact)
 		}
 	}
 
@@ -5784,7 +5849,7 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	}
 
 	// Auto-sync to Google Contacts if linked contact is synced
-	if s.googleClient != nil && lead.ContactID != nil {
+	if s.googleClient != nil && lead.ContactID != nil && len(lead.PersonalFieldChanges) > 0 {
 		go func() {
 			contact, err := s.repos.Contact.GetByID(context.Background(), *lead.ContactID)
 			if err == nil && contact != nil && contact.GoogleSync {
@@ -6267,29 +6332,33 @@ func (s *Server) handleGetLeadCounts(c *fiber.Ctx) error {
 
 	switch kommoSync {
 	case "kommo":
-		extraWhere += " AND kommo_id IS NOT NULL AND kommo_deleted_at IS NULL"
+		extraWhere += " AND l.kommo_id IS NOT NULL AND l.kommo_deleted_at IS NULL"
 	case "clarin":
-		extraWhere += " AND (kommo_id IS NULL OR kommo_deleted_at IS NOT NULL)"
+		extraWhere += " AND (l.kommo_id IS NULL OR l.kommo_deleted_at IS NOT NULL)"
 	}
 
 	// Filter by pipeline if specified
 	if pipelineID != "" && pipelineID != "__no_pipeline__" {
 		if uid, err := uuid.Parse(pipelineID); err == nil {
-			extraWhere += fmt.Sprintf(" AND stage_id IN (SELECT id FROM pipeline_stages WHERE pipeline_id = $%d)", len(args)+1)
+			extraWhere += fmt.Sprintf(" AND l.stage_id IN (SELECT id FROM pipeline_stages WHERE pipeline_id = $%d)", len(args)+1)
 			args = append(args, uid)
 		}
 	} else if pipelineID == "__no_pipeline__" {
-		extraWhere += " AND stage_id IS NULL"
+		extraWhere += " AND l.stage_id IS NULL"
 	}
 
-	var active, archived, blocked int
+	var active, won, lost, archived, blocked, trash int
 	err := s.repos.DB().QueryRow(c.Context(), fmt.Sprintf(`
 		SELECT
-			COUNT(*) FILTER (WHERE NOT is_archived AND NOT is_blocked),
-			COUNT(*) FILTER (WHERE is_archived AND NOT is_blocked),
-			COUNT(*) FILTER (WHERE is_blocked)
-		FROM leads WHERE account_id = $1%s
-	`, extraWhere), args...).Scan(&active, &archived, &blocked)
+			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND l.status='open' AND NOT l.is_archived),
+			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND l.status='won' AND NOT l.is_archived),
+			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND l.status='lost' AND NOT l.is_archived),
+			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND l.is_archived),
+			COUNT(*) FILTER (WHERE l.deleted_at IS NULL AND COALESCE(contact.do_not_contact,FALSE)),
+			COUNT(*) FILTER (WHERE l.deleted_at IS NOT NULL)
+		FROM leads l LEFT JOIN contacts contact ON contact.id=l.contact_id
+		WHERE l.account_id = $1%s
+	`, extraWhere), args...).Scan(&active, &won, &lost, &archived, &blocked, &trash)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -6297,8 +6366,12 @@ func (s *Server) handleGetLeadCounts(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success":  true,
 		"active":   active,
+		"open":     active,
+		"won":      won,
+		"lost":     lost,
 		"archived": archived,
 		"blocked":  blocked,
+		"trash":    trash,
 	})
 }
 
@@ -6418,7 +6491,7 @@ func (s *Server) handleUpdatePipeline(c *fiber.Ctx) error {
 	if req.Description != nil {
 		pipeline.Description = req.Description
 	}
-	if err := s.services.Pipeline.Update(c.Context(), pipeline); err != nil {
+	if err := s.repos.Pipeline.UpdateForAccount(c.Context(), pipeline); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	s.invalidatePipelinesCache(pipeline.AccountID)
@@ -6438,6 +6511,9 @@ func (s *Server) handleDeletePipeline(c *fiber.Ctx) error {
 	if err := s.services.Pipeline.DeleteForAccount(c.Context(), pipelineID, accountID); err != nil {
 		if err == pgx.ErrNoRows {
 			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
+		}
+		if errors.Is(err, repository.ErrPipelineHasLeads) {
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "Mueve o elimina las oportunidades antes de eliminar este pipeline"})
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -6541,43 +6617,55 @@ func (s *Server) handleReorderPipelineStages(c *fiber.Ctx) error {
 // --- Import CSV Handler ---
 
 type csvImportPreviewRow struct {
-	Row            int    `json:"row"`
-	Action         string `json:"action"`
-	Reason         string `json:"reason,omitempty"`
-	Name           string `json:"name,omitempty"`
-	Phone          string `json:"phone,omitempty"`
-	KommoID        *int64 `json:"kommo_id,omitempty"`
-	ExistingLeadID string `json:"existing_lead_id,omitempty"`
+	Row               int    `json:"row"`
+	Action            string `json:"action"`
+	ReasonCode        string `json:"reason_code,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Phone             string `json:"phone,omitempty"`
+	KommoID           *int64 `json:"kommo_id,omitempty"`
+	ExistingLeadID    string `json:"existing_lead_id,omitempty"`
+	ExistingContact   bool   `json:"existing_contact,omitempty"`
+	WillCreateContact bool   `json:"will_create_contact,omitempty"`
+	ActiveLeadCount   int    `json:"active_lead_count,omitempty"`
 }
 
 type csvImportSummary struct {
-	ImportType          string                `json:"import_type"`
-	Source              string                `json:"source"`
-	FileName            string                `json:"file_name"`
-	ImportTag           string                `json:"import_tag,omitempty"`
-	TotalRows           int                   `json:"total_rows"`
-	New                 int                   `json:"new"`
-	Existing            int                   `json:"existing"`
-	Created             int                   `json:"created"`
-	Updated             int                   `json:"updated"`
-	Skipped             int                   `json:"skipped"`
-	Duplicates          int                   `json:"duplicates"`
-	ErrorCount          int                   `json:"error_count"`
-	NewContacts         int                   `json:"new_contacts"`
-	SafeMode            bool                  `json:"safe_mode"`
-	IncomingDestination string                `json:"incoming_destination,omitempty"`
-	Rows                []csvImportPreviewRow `json:"rows,omitempty"`
-	Errors              []string              `json:"errors"`
+	ImportType            string                `json:"import_type"`
+	Source                string                `json:"source"`
+	FileName              string                `json:"file_name"`
+	ImportTag             string                `json:"import_tag,omitempty"`
+	TotalRows             int                   `json:"total_rows"`
+	New                   int                   `json:"new"`
+	Existing              int                   `json:"existing"`
+	Created               int                   `json:"created"`
+	Updated               int                   `json:"updated"`
+	Skipped               int                   `json:"skipped"`
+	Duplicates            int                   `json:"duplicates"`
+	ErrorCount            int                   `json:"error_count"`
+	NewContacts           int                   `json:"new_contacts"`
+	NeedsReview           int                   `json:"needs_review"`
+	NewOpportunities      int                   `json:"new_opportunities"`
+	ExistingKommo         int                   `json:"existing_kommo"`
+	DuplicateContactLeads int                   `json:"duplicate_contact_leads"`
+	InvalidRows           int                   `json:"invalid_rows"`
+	DuplicatePolicy       string                `json:"duplicate_policy"`
+	SafeMode              bool                  `json:"safe_mode"`
+	IncomingDestination   string                `json:"incoming_destination,omitempty"`
+	Rows                  []csvImportPreviewRow `json:"rows,omitempty"`
+	Errors                []string              `json:"errors"`
 }
 
 type csvImportRecord struct {
 	RowNum             int
 	Action             string
+	ReasonCode         string
 	Reason             string
 	KommoID            *int64
 	Phone              string
 	JID                string
 	Name               string
+	LeadTitle          string
 	LastName           string
 	Email              string
 	Company            string
@@ -6592,8 +6680,8 @@ type csvImportRecord struct {
 	KommoCreatedAt     *time.Time
 	CustomFields       map[string]interface{}
 	ExistingLeadID     *uuid.UUID
+	ActiveLeadCount    int
 	ExistingContactID  *uuid.UUID
-	LinkKommoToLead    bool
 	WillCreateContact  bool
 	ExistingLeadIDText string
 }
@@ -6613,6 +6701,15 @@ var kommoStatusTagNames = []string{
 
 const kommoImportFreshWindow = 24 * time.Hour
 const csvImportPreviewRowLimit = 500
+const csvImportDuplicatePolicy = "single_open_lead_per_contact"
+
+func shouldBlockCSVImportContact(strictKommo bool, importType string, activeLeadCount int) bool {
+	return strictKommo && importType != "contacts" && activeLeadCount > 0
+}
+
+var kommoIquitosV2Headers = []string{
+	"ID", "Nombre del lead", "Compañía", "Contacto principal", "Compañía del lead", "Responsable", "Estatus del lead", "Embudo de ventas", "Presupuesto", "Fecha de creación", "Creado por", "Última modificación el", "Modificado por", "Etiquetas del lead", "Tareas próximas", "Cerrado el", "Próxima cita", "BOT 1.0", "Atención", "✅ RED SOCIAL", "‼️MOTIVO PERDIDA", "✅ SEDE", "✅ Acepto invitación?", "✅ Acepto Clase Gratuita", "✅ Desea inscripción?", "✅ Tipo de cliente", "✅ Campaña", "✅ Consulta", "✅ Fecha", "PRUEBA", "STATUS", "DETEC CAM", "GRUPO", "OTRAS", "✅ Exportado", "utm_content", "utm_medium", "utm_campaign", "utm_source", "utm_term", "utm_referrer", "referrer", "gclientid", "gclid", "fbclid", "ttad_name", "ttad_id", "Cargo (contacto)", "Correo (contacto)", "E-mail priv. (contacto)", "Otro e-mail (contacto)", "Teléfono oficina (contacto)", "Teléfono oficina directo (contacto)", "Teléfono celular (contacto)", "Fax (contacto)", "Teléfono de casa (contacto)", "Otro teléfono (contacto)", "Nota 1", "Nota 2", "Nota 3", "Nota 4", "Nota 5",
+}
 
 func (s *Server) handlePreviewImportCSV(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -6620,7 +6717,7 @@ func (s *Server) handlePreviewImportCSV(c *fiber.Ctx) error {
 	if errMsg != "" {
 		return c.Status(status).JSON(fiber.Map{"success": false, "error": errMsg})
 	}
-	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes)
+	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes, importType != "contacts")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -6634,8 +6731,13 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	if errMsg != "" {
 		return c.Status(status).JSON(fiber.Map{"success": false, "error": errMsg})
 	}
+	releaseImportLock, err := s.acquireCSVImportLock(c.Context(), accountID)
+	if err != nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "No se pudo asegurar la importación; inténtalo nuevamente"})
+	}
+	defer releaseImportLock()
 
-	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes)
+	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes, importType != "contacts")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -6658,16 +6760,20 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"success":      true,
-		"imported":     result.Created + result.Updated,
-		"created":      result.Created,
-		"updated":      result.Updated,
-		"existing":     result.Existing,
-		"skipped":      result.Skipped,
-		"duplicates":   result.Duplicates,
-		"new_contacts": result.NewContacts,
-		"errors":       result.Errors,
-		"summary":      result,
+		"success":                 true,
+		"imported":                result.Created + result.Updated,
+		"created":                 result.Created,
+		"updated":                 result.Updated,
+		"existing":                result.Existing,
+		"skipped":                 result.Skipped,
+		"duplicates":              result.Duplicates,
+		"duplicate_contact_leads": result.DuplicateContactLeads,
+		"existing_kommo":          result.ExistingKommo,
+		"new_opportunities":       result.NewOpportunities,
+		"invalid_rows":            result.InvalidRows,
+		"new_contacts":            result.NewContacts,
+		"errors":                  result.Errors,
+		"summary":                 result,
 	})
 }
 
@@ -6696,7 +6802,25 @@ func readCSVImportUpload(c *fiber.Ctx) (string, string, string, []byte, int, str
 	return importType, importTag, file.Filename, rawBytes, fiber.StatusOK, ""
 }
 
-func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, importType, importTag, fileName string, rawBytes []byte) (*csvImportPlan, error) {
+func (s *Server) acquireCSVImportLock(ctx context.Context, accountID uuid.UUID) (func(), error) {
+	conn, err := s.repos.DB().Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	lockKey := "csv-import:" + accountID.String()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	return func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, lockKey)
+		conn.Release()
+	}, nil
+}
+
+func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, importType, importTag, fileName string, rawBytes []byte, strictKommo bool) (*csvImportPlan, error) {
 	rawContent := strings.TrimPrefix(string(rawBytes), "\ufeff")
 	headerLine, dataContent := splitCSVHeader(rawContent)
 	if strings.TrimSpace(headerLine) == "" || strings.TrimSpace(dataContent) == "" {
@@ -6707,6 +6831,11 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 	headers, err := readCSVRecord(headerLine, headerSep)
 	if err != nil {
 		return nil, fmt.Errorf("cannot parse CSV headers")
+	}
+	if strictKommo {
+		if err := validateKommoIquitosV2Headers(headers); err != nil {
+			return nil, err
+		}
 	}
 	firstDataRow, firstDataLine := firstCSVDataRow(dataContent)
 	dataSep := detectCSVSeparator(firstDataLine)
@@ -6743,6 +6872,9 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 	kommoCreatedAtCol := findImportHeaderCol(headers, colMap, "fecha de creación", "fecha de creacion", "fecha creación", "fecha creacion")
 	kommoFieldCols := kommoCSVFieldColumns(colMap)
 	source := detectImportSource(colMap)
+	if strictKommo && source != "kommo_csv" {
+		return nil, fmt.Errorf("FORMATO_KOMMO_INCOMPATIBLE: el archivo no corresponde al exportador Kommo aprobado")
+	}
 	useKommoFreshWindow := source == "kommo_csv"
 	if useKommoFreshWindow {
 		if kommoCreatedAtCol < 0 {
@@ -6753,11 +6885,12 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 
 	plan := &csvImportPlan{
 		Summary: csvImportSummary{
-			ImportType: importType,
-			Source:     source,
-			FileName:   fileName,
-			ImportTag:  importTag,
-			SafeMode:   true,
+			ImportType:      importType,
+			Source:          source,
+			FileName:        fileName,
+			ImportTag:       importTag,
+			SafeMode:        true,
+			DuplicatePolicy: csvImportDuplicatePolicy,
 		},
 	}
 	if pid, sid, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID); err == nil && pid != nil && sid != nil {
@@ -6786,8 +6919,9 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 		if err != nil {
 			plan.Summary.Skipped++
 			plan.Summary.ErrorCount++
+			plan.Summary.InvalidRows++
 			plan.Summary.Errors = append(plan.Summary.Errors, fmt.Sprintf("fila %d: no se pudo leer (%v)", rowNum, err))
-			plan.addPreview(csvImportPreviewRow{Row: rowNum, Action: "skip", Reason: "No se pudo leer la fila"})
+			plan.addPreview(csvImportPreviewRow{Row: rowNum, Action: "skip", ReasonCode: "invalid_row", Reason: "No se pudo leer la fila"})
 			continue
 		}
 		if rowIsEmpty(row) {
@@ -6799,17 +6933,20 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 		record.Phone = firstValidImportPhone(row, phoneCols)
 		if record.Phone == "" || len(record.Phone) < 6 {
 			record.Action = "skip"
+			record.ReasonCode = "invalid_phone"
 			record.Reason = "Sin teléfono válido"
 			plan.Summary.Skipped++
-			plan.addPreview(csvImportPreviewRow{Row: rowNum, Action: "skip", Reason: record.Reason})
+			plan.Summary.InvalidRows++
+			plan.addPreview(record.previewRow())
 			plan.Records = append(plan.Records, record)
 			continue
 		}
 		record.JID = record.Phone + "@s.whatsapp.net"
 		record.KommoID = parseOptionalInt64(safeCol(row, idCol))
 		record.Name = cleanCSVValue(safeCol(row, nameCol))
+		record.LeadTitle = cleanCSVValue(safeCol(row, leadNameCol))
 		if record.Name == "" {
-			record.Name = cleanLeadNameFallback(safeCol(row, leadNameCol))
+			record.Name = cleanLeadNameFallback(record.LeadTitle)
 		}
 		record.Email = firstValidImportEmail(row, emailCols)
 		record.Notes = joinImportNotes(row, notesCols)
@@ -6827,6 +6964,7 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 		if record.KommoID != nil {
 			if seenKommoIDs[*record.KommoID] {
 				record.Action = "skip"
+				record.ReasonCode = "duplicate_kommo_id_in_file"
 				record.Reason = "ID de Kommo duplicado dentro del archivo"
 				plan.Summary.Skipped++
 				plan.Summary.Duplicates++
@@ -6837,7 +6975,7 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 			seenKommoIDs[*record.KommoID] = true
 		}
 
-		leadID, leadContactID, linkKommo, err := s.findCSVImportLead(ctx, accountID, record.KommoID, record.JID)
+		leadID, leadContactID, err := s.findCSVImportLead(ctx, accountID, record.KommoID)
 		if err != nil {
 			record.Action = "skip"
 			record.Reason = err.Error()
@@ -6849,48 +6987,7 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 			continue
 		}
 		record.ExistingLeadID = leadID
-		record.LinkKommoToLead = linkKommo
-		if leadID != nil {
-			record.Action = "update_existing"
-			record.ExistingLeadIDText = leadID.String()
-			plan.Summary.Existing++
-		} else {
-			if seenNewJIDs[record.JID] {
-				record.Action = "skip"
-				record.Reason = "Teléfono duplicado dentro del archivo"
-				plan.Summary.Skipped++
-				plan.Summary.Duplicates++
-				plan.addPreview(record.previewRow())
-				plan.Records = append(plan.Records, record)
-				continue
-			}
-			seenNewJIDs[record.JID] = true
-			plan.Summary.New++
-		}
-
-		if useKommoFreshWindow && leadID != nil {
-			windowReference, missingReason, staleReason := record.kommoWindowReference()
-			if windowReference == nil {
-				record.Action = "skip"
-				record.Reason = missingReason
-				plan.Summary.Existing--
-				plan.Summary.Skipped++
-				plan.addPreview(record.previewRow())
-				plan.Records = append(plan.Records, record)
-				continue
-			}
-			if !kommoImportWithinWindow(importNow, *windowReference) {
-				record.Action = "skip"
-				record.Reason = staleReason
-				plan.Summary.Existing--
-				plan.Summary.Skipped++
-				plan.addPreview(record.previewRow())
-				plan.Records = append(plan.Records, record)
-				continue
-			}
-		}
-
-		contactID, err := s.findCSVImportContact(ctx, accountID, record.JID)
+		contactID, activeLeadCount, err := s.findCSVImportContactState(ctx, accountID, record.JID)
 		if err != nil {
 			record.Action = "skip"
 			record.Reason = err.Error()
@@ -6905,6 +7002,73 @@ func (s *Server) buildCSVImportPlan(ctx context.Context, accountID uuid.UUID, im
 			contactID = leadContactID
 		}
 		record.ExistingContactID = contactID
+		record.ActiveLeadCount = activeLeadCount
+
+		if leadID != nil {
+			record.Action = "update_existing"
+			record.ExistingLeadIDText = leadID.String()
+			plan.Summary.Existing++
+			plan.Summary.ExistingKommo++
+		} else {
+			if shouldBlockCSVImportContact(strictKommo, importType, activeLeadCount) {
+				record.Action = "duplicate_contact_lead"
+				record.ReasonCode = "open_lead_for_contact"
+				if activeLeadCount == 1 {
+					record.Reason = "Este contacto ya tiene una oportunidad abierta en Clarín. La fila no se importará."
+				} else {
+					record.Reason = fmt.Sprintf("Este contacto ya tiene %d oportunidades abiertas en Clarín. La fila no se importará.", activeLeadCount)
+				}
+				plan.Summary.Skipped++
+				plan.Summary.Duplicates++
+				plan.Summary.DuplicateContactLeads++
+				plan.addPreview(record.previewRow())
+				plan.Records = append(plan.Records, record)
+				continue
+			}
+			if seenNewJIDs[record.JID] {
+				record.Action = "skip"
+				record.ReasonCode = "duplicate_phone_in_file"
+				record.Reason = "Otra fila del archivo ya utilizará este contacto"
+				plan.Summary.Skipped++
+				plan.Summary.Duplicates++
+				if strictKommo && importType != "contacts" {
+					plan.Summary.DuplicateContactLeads++
+				}
+				plan.addPreview(record.previewRow())
+				plan.Records = append(plan.Records, record)
+				continue
+			}
+			seenNewJIDs[record.JID] = true
+			plan.Summary.New++
+			if importType != "contacts" {
+				plan.Summary.NewOpportunities++
+			}
+		}
+
+		if useKommoFreshWindow && leadID != nil {
+			windowReference, missingReason, staleReason := record.kommoWindowReference()
+			if windowReference == nil {
+				record.Action = "skip"
+				record.ReasonCode = "existing_without_valid_creation_date"
+				record.Reason = missingReason
+				plan.Summary.Existing--
+				plan.Summary.Skipped++
+				plan.addPreview(record.previewRow())
+				plan.Records = append(plan.Records, record)
+				continue
+			}
+			if !kommoImportWithinWindow(importNow, *windowReference) {
+				record.Action = "skip"
+				record.ReasonCode = "existing_outside_24h"
+				record.Reason = staleReason
+				plan.Summary.Existing--
+				plan.Summary.Skipped++
+				plan.addPreview(record.previewRow())
+				plan.Records = append(plan.Records, record)
+				continue
+			}
+		}
+
 		if contactID == nil && (importType == "leads" || importType == "contacts" || importType == "both") {
 			record.WillCreateContact = true
 			plan.Summary.NewContacts++
@@ -6924,13 +7088,17 @@ func (p *csvImportPlan) addPreview(row csvImportPreviewRow) {
 
 func (r csvImportRecord) previewRow() csvImportPreviewRow {
 	row := csvImportPreviewRow{
-		Row:            r.RowNum,
-		Action:         r.Action,
-		Reason:         r.Reason,
-		Name:           r.Name,
-		Phone:          r.Phone,
-		KommoID:        r.KommoID,
-		ExistingLeadID: r.ExistingLeadIDText,
+		Row:               r.RowNum,
+		Action:            r.Action,
+		ReasonCode:        r.ReasonCode,
+		Reason:            r.Reason,
+		Name:              r.Name,
+		Phone:             r.Phone,
+		KommoID:           r.KommoID,
+		ExistingLeadID:    r.ExistingLeadIDText,
+		ExistingContact:   r.ExistingContactID != nil,
+		WillCreateContact: r.WillCreateContact,
+		ActiveLeadCount:   r.ActiveLeadCount,
 	}
 	if row.Reason == "" {
 		row.Reason = r.previewReason()
@@ -6992,6 +7160,8 @@ func (r csvImportRecord) previewReason() string {
 			parts = append(parts, "sin cambios aplicables dentro del modo seguro")
 		}
 		return strings.Join(parts, "\n")
+	case "duplicate_contact_lead":
+		return r.Reason
 	default:
 		return r.Reason
 	}
@@ -7009,7 +7179,7 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID, userID uui
 	result.Updated = 0
 	syncKommoMetadata := plan.Summary.Source == "kommo_csv"
 	for _, record := range plan.Records {
-		if record.Action == "skip" {
+		if record.Action == "skip" || record.Action == "duplicate_contact_lead" {
 			continue
 		}
 		if record.Action == "update_existing" {
@@ -7039,6 +7209,19 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID, userID uui
 			}
 			continue
 		}
+		if syncKommoMetadata {
+			_, activeCount, err := s.findCSVImportContactState(ctx, accountID, record.JID)
+			if err != nil {
+				result.Skipped++
+				result.ErrorCount++
+				result.Errors = append(result.Errors, fmt.Sprintf("fila %d: revalidación de contacto: %s", record.RowNum, err.Error()))
+				continue
+			}
+			if activeCount > 0 {
+				markCSVImportRuntimeDuplicate(&result, record)
+				continue
+			}
+		}
 		contact, contactCreated, _, err := s.ensureCSVImportContact(ctx, accountID, record)
 		if err != nil {
 			result.Skipped++
@@ -7057,6 +7240,19 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID, userID uui
 			}
 			continue
 		}
+		if syncKommoMetadata && contact != nil {
+			activeCount, err := s.countOpenCSVImportLeads(ctx, accountID, contact.ID)
+			if err != nil {
+				result.Skipped++
+				result.ErrorCount++
+				result.Errors = append(result.Errors, fmt.Sprintf("fila %d: validación de duplicado: %s", record.RowNum, err.Error()))
+				continue
+			}
+			if activeCount > 0 {
+				markCSVImportRuntimeDuplicate(&result, record)
+				continue
+			}
+		}
 		if err := s.createCSVImportLead(ctx, accountID, userID, record, contact, plan.Summary.ImportTag, syncKommoMetadata); err != nil {
 			result.Skipped++
 			result.ErrorCount++
@@ -7068,6 +7264,21 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID, userID uui
 	return result
 }
 
+func markCSVImportRuntimeDuplicate(result *csvImportSummary, record csvImportRecord) {
+	result.Skipped++
+	result.Duplicates++
+	result.DuplicateContactLeads++
+	if result.New > 0 {
+		result.New--
+	}
+	if result.NewOpportunities > 0 {
+		result.NewOpportunities--
+	}
+	if record.WillCreateContact && result.NewContacts > 0 {
+		result.NewContacts--
+	}
+}
+
 func (s *Server) createCSVImportLead(ctx context.Context, accountID, userID uuid.UUID, record csvImportRecord, contact *domain.Contact, importTag string, syncKommoMetadata bool) error {
 	pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID)
 	if err != nil {
@@ -7077,6 +7288,7 @@ func (s *Server) createCSVImportLead(ctx context.Context, accountID, userID uuid
 	tags := appendImportTag(record.Tags, importTag)
 	lead := &domain.Lead{
 		AccountID:    accountID,
+		Title:        record.LeadTitle,
 		JID:          record.JID,
 		Name:         strPtr(record.Name),
 		LastName:     strPtr(record.LastName),
@@ -7255,26 +7467,7 @@ func (s *Server) currentKommoStatusTagNamesForContact(ctx context.Context, accou
 	return names, rows.Err()
 }
 
-func (s *Server) linkCSVImportLead(ctx context.Context, leadID uuid.UUID, contactID *uuid.UUID, kommoID *int64) error {
-	_, err := s.repos.DB().Exec(ctx, `
-		UPDATE leads SET
-			contact_id = COALESCE(contact_id, $1::uuid),
-			kommo_id = COALESCE(kommo_id, $2::bigint),
-			source = COALESCE(source, 'kommo_csv_import'),
-			kommo_deleted_at = CASE WHEN $2::bigint IS NOT NULL THEN NULL ELSE kommo_deleted_at END,
-			updated_at = CASE
-				WHEN (contact_id IS NULL AND $1::uuid IS NOT NULL)
-				  OR (kommo_id IS NULL AND $2::bigint IS NOT NULL)
-				  OR source IS NULL
-				THEN NOW()
-				ELSE updated_at
-			END
-		WHERE id = $3
-	`, contactID, kommoID, leadID)
-	return err
-}
-
-func (s *Server) findCSVImportLead(ctx context.Context, accountID uuid.UUID, kommoID *int64, jid string) (*uuid.UUID, *uuid.UUID, bool, error) {
+func (s *Server) findCSVImportLead(ctx context.Context, accountID uuid.UUID, kommoID *int64) (*uuid.UUID, *uuid.UUID, error) {
 	var leadID uuid.UUID
 	var contactID *uuid.UUID
 	if kommoID != nil {
@@ -7284,57 +7477,76 @@ func (s *Server) findCSVImportLead(ctx context.Context, accountID uuid.UUID, kom
 			ORDER BY updated_at DESC LIMIT 1
 		`, accountID, *kommoID).Scan(&leadID, &contactID)
 		if err == nil {
-			return &leadID, contactID, false, nil
+			return &leadID, contactID, nil
 		}
 		if err != pgx.ErrNoRows {
-			return nil, nil, false, err
+			return nil, nil, err
 		}
-		var existingKommoID *int64
-		err = s.repos.DB().QueryRow(ctx, `
-			SELECT id, contact_id, kommo_id FROM leads
-			WHERE account_id = $1 AND jid = $2
-			ORDER BY (kommo_id IS NULL) DESC, updated_at DESC LIMIT 1
-		`, accountID, jid).Scan(&leadID, &contactID, &existingKommoID)
-		if err == nil {
-			return &leadID, contactID, existingKommoID == nil, nil
-		}
-		if err != pgx.ErrNoRows {
-			return nil, nil, false, err
-		}
-		return nil, nil, false, nil
+		return nil, nil, nil
 	}
-	err := s.repos.DB().QueryRow(ctx, `
-		SELECT id, contact_id FROM leads
-		WHERE account_id = $1 AND jid = $2
-		ORDER BY updated_at DESC LIMIT 1
-	`, accountID, jid).Scan(&leadID, &contactID)
-	if err == nil {
-		return &leadID, contactID, false, nil
-	}
-	if err != pgx.ErrNoRows {
-		return nil, nil, false, err
-	}
-	return nil, nil, false, nil
+	return nil, nil, nil
 }
 
-func (s *Server) findCSVImportContact(ctx context.Context, accountID uuid.UUID, jid string) (*uuid.UUID, error) {
+func (s *Server) findCSVImportContactState(ctx context.Context, accountID uuid.UUID, jid string) (*uuid.UUID, int, error) {
 	var contactID uuid.UUID
-	err := s.repos.DB().QueryRow(ctx, `SELECT id FROM contacts WHERE account_id = $1 AND jid = $2`, accountID, jid).Scan(&contactID)
+	var activeLeadCount int
+	err := s.repos.DB().QueryRow(ctx, `
+		SELECT c.id, COUNT(l.id)
+		FROM contacts c
+		LEFT JOIN leads l ON l.account_id = c.account_id
+			AND l.contact_id = c.id
+			AND l.status IN ('open', 'new')
+			AND l.deleted_at IS NULL
+			AND l.is_archived = FALSE
+		WHERE c.account_id = $1 AND c.jid = $2
+		GROUP BY c.id
+	`, accountID, jid).Scan(&contactID, &activeLeadCount)
 	if err == nil {
-		return &contactID, nil
+		return &contactID, activeLeadCount, nil
 	}
 	if err == pgx.ErrNoRows {
-		return nil, nil
+		return nil, 0, nil
 	}
-	return nil, err
+	return nil, 0, err
+}
+
+func (s *Server) countOpenCSVImportLeads(ctx context.Context, accountID, contactID uuid.UUID) (int, error) {
+	var count int
+	err := s.repos.DB().QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM leads
+		WHERE account_id = $1 AND contact_id = $2
+			AND status IN ('open', 'new')
+			AND deleted_at IS NULL
+			AND is_archived = FALSE
+	`, accountID, contactID).Scan(&count)
+	return count, err
+}
+
+func validateKommoIquitosV2Headers(headers []string) error {
+	if len(headers) != len(kommoIquitosV2Headers) {
+		return fmt.Errorf("FORMATO_KOMMO_INCOMPATIBLE: se esperaban %d columnas y se detectaron %d; la importación fue bloqueada", len(kommoIquitosV2Headers), len(headers))
+	}
+	for i := range kommoIquitosV2Headers {
+		detected := strings.TrimSpace(strings.TrimPrefix(headers[i], "\ufeff"))
+		if detected != kommoIquitosV2Headers[i] {
+			return fmt.Errorf("FORMATO_KOMMO_INCOMPATIBLE: columna %d; se esperaba %q y se detectó %q; la importación fue bloqueada", i+1, kommoIquitosV2Headers[i], detected)
+		}
+	}
+	return nil
 }
 
 func (s *Server) recordCSVImportLog(ctx context.Context, accountID, userID uuid.UUID, summary csvImportSummary) {
 	details, _ := json.Marshal(fiber.Map{
-		"incoming_destination": summary.IncomingDestination,
-		"import_tag":           summary.ImportTag,
-		"safe_mode":            summary.SafeMode,
-		"errors":               summary.Errors,
+		"incoming_destination":    summary.IncomingDestination,
+		"import_tag":              summary.ImportTag,
+		"safe_mode":               summary.SafeMode,
+		"duplicate_policy":        summary.DuplicatePolicy,
+		"new_opportunities":       summary.NewOpportunities,
+		"existing_kommo":          summary.ExistingKommo,
+		"duplicate_contact_leads": summary.DuplicateContactLeads,
+		"invalid_rows":            summary.InvalidRows,
+		"errors":                  summary.Errors,
 	})
 	_, err := s.repos.DB().Exec(ctx, `
 		INSERT INTO csv_import_logs (
@@ -7583,7 +7795,7 @@ func joinImportNotes(row []string, cols []int) string {
 
 func kommoCSVFieldColumns(colMap map[string]int) map[string]int {
 	keys := []string{
-		"estatus del lead", "embudo de ventas", "status", "detec cam", "grupo", "otras",
+		"estatus del lead", "embudo de ventas", "atención", "status", "detec cam", "grupo", "otras",
 		"prueba", "bot 1.0", "utm_content", "utm_medium", "utm_campaign", "utm_source",
 		"utm_term", "utm_referrer", "referrer", "gclientid", "gclid", "fbclid", "ttad_name", "ttad_id",
 	}
@@ -8218,7 +8430,12 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 
 	// Sync tags to contact_tags table
 	if body.Tags != nil {
-		_ = s.repos.Tag.SyncContactTagsByNames(c.Context(), contact.AccountID, contact.ID, body.Tags)
+		if err := s.repos.Tag.SyncContactTagsByNames(c.Context(), contact.AccountID, contact.ID, body.Tags); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron actualizar las etiquetas"})
+		}
+		if _, err := s.services.Event.ReconcileContactEventMembership(c.Context(), contact.AccountID, contact.ID); err != nil {
+			log.Printf("[EVENT-SYNC] Immediate contact update reconciliation failed for contact %s: %v", contact.ID, err)
+		}
 	}
 
 	// Sync shared fields to all linked event_participants
@@ -8322,10 +8539,11 @@ func (s *Server) handleGetContactLeads(c *fiber.Ctx) error {
 		       COALESCE(c.last_name, l.last_name) AS last_name,
 		       COALESCE(c.phone, l.phone) AS phone,
 		       COALESCE(c.email, l.email) AS email,
-		       l.pipeline_id, l.stage_id,
-		       ps.name AS stage_name, ps.color AS stage_color,
+		       l.title, l.status, l.pipeline_id, l.stage_id,
+		       ps.name AS stage_name, ps.color AS stage_color, ps.stage_type,
 		       pp.name AS pipeline_name,
-		       l.is_archived, l.is_blocked, l.created_at
+		       l.is_archived, COALESCE(c.do_not_contact,FALSE), l.closed_at, l.close_reason,
+		       l.deleted_at, l.delete_reason, l.created_at
 		FROM leads l
 		LEFT JOIN contacts c ON c.id = l.contact_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
@@ -8347,13 +8565,20 @@ func (s *Server) handleGetContactLeads(c *fiber.Ctx) error {
 		LastName     *string       `json:"last_name"`
 		Phone        *string       `json:"phone"`
 		Email        *string       `json:"email"`
+		Title        string        `json:"title"`
+		Status       string        `json:"status"`
 		PipelineID   *uuid.UUID    `json:"pipeline_id"`
 		StageID      *uuid.UUID    `json:"stage_id"`
 		StageName    *string       `json:"stage_name"`
 		StageColor   *string       `json:"stage_color"`
+		StageType    *string       `json:"stage_type"`
 		PipelineName *string       `json:"pipeline_name"`
 		IsArchived   bool          `json:"is_archived"`
 		IsBlocked    bool          `json:"is_blocked"`
+		ClosedAt     *time.Time    `json:"closed_at,omitempty"`
+		CloseReason  string        `json:"close_reason,omitempty"`
+		DeletedAt    *time.Time    `json:"deleted_at,omitempty"`
+		DeleteReason string        `json:"delete_reason,omitempty"`
 		CreatedAt    time.Time     `json:"created_at"`
 		Tags         []*domain.Tag `json:"tags"`
 	}
@@ -8364,8 +8589,8 @@ func (s *Server) handleGetContactLeads(c *fiber.Ctx) error {
 		if err := rows.Scan(
 			&cl.ID, &cl.AccountID, &cl.ContactID, &cl.JID,
 			&cl.Name, &cl.LastName, &cl.Phone, &cl.Email,
-			&cl.PipelineID, &cl.StageID, &cl.StageName, &cl.StageColor, &cl.PipelineName,
-			&cl.IsArchived, &cl.IsBlocked, &cl.CreatedAt,
+			&cl.Title, &cl.Status, &cl.PipelineID, &cl.StageID, &cl.StageName, &cl.StageColor, &cl.StageType, &cl.PipelineName,
+			&cl.IsArchived, &cl.IsBlocked, &cl.ClosedAt, &cl.CloseReason, &cl.DeletedAt, &cl.DeleteReason, &cl.CreatedAt,
 		); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
@@ -8588,7 +8813,12 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 
 	// Sync tags to contact_tags table
 	if len(body.Tags) > 0 {
-		_ = s.repos.Tag.SyncContactTagsByNames(c.Context(), accountID, contact.ID, body.Tags)
+		if err := s.repos.Tag.SyncContactTagsByNames(c.Context(), accountID, contact.ID, body.Tags); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron guardar las etiquetas"})
+		}
+		if _, err := s.services.Event.ReconcileContactEventMembership(c.Context(), accountID, contact.ID); err != nil {
+			log.Printf("[EVENT-SYNC] Immediate contact creation reconciliation failed for contact %s: %v", contact.ID, err)
+		}
 	}
 
 	tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID)
@@ -8627,6 +8857,7 @@ func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
 
 	created := 0
 	skipped := 0
+	eventParticipantsAdded := 0
 	var importErrors []string
 
 	for i, row := range body.Contacts {
@@ -8689,17 +8920,28 @@ func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
 		}
 		// Sync tags to contact_tags table
 		if len(row.Tags) > 0 {
-			_ = s.repos.Tag.SyncContactTagsByNames(c.Context(), accountID, contact.ID, row.Tags)
+			if err := s.repos.Tag.SyncContactTagsByNames(c.Context(), accountID, contact.ID, row.Tags); err != nil {
+				skipped++
+				importErrors = append(importErrors, fmt.Sprintf("fila %d: no se pudieron guardar las etiquetas", i+1))
+				continue
+			}
+			added, reconcileErr := s.services.Event.ReconcileContactEventMembership(c.Context(), accountID, contact.ID)
+			if reconcileErr != nil {
+				log.Printf("[EVENT-SYNC] Immediate bulk contact reconciliation failed for contact %s: %v", contact.ID, reconcileErr)
+			} else {
+				eventParticipantsAdded += added
+			}
 		}
 		created++
 	}
 
 	s.invalidateContactsCache(accountID)
 	return c.JSON(fiber.Map{
-		"success": true,
-		"created": created,
-		"skipped": skipped,
-		"errors":  importErrors,
+		"success":                  true,
+		"created":                  created,
+		"skipped":                  skipped,
+		"errors":                   importErrors,
+		"event_participants_added": eventParticipantsAdded,
 	})
 }
 
@@ -8794,6 +9036,7 @@ func (s *Server) handleCreateTag(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateTag(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid tag ID"})
@@ -8805,11 +9048,14 @@ func (s *Server) handleUpdateTag(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	tag := &domain.Tag{ID: id, Name: req.Name, Color: req.Color}
+	existing, getErr := s.repos.Tag.GetByID(c.Context(), id)
+	if getErr != nil || existing == nil || existing.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Tag not found"})
+	}
+	tag := &domain.Tag{ID: id, AccountID: accountID, Name: req.Name, Color: req.Color}
 	if err := s.services.Tag.Update(c.Context(), tag); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	accountID := c.Locals("account_id").(uuid.UUID)
 	s.invalidateTagsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "tag": tag})
 }
@@ -8843,6 +9089,10 @@ func (s *Server) handleDeleteTag(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid tag ID"})
 	}
+	tag, getErr := s.repos.Tag.GetByID(c.Context(), id)
+	if getErr != nil || tag == nil || tag.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Tag not found"})
+	}
 	if err := s.services.Tag.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -8853,6 +9103,7 @@ func (s *Server) handleDeleteTag(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleAssignTag(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		EntityType string `json:"entity_type"` // contact, lead, chat
 		EntityID   string `json:"entity_id"`
@@ -8869,12 +9120,12 @@ func (s *Server) handleAssignTag(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid tag ID"})
 	}
-	if err := s.services.Tag.Assign(c.Context(), req.EntityType, entityID, tagID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	contactID, err := s.repos.Tag.SetEntityTagForAccount(c.Context(), accountID, req.EntityType, entityID, tagID, true)
+	if err != nil {
+		return writeCRMError(c, err)
 	}
 
 	// Push tag change to Kommo (batched via outbox) — only for leads, NOT contacts
-	accountID := c.Locals("account_id").(uuid.UUID)
 	if kommoSync := s.kommoForAccount(c.Context(), accountID); kommoSync != nil {
 		switch req.EntityType {
 		case "lead":
@@ -8882,17 +9133,25 @@ func (s *Server) handleAssignTag(c *fiber.Ctx) error {
 		}
 	}
 
-	// Event tag auto-sync: when a tag is assigned to a lead, add to matching events
+	eventParticipantsAdded := 0
+	if contactID != nil {
+		added, reconcileErr := s.services.Event.ReconcileContactEventMembership(c.Context(), accountID, *contactID)
+		if reconcileErr != nil {
+			log.Printf("[EVENT-SYNC] Immediate tag assignment reconciliation failed for contact %s: %v", *contactID, reconcileErr)
+		} else {
+			eventParticipantsAdded = added
+		}
+	}
 	if req.EntityType == "lead" {
-		go s.services.Event.HandleLeadTagAssigned(context.Background(), accountID, entityID, tagID)
 		// Fire tag_assigned automation trigger
 		s.triggerAutomationTagAssigned(accountID, entityID, tagID)
 	}
 
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "event_participants_added": eventParticipantsAdded})
 }
 
 func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		EntityType string `json:"entity_type"`
 		EntityID   string `json:"entity_id"`
@@ -8909,12 +9168,11 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid tag ID"})
 	}
-	if err := s.services.Tag.Remove(c.Context(), req.EntityType, entityID, tagID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	if _, err := s.repos.Tag.SetEntityTagForAccount(c.Context(), accountID, req.EntityType, entityID, tagID, false); err != nil {
+		return writeCRMError(c, err)
 	}
 
 	// Push tag change to Kommo (batched via outbox) — only for leads, NOT contacts
-	accountID := c.Locals("account_id").(uuid.UUID)
 	if kommoSync := s.kommoForAccount(c.Context(), accountID); kommoSync != nil {
 		switch req.EntityType {
 		case "lead":
@@ -8933,14 +9191,15 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetEntityTags(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	entityType := c.Params("type")
 	entityID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
 	}
-	tags, err := s.services.Tag.GetByEntity(c.Context(), entityType, entityID)
+	tags, err := s.repos.Tag.GetByEntityForAccount(c.Context(), accountID, entityType, entityID)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeCRMError(c, err)
 	}
 	if tags == nil {
 		tags = make([]*domain.Tag, 0)
@@ -9173,6 +9432,10 @@ func (s *Server) handleDeleteCampaign(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
 	}
+	campaign, getErr := s.services.Campaign.GetByID(c.Context(), id)
+	if getErr != nil || campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
+	}
 	if err := s.services.Campaign.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -9181,6 +9444,7 @@ func (s *Server) handleDeleteCampaign(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleBatchDeleteCampaigns(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		IDs []string `json:"ids"`
 	}
@@ -9193,11 +9457,14 @@ func (s *Server) handleBatchDeleteCampaigns(c *fiber.Ctx) error {
 		if err != nil {
 			continue
 		}
+		campaign, getErr := s.services.Campaign.GetByID(c.Context(), id)
+		if getErr != nil || campaign == nil || campaign.AccountID != accountID {
+			continue
+		}
 		if err := s.services.Campaign.Delete(c.Context(), id); err == nil {
 			deleted++
 		}
 	}
-	accountID := c.Locals("account_id").(uuid.UUID)
 	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "deleted": deleted})
 }
@@ -9208,6 +9475,10 @@ func (s *Server) handleAddCampaignRecipients(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
 	}
 	acctUUID := c.Locals("account_id").(uuid.UUID)
+	campaign, err := s.services.Campaign.GetByID(c.Context(), campaignID)
+	if err != nil || campaign == nil || campaign.AccountID != acctUUID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
+	}
 	var req struct {
 		Recipients []struct {
 			ContactID *string                `json:"contact_id"`
@@ -9222,6 +9493,7 @@ func (s *Server) handleAddCampaignRecipients(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 	var recipients []*domain.CampaignRecipient
+	seenContacts := make(map[uuid.UUID]struct{}, len(req.Recipients))
 	for _, r := range req.Recipients {
 		rec := &domain.CampaignRecipient{
 			CampaignID: campaignID,
@@ -9248,17 +9520,36 @@ func (s *Server) handleAddCampaignRecipients(c *fiber.Ctx) error {
 				rec.ContactID = &contact.ID
 			}
 		}
-		// Auto-populate nombre_corto from contact's short_name if not already set
-		if rec.ContactID != nil {
-			if rec.Metadata == nil || rec.Metadata["nombre_corto"] == nil || rec.Metadata["nombre_corto"] == "" {
-				ct, _ := s.repos.Contact.GetByID(c.Context(), *rec.ContactID)
-				if ct != nil && ct.ShortName != nil && *ct.ShortName != "" {
-					if rec.Metadata == nil {
-						rec.Metadata = make(map[string]interface{})
-					}
-					rec.Metadata["nombre_corto"] = *ct.ShortName
-				}
+		if rec.ContactID == nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Cada destinatario debe estar vinculado a un contacto vigente"})
+		}
+		ct, contactErr := s.repos.Contact.GetByID(c.Context(), *rec.ContactID)
+		if contactErr != nil || ct == nil || ct.AccountID != acctUUID {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Uno de los contactos no existe en esta cuenta"})
+		}
+		blocked, privacyErr := s.repos.Contact.IsOutboundSuppressed(c.Context(), acctUUID, []string{ct.JID, stringValueOrEmpty(ct.Phone), r.JID})
+		if privacyErr != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"success": false, "error": "No se pudo validar la preferencia de contacto"})
+		}
+		if ct.DoNotContact || blocked {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Uno de los contactos está marcado como No contactar", "code": "do_not_contact"})
+		}
+		if _, duplicate := seenContacts[ct.ID]; duplicate {
+			continue
+		}
+		seenContacts[ct.ID] = struct{}{}
+		rec.ContactID = &ct.ID
+		rec.JID = ct.JID
+		rec.Phone = ct.Phone
+		if rec.Name == nil || strings.TrimSpace(*rec.Name) == "" {
+			rec.Name = ct.Name
+		}
+		// Auto-populate nombre_corto from the canonical Contact.
+		if (rec.Metadata == nil || rec.Metadata["nombre_corto"] == nil || rec.Metadata["nombre_corto"] == "") && ct.ShortName != nil && *ct.ShortName != "" {
+			if rec.Metadata == nil {
+				rec.Metadata = make(map[string]interface{})
 			}
+			rec.Metadata["nombre_corto"] = *ct.ShortName
 		}
 		recipients = append(recipients, rec)
 	}
@@ -9277,6 +9568,10 @@ func (s *Server) handleAddCampaignRecipientsFromLeads(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
+	campaign, getErr := s.services.Campaign.GetByID(c.Context(), campaignID)
+	if getErr != nil || campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
+	}
 
 	// Parse the same filter params used by the leads list endpoint
 	search := strings.TrimSpace(c.Query("search"))
@@ -9299,7 +9594,8 @@ func (s *Server) handleAddCampaignRecipientsFromLeads(c *fiber.Ctx) error {
 	// Build WHERE — same logic as handleGetLeadsListPaginated
 	args := []interface{}{accountID}
 	argIdx := 2
-	whereClauses := []string{"l.account_id = $1", "COALESCE(c.phone, l.phone, '') != ''", "l.is_blocked = false", "l.is_archived = false"}
+	whereClauses := []string{"l.account_id = $1", "COALESCE(c.phone, l.phone, '') != ''", "COALESCE(c.do_not_contact,FALSE)=FALSE"}
+	addLeadLifecycleWhere(c, &whereClauses)
 
 	if pipelineID == "__no_pipeline__" {
 		whereClauses = append(whereClauses, "l.pipeline_id IS NULL")
@@ -9369,12 +9665,12 @@ func (s *Server) handleAddCampaignRecipientsFromLeads(c *fiber.Ctx) error {
 
 	// Query all matching leads with phone — no LIMIT (we need all for the campaign)
 	q := fmt.Sprintf(`
-		SELECT l.id, COALESCE(c.name,l.name,''), COALESCE(c.last_name,l.last_name,''), COALESCE(c.short_name,l.short_name,''),
-		       COALESCE(c.phone,l.phone,''), COALESCE(c.company,l.company,''), l.contact_id
+		SELECT DISTINCT ON (c.id) l.id, COALESCE(c.name,''), COALESCE(c.last_name,''), COALESCE(c.short_name,''),
+		       COALESCE(c.phone,''), COALESCE(c.company,''), c.id
 		FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
+		JOIN contacts c ON c.id = l.contact_id AND c.account_id=l.account_id
 		WHERE %s
-		ORDER BY l.updated_at DESC
+		ORDER BY c.id, l.updated_at DESC
 	`, whereSQL)
 
 	rows, err := s.repos.DB().Query(c.Context(), q, args...)
@@ -9444,6 +9740,11 @@ func (s *Server) handleGetCampaignRecipients(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
 	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	campaign, getErr := s.services.Campaign.GetByID(c.Context(), campaignID)
+	if getErr != nil || campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
+	}
 	recipients, err := s.services.Campaign.GetRecipients(c.Context(), campaignID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -9466,7 +9767,7 @@ func (s *Server) handleGetCampaignRecipients(c *fiber.Ctx) error {
 	// Map contact_id → lead_id
 	contactToLead := make(map[uuid.UUID]string)
 	if len(contactIDs) > 0 {
-		rows, err := s.repos.DB().Query(c.Context(), `SELECT id, contact_id FROM leads WHERE contact_id = ANY($1)`, contactIDs)
+		rows, err := s.repos.DB().Query(c.Context(), `SELECT DISTINCT ON (contact_id) id, contact_id FROM leads WHERE account_id=$1 AND contact_id = ANY($2) ORDER BY contact_id, (deleted_at IS NULL) DESC, (status='open') DESC, updated_at DESC`, accountID, contactIDs)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -9481,7 +9782,7 @@ func (s *Server) handleGetCampaignRecipients(c *fiber.Ctx) error {
 	// Fallback: JID → lead_id (for recipients without contact_id)
 	jidToLead := make(map[string]string)
 	if len(jids) > 0 {
-		rows, err := s.repos.DB().Query(c.Context(), `SELECT l.id, l.jid FROM leads l WHERE l.jid = ANY($1)`, jids)
+		rows, err := s.repos.DB().Query(c.Context(), `SELECT DISTINCT ON (l.jid) l.id, l.jid FROM leads l WHERE l.account_id=$1 AND l.jid = ANY($2) ORDER BY l.jid, (l.deleted_at IS NULL) DESC, (l.status='open') DESC, l.updated_at DESC`, accountID, jids)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -9501,7 +9802,7 @@ func (s *Server) handleGetCampaignRecipients(c *fiber.Ctx) error {
 	contactShortNames := make(map[uuid.UUID]contactInfo)
 	if len(contactIDs) > 0 {
 		cRows, cErr := s.repos.DB().Query(c.Context(),
-			`SELECT id, COALESCE(short_name,'') FROM contacts WHERE id = ANY($1)`, contactIDs)
+			`SELECT id, COALESCE(short_name,'') FROM contacts WHERE account_id=$1 AND id = ANY($2)`, accountID, contactIDs)
 		if cErr == nil {
 			for cRows.Next() {
 				var cid uuid.UUID
@@ -9549,6 +9850,11 @@ func (s *Server) handleDeleteCampaignRecipient(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
 	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	campaign, getErr := s.services.Campaign.GetByID(c.Context(), campaignID)
+	if getErr != nil || campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
+	}
 	recipientID, err := uuid.Parse(c.Params("rid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid recipient ID"})
@@ -9563,6 +9869,11 @@ func (s *Server) handleUpdateCampaignRecipient(c *fiber.Ctx) error {
 	campaignID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	campaign, getErr := s.services.Campaign.GetByID(c.Context(), campaignID)
+	if getErr != nil || campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	recipientID, err := uuid.Parse(c.Params("rid"))
 	if err != nil {
@@ -9589,12 +9900,12 @@ func (s *Server) handleUpdateCampaignRecipient(c *fiber.Ctx) error {
 	result := enrichedRecipient{CampaignRecipient: rec}
 	var lid uuid.UUID
 	if rec.ContactID != nil {
-		if err := s.repos.DB().QueryRow(c.Context(), `SELECT id FROM leads WHERE contact_id = $1 LIMIT 1`, *rec.ContactID).Scan(&lid); err == nil {
+		if err := s.repos.DB().QueryRow(c.Context(), `SELECT id FROM leads WHERE account_id=$1 AND contact_id=$2 ORDER BY (deleted_at IS NULL) DESC, (status='open') DESC, updated_at DESC LIMIT 1`, accountID, *rec.ContactID).Scan(&lid); err == nil {
 			lidStr := lid.String()
 			result.LeadID = &lidStr
 		}
 	} else if rec.JID != "" {
-		if err := s.repos.DB().QueryRow(c.Context(), `SELECT id FROM leads WHERE jid = $1 LIMIT 1`, rec.JID).Scan(&lid); err == nil {
+		if err := s.repos.DB().QueryRow(c.Context(), `SELECT id FROM leads WHERE account_id=$1 AND jid=$2 ORDER BY (deleted_at IS NULL) DESC, (status='open') DESC, updated_at DESC LIMIT 1`, accountID, rec.JID).Scan(&lid); err == nil {
 			lidStr := lid.String()
 			result.LeadID = &lidStr
 		}
@@ -9727,6 +10038,11 @@ func (s *Server) handleUpdateCampaignAttachments(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	campaign, getErr := s.services.Campaign.GetByID(c.Context(), id)
+	if getErr != nil || campaign == nil || campaign.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	var req struct {
 		Attachments []struct {
@@ -10024,9 +10340,15 @@ func (s *Server) handleCreateEvent(c *fiber.Ctx) error {
 		CreatedBy:   &userID,
 	}
 	if req.PipelineID != nil {
-		if pid, err := uuid.Parse(*req.PipelineID); err == nil {
-			event.PipelineID = &pid
+		pid, parseErr := uuid.Parse(*req.PipelineID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
 		}
+		pipeline, pipelineErr := s.services.Event.GetPipeline(c.Context(), pid)
+		if pipelineErr != nil || pipeline == nil || pipeline.AccountID != accountID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Pipeline does not belong to this account"})
+		}
+		event.PipelineID = &pid
 	}
 	// If no pipeline specified, assign default
 	if event.PipelineID == nil {
@@ -10108,9 +10430,15 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 		event.Status = *req.Status
 	}
 	if req.PipelineID != nil {
-		if pid, err := uuid.Parse(*req.PipelineID); err == nil {
-			event.PipelineID = &pid
+		pid, parseErr := uuid.Parse(*req.PipelineID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
 		}
+		pipeline, pipelineErr := s.services.Event.GetPipeline(c.Context(), pid)
+		if pipelineErr != nil || pipeline == nil || pipeline.AccountID != accountID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Pipeline does not belong to this account"})
+		}
+		event.PipelineID = &pid
 	}
 	if err := s.services.Event.Update(c.Context(), event); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -10124,6 +10452,10 @@ func (s *Server) handleDeleteEvent(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	event, getErr := s.services.Event.GetByID(c.Context(), id)
+	if getErr != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	if err := s.services.Event.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -10156,6 +10488,9 @@ func (s *Server) handleGetEventTags(c *fiber.Ctx) error {
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	if event, eventErr := s.services.Event.GetByID(c.Context(), eventID); eventErr != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	event, err := s.services.Event.GetByID(c.Context(), eventID)
 	if err != nil || event == nil || event.AccountID != accountID {
@@ -10248,6 +10583,20 @@ func (s *Server) handleSetEventTags(c *fiber.Ctx) error {
 			continue
 		}
 		excludes = append(excludes, tid)
+	}
+	allTagIDs := append(append(make([]uuid.UUID, 0, len(includes)+len(excludes)), includes...), excludes...)
+	if len(allTagIDs) > 0 {
+		var validTagCount int
+		if err := s.repos.DB().QueryRow(c.Context(), `SELECT COUNT(DISTINCT id) FROM tags WHERE account_id=$1 AND id=ANY($2)`, accountID, allTagIDs).Scan(&validTagCount); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		uniqueTagIDs := make(map[uuid.UUID]struct{}, len(allTagIDs))
+		for _, id := range allTagIDs {
+			uniqueTagIDs[id] = struct{}{}
+		}
+		if validTagCount != len(uniqueTagIDs) {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "One or more tags do not belong to this account"})
+		}
 	}
 
 	// Update formula fields on the event
@@ -10343,9 +10692,13 @@ func (s *Server) handleValidateFormula(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	if event, eventErr := s.services.Event.GetByID(c.Context(), eventID); eventErr != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 
 	// Pagination
@@ -10376,7 +10729,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
 		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(p.name,'')) LIKE $%d OR LOWER(COALESCE(p.phone,'')) LIKE $%d OR LOWER(COALESCE(p.email,'')) LIKE $%d OR LOWER(COALESCE(p.last_name,'')) LIKE $%d)",
+			"(LOWER(COALESCE(contact.custom_name,contact.name,contact.push_name,p.name,'')) LIKE $%d OR LOWER(COALESCE(contact.phone,p.phone,'')) LIKE $%d OR LOWER(COALESCE(contact.email,p.email,'')) LIKE $%d OR LOWER(COALESCE(contact.last_name,p.last_name,'')) LIKE $%d)",
 			argIdx, argIdx, argIdx, argIdx,
 		))
 		args = append(args, searchPattern)
@@ -10432,7 +10785,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 	}
 
 	if hasPhone != nil && *hasPhone {
-		whereClauses = append(whereClauses, "p.phone IS NOT NULL AND p.phone != ''")
+		whereClauses = append(whereClauses, "NULLIF(BTRIM(COALESCE(contact.phone,p.phone,'')),'') IS NOT NULL")
 	}
 
 	if stageIDsRaw != "" {
@@ -10455,26 +10808,28 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 
 	// Count total
 	var total int
-	countQ := fmt.Sprintf("SELECT COUNT(*) FROM event_participants p WHERE %s", whereSQL)
+	countQ := fmt.Sprintf("SELECT COUNT(*) FROM event_participants p LEFT JOIN contacts contact ON contact.id=p.contact_id WHERE %s", whereSQL)
 	_ = s.repos.DB().QueryRow(c.Context(), countQ, args...).Scan(&total)
 
 	// Fetch page
 	dataQ := fmt.Sprintf(`
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-		       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
-		       p.company, p.dni, p.birth_date, p.address, p.distrito, p.ocupacion,
+		       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),p.name),
+		       COALESCE(contact.last_name,p.last_name), COALESCE(contact.short_name,p.short_name), COALESCE(contact.phone,p.phone), COALESCE(contact.email,p.email), COALESCE(contact.age,p.age),
+		       COALESCE(contact.company,p.company), COALESCE(contact.dni,p.dni), COALESCE(contact.birth_date,p.birth_date), COALESCE(contact.address,p.address), COALESCE(contact.distrito,p.distrito), COALESCE(contact.ocupacion,p.ocupacion),
 		       p.status, p.notes, p.next_action, p.next_action_date,
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.created_at, p.updated_at,
 		       eps.name AS stage_name, eps.color AS stage_color,
 		       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
-		       COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked
+		       COALESCE(l.is_archived, false) AS is_archived, COALESCE(contact.do_not_contact, false) AS is_blocked
 		FROM event_participants p
+		LEFT JOIN contacts contact ON contact.id = p.contact_id
 		LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id
 		LEFT JOIN leads l ON l.id = p.lead_id
 		LEFT JOIN pipeline_stages lps ON lps.id = l.stage_id
 		WHERE %s
-		ORDER BY p.next_action_date ASC NULLS LAST, p.name ASC
+		ORDER BY p.next_action_date ASC NULLS LAST, COALESCE(contact.custom_name,contact.name,contact.push_name,p.name) ASC
 		OFFSET %d LIMIT %d
 	`, whereSQL, offset, limit)
 
@@ -10503,29 +10858,21 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 		participants = append(participants, p)
 	}
 
-	// Load tags for each participant
-	for _, p := range participants {
-		if p.LeadID == nil {
-			p.Tags = make([]*domain.Tag, 0)
-			continue
+	contactIDs := make([]uuid.UUID, 0, len(participants))
+	for _, participant := range participants {
+		if participant.ContactID != nil {
+			contactIDs = append(contactIDs, *participant.ContactID)
 		}
-		tagRows, err := s.repos.DB().Query(c.Context(), `
-			SELECT t.id, t.account_id, t.name, t.color, t.created_at
-			FROM tags t JOIN contact_tags ct ON ct.tag_id = t.id
-			JOIN leads l ON l.contact_id = ct.contact_id
-			WHERE l.id = $1
-		`, *p.LeadID)
-		if err == nil {
-			for tagRows.Next() {
-				tag := &domain.Tag{}
-				if err := tagRows.Scan(&tag.ID, &tag.AccountID, &tag.Name, &tag.Color, &tag.CreatedAt); err == nil {
-					p.Tags = append(p.Tags, tag)
-				}
-			}
-			tagRows.Close()
+	}
+	tagsByContact, _ := s.repos.Tag.GetByContactsBatch(c.Context(), contactIDs)
+	for _, participant := range participants {
+		if participant.ContactID != nil {
+			participant.Tags = tagsByContact[*participant.ContactID]
+		} else if participant.LeadID != nil { // legacy detached-row fallback
+			participant.Tags, _ = s.services.Tag.GetByEntity(c.Context(), "lead", *participant.LeadID)
 		}
-		if p.Tags == nil {
-			p.Tags = make([]*domain.Tag, 0)
+		if participant.Tags == nil {
+			participant.Tags = make([]*domain.Tag, 0)
 		}
 	}
 
@@ -10551,9 +10898,13 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 
 // handleGetEventParticipantsPaginated returns first N participants per stage using ROW_NUMBER()
 func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	if event, eventErr := s.services.Event.GetByID(c.Context(), eventID); eventErr != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 
 	perStage, _ := strconv.Atoi(c.Query("per_stage", "50"))
@@ -10580,7 +10931,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
 		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(p.name,'')) LIKE $%d OR LOWER(COALESCE(p.phone,'')) LIKE $%d OR LOWER(COALESCE(p.email,'')) LIKE $%d OR LOWER(COALESCE(p.last_name,'')) LIKE $%d)",
+			"(LOWER(COALESCE(contact.custom_name,contact.name,contact.push_name,p.name,'')) LIKE $%d OR LOWER(COALESCE(contact.phone,p.phone,'')) LIKE $%d OR LOWER(COALESCE(contact.email,p.email,'')) LIKE $%d OR LOWER(COALESCE(contact.last_name,p.last_name,'')) LIKE $%d)",
 			argIdx, argIdx, argIdx, argIdx,
 		))
 		args = append(args, searchPattern)
@@ -10636,7 +10987,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	}
 
 	if hasPhone != nil && *hasPhone {
-		whereClauses = append(whereClauses, "p.phone IS NOT NULL AND p.phone != ''")
+		whereClauses = append(whereClauses, "NULLIF(BTRIM(COALESCE(contact.phone,p.phone,'')),'') IS NOT NULL")
 	}
 
 	if stageIDsRaw != "" {
@@ -10710,7 +11061,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	// Goroutine 2: Count participants per stage
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT p.stage_id, COUNT(*) FROM event_participants p WHERE %s AND p.stage_id IS NOT NULL GROUP BY p.stage_id`, whereSQL)
+		q := fmt.Sprintf(`SELECT p.stage_id, COUNT(*) FROM event_participants p LEFT JOIN contacts contact ON contact.id=p.contact_id WHERE %s AND p.stage_id IS NOT NULL GROUP BY p.stage_id`, whereSQL)
 		rows, err := s.repos.DB().Query(c.Context(), q, args...)
 		if err != nil {
 			countsErr = err
@@ -10733,16 +11084,20 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 		q := fmt.Sprintf(`
 			WITH ranked AS (
 				SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-				       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
-				       p.company, p.dni, p.birth_date, p.address, p.distrito, p.ocupacion,
+				       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),p.name) AS name,
+				       COALESCE(contact.last_name,p.last_name) AS last_name, COALESCE(contact.short_name,p.short_name) AS short_name,
+				       COALESCE(contact.phone,p.phone) AS phone, COALESCE(contact.email,p.email) AS email, COALESCE(contact.age,p.age) AS age,
+				       COALESCE(contact.company,p.company) AS company, COALESCE(contact.dni,p.dni) AS dni, COALESCE(contact.birth_date,p.birth_date) AS birth_date,
+				       COALESCE(contact.address,p.address) AS address, COALESCE(contact.distrito,p.distrito) AS distrito, COALESCE(contact.ocupacion,p.ocupacion) AS ocupacion,
 				       p.status, p.notes, p.next_action, p.next_action_date,
 				       p.invited_at, p.confirmed_at, p.attended_at,
 				       p.created_at, p.updated_at,
 				       s.name AS stage_name, s.color AS stage_color, s.position AS stage_position,
 				       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
-				       COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked,
+				       COALESCE(l.is_archived, false) AS is_archived, COALESCE(contact.do_not_contact, false) AS is_blocked,
 				       ROW_NUMBER() OVER (PARTITION BY p.stage_id ORDER BY p.created_at DESC) AS rn
 				FROM event_participants p
+				LEFT JOIN contacts contact ON contact.id = p.contact_id
 				LEFT JOIN event_pipeline_stages s ON s.id = p.stage_id
 				LEFT JOIN leads l ON l.id = p.lead_id
 				LEFT JOIN pipeline_stages lps ON lps.id = l.stage_id
@@ -10817,7 +11172,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	// Goroutine 5: Unassigned participants count
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT COUNT(*) FROM event_participants p WHERE %s AND (p.stage_id IS NULL)`, whereSQL)
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM event_participants p LEFT JOIN contacts contact ON contact.id=p.contact_id WHERE %s AND (p.stage_id IS NULL)`, whereSQL)
 		err := s.repos.DB().QueryRow(c.Context(), q, args...).Scan(&unassignedCount)
 		if err != nil {
 			unassignedErr = err
@@ -10914,12 +11269,14 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	if unassignedCount > 0 {
 		q := fmt.Sprintf(`
 			SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-			       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
-			       p.company, p.dni, p.birth_date, p.address, p.distrito, p.ocupacion,
+			       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),p.name),
+			       COALESCE(contact.last_name,p.last_name), COALESCE(contact.short_name,p.short_name), COALESCE(contact.phone,p.phone), COALESCE(contact.email,p.email), COALESCE(contact.age,p.age),
+			       COALESCE(contact.company,p.company), COALESCE(contact.dni,p.dni), COALESCE(contact.birth_date,p.birth_date), COALESCE(contact.address,p.address), COALESCE(contact.distrito,p.distrito), COALESCE(contact.ocupacion,p.ocupacion),
 			       p.status, p.notes, p.next_action, p.next_action_date,
 			       p.invited_at, p.confirmed_at, p.attended_at,
 			       p.created_at, p.updated_at
 			FROM event_participants p
+			LEFT JOIN contacts contact ON contact.id=p.contact_id
 			WHERE %s AND p.stage_id IS NULL
 			ORDER BY p.created_at DESC
 			LIMIT %d
@@ -10995,9 +11352,13 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 
 // handleGetEventParticipantsByStage returns paginated participants for a single stage (infinite scroll)
 func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	if event, eventErr := s.services.Event.GetByID(c.Context(), eventID); eventErr != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	stageIDParam := c.Params("stageId")
 
@@ -11038,7 +11399,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
 		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(p.name,'')) LIKE $%d OR LOWER(COALESCE(p.phone,'')) LIKE $%d OR LOWER(COALESCE(p.email,'')) LIKE $%d OR LOWER(COALESCE(p.last_name,'')) LIKE $%d)",
+			"(LOWER(COALESCE(contact.custom_name,contact.name,contact.push_name,p.name,'')) LIKE $%d OR LOWER(COALESCE(contact.phone,p.phone,'')) LIKE $%d OR LOWER(COALESCE(contact.email,p.email,'')) LIKE $%d OR LOWER(COALESCE(contact.last_name,p.last_name,'')) LIKE $%d)",
 			argIdx, argIdx, argIdx, argIdx,
 		))
 		args = append(args, searchPattern)
@@ -11094,7 +11455,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 	}
 
 	if hasPhone != nil && *hasPhone {
-		whereClauses = append(whereClauses, "p.phone IS NOT NULL AND p.phone != ''")
+		whereClauses = append(whereClauses, "NULLIF(BTRIM(COALESCE(contact.phone,p.phone,'')),'') IS NOT NULL")
 	}
 
 	addDateFilter(c, "p", participantDateFields, &whereClauses, &args, &argIdx)
@@ -11104,15 +11465,17 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 	// Query with LIMIT+1 OFFSET
 	q := fmt.Sprintf(`
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-		       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
-		       p.company, p.dni, p.birth_date, p.address, p.distrito, p.ocupacion,
+		       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),p.name),
+		       COALESCE(contact.last_name,p.last_name), COALESCE(contact.short_name,p.short_name), COALESCE(contact.phone,p.phone), COALESCE(contact.email,p.email), COALESCE(contact.age,p.age),
+		       COALESCE(contact.company,p.company), COALESCE(contact.dni,p.dni), COALESCE(contact.birth_date,p.birth_date), COALESCE(contact.address,p.address), COALESCE(contact.distrito,p.distrito), COALESCE(contact.ocupacion,p.ocupacion),
 		       p.status, p.notes, p.next_action, p.next_action_date,
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.created_at, p.updated_at,
 		       COALESCE(s.name, '') AS stage_name, COALESCE(s.color, '') AS stage_color,
 		       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
-		       COALESCE(l.is_archived, false) AS is_archived, COALESCE(l.is_blocked, false) AS is_blocked
+		       COALESCE(l.is_archived, false) AS is_archived, COALESCE(contact.do_not_contact, false) AS is_blocked
 		FROM event_participants p
+		LEFT JOIN contacts contact ON contact.id = p.contact_id
 		LEFT JOIN event_pipeline_stages s ON s.id = p.stage_id
 		LEFT JOIN leads l ON l.id = p.lead_id
 		LEFT JOIN pipeline_stages lps ON lps.id = l.stage_id
@@ -11192,6 +11555,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 // handleBatchParticipantObservations returns observations for multiple participants
 // It searches interactions by participant_id, contact_id, and lead_id
 func (s *Server) handleBatchParticipantObservations(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		ParticipantIDs []string `json:"participant_ids"`
 		Limit          int      `json:"limit"`
@@ -11221,8 +11585,10 @@ func (s *Server) handleBatchParticipantObservations(c *fiber.Ctx) error {
 
 	// Get participant_id → contact_id and lead_id mappings
 	mapRows, err := s.repos.DB().Query(c.Context(), `
-		SELECT id, contact_id, lead_id FROM event_participants WHERE id = ANY($1)
-	`, partUUIDs)
+		SELECT ep.id, ep.contact_id, ep.lead_id
+		FROM event_participants ep JOIN events e ON e.id=ep.event_id
+		WHERE ep.id = ANY($1) AND e.account_id=$2
+	`, partUUIDs, accountID)
 	if err != nil {
 		log.Printf("[API] Error querying participant mapping: %v", err)
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -11268,13 +11634,15 @@ func (s *Server) handleBatchParticipantObservations(c *fiber.Ctx) error {
 			       ) as rn
 			FROM interactions i
 			LEFT JOIN users u ON i.created_by = u.id
-			WHERE i.participant_id = ANY($1)
-			   OR i.contact_id = ANY($2)
-			   OR i.lead_id = ANY($3)
+			WHERE i.account_id=$5 AND (
+				i.participant_id = ANY($1)
+				OR i.contact_id = ANY($2)
+				OR i.lead_id = ANY($3)
+			)
 		) sub
 		WHERE rn <= $4
 		ORDER BY created_at DESC
-	`, partUUIDs, contactUUIDs, leadUUIDs, req.Limit)
+	`, partUUIDs, contactUUIDs, leadUUIDs, req.Limit, accountID)
 	if err != nil {
 		log.Printf("[API] Error querying batch participant observations: %v", err)
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -11345,7 +11713,6 @@ func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 	}
 	var req struct {
 		ContactID *string `json:"contact_id"`
-		LeadID    *string `json:"lead_id"`
 		Name      string  `json:"name"`
 		LastName  *string `json:"last_name"`
 		ShortName *string `json:"short_name"`
@@ -11373,16 +11740,8 @@ func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 			p.ContactID = &cid
 		}
 	}
-	if req.LeadID != nil {
-		if lid, err := uuid.Parse(*req.LeadID); err == nil {
-			p.LeadID = &lid
-			// If no contact_id provided, look up the lead's contact_id
-			if p.ContactID == nil {
-				if lead, err := s.services.Lead.GetByID(c.Context(), lid); err == nil && lead != nil && lead.ContactID != nil {
-					p.ContactID = lead.ContactID
-				}
-			}
-		}
+	if err := s.ensureEventParticipantContact(c.Context(), accountID, p); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	if err := s.services.Event.AddParticipant(c.Context(), p); err != nil {
 		errMsg := err.Error()
@@ -11415,7 +11774,6 @@ func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
 	var req struct {
 		Participants []struct {
 			ContactID *string `json:"contact_id"`
-			LeadID    *string `json:"lead_id"`
 			Name      string  `json:"name"`
 			LastName  *string `json:"last_name"`
 			ShortName *string `json:"short_name"`
@@ -11442,15 +11800,8 @@ func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
 				p.ContactID = &cid
 			}
 		}
-		if r.LeadID != nil {
-			if lid, err := uuid.Parse(*r.LeadID); err == nil {
-				p.LeadID = &lid
-				if p.ContactID == nil {
-					if lead, err := s.services.Lead.GetByID(c.Context(), lid); err == nil && lead != nil && lead.ContactID != nil {
-						p.ContactID = lead.ContactID
-					}
-				}
-			}
+		if err := s.ensureEventParticipantContact(c.Context(), accountID, p); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
 		participants = append(participants, p)
 	}
@@ -11497,6 +11848,17 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	p.PersonalFieldChanges = map[string]bool{
+		"name": req.Name != nil, "last_name": req.LastName != nil, "short_name": req.ShortName != nil,
+		"phone": req.Phone != nil, "email": req.Email != nil, "age": req.Age != nil,
+		"company": req.Company != nil, "dni": req.DNI != nil, "birth_date": req.BirthDate != nil,
+		"address": req.Address != nil, "distrito": req.Distrito != nil, "ocupacion": req.Ocupacion != nil,
+	}
+	if req.Name == nil && req.LastName == nil && req.ShortName == nil && req.Phone == nil && req.Email == nil &&
+		req.Age == nil && req.Company == nil && req.DNI == nil && req.BirthDate == nil && req.Address == nil &&
+		req.Distrito == nil && req.Ocupacion == nil {
+		p.PersonalFieldChanges = nil
 	}
 	if req.Name != nil {
 		p.Name = *req.Name
@@ -11595,6 +11957,17 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 	if req.NextActionDate != nil {
 		p.NextActionDate = req.NextActionDate
 	}
+	// Legacy detached participants are linked before the write so the same
+	// transaction can update the Contact source of truth and all snapshots.
+	if p.ContactID == nil && p.Phone != nil && strings.TrimSpace(*p.Phone) != "" {
+		contact, _ := s.repos.Contact.GetByPhone(c.Context(), accountID, *p.Phone)
+		if contact != nil {
+			if err := s.repos.Participant.LinkContact(c.Context(), accountID, p.EventID, p.ID, contact.ID); err != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+			}
+			p.ContactID = &contact.ID
+		}
+	}
 	if err := s.services.Event.UpdateParticipant(c.Context(), p); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -11602,29 +11975,15 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 		s.hub.BroadcastToAccount(ev.AccountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": p.EventID.String(), "action": "updated"})
 	}
 
-	// If participant has no contact_id, try to find and link by phone
-	if p.ContactID == nil && p.Phone != nil && *p.Phone != "" {
-		// Get account_id from the event
-		event, _ := s.services.Event.GetByID(c.Context(), p.EventID)
-		if event != nil {
-			contact, _ := s.repos.Contact.GetByPhone(c.Context(), event.AccountID, *p.Phone)
-			if contact != nil {
-				p.ContactID = &contact.ID
-				// Update the participant's contact_id in DB
-				s.repos.Participant.LinkContact(c.Context(), p.ID, contact.ID)
-			}
-		}
-	}
-
-	// Sync shared fields back to the linked contact
-	if p.ContactID != nil {
-		_ = s.services.Event.SyncParticipantToContact(c.Context(), p)
-
+	// ParticipantRepository updates the Contact once and refreshes every
+	// participant/campaign snapshot. Only external Google sync remains here.
+	if p.ContactID != nil && len(p.PersonalFieldChanges) > 0 {
 		// Auto-sync to Google Contacts if linked contact has google_sync enabled
 		if s.googleClient != nil {
+			contactID := *p.ContactID
 			go func() {
-				contact, err := s.repos.Contact.GetByID(context.Background(), *p.ContactID)
-				if err == nil && contact != nil && contact.GoogleSync {
+				contact, err := s.repos.Contact.GetByID(context.Background(), contactID)
+				if err == nil && contact != nil && contact.AccountID == accountID && contact.GoogleSync {
 					log.Printf("[GOOGLE] Auto-sync triggered from handleUpdateEventParticipant for participant %s → contact %s (google_sync=%v)", p.ID, contact.ID, contact.GoogleSync)
 					if _, err := s.syncContactToGoogle(context.Background(), contact.AccountID, contact.ID); err != nil {
 						log.Printf("[GOOGLE] Auto-sync from participant %s failed: %v", p.ID, err)
@@ -11657,6 +12016,9 @@ func (s *Server) handleUpdateEventParticipantStatus(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if !validParticipantStatus(req.Status) {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Invalid participant status"})
+	}
 	if err := s.services.Event.UpdateParticipantStatus(c.Context(), pid, req.Status); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -11681,6 +12043,9 @@ func (s *Server) handleBulkUpdateEventParticipantStatus(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || len(req.ParticipantIDs) == 0 || req.Status == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if !validParticipantStatus(req.Status) {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Invalid participant status"})
+	}
 	ids := make([]uuid.UUID, 0, len(req.ParticipantIDs))
 	for _, s := range req.ParticipantIDs {
 		id, err := uuid.Parse(s)
@@ -11689,10 +12054,18 @@ func (s *Server) handleBulkUpdateEventParticipantStatus(c *fiber.Ctx) error {
 		}
 		ids = append(ids, id)
 	}
-	if err := s.services.Event.BulkUpdateParticipantStatus(c.Context(), ids, req.Status); err != nil {
+	tag, err := s.repos.DB().Exec(c.Context(), `
+		UPDATE event_participants
+		SET status=$1,
+			confirmed_at=CASE WHEN $1='confirmed' THEN NOW() ELSE confirmed_at END,
+			attended_at=CASE WHEN $1='attended' THEN NOW() ELSE attended_at END,
+			updated_at=NOW()
+		WHERE event_id=$2 AND id=ANY($3)
+	`, req.Status, eventID, ids)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"success": true, "updated": len(ids)})
+	return c.JSON(fiber.Map{"success": true, "updated": tag.RowsAffected()})
 }
 
 func (s *Server) handleDeleteEventParticipant(c *fiber.Ctx) error {
@@ -11703,10 +12076,11 @@ func (s *Server) handleDeleteEventParticipant(c *fiber.Ctx) error {
 	}
 	// Get participant's event_id before deleting and verify ownership
 	delPart, _ := s.services.Event.GetParticipant(c.Context(), pid)
-	if delPart != nil {
-		if ev, _ := s.services.Event.GetByID(c.Context(), delPart.EventID); ev == nil || ev.AccountID != accountID {
-			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
-		}
+	if delPart == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
+	}
+	if ev, _ := s.services.Event.GetByID(c.Context(), delPart.EventID); ev == nil || ev.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 	}
 	if err := s.services.Event.DeleteParticipant(c.Context(), pid); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -11717,6 +12091,16 @@ func (s *Server) handleDeleteEventParticipant(c *fiber.Ctx) error {
 		}
 	}
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func validParticipantStatus(status string) bool {
+	switch status {
+	case domain.ParticipantStatusInvited, domain.ParticipantStatusContacted, domain.ParticipantStatusConfirmed,
+		domain.ParticipantStatusDeclined, domain.ParticipantStatusAttended, domain.ParticipantStatusNoShow:
+		return true
+	default:
+		return false
+	}
 }
 
 // handleCheckTagImpact checks if adding/removing a tag would cause a participant to leave/join the event
@@ -11752,14 +12136,13 @@ func (s *Server) handleCheckTagImpact(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"success": true, "would_remove": false, "would_add": false})
 	}
 
-	// Get the participant to find their lead_id
+	// Event membership is contact-based; participant tags are the contact tags.
 	participant, err := s.services.Event.GetParticipant(c.Context(), pid)
-	if err != nil || participant == nil || participant.LeadID == nil {
+	if err != nil || participant == nil || participant.ContactID == nil {
 		return c.JSON(fiber.Map{"success": true, "would_remove": false, "would_add": false})
 	}
 
-	// Get current lead tags
-	currentTags, err := s.services.Tag.GetByEntity(c.Context(), "lead", *participant.LeadID)
+	currentTags, err := s.repos.Tag.GetByEntityForAccount(c.Context(), accountID, "contact", *participant.ContactID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -11823,6 +12206,9 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
 	}
+	if event, eventErr := s.services.Event.GetByID(c.Context(), eventID); eventErr != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
 
 	var req struct {
 		Name            string                 `json:"name"`
@@ -11870,9 +12256,15 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	}
 
 	// Build WHERE clause for participant filtering (same logic as handleGetEventParticipants)
-	pArgs := []interface{}{eventID}
-	pArgIdx := 2
-	pWhere := []string{"p.event_id = $1", "p.phone IS NOT NULL", "p.phone != ''"}
+	pArgs := []interface{}{eventID, accountID}
+	pArgIdx := 3
+	pWhere := []string{
+		"p.event_id = $1",
+		"contact.id IS NOT NULL",
+		"contact.account_id = $2",
+		"NULLIF(BTRIM(contact.phone),'') IS NOT NULL",
+		"contact.do_not_contact = FALSE",
+	}
 
 	if req.TagFormula != "" {
 		ast, parseErr := formula.Parse(req.TagFormula)
@@ -11936,15 +12328,17 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	whereSQL := strings.Join(pWhere, " AND ")
 	dataQ := fmt.Sprintf(`
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-		       p.name, p.last_name, p.short_name, p.phone, p.email, p.age,
+		       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),contact.phone),
+		       contact.last_name, contact.short_name, contact.phone, contact.email, contact.age,
 		       p.status, p.notes, p.next_action, p.next_action_date,
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.created_at, p.updated_at,
 		       eps.name AS stage_name, eps.color AS stage_color
 		FROM event_participants p
+		LEFT JOIN contacts contact ON contact.id=p.contact_id
 		LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id
 		WHERE %s
-		ORDER BY p.name ASC
+		ORDER BY COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone) ASC
 	`, whereSQL)
 
 	rows, err := s.repos.DB().Query(c.Context(), dataQ, pArgs...)
@@ -12105,6 +12499,10 @@ func (s *Server) handleCreateEventFolder(c *fiber.Ctx) error {
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid parent folder ID"})
 		}
+		parent, parentErr := s.services.Event.GetFolderByID(c.Context(), pid)
+		if parentErr != nil || parent == nil || parent.AccountID != accountID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Parent folder does not belong to this account"})
+		}
 		folder.ParentID = &pid
 	}
 	if err := s.services.Event.CreateFolder(c.Context(), folder); err != nil {
@@ -12114,12 +12512,13 @@ func (s *Server) handleCreateEventFolder(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateEventFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	fid, err := uuid.Parse(c.Params("fid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
 	}
 	folder, err := s.services.Event.GetFolderByID(c.Context(), fid)
-	if err != nil || folder == nil {
+	if err != nil || folder == nil || folder.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Folder not found"})
 	}
 	var req struct {
@@ -12146,9 +12545,14 @@ func (s *Server) handleUpdateEventFolder(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeleteEventFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	fid, err := uuid.Parse(c.Params("fid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
+	}
+	folder, getErr := s.services.Event.GetFolderByID(c.Context(), fid)
+	if getErr != nil || folder == nil || folder.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Folder not found"})
 	}
 	if err := s.services.Event.DeleteFolder(c.Context(), fid); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -12157,9 +12561,14 @@ func (s *Server) handleDeleteEventFolder(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleMoveEventToFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	event, getErr := s.services.Event.GetByID(c.Context(), eventID)
+	if getErr != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	var req struct {
 		FolderID *string `json:"folder_id"`
@@ -12172,6 +12581,10 @@ func (s *Server) handleMoveEventToFolder(c *fiber.Ctx) error {
 		fid, err := uuid.Parse(*req.FolderID)
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
+		}
+		folder, folderErr := s.services.Event.GetFolderByID(c.Context(), fid)
+		if folderErr != nil || folder == nil || folder.AccountID != accountID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Folder does not belong to this account"})
 		}
 		folderID = &fid
 	}
@@ -12240,12 +12653,13 @@ func (s *Server) handleCreateEventPipeline(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetEventPipeline(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
 	}
 	pipeline, err := s.services.Event.GetPipeline(c.Context(), pid)
-	if err != nil {
+	if err != nil || pipeline == nil || pipeline.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
 	}
 	// Load participant counts per stage
@@ -12261,12 +12675,13 @@ func (s *Server) handleGetEventPipeline(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleUpdateEventPipeline(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
 	}
 	pipeline, err := s.services.Event.GetPipeline(c.Context(), pid)
-	if err != nil {
+	if err != nil || pipeline == nil || pipeline.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
 	}
 	var req struct {
@@ -12289,9 +12704,14 @@ func (s *Server) handleUpdateEventPipeline(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleDeleteEventPipeline(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid pipeline ID"})
+	}
+	pipeline, getErr := s.services.Event.GetPipeline(c.Context(), pid)
+	if getErr != nil || pipeline == nil || pipeline.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Pipeline not found"})
 	}
 	if err := s.services.Event.DeletePipeline(c.Context(), pid); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -12611,7 +13031,8 @@ func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
 	}
-	if part, _ := s.services.Event.GetParticipant(c.Context(), pid); part == nil {
+	part, _ := s.services.Event.GetParticipant(c.Context(), pid)
+	if part == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 	} else if ev, _ := s.services.Event.GetByID(c.Context(), part.EventID); ev == nil || ev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
@@ -12626,7 +13047,13 @@ func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
 	}
-	if err := s.services.Event.UpdateParticipantStage(c.Context(), pid, stageID); err != nil {
+	var stageValid bool
+	if err := s.repos.DB().QueryRow(c.Context(), `
+		SELECT EXISTS(SELECT 1 FROM events e JOIN event_pipeline_stages eps ON eps.pipeline_id=e.pipeline_id WHERE e.id=$1 AND e.account_id=$2 AND eps.id=$3)
+	`, part.EventID, accountID, stageID).Scan(&stageValid); err != nil || !stageValid {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Stage does not belong to this event"})
+	}
+	if _, err := s.repos.DB().Exec(c.Context(), `UPDATE event_participants SET stage_id=$1, updated_at=NOW() WHERE id=$2 AND event_id=$3`, stageID, pid, part.EventID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	if stagePart, err := s.services.Event.GetParticipant(c.Context(), pid); err == nil && stagePart != nil {
@@ -12657,6 +13084,12 @@ func (s *Server) handleBulkUpdateEventParticipantStage(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
 	}
+	var stageValid bool
+	if err := s.repos.DB().QueryRow(c.Context(), `
+		SELECT EXISTS(SELECT 1 FROM events e JOIN event_pipeline_stages eps ON eps.pipeline_id=e.pipeline_id WHERE e.id=$1 AND e.account_id=$2 AND eps.id=$3)
+	`, eventID, accountID, stageID).Scan(&stageValid); err != nil || !stageValid {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Stage does not belong to this event"})
+	}
 	var ids []uuid.UUID
 	for _, idStr := range req.ParticipantIDs {
 		if id, err := uuid.Parse(idStr); err == nil {
@@ -12666,13 +13099,14 @@ func (s *Server) handleBulkUpdateEventParticipantStage(c *fiber.Ctx) error {
 	if len(ids) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No valid participant IDs"})
 	}
-	if err := s.services.Event.BulkUpdateParticipantStage(c.Context(), ids, stageID); err != nil {
+	tag, err := s.repos.DB().Exec(c.Context(), `UPDATE event_participants SET stage_id=$1, updated_at=NOW() WHERE event_id=$2 AND id=ANY($3)`, stageID, eventID, ids)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	if ev, err := s.services.Event.GetByID(c.Context(), eventID); err == nil && ev != nil && s.hub != nil {
 		s.hub.BroadcastToAccount(ev.AccountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "bulk_stage_changed"})
 	}
-	return c.JSON(fiber.Map{"success": true, "updated": len(ids)})
+	return c.JSON(fiber.Map{"success": true, "updated": tag.RowsAffected()})
 }
 
 func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
@@ -12761,7 +13195,17 @@ func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
 	}
 
 	whereSQL := strings.Join(whereClauses, " AND ")
-	query := fmt.Sprintf(`SELECT l.id, l.contact_id, COALESCE(c.name,l.name,''), COALESCE(c.last_name,l.last_name,''), COALESCE(c.short_name,l.short_name,''), COALESCE(c.phone,l.phone), COALESCE(c.email,l.email), COALESCE(c.age,l.age) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id WHERE %s ORDER BY l.created_at DESC`, whereSQL)
+	query := fmt.Sprintf(`
+		SELECT DISTINCT ON (l.contact_id)
+		       l.id, l.contact_id,
+		       COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),l.name,''),
+		       COALESCE(c.last_name,l.last_name,''), COALESCE(c.short_name,l.short_name,''),
+		       COALESCE(c.phone,l.phone), COALESCE(c.email,l.email), COALESCE(c.age,l.age)
+		FROM leads l
+		JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
+		WHERE %s
+		ORDER BY l.contact_id, l.created_at DESC, l.id
+	`, whereSQL)
 
 	rows, err := s.repos.DB().Query(c.Context(), query, args...)
 	if err != nil {
@@ -12805,7 +13249,16 @@ func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
 	}
 	if req.PipelineID != nil {
 		if pid, err := uuid.Parse(*req.PipelineID); err == nil {
+			var valid bool
+			if queryErr := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM event_pipelines WHERE id=$1 AND account_id=$2)`, pid, accountID).Scan(&valid); queryErr != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": queryErr.Error()})
+			}
+			if !valid {
+				return c.Status(422).JSON(fiber.Map{"success": false, "error": "Event pipeline does not belong to this account"})
+			}
 			event.PipelineID = &pid
+		} else {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event pipeline"})
 		}
 	}
 	if event.PipelineID == nil {
@@ -12900,31 +13353,61 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 		CreatedBy:      &userID,
 	}
 	if req.ContactID != nil {
-		if cid, err := uuid.Parse(*req.ContactID); err == nil {
-			interaction.ContactID = &cid
+		cid, parseErr := uuid.Parse(*req.ContactID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid contact ID"})
 		}
+		var valid bool
+		if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM contacts WHERE id=$1 AND account_id=$2)`, cid, accountID).Scan(&valid); err != nil || !valid {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Contact does not belong to this account"})
+		}
+		interaction.ContactID = &cid
 	}
 	if req.LeadID != nil {
-		if lid, err := uuid.Parse(*req.LeadID); err == nil {
-			interaction.LeadID = &lid
+		lid, parseErr := uuid.Parse(*req.LeadID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
+		}
+		var leadContactID *uuid.UUID
+		if err := s.repos.DB().QueryRow(c.Context(), `SELECT contact_id FROM leads WHERE id=$1 AND account_id=$2`, lid, accountID).Scan(&leadContactID); err != nil {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Lead does not belong to this account"})
+		}
+		if interaction.ContactID != nil && leadContactID != nil && *interaction.ContactID != *leadContactID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Lead and contact do not represent the same person"})
+		}
+		interaction.LeadID = &lid
+		if interaction.ContactID == nil {
+			interaction.ContactID = leadContactID
 		}
 	}
 	if req.EventID != nil {
-		if eid, err := uuid.Parse(*req.EventID); err == nil {
-			interaction.EventID = &eid
+		eid, parseErr := uuid.Parse(*req.EventID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
 		}
+		var valid bool
+		if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM events WHERE id=$1 AND account_id=$2)`, eid, accountID).Scan(&valid); err != nil || !valid {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Event does not belong to this account"})
+		}
+		interaction.EventID = &eid
 	}
 	if req.ParticipantID != nil {
-		if pid, err := uuid.Parse(*req.ParticipantID); err == nil {
-			interaction.ParticipantID = &pid
+		pid, parseErr := uuid.Parse(*req.ParticipantID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
 		}
-	}
-	// Auto-link contact_id: if interaction has lead_id but no contact_id, resolve from lead
-	if interaction.LeadID != nil && interaction.ContactID == nil {
-		var contactID *uuid.UUID
-		_ = s.repos.DB().QueryRow(c.Context(), `SELECT contact_id FROM leads WHERE id = $1`, *interaction.LeadID).Scan(&contactID)
-		if contactID != nil {
-			interaction.ContactID = contactID
+		var participantEventID uuid.UUID
+		var participantContactID *uuid.UUID
+		if err := s.repos.DB().QueryRow(c.Context(), `SELECT ep.event_id, ep.contact_id FROM event_participants ep JOIN events e ON e.id=ep.event_id WHERE ep.id=$1 AND e.account_id=$2`, pid, accountID).Scan(&participantEventID, &participantContactID); err != nil {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Participant does not belong to this account"})
+		}
+		if interaction.EventID != nil && *interaction.EventID != participantEventID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Participant does not belong to the selected event"})
+		}
+		interaction.ParticipantID = &pid
+		interaction.EventID = &participantEventID
+		if interaction.ContactID == nil {
+			interaction.ContactID = participantContactID
 		}
 	}
 
@@ -12953,20 +13436,19 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	limit := c.QueryInt("limit", 50)
 	offset := c.QueryInt("offset", 0)
 
 	if participantID := c.Query("participant_id"); participantID != "" {
 		if pid, err := uuid.Parse(participantID); err == nil {
-			accountID := c.Locals("account_id").(uuid.UUID)
-			var contactID, leadID *uuid.UUID
+			var contactID *uuid.UUID
 			err := s.repos.DB().QueryRow(c.Context(), `
-				SELECT COALESCE(ep.contact_id, l.contact_id), ep.lead_id
+				SELECT ep.contact_id
 				FROM event_participants ep
 				JOIN events e ON e.id = ep.event_id
-				LEFT JOIN leads l ON l.id = ep.lead_id
 				WHERE ep.id = $1 AND e.account_id = $2
-			`, pid, accountID).Scan(&contactID, &leadID)
+			`, pid, accountID).Scan(&contactID)
 			if err != nil {
 				if err == pgx.ErrNoRows {
 					return c.JSON(fiber.Map{"success": true, "interactions": []*domain.Interaction{}})
@@ -12985,13 +13467,12 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 				  AND (
 				    i.participant_id = $2
 				    OR ($3::uuid IS NOT NULL AND i.contact_id = $3)
-				    OR ($4::uuid IS NOT NULL AND i.lead_id = $4)
 				    OR ($3::uuid IS NOT NULL AND i.lead_id IN (
 				      SELECT l2.id FROM leads l2 WHERE l2.account_id = $1 AND l2.contact_id = $3
 				    ))
 				  )
 				ORDER BY i.id, i.created_at DESC
-			`, accountID, pid, contactID, leadID)
+			`, accountID, pid, contactID)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 			}
@@ -13028,6 +13509,10 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 	}
 	if eventID := c.Query("event_id"); eventID != "" {
 		if eid, err := uuid.Parse(eventID); err == nil {
+			var valid bool
+			if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM events WHERE id=$1 AND account_id=$2)`, eid, accountID).Scan(&valid); err != nil || !valid {
+				return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+			}
 			interactions, err := s.services.Interaction.GetByEventID(c.Context(), eid, limit, offset)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -13040,6 +13525,10 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 	}
 	if contactID := c.Query("contact_id"); contactID != "" {
 		if cid, err := uuid.Parse(contactID); err == nil {
+			var valid bool
+			if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM contacts WHERE id=$1 AND account_id=$2)`, cid, accountID).Scan(&valid); err != nil || !valid {
+				return c.Status(404).JSON(fiber.Map{"success": false, "error": "Contact not found"})
+			}
 			interactions, err := s.services.Interaction.GetByContactID(c.Context(), cid, limit, offset)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -13052,6 +13541,10 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 	}
 	if leadID := c.Query("lead_id"); leadID != "" {
 		if lid, err := uuid.Parse(leadID); err == nil {
+			var valid bool
+			if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM leads WHERE id=$1 AND account_id=$2)`, lid, accountID).Scan(&valid); err != nil || !valid {
+				return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
+			}
 			interactions, err := s.services.Interaction.GetByLeadID(c.Context(), lid, limit, offset)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -13075,7 +13568,9 @@ func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	var interactionLeadID *uuid.UUID
 	var interactionType string
-	_ = s.repos.DB().QueryRow(c.Context(), `SELECT lead_id, type FROM interactions WHERE id = $1`, id).Scan(&interactionLeadID, &interactionType)
+	if err := s.repos.DB().QueryRow(c.Context(), `SELECT lead_id, type FROM interactions WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&interactionLeadID, &interactionType); err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Interaction not found"})
+	}
 
 	if err := s.services.Interaction.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -13102,9 +13597,14 @@ func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetContactInteractions(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	contactID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid contact ID"})
+	}
+	var valid bool
+	if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM contacts WHERE id=$1 AND account_id=$2)`, contactID, accountID).Scan(&valid); err != nil || !valid {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Contact not found"})
 	}
 	limit := c.QueryInt("limit", 50)
 	offset := c.QueryInt("offset", 0)
@@ -13119,15 +13619,20 @@ func (s *Server) handleGetContactInteractions(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleGetLeadInteractions(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	leadID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
+	}
+	var valid bool
+	if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM leads WHERE id=$1 AND account_id=$2)`, leadID, accountID).Scan(&valid); err != nil || !valid {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
 	}
 	limit := c.QueryInt("limit", 50)
 	offset := c.QueryInt("offset", 0)
 
 	// Try Redis cache first (30s TTL)
-	cacheKey := fmt.Sprintf("lead_interactions:%s:%d:%d", leadID.String(), limit, offset)
+	cacheKey := fmt.Sprintf("lead_interactions:%s:%s:%d:%d", accountID.String(), leadID.String(), limit, offset)
 	if s.cache != nil {
 		if cached, err := s.cache.Get(c.Context(), cacheKey); err == nil && cached != nil {
 			c.Set("Content-Type", "application/json")
