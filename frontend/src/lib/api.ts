@@ -301,6 +301,9 @@ export async function api<T>(
     if (!skipAuth) markAuthActivity()
     return { success: true, data: data as T }
   } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      return { success: false, error: 'Solicitud cancelada' }
+    }
     console.error('API Error:', err)
     return { success: false, error: 'Error de conexión' }
   }

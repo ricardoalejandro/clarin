@@ -791,6 +791,7 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/ws", websocket.New(s.handleWebSocket))
 
 	// Stats
+	protected.Get("/dashboard/summary", s.handleGetDashboardSummary)
 	protected.Get("/stats", s.handleGetStats)
 
 	// Eros Assistant (Codex Bridge + MCP shared tools)
