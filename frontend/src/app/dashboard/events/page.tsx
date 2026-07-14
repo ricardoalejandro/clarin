@@ -84,6 +84,7 @@ interface Event {
   status: string
   color: string
   tag_formula_mode?: string
+  rule_revision?: number
   tag_formula?: string
   tag_formula_type?: string
   folder_id?: string | null
@@ -178,6 +179,8 @@ export default function EventsPage() {
 
   // Formula validation state
   const [formulaIsValid, setFormulaIsValid] = useState(true)
+  const [ruleRevision, setRuleRevision] = useState(0)
+  const [savingEvent, setSavingEvent] = useState(false)
 
   // Folder modal
   const [showFolderModal, setShowFolderModal] = useState(false)
@@ -457,6 +460,7 @@ export default function EventsPage() {
     setShowTagDropdown(false)
     setTagSearch('')
     setFormulaIsValid(true)
+    setRuleRevision(0)
   }
 
   const openEditEvent = async (ev: Event) => {
@@ -482,6 +486,7 @@ export default function EventsPage() {
         if (data.formula_mode) formulaMode = data.formula_mode
         if (data.tag_formula) tagFormula = data.tag_formula
         if (data.tag_formula_type) tagFormulaType = data.tag_formula_type
+        if (typeof data.rule_revision === 'number') setRuleRevision(data.rule_revision)
       }
     } catch (e) {
       console.error('Failed to fetch event tags:', e)
@@ -505,7 +510,54 @@ export default function EventsPage() {
     setEditEvent(ev)
   }
 
+  const currentRulePayload = () => ({
+    formula_mode: formData.formula_mode,
+    include_tag_ids: formData.include_tag_ids,
+    exclude_tag_ids: formData.exclude_tag_ids,
+    tag_formula: formData.tag_formula,
+    tag_formula_type: formData.tag_formula_type,
+  })
+
+  const previewRuleChange = async (eventID: string) => {
+    const res = await fetch(`/api/events/${eventID}/tags/preview`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(currentRulePayload()),
+    })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo previsualizar la regla')
+    const impact = data.impact as { created: number; activated: number; deactivated: number; unchanged: number; matched: number; broad_rule: boolean; rule_revision: number; fingerprint: string }
+    const broad = impact.broad_rule
+      ? '\n\n⚠️ Es una regla negativa/amplia: puede incorporar a todos los contactos que no estén excluidos.'
+      : ''
+    const accepted = window.confirm(
+      `Impacto de la regla:\n\n` +
+      `• Nuevos: ${impact.created}\n• Reactivados: ${impact.activated}\n• Saldrán del listado activo: ${impact.deactivated}\n• Sin cambios: ${impact.unchanged}\n• Coincidencias: ${impact.matched}` +
+      `${broad}\n\nLos participantes que salgan conservarán su historial. Si eliminas todas las reglas, los inactivos no volverán automáticamente. ¿Confirmas el cambio?`
+    )
+    return accepted ? impact : null
+  }
+
+  const applyRuleChange = async (eventID: string, impact: { rule_revision: number; fingerprint: string }) => {
+    const res = await fetch(`/api/events/${eventID}/tags`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...currentRulePayload(),
+        expected_rule_revision: impact.rule_revision,
+        preview_fingerprint: impact.fingerprint,
+        confirm: true,
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo guardar la regla')
+    setRuleRevision(data.rule_revision ?? impact.rule_revision + 1)
+  }
+
   const handleCreateEvent = async () => {
+    if (savingEvent) return
+    setSavingEvent(true)
+    try {
     const body: Record<string, unknown> = { ...formData }
     delete body.tag_ids
     delete body.formula_mode
@@ -533,31 +585,29 @@ export default function EventsPage() {
         ? formData.tag_formula.trim() !== ''
         : (formData.include_tag_ids.length > 0 || formData.exclude_tag_ids.length > 0)
       if (hasFormula && data.event?.id) {
-        try {
-          await fetch(`/api/events/${data.event.id}/tags`, {
-            method: 'PUT',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              formula_mode: formData.formula_mode,
-              include_tag_ids: formData.include_tag_ids,
-              exclude_tag_ids: formData.exclude_tag_ids,
-              tag_formula: formData.tag_formula,
-              tag_formula_type: formData.tag_formula_type,
-            }),
-          })
-        } catch (e) {
-          console.error('Failed to save event tags:', e)
-        }
+        const impact = await previewRuleChange(data.event.id)
+        if (impact) await applyRuleChange(data.event.id, impact)
       }
       setShowCreate(false)
       resetEventForm()
       fetchEvents()
       fetchFolders()
     }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'No se pudo crear el evento')
+    } finally { setSavingEvent(false) }
   }
 
   const handleUpdateEvent = async () => {
-    if (!editEvent) return
+    if (!editEvent || savingEvent) return
+    setSavingEvent(true)
+    try {
+    const frozen = editEvent.status === 'completed' || editEvent.status === 'cancelled'
+    const remainsFrozen = frozen && (formData.status === 'completed' || formData.status === 'cancelled')
+    // Reopening also previews and reapplies the rule so a frozen historical
+    // roster never becomes an active, stale roster.
+    const impact = remainsFrozen ? null : await previewRuleChange(editEvent.id)
+    if (!remainsFrozen && !impact) return
     const body: Record<string, unknown> = { ...formData }
     delete body.tag_ids
     delete body.formula_mode
@@ -578,27 +628,16 @@ export default function EventsPage() {
       body: JSON.stringify(body),
     })
     const data = await res.json()
+    if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar el evento')
     if (data.success) {
-      // Save tags with formula
-      try {
-        await fetch(`/api/events/${editEvent.id}/tags`, {
-          method: 'PUT',
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            formula_mode: formData.formula_mode,
-            include_tag_ids: formData.include_tag_ids,
-            exclude_tag_ids: formData.exclude_tag_ids,
-            tag_formula: formData.tag_formula,
-            tag_formula_type: formData.tag_formula_type,
-          }),
-        })
-      } catch (e) {
-        console.error('Failed to save event tags:', e)
-      }
+      if (impact) await applyRuleChange(editEvent.id, impact)
       setEditEvent(null)
       resetEventForm()
       fetchEvents()
     }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'No se pudo actualizar el evento')
+    } finally { setSavingEvent(false) }
   }
 
   const handleDeleteEvent = async (id: string) => {
@@ -778,10 +817,16 @@ export default function EventsPage() {
               <div className="flex items-center gap-2 mb-1">
                 <Tag className="w-4 h-4 text-emerald-600" />
                 <span className="text-sm font-semibold text-slate-800">Incorporación automática de contactos</span>
+				{editEvent && <span className="ml-auto text-[10px] text-slate-400">Revisión {ruleRevision}</span>}
               </div>
               <p className="text-xs text-slate-500 mb-4">
-                Define qué contactos se incorporan al evento. La regla solo agrega participantes; nunca elimina el historial existente.
+                La regla es obligatoria para todas las altas. Si un contacto deja de cumplir, sale del listado activo pero conserva todo su historial.
               </p>
+              {editEvent && (editEvent.status === 'completed' || editEvent.status === 'cancelled') && (
+                <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  La membresía y las reglas están congeladas porque el evento está {editEvent.status === 'completed' ? 'completado' : 'cancelado'}. Si lo reabres, se mostrará el impacto y la regla se reconciliará antes de terminar.
+                </div>
+              )}
 
               {/* Simple / Advanced toggle tabs */}
               <div className="flex rounded-lg border border-slate-200 bg-white mb-4 overflow-hidden">
@@ -1048,10 +1093,10 @@ export default function EventsPage() {
         <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-200 flex-shrink-0 bg-white rounded-b-2xl">
           <button onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}
             className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium">Cancelar</button>
-          <button disabled={!formData.name || (formData.tag_formula_type === 'advanced' && !formulaIsValid)}
+          <button disabled={savingEvent || !formData.name || (formData.tag_formula_type === 'advanced' && !formulaIsValid)}
             onClick={onSubmit}
             className="px-6 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium">
-            {submitLabel}
+            {savingEvent ? 'Guardando…' : submitLabel}
           </button>
         </div>
       </div>

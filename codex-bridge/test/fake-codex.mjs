@@ -123,6 +123,11 @@ rl.on('line', line => {
       })
       break
     case 'thread/start': {
+      const toolsDisabled = String(message.params?.baseInstructions || '').includes('Todas las herramientas, incluido MCP, están deshabilitadas')
+      if (toolsDisabled && (message.params?.config?.mcp_servers?.clarin?.enabled !== false || message.params?.config?.web_search !== 'disabled' || !Array.isArray(message.params?.dynamicTools))) {
+        send({ id: message.id, error: { message: 'tool isolation was not applied to the report thread' } })
+        break
+      }
       threadSequence += 1
       const thread = { id: `thread-${threadSequence}`, turns: new Map() }
       threads.set(thread.id, thread)

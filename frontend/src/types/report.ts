@@ -12,6 +12,95 @@ export interface ReportDefinition {
   description: string
   category: string
   href: string
+  usesAI?: boolean
+  icon?: 'whatsapp' | 'sparkles'
+}
+
+export interface LeadIntelligenceOption {
+  id: string
+  name: string
+}
+
+export interface LeadIntelligenceAIAvailability {
+  available: boolean
+  code?: string
+  message: string
+}
+
+export interface LeadIntelligenceOptions {
+  ai: LeadIntelligenceAIAvailability
+  allowed_reasoning_efforts: string[]
+  pipelines: LeadIntelligenceOption[]
+  stages: LeadIntelligenceOption[]
+  tags: LeadIntelligenceOption[]
+  sources: string[]
+}
+
+export interface LeadIntelligencePreview {
+  total_leads: number
+  leads_with_chats: number
+  ai_candidate_count: number
+  ai_candidate_limit: number
+  recommended_reasoning: string
+  recommendation_reason: string
+}
+
+export type LeadIntelligenceRunStatus = 'queued' | 'running' | 'completed' | 'completed_with_warnings' | 'failed' | 'cancelled'
+
+export interface LeadIntelligenceRun {
+  id: string
+  report_type: string
+  status: LeadIntelligenceRunStatus
+  phase: string
+  selected_reasoning: string
+  recommended_reasoning: string
+  total_items: number
+  processed_items: number
+  ai_candidate_count: number
+  ai_processed_count: number
+  cancel_requested: boolean
+  error_code?: string
+  safe_error?: string
+  created_at: string
+  started_at?: string
+  completed_at?: string
+  expires_at: string
+}
+
+export interface LeadIntelligenceSummary {
+  generated_at: string
+  objective_name: string
+  campaign_context?: string
+  total_leads: number
+  leads_with_chats: number
+  leads_with_notes: number
+  leads_with_events: number
+  ai_candidate_count: number
+  ai_processed_count: number
+  ai_coverage_percent: number
+  priority_distribution: Record<string, number>
+  profile_distribution: Record<string, number>
+  hallazgos: string[]
+  limitaciones: string[]
+  respuestas?: Record<string, string>
+}
+
+export type LeadIntelligenceRow = Record<string, unknown> & {
+  lead_id: string
+  nombre: string
+  telefono: string
+  nivel_prioridad: string
+  perfil_humano_principal: string
+  razon_prioridad: string
+  accion_recomendada: string
+  eventos_detalle?: Array<Record<string, unknown>>
+}
+
+export interface LeadIntelligenceResult {
+  run: LeadIntelligenceRun
+  summary: LeadIntelligenceSummary
+  warnings: string[]
+  rows: LeadIntelligenceRow[]
 }
 
 export interface ReportDevice {

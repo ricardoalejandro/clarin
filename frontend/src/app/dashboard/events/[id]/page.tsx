@@ -125,6 +125,21 @@ interface Observation {
   created_by_name: string | null; created_at: string
 }
 
+interface MembershipHistoryEntry {
+  id: string
+  action: string
+  participant_id?: string
+  contact_id?: string
+  actor_type: string
+  actor_user_id?: string
+  source: string
+  rule_revision: number
+  before_state: Record<string, unknown>
+  after_state: Record<string, unknown>
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
 interface StageData {
   id: string; pipeline_id: string; name: string; color: string; position: number
   total_count: number; participants: Participant[]; has_more: boolean
@@ -497,6 +512,9 @@ export default function EventDetailPage() {
   // Detail panel
   const [showDetailPanel, setShowDetailPanel] = useState(false)
   const [detailParticipant, setDetailParticipant] = useState<Participant | null>(null)
+  const [showMembershipHistory, setShowMembershipHistory] = useState(false)
+  const [membershipHistory, setMembershipHistory] = useState<MembershipHistoryEntry[]>([])
+  const [membershipHistoryLoading, setMembershipHistoryLoading] = useState(false)
 
   // Track own stage changes to avoid WebSocket refetch race condition
   const ownStageChangeRef = useRef(false)
@@ -659,6 +677,22 @@ export default function EventDetailPage() {
         }
       }
     } catch (e) { console.error(e) }
+  }, [eventId])
+
+  const openMembershipHistory = useCallback(async () => {
+    setShowMembershipHistory(true)
+    setMembershipHistoryLoading(true)
+    try {
+      const res = await fetch(`/api/events/${eventId}/membership-history?limit=100`, { headers: { Authorization: `Bearer ${getToken()}` } })
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo cargar el historial')
+      setMembershipHistory(data.entries || [])
+    } catch (e) {
+      console.error('[Membership history]', e)
+      setMembershipHistory([])
+    } finally {
+      setMembershipHistoryLoading(false)
+    }
   }, [eventId])
 
   const fetchParticipantsPaginated = useCallback(async () => {
@@ -1363,13 +1397,15 @@ export default function EventDetailPage() {
   }
   // ─── Delete ─────────────────────────────────────────────────────────────────
   const handleDeleteParticipant = useCallback(async (pid: string) => {
-    if (!confirm('¿Eliminar este participante?')) return
-    removeParticipantFromStages(pid)
-    if (detailParticipant?.id === pid) { setShowDetailPanel(false); setShowInlineChat(false) }
+    if (!confirm('¿Sacar este participante del listado activo? Su historial se conservará.')) return
     try {
-      await fetch(`/api/events/${eventId}/participants/${pid}`, {
+      const res = await fetch(`/api/events/${eventId}/participants/${pid}`, {
         method: 'DELETE', headers: { Authorization: `Bearer ${getToken()}` },
       })
+      const data = await res.json()
+      if (!res.ok || !data.success) { alert(data.error || 'No se pudo sacar al participante'); return }
+      removeParticipantFromStages(pid)
+      if (detailParticipant?.id === pid) { setShowDetailPanel(false); setShowInlineChat(false) }
       fetchEvent()
     } catch (e) { console.error(e) }
   }, [eventId, detailParticipant, removeParticipantFromStages, fetchEvent])
@@ -1879,11 +1915,12 @@ export default function EventDetailPage() {
   const participantDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
-      const msg = data as { event?: string; action?: string; event_id?: string }
-      if (msg.event === 'event_participant_update' && msg.event_id === eventId) {
+	  const msg = data as { event?: string; action?: string; event_id?: string; data?: { action?: string; event_id?: string } }
+	  const payload = msg.data || msg
+	  if (msg.event === 'event_participant_update' && payload.event_id === eventId) {
         // Skip refetch if we just changed a stage ourselves (prevents reverting optimistic update)
-        if (msg.action === 'stage_changed' && ownStageChangeRef.current) return
-        if (msg.action === 'tag_sync_reconcile') {
+		if (payload.action === 'stage_changed' && ownStageChangeRef.current) return
+		if (payload.action === 'tag_sync_reconcile' || payload.action === 'rule_reconciled' || payload.action === 'membership_reconciled') {
           // Background sync reconciliation — debounce to avoid refresh storms
           if (participantDebounceRef.current) clearTimeout(participantDebounceRef.current)
           participantDebounceRef.current = setTimeout(() => {
@@ -1899,7 +1936,7 @@ export default function EventDetailPage() {
         fetchEvent()
         if (viewMode === 'list') fetchListParticipants(true)
       }
-      if (msg.event === 'logbook_update' && msg.event_id === eventId) {
+	  if (msg.event === 'logbook_update' && payload.event_id === eventId) {
         if (viewMode === 'logbook') fetchLogbooks()
       }
       // Handle interaction updates — invalidate and refetch observations in list view
@@ -2129,6 +2166,11 @@ export default function EventDetailPage() {
           )}
           <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full flex-shrink-0">{totalParticipantCount}</span>
         </div>
+
+		<button onClick={openMembershipHistory} className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-emerald-300 hover:text-emerald-700 transition" title="Ver altas, salidas y reactivaciones">
+		  <BookOpen className="w-3.5 h-3.5" />
+		  Historial
+		</button>
 
         {viewMode !== 'logbook' && (
           <>
@@ -4266,6 +4308,49 @@ export default function EventDetailPage() {
       )}
 
       {/* ═══ Google Sync Modal ═══ */}
+      {showMembershipHistory && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4" onClick={() => setShowMembershipHistory(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">Historial de membresía</h2>
+                <p className="text-xs text-slate-500 mt-0.5">Altas, salidas y reactivaciones sin perder bitácoras ni interacciones.</p>
+              </div>
+              <button onClick={() => setShowMembershipHistory(false)} className="p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="overflow-y-auto p-4">
+              {membershipHistoryLoading ? (
+                <div className="py-12 flex justify-center"><Loader2 className="w-5 h-5 animate-spin text-emerald-600" /></div>
+              ) : membershipHistory.length === 0 ? (
+                <div className="py-12 text-center text-sm text-slate-400">Aún no hay cambios de membresía registrados.</div>
+              ) : (
+                <div className="space-y-2">
+                  {membershipHistory.map(entry => {
+                    const labels: Record<string, string> = { created: 'Alta automática', reactivated: 'Reactivado', deactivated: 'Salida del listado activo', created_or_reactivated: 'Alta manual' }
+                    const state = entry.after_state || {}
+                    const reason = typeof state.reason === 'string' ? state.reason : ''
+                    return (
+                      <div key={entry.id} className="rounded-xl border border-slate-200 px-4 py-3 flex items-start gap-3">
+                        <div className={`mt-1 w-2.5 h-2.5 rounded-full flex-shrink-0 ${entry.action === 'deactivated' ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold text-slate-800">{labels[entry.action] || entry.action}</span>
+                            {reason && <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">{reason}</span>}
+                            {entry.rule_revision > 0 && <span className="text-[10px] text-violet-600">regla v{entry.rule_revision}</span>}
+                          </div>
+                          <p className="text-xs text-slate-500 mt-1 break-all">Contacto: {entry.contact_id || 'histórico'} · {entry.actor_type === 'user' ? 'usuario' : 'sistema'} · {entry.source || 'sin origen'}</p>
+                        </div>
+                        <time className="text-[11px] text-slate-400 whitespace-nowrap">{new Date(entry.created_at).toLocaleString('es-PE')}</time>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showGoogleSyncModal && (
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4"

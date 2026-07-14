@@ -334,6 +334,13 @@ func (s *Server) setupRoutes() {
 	reports := protected.Group("/reports", s.requirePermission(domain.PermReports))
 	reports.Get("/whatsapp-group-coverage/groups", s.handleListWhatsAppReportGroups)
 	reports.Post("/whatsapp-group-coverage/generate", s.handleGenerateWhatsAppGroupCoverage)
+	reports.Get("/lead-intelligence/options", s.handleLeadIntelligenceOptions)
+	reports.Post("/lead-intelligence/preview", s.handlePreviewLeadIntelligence)
+	reports.Post("/lead-intelligence/runs", s.handleCreateLeadIntelligenceRun)
+	reports.Get("/lead-intelligence/runs", s.handleListLeadIntelligenceRuns)
+	reports.Get("/lead-intelligence/runs/:id", s.handleGetLeadIntelligenceRun)
+	reports.Post("/lead-intelligence/runs/:id/cancel", s.handleCancelLeadIntelligenceRun)
+	reports.Get("/lead-intelligence/runs/:id/result", s.handleGetLeadIntelligenceResult)
 
 	// Chat routes
 	chats := protected.Group("/chats", s.requirePermission(domain.PermChats))
@@ -559,7 +566,10 @@ func (s *Server) setupRoutes() {
 	events.Patch("/:id/move-folder", s.handleMoveEventToFolder)
 	// Event tag auto-sync
 	events.Get("/:id/tags", s.handleGetEventTags)
+	events.Post("/:id/tags/preview", s.handlePreviewEventTags)
 	events.Put("/:id/tags", s.handleSetEventTags)
+	events.Post("/:id/reconcile", s.handleReconcileEventMembership)
+	events.Get("/:id/membership-history", s.handleGetEventMembershipHistory)
 	events.Post("/formula/validate", s.handleValidateFormula)
 	events.Get("/:id/participants/paginated", s.handleGetEventParticipantsPaginated)
 	events.Get("/:id/participants/by-stage/:stageId", s.handleGetEventParticipantsByStage)
@@ -8414,6 +8424,8 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		}
 		if _, err := s.services.Event.ReconcileContactEventMembership(c.Context(), contact.AccountID, contact.ID); err != nil {
 			log.Printf("[EVENT-SYNC] Immediate contact update reconciliation failed for contact %s: %v", contact.ID, err)
+		} else {
+			s.invalidateEventsCache(contact.AccountID)
 		}
 	}
 
@@ -8797,6 +8809,8 @@ func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 		}
 		if _, err := s.services.Event.ReconcileContactEventMembership(c.Context(), accountID, contact.ID); err != nil {
 			log.Printf("[EVENT-SYNC] Immediate contact creation reconciliation failed for contact %s: %v", contact.ID, err)
+		} else {
+			s.invalidateEventsCache(accountID)
 		}
 	}
 
@@ -9119,6 +9133,7 @@ func (s *Server) handleAssignTag(c *fiber.Ctx) error {
 			log.Printf("[EVENT-SYNC] Immediate tag assignment reconciliation failed for contact %s: %v", *contactID, reconcileErr)
 		} else {
 			eventParticipantsAdded = added
+			s.invalidateEventsCache(accountID)
 		}
 	}
 	if req.EntityType == "lead" {
@@ -9147,7 +9162,8 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid tag ID"})
 	}
-	if _, err := s.repos.Tag.SetEntityTagForAccount(c.Context(), accountID, req.EntityType, entityID, tagID, false); err != nil {
+	contactID, err := s.repos.Tag.SetEntityTagForAccount(c.Context(), accountID, req.EntityType, entityID, tagID, false)
+	if err != nil {
 		return writeCRMError(c, err)
 	}
 
@@ -9159,9 +9175,16 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 		}
 	}
 
-	// Event tag auto-sync: when a tag is removed from a lead, check event membership
+	// Reconcile synchronously against the final contact tag state so an
+	// out-of-rule participant disappears from the active roster immediately.
+	if contactID != nil {
+		if _, reconcileErr := s.services.Event.ReconcileContactEventMembership(c.Context(), accountID, *contactID); reconcileErr != nil {
+			log.Printf("[EVENT-SYNC] Immediate tag removal reconciliation failed for contact %s: %v", *contactID, reconcileErr)
+		} else {
+			s.invalidateEventsCache(accountID)
+		}
+	}
 	if req.EntityType == "lead" {
-		go s.services.Event.HandleLeadTagRemoved(context.Background(), accountID, entityID, tagID)
 		// Fire tag_removed automation trigger
 		s.triggerAutomationTagRemoved(accountID, entityID, tagID)
 	}
@@ -10468,9 +10491,6 @@ func (s *Server) handleGetEventTags(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
 	}
-	if event, eventErr := s.services.Event.GetByID(c.Context(), eventID); eventErr != nil || event == nil || event.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
-	}
 	event, err := s.services.Event.GetByID(c.Context(), eventID)
 	if err != nil || event == nil || event.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
@@ -10490,17 +10510,118 @@ func (s *Server) handleGetEventTags(c *fiber.Ctx) error {
 	if formulaType == "" {
 		formulaType = "simple"
 	}
+	policyMode, _ := s.services.Event.GetMembershipPolicy(c.Context(), accountID)
 	return c.JSON(fiber.Map{
-		"success":          true,
-		"tags":             tags,
-		"formula_mode":     mode,
-		"tag_formula":      event.TagFormula,
-		"tag_formula_type": formulaType,
+		"success":              true,
+		"tags":                 tags,
+		"formula_mode":         mode,
+		"tag_formula":          event.TagFormula,
+		"tag_formula_type":     formulaType,
+		"rule_revision":        event.RuleRevision,
+		"has_rules":            (formulaType == "advanced" && strings.TrimSpace(event.TagFormula) != "") || len(tags) > 0,
+		"policy_mode":          policyMode,
+		"membership_semantics": "Las reglas son obligatorias para todas las altas; quien deja de cumplir queda inactivo con historial.",
 	})
 }
 
-// handleSetEventTags sets the tags for auto-sync on an event with formula support (AND/OR + excludes).
-func (s *Server) handleSetEventTags(c *fiber.Ctx) error {
+type eventRulePayload struct {
+	TagIDs               []string `json:"tag_ids"`      // backward compat (all include, no exclude)
+	FormulaMode          string   `json:"formula_mode"` // "AND" or "OR" (default "OR")
+	IncludeTagIDs        []string `json:"include_tag_ids"`
+	ExcludeTagIDs        []string `json:"exclude_tag_ids"`
+	TagFormula           string   `json:"tag_formula"`      // text-based formula (advanced mode)
+	TagFormulaType       string   `json:"tag_formula_type"` // "simple" or "advanced"
+	ExpectedRuleRevision *int64   `json:"expected_rule_revision"`
+	PreviewFingerprint   string   `json:"preview_fingerprint"`
+	Confirm              bool     `json:"confirm"`
+}
+
+func (s *Server) parseEventRulePayload(ctx context.Context, accountID uuid.UUID, req eventRulePayload) (repository.EventRuleConfig, error) {
+	formulaType := strings.ToLower(strings.TrimSpace(req.TagFormulaType))
+	if formulaType == "" {
+		formulaType = "simple"
+	}
+	if formulaType != "simple" && formulaType != "advanced" {
+		return repository.EventRuleConfig{}, fmt.Errorf("tag_formula_type debe ser simple o advanced")
+	}
+	mode := strings.ToUpper(strings.TrimSpace(req.FormulaMode))
+	if mode == "" {
+		mode = "OR"
+	}
+	if mode != "OR" && mode != "AND" {
+		return repository.EventRuleConfig{}, fmt.Errorf("formula_mode debe ser OR o AND")
+	}
+	if formulaType == "advanced" && strings.TrimSpace(req.TagFormula) != "" {
+		if err := formula.Validate(req.TagFormula); err != nil {
+			return repository.EventRuleConfig{}, fmt.Errorf("fórmula inválida: %w", err)
+		}
+	}
+	srcIDs := req.IncludeTagIDs
+	if len(srcIDs) == 0 {
+		srcIDs = req.TagIDs
+	}
+	includes := make([]uuid.UUID, 0, len(srcIDs))
+	excludes := make([]uuid.UUID, 0, len(req.ExcludeTagIDs))
+	seenInclude := make(map[uuid.UUID]struct{})
+	for _, tidStr := range srcIDs {
+		tid, err := uuid.Parse(tidStr)
+		if err != nil {
+			return repository.EventRuleConfig{}, fmt.Errorf("ID de etiqueta incluido inválido")
+		}
+		if _, ok := seenInclude[tid]; !ok {
+			includes = append(includes, tid)
+			seenInclude[tid] = struct{}{}
+		}
+	}
+	seenExclude := make(map[uuid.UUID]struct{})
+	for _, tidStr := range req.ExcludeTagIDs {
+		tid, err := uuid.Parse(tidStr)
+		if err != nil {
+			return repository.EventRuleConfig{}, fmt.Errorf("ID de etiqueta excluido inválido")
+		}
+		if _, overlap := seenInclude[tid]; overlap {
+			return repository.EventRuleConfig{}, fmt.Errorf("EVENT_RULE_TAG_OVERLAP")
+		}
+		if _, ok := seenExclude[tid]; !ok {
+			excludes = append(excludes, tid)
+			seenExclude[tid] = struct{}{}
+		}
+	}
+	if formulaType == "advanced" {
+		includes = nil
+		excludes = nil
+	}
+	allTagIDs := append(append(make([]uuid.UUID, 0, len(includes)+len(excludes)), includes...), excludes...)
+	if len(allTagIDs) > 0 {
+		var validTagCount int
+		if err := s.repos.DB().QueryRow(ctx, `SELECT COUNT(DISTINCT id) FROM tags WHERE account_id=$1 AND id=ANY($2)`, accountID, allTagIDs).Scan(&validTagCount); err != nil {
+			return repository.EventRuleConfig{}, err
+		}
+		if validTagCount != len(allTagIDs) {
+			return repository.EventRuleConfig{}, fmt.Errorf("una o más etiquetas no pertenecen a la cuenta")
+		}
+	}
+	return repository.EventRuleConfig{FormulaType: formulaType, FormulaMode: mode, Formula: strings.TrimSpace(req.TagFormula), Includes: includes, Excludes: excludes}, nil
+}
+
+func writeEventMembershipError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, repository.ErrEventRuleVersionConflict):
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_RULE_VERSION_CONFLICT", "error": "La regla cambió desde la previsualización"})
+	case errors.Is(err, repository.ErrEventRulePreviewStale):
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_RULE_VERSION_CONFLICT", "error": "Los contactos o etiquetas cambiaron; vuelve a previsualizar"})
+	case errors.Is(err, repository.ErrEventMembershipFrozen):
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_MEMBERSHIP_FROZEN", "error": "El evento completado o cancelado conserva su membresía histórica"})
+	case errors.Is(err, repository.ErrEventMembershipAuditOnly):
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_MEMBERSHIP_AUDIT_ONLY", "error": "La cuenta sigue en modo auditoría; habilita strict al aplicar"})
+	case strings.Contains(err.Error(), "EVENT_RULE_TAG_OVERLAP"):
+		return c.Status(422).JSON(fiber.Map{"success": false, "code": "EVENT_RULE_TAG_OVERLAP", "error": "Una etiqueta no puede incluirse y excluirse a la vez"})
+	default:
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+}
+
+func (s *Server) handlePreviewEventTags(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -10510,137 +10631,95 @@ func (s *Server) handleSetEventTags(c *fiber.Ctx) error {
 	if err != nil || event == nil || event.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
-
-	var req struct {
-		TagIDs         []string `json:"tag_ids"`      // backward compat (all include, no exclude)
-		FormulaMode    string   `json:"formula_mode"` // "AND" or "OR" (default "OR")
-		IncludeTagIDs  []string `json:"include_tag_ids"`
-		ExcludeTagIDs  []string `json:"exclude_tag_ids"`
-		TagFormula     string   `json:"tag_formula"`      // text-based formula (advanced mode)
-		TagFormulaType string   `json:"tag_formula_type"` // "simple" or "advanced"
-	}
+	var req eventRulePayload
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-
-	formulaType := req.TagFormulaType
-	if formulaType == "" {
-		formulaType = "simple"
+	cfg, err := s.parseEventRulePayload(c.Context(), accountID, req)
+	if err != nil {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-
-	mode := req.FormulaMode
-	if mode == "" {
-		mode = "OR"
+	impact, err := s.services.Event.PreviewEventRule(c.Context(), eventID, accountID, cfg)
+	if err != nil {
+		return writeEventMembershipError(c, err)
 	}
+	return c.JSON(fiber.Map{"success": true, "impact": impact, "warning": "Modificar o eliminar reglas puede activar o sacar participantes. Las reglas negativas pueden abarcar casi toda la cuenta."})
+}
 
-	// Validate advanced formula syntax
-	if formulaType == "advanced" && req.TagFormula != "" {
-		if err := formula.Validate(req.TagFormula); err != nil {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid formula: " + err.Error()})
+// handleSetEventTags changes the rule and membership atomically after a fresh impact preview.
+func (s *Server) handleSetEventTags(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	event, err := s.services.Event.GetByID(c.Context(), eventID)
+	if err != nil || event == nil || event.AccountID != accountID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	}
+	var req eventRulePayload
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.ExpectedRuleRevision == nil || req.PreviewFingerprint == "" || !req.Confirm {
+		return c.Status(422).JSON(fiber.Map{"success": false, "code": "EVENT_RULE_CONFIRMATION_REQUIRED", "error": "Previsualiza y confirma el impacto antes de guardar la regla"})
+	}
+	cfg, err := s.parseEventRulePayload(c.Context(), accountID, req)
+	if err != nil {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	impact, err := s.services.Event.SaveEventRule(c.Context(), eventID, accountID, cfg, *req.ExpectedRuleRevision, req.PreviewFingerprint, &userID)
+	if err != nil {
+		return writeEventMembershipError(c, err)
+	}
+	s.invalidateEventsCache(accountID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "rule_reconciled", "added": impact.Created + impact.Activated, "removed": impact.Deactivated, "rule_revision": impact.RuleRevision})
+	}
+	return c.JSON(fiber.Map{"success": true, "impact": impact, "rule_revision": impact.RuleRevision})
+}
+
+func (s *Server) handleReconcileEventMembership(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+	}
+	var req struct {
+		Apply        bool `json:"apply"`
+		EnableStrict bool `json:"enable_strict"`
+	}
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 		}
 	}
+	impact, err := s.services.Event.ReconcileCurrentEvent(c.Context(), eventID, accountID, req.Apply, req.EnableStrict, "manual_reconcile", &userID)
+	if err != nil {
+		return writeEventMembershipError(c, err)
+	}
+	if req.Apply {
+		s.invalidateEventsCache(accountID)
+		if s.hub != nil {
+			s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "membership_reconciled", "added": impact.Created + impact.Activated, "removed": impact.Deactivated})
+		}
+	}
+	return c.JSON(fiber.Map{"success": true, "impact": impact})
+}
 
-	// Parse include tag UUIDs — prefer include_tag_ids, fall back to tag_ids
-	var includes []uuid.UUID
-	srcIDs := req.IncludeTagIDs
-	if len(srcIDs) == 0 {
-		srcIDs = req.TagIDs
+func (s *Server) handleGetEventMembershipHistory(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
 	}
-	for _, tidStr := range srcIDs {
-		tid, err := uuid.Parse(tidStr)
-		if err != nil {
-			continue
-		}
-		includes = append(includes, tid)
-	}
-
-	// Parse exclude tag UUIDs
-	var excludes []uuid.UUID
-	for _, tidStr := range req.ExcludeTagIDs {
-		tid, err := uuid.Parse(tidStr)
-		if err != nil {
-			continue
-		}
-		excludes = append(excludes, tid)
-	}
-	allTagIDs := append(append(make([]uuid.UUID, 0, len(includes)+len(excludes)), includes...), excludes...)
-	if len(allTagIDs) > 0 {
-		var validTagCount int
-		if err := s.repos.DB().QueryRow(c.Context(), `SELECT COUNT(DISTINCT id) FROM tags WHERE account_id=$1 AND id=ANY($2)`, accountID, allTagIDs).Scan(&validTagCount); err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-		}
-		uniqueTagIDs := make(map[uuid.UUID]struct{}, len(allTagIDs))
-		for _, id := range allTagIDs {
-			uniqueTagIDs[id] = struct{}{}
-		}
-		if validTagCount != len(uniqueTagIDs) {
-			return c.Status(422).JSON(fiber.Map{"success": false, "error": "One or more tags do not belong to this account"})
-		}
-	}
-
-	// Update formula fields on the event
-	event.TagFormulaMode = mode
-	event.TagFormula = req.TagFormula
-	event.TagFormulaType = formulaType
-	if err := s.services.Event.Update(c.Context(), event); err != nil {
-		log.Printf("[EVENT-SYNC] Error updating formula for event %s: %v", eventID, err)
-	}
-
-	// Save simple-mode tag entries (include/exclude)
-	if err := s.services.Event.SetEventTags(c.Context(), eventID, includes, excludes); err != nil {
+	entries, err := s.services.Event.GetMembershipHistory(c.Context(), eventID, accountID, c.QueryInt("limit", 50), c.QueryInt("offset", 0))
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-
-	// Trigger async reconciliation if event is active
-	if event.Status == domain.EventStatusActive {
-		go func() {
-			ctx := context.Background()
-			var stageID *uuid.UUID
-			if event.PipelineID != nil {
-				stages, _ := s.services.Event.GetPipelineStages(ctx, *event.PipelineID)
-				if len(stages) > 0 {
-					stageID = &stages[0].ID
-				}
-			}
-
-			var added, removed int
-			var reconcileErr error
-			if formulaType == "advanced" && req.TagFormula != "" {
-				added, removed, reconcileErr = s.services.Event.ReconcileEventParticipantsAdvanced(ctx, eventID, event.AccountID, req.TagFormula, stageID)
-			} else if len(includes) > 0 {
-				added, removed, reconcileErr = s.services.Event.ReconcileEventParticipants(ctx, eventID, event.AccountID, mode, includes, excludes, stageID)
-			}
-
-			if reconcileErr != nil {
-				log.Printf("[EVENT-SYNC] Error reconciling after tag config change for event '%s': %v", event.Name, reconcileErr)
-				return
-			}
-			if added > 0 || removed > 0 {
-				log.Printf("[EVENT-SYNC] Event '%s' tag config changed (type=%s): +%d added, -%d removed", event.Name, formulaType, added, removed)
-			}
-			if s.hub != nil {
-				s.hub.BroadcastToAccount(event.AccountID, "event_participant_update", map[string]interface{}{
-					"event_id": eventID,
-					"action":   "tag_sync_reconcile",
-					"added":    added,
-					"removed":  removed,
-				})
-			}
-		}()
-	}
-
-	// Return updated tags
-	tags, _ := s.services.Event.GetEventTags(c.Context(), eventID)
-	if tags == nil {
-		tags = make([]*domain.Tag, 0)
-	}
-	return c.JSON(fiber.Map{
-		"success":          true,
-		"tags":             tags,
-		"formula_mode":     mode,
-		"tag_formula":      req.TagFormula,
-		"tag_formula_type": formulaType,
-	})
+	return c.JSON(fiber.Map{"success": true, "entries": entries})
 }
 
 // handleValidateFormula validates a text-based tag formula and returns its structure.
@@ -10703,7 +10782,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 	// Build WHERE
 	args := []interface{}{eventID}
 	argIdx := 2
-	whereClauses := []string{"p.event_id = $1"}
+	whereClauses := []string{"p.event_id = $1", "p.membership_state = 'active'"}
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
@@ -10905,7 +10984,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	// Build WHERE clause for participants
 	args := []interface{}{eventID}
 	argIdx := 2
-	whereClauses := []string{"p.event_id = $1"}
+	whereClauses := []string{"p.event_id = $1", "p.membership_state = 'active'"}
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
@@ -11299,7 +11378,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 		LEFT JOIN leads l ON l.id = ep.lead_id
 		JOIN contact_tags ct ON ct.contact_id = COALESCE(ep.contact_id, l.contact_id)
 		JOIN tags t ON t.id = ct.tag_id
-		WHERE ep.event_id = $1 AND COALESCE(ep.contact_id, l.contact_id) IS NOT NULL
+		WHERE ep.event_id = $1 AND ep.membership_state='active' AND COALESCE(ep.contact_id, l.contact_id) IS NOT NULL
 		GROUP BY t.name, t.color
 		ORDER BY cnt DESC, t.name
 	`, eventID)
@@ -11360,7 +11439,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 	// Build WHERE
 	args := []interface{}{eventID}
 	argIdx := 2
-	whereClauses := []string{"p.event_id = $1"}
+	whereClauses := []string{"p.event_id = $1", "p.membership_state = 'active'"}
 
 	isUnassigned := stageIDParam == "unassigned"
 	if isUnassigned {
@@ -11683,6 +11762,7 @@ func (s *Server) handleBatchParticipantObservations(c *fiber.Ctx) error {
 
 func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
@@ -11715,12 +11795,23 @@ func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 		Age:       req.Age,
 	}
 	if req.ContactID != nil {
-		if cid, err := uuid.Parse(*req.ContactID); err == nil {
-			p.ContactID = &cid
+		cid, parseErr := uuid.Parse(*req.ContactID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid contact ID"})
 		}
+		p.ContactID = &cid
 	}
 	if err := s.ensureEventParticipantContact(c.Context(), accountID, p); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if p.ContactID == nil {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": "El participante necesita un contacto"})
+	}
+	if err := s.services.Event.ValidateParticipantMembership(c.Context(), accountID, eventID, *p.ContactID); err != nil {
+		if strings.Contains(err.Error(), "EVENT_RULE_NOT_MATCHED") {
+			return c.Status(422).JSON(fiber.Map{"success": false, "code": "EVENT_RULE_NOT_MATCHED", "error": "El contacto no cumple las reglas del evento"})
+		}
+		return writeEventMembershipError(c, err)
 	}
 	if err := s.services.Event.AddParticipant(c.Context(), p); err != nil {
 		errMsg := err.Error()
@@ -11735,6 +11826,9 @@ func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": errMsg})
 	}
+	if err := s.services.Event.RecordManualMembership(c.Context(), accountID, eventID, p.ID, &userID); err != nil {
+		log.Printf("[EVENT] Failed to audit manual membership %s: %v", p.ID, err)
+	}
 	if ev, err := s.services.Event.GetByID(c.Context(), eventID); err == nil && ev != nil && s.hub != nil {
 		s.hub.BroadcastToAccount(ev.AccountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "added"})
 	}
@@ -11743,6 +11837,7 @@ func (s *Server) handleAddEventParticipant(c *fiber.Ctx) error {
 
 func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
@@ -11775,12 +11870,23 @@ func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
 			Age:       r.Age,
 		}
 		if r.ContactID != nil {
-			if cid, err := uuid.Parse(*r.ContactID); err == nil {
-				p.ContactID = &cid
+			cid, parseErr := uuid.Parse(*r.ContactID)
+			if parseErr != nil {
+				return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid contact ID"})
 			}
+			p.ContactID = &cid
 		}
 		if err := s.ensureEventParticipantContact(c.Context(), accountID, p); err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		if p.ContactID == nil {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "El participante necesita un contacto"})
+		}
+		if err := s.services.Event.ValidateParticipantMembership(c.Context(), accountID, eventID, *p.ContactID); err != nil {
+			if strings.Contains(err.Error(), "EVENT_RULE_NOT_MATCHED") {
+				return c.Status(422).JSON(fiber.Map{"success": false, "code": "EVENT_RULE_NOT_MATCHED", "error": "Uno o más contactos no cumplen las reglas del evento"})
+			}
+			return writeEventMembershipError(c, err)
 		}
 		participants = append(participants, p)
 	}
@@ -11790,6 +11896,11 @@ func (s *Server) handleBulkAddEventParticipants(c *fiber.Ctx) error {
 			return c.Status(409).JSON(fiber.Map{"success": false, "error": "Uno o más participantes ya están registrados en este evento"})
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": errMsg})
+	}
+	for _, p := range participants {
+		if err := s.services.Event.RecordManualMembership(c.Context(), accountID, eventID, p.ID, &userID); err != nil {
+			log.Printf("[EVENT] Failed to audit bulk membership %s: %v", p.ID, err)
+		}
 	}
 	return c.JSON(fiber.Map{"success": true, "count": len(participants)})
 }
@@ -11986,6 +12097,9 @@ func (s *Server) handleUpdateEventParticipantStatus(c *fiber.Ctx) error {
 		if ev, _ := s.services.Event.GetByID(c.Context(), p.EventID); ev == nil || ev.AccountID != accountID {
 			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 		}
+		if p.MembershipState != "active" {
+			return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_PARTICIPANT_INACTIVE", "error": "El participante ya no está activo en el evento"})
+		}
 	} else {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 	}
@@ -12039,7 +12153,7 @@ func (s *Server) handleBulkUpdateEventParticipantStatus(c *fiber.Ctx) error {
 			confirmed_at=CASE WHEN $1='confirmed' THEN NOW() ELSE confirmed_at END,
 			attended_at=CASE WHEN $1='attended' THEN NOW() ELSE attended_at END,
 			updated_at=NOW()
-		WHERE event_id=$2 AND id=ANY($3)
+		WHERE event_id=$2 AND id=ANY($3) AND membership_state='active'
 	`, req.Status, eventID, ids)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -12049,6 +12163,7 @@ func (s *Server) handleBulkUpdateEventParticipantStatus(c *fiber.Ctx) error {
 
 func (s *Server) handleDeleteEventParticipant(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	pid, err := uuid.Parse(c.Params("pid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid participant ID"})
@@ -12061,12 +12176,15 @@ func (s *Server) handleDeleteEventParticipant(c *fiber.Ctx) error {
 	if ev, _ := s.services.Event.GetByID(c.Context(), delPart.EventID); ev == nil || ev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 	}
-	if err := s.services.Event.DeleteParticipant(c.Context(), pid); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	if err := s.services.Event.SoftRemoveParticipant(c.Context(), accountID, delPart.EventID, pid, &userID); err != nil {
+		if strings.Contains(err.Error(), "event rule managed") {
+			return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_RULE_MANAGED", "error": "Este participante cumple una regla obligatoria; modifica sus etiquetas o la regla"})
+		}
+		return writeEventMembershipError(c, err)
 	}
 	if delPart != nil {
 		if ev, err := s.services.Event.GetByID(c.Context(), delPart.EventID); err == nil && ev != nil && s.hub != nil {
-			s.hub.BroadcastToAccount(ev.AccountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": delPart.EventID.String(), "action": "deleted"})
+			s.hub.BroadcastToAccount(ev.AccountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": delPart.EventID.String(), "action": "deactivated"})
 		}
 	}
 	return c.JSON(fiber.Map{"success": true})
@@ -12239,6 +12357,7 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	pArgIdx := 3
 	pWhere := []string{
 		"p.event_id = $1",
+		"p.membership_state = 'active'",
 		"contact.id IS NOT NULL",
 		"contact.account_id = $2",
 		"NULLIF(BTRIM(contact.phone),'') IS NOT NULL",
@@ -13016,6 +13135,9 @@ func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {
 	} else if ev, _ := s.services.Event.GetByID(c.Context(), part.EventID); ev == nil || ev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Participant not found"})
 	}
+	if part.MembershipState != "active" {
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_PARTICIPANT_INACTIVE", "error": "El participante ya no está activo en el evento"})
+	}
 	var req struct {
 		StageID string `json:"stage_id"`
 	}
@@ -13032,7 +13154,7 @@ func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {
 	`, part.EventID, accountID, stageID).Scan(&stageValid); err != nil || !stageValid {
 		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Stage does not belong to this event"})
 	}
-	if _, err := s.repos.DB().Exec(c.Context(), `UPDATE event_participants SET stage_id=$1, updated_at=NOW() WHERE id=$2 AND event_id=$3`, stageID, pid, part.EventID); err != nil {
+	if _, err := s.repos.DB().Exec(c.Context(), `UPDATE event_participants SET stage_id=$1, updated_at=NOW() WHERE id=$2 AND event_id=$3 AND membership_state='active'`, stageID, pid, part.EventID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	if stagePart, err := s.services.Event.GetParticipant(c.Context(), pid); err == nil && stagePart != nil {
@@ -13078,7 +13200,7 @@ func (s *Server) handleBulkUpdateEventParticipantStage(c *fiber.Ctx) error {
 	if len(ids) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No valid participant IDs"})
 	}
-	tag, err := s.repos.DB().Exec(c.Context(), `UPDATE event_participants SET stage_id=$1, updated_at=NOW() WHERE event_id=$2 AND id=ANY($3)`, stageID, eventID, ids)
+	tag, err := s.repos.DB().Exec(c.Context(), `UPDATE event_participants SET stage_id=$1, updated_at=NOW() WHERE event_id=$2 AND id=ANY($3) AND membership_state='active'`, stageID, eventID, ids)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -13377,7 +13499,7 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 		}
 		var participantEventID uuid.UUID
 		var participantContactID *uuid.UUID
-		if err := s.repos.DB().QueryRow(c.Context(), `SELECT ep.event_id, ep.contact_id FROM event_participants ep JOIN events e ON e.id=ep.event_id WHERE ep.id=$1 AND e.account_id=$2`, pid, accountID).Scan(&participantEventID, &participantContactID); err != nil {
+		if err := s.repos.DB().QueryRow(c.Context(), `SELECT ep.event_id, ep.contact_id FROM event_participants ep JOIN events e ON e.id=ep.event_id WHERE ep.id=$1 AND e.account_id=$2 AND ep.membership_state='active'`, pid, accountID).Scan(&participantEventID, &participantContactID); err != nil {
 			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Participant does not belong to this account"})
 		}
 		if interaction.EventID != nil && *interaction.EventID != participantEventID {
@@ -13844,6 +13966,7 @@ func (s *Server) runEventTagSync(ctx context.Context) {
 		}
 		if added > 0 || removed > 0 {
 			log.Printf("[EVENT-SYNC] Event '%s': +%d added, -%d removed", ewt.Event.Name, added, removed)
+			s.invalidateEventsCache(ewt.Event.AccountID)
 			if s.hub != nil {
 				s.hub.BroadcastToAccount(ewt.Event.AccountID, "event_participant_update", map[string]interface{}{
 					"event_id": ewt.Event.ID,

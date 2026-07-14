@@ -15,7 +15,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
-	"github.com/naperu/clarin/internal/formula"
 	"github.com/naperu/clarin/internal/kommo"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/whatsapp"
@@ -1381,6 +1380,15 @@ func (s *CampaignService) validateRecipientPrivacy(ctx context.Context, campaign
 	if contact.DoNotContact || blocked {
 		return nil, fmt.Errorf("destinatario omitido: contacto marcado como no contactar")
 	}
+	if campaign.EventID != nil {
+		var active bool
+		if err := s.repos.DB().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM event_participants ep JOIN events e ON e.id=ep.event_id WHERE ep.event_id=$1 AND ep.contact_id=$2 AND ep.membership_state='active' AND e.account_id=$3)`, *campaign.EventID, contact.ID, campaign.AccountID).Scan(&active); err != nil {
+			return nil, fmt.Errorf("destinatario omitido: no se pudo validar la membresía del evento: %w", err)
+		}
+		if !active {
+			return nil, fmt.Errorf("destinatario omitido: ya no pertenece al evento")
+		}
+	}
 	return contact, nil
 }
 
@@ -1967,6 +1975,17 @@ func (s *EventService) AddParticipant(ctx context.Context, p *domain.EventPartic
 	return s.repos.Participant.Add(ctx, p)
 }
 
+func (s *EventService) ValidateParticipantMembership(ctx context.Context, accountID, eventID, contactID uuid.UUID) error {
+	hasRules, matches, err := s.repos.Event.ContactMatchesEventRule(ctx, eventID, accountID, contactID)
+	if err != nil {
+		return err
+	}
+	if hasRules && !matches {
+		return fmt.Errorf("EVENT_RULE_NOT_MATCHED")
+	}
+	return nil
+}
+
 func (s *EventService) BulkAddParticipants(ctx context.Context, eventID uuid.UUID, participants []*domain.EventParticipant) error {
 	return s.repos.Participant.BulkAdd(ctx, eventID, participants)
 }
@@ -2090,9 +2109,32 @@ func (s *EventService) BulkUpdateParticipantStage(ctx context.Context, ids []uui
 
 // ── Event Tag Auto-Sync Methods ──────────────────────────────────────────────
 
-// SetEventTags sets the tags for automatic participant sync on an event (with formula support).
-func (s *EventService) SetEventTags(ctx context.Context, eventID uuid.UUID, includes []uuid.UUID, excludes []uuid.UUID) error {
-	return s.repos.Event.SetEventTags(ctx, eventID, includes, excludes)
+func (s *EventService) PreviewEventRule(ctx context.Context, eventID, accountID uuid.UUID, cfg repository.EventRuleConfig) (repository.EventMembershipImpact, error) {
+	return s.repos.Event.PreviewEventRule(ctx, eventID, accountID, cfg)
+}
+
+func (s *EventService) SaveEventRule(ctx context.Context, eventID, accountID uuid.UUID, cfg repository.EventRuleConfig, expectedRevision int64, fingerprint string, actor *uuid.UUID) (repository.EventMembershipImpact, error) {
+	return s.repos.Event.SaveEventRule(ctx, eventID, accountID, cfg, expectedRevision, fingerprint, actor)
+}
+
+func (s *EventService) ReconcileCurrentEvent(ctx context.Context, eventID, accountID uuid.UUID, apply, enableStrict bool, source string, actor *uuid.UUID) (repository.EventMembershipImpact, error) {
+	return s.repos.Event.ReconcileCurrentEvent(ctx, eventID, accountID, apply, enableStrict, source, actor)
+}
+
+func (s *EventService) GetMembershipPolicy(ctx context.Context, accountID uuid.UUID) (string, error) {
+	return s.repos.Event.GetMembershipPolicy(ctx, accountID)
+}
+
+func (s *EventService) GetMembershipHistory(ctx context.Context, eventID, accountID uuid.UUID, limit, offset int) ([]repository.EventMembershipAuditEntry, error) {
+	return s.repos.Event.GetMembershipHistory(ctx, eventID, accountID, limit, offset)
+}
+
+func (s *EventService) SoftRemoveParticipant(ctx context.Context, accountID, eventID, participantID uuid.UUID, actor *uuid.UUID) error {
+	return s.repos.Event.SoftRemoveParticipant(ctx, accountID, eventID, participantID, actor)
+}
+
+func (s *EventService) RecordManualMembership(ctx context.Context, accountID, eventID, participantID uuid.UUID, actor *uuid.UUID) error {
+	return s.repos.Event.RecordManualMembership(ctx, accountID, eventID, participantID, actor)
 }
 
 // GetEventTags returns the tags configured for auto-sync on an event (with negate flag).
@@ -2109,56 +2151,25 @@ func (s *EventService) GetEventTagEntries(ctx context.Context, eventID uuid.UUID
 // Supports AND/OR include tags plus exclusions, evaluated on contacts.
 // Returns (added, removed, error).
 func (s *EventService) ReconcileEventParticipants(ctx context.Context, eventID uuid.UUID, accountID uuid.UUID, mode string, includes []uuid.UUID, excludes []uuid.UUID, defaultStageID *uuid.UUID) (int, int, error) {
-	if len(includes) == 0 {
+	impact, err := s.repos.Event.ReconcileCurrentEvent(ctx, eventID, accountID, true, false, "worker", nil)
+	if errors.Is(err, repository.ErrEventMembershipAuditOnly) {
 		return 0, 0, nil
 	}
-
-	if mode == "" {
-		mode = "OR"
-	}
-
-	matchedContactIDs, err := s.repos.Event.GetContactIDsByTagFormula(ctx, accountID, mode, includes, excludes)
 	if err != nil {
-		return 0, 0, fmt.Errorf("get contacts by formula: %w", err)
+		return 0, 0, err
 	}
-
-	return s.reconcileWithMatchedContacts(ctx, eventID, accountID, defaultStageID, matchedContactIDs)
+	return impact.Created + impact.Activated, impact.Deactivated, nil
 }
 
 // ReconcileEventParticipantsAdvanced synchronizes participants using a text-based formula.
 func (s *EventService) ReconcileEventParticipantsAdvanced(ctx context.Context, eventID uuid.UUID, accountID uuid.UUID, formulaText string, defaultStageID *uuid.UUID) (int, int, error) {
-	if formulaText == "" {
-		return 0, 0, nil
-	}
-
-	ast, err := formula.Parse(formulaText)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parse formula: %w", err)
-	}
-
-	sql, args, err := formula.BuildSQLForContacts(ast, accountID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("build formula SQL: %w", err)
-	}
-
-	matchedContactIDs, err := s.repos.Event.GetContactIDsByFormulaText(ctx, sql, args)
-	if err != nil {
-		return 0, 0, fmt.Errorf("execute formula query: %w", err)
-	}
-
-	log.Printf("[EVENT-SYNC] Advanced formula matched %d contacts for event %s", len(matchedContactIDs), eventID)
-
-	return s.reconcileWithMatchedContacts(ctx, eventID, accountID, defaultStageID, matchedContactIDs)
+	return s.ReconcileEventParticipants(ctx, eventID, accountID, "", nil, nil, defaultStageID)
 }
 
-// reconcileWithMatchedContacts is intentionally additive. A formula is an
-// enrollment source, never a destructive membership rule.
+// reconcileWithMatchedContacts is retained for compatibility with old callers.
+// Authoritative reconciliation is performed from the persisted event rule.
 func (s *EventService) reconcileWithMatchedContacts(ctx context.Context, eventID, accountID uuid.UUID, defaultStageID *uuid.UUID, matchedContactIDs []uuid.UUID) (int, int, error) {
-	added, err := s.repos.Event.BulkAddParticipantsFromContacts(ctx, eventID, accountID, defaultStageID, matchedContactIDs)
-	if err != nil {
-		return 0, 0, fmt.Errorf("bulk add participants: %w", err)
-	}
-	return added, 0, nil
+	return s.ReconcileEventParticipants(ctx, eventID, accountID, "", nil, nil, defaultStageID)
 }
 
 // ReconcileContactEventMembership evaluates one contact against every active
@@ -2175,57 +2186,23 @@ func (s *EventService) ReconcileContactEventMembership(ctx context.Context, acco
 		return 0, fmt.Errorf("get account event rules: %w", err)
 	}
 
-	var tagNames []string
-	tagNamesLoaded := false
 	addedTotal := 0
 	for _, rule := range rules {
-		exists, err := s.repos.Event.ParticipantExistsForContact(ctx, rule.Event.ID, accountID, contactID)
-		if err != nil {
-			return addedTotal, fmt.Errorf("check participant membership: %w", err)
-		}
-		if exists {
+		impact, reconcileErr := s.repos.Event.ReconcileCurrentEvent(ctx, rule.Event.ID, accountID, true, false, "contact_tag_change", nil)
+		if errors.Is(reconcileErr, repository.ErrEventMembershipAuditOnly) {
 			continue
 		}
-
-		matches := false
-		if rule.Event.TagFormulaType == "advanced" && rule.Event.TagFormula != "" {
-			if !tagNamesLoaded {
-				tagNames, err = s.repos.Event.GetContactTagNames(ctx, accountID, contactID)
-				if err != nil {
-					return addedTotal, fmt.Errorf("get contact tags: %w", err)
-				}
-				tagNamesLoaded = true
-			}
-			ast, parseErr := formula.Parse(rule.Event.TagFormula)
-			if parseErr != nil {
-				log.Printf("[EVENT-SYNC] Invalid formula for event %s: %v", rule.Event.ID, parseErr)
-				continue
-			}
-			matches = formula.Evaluate(ast, tagNames)
-		} else {
-			matches, err = s.repos.Event.ContactMatchesFormula(ctx, accountID, contactID, rule.Event.TagFormulaMode, rule.Includes, rule.Excludes)
-			if err != nil {
-				return addedTotal, fmt.Errorf("evaluate contact event rule: %w", err)
-			}
+		if reconcileErr != nil {
+			return addedTotal, reconcileErr
 		}
-		if !matches {
-			continue
-		}
-
-		stageID := s.getDefaultStageID(ctx, rule.Event)
-		added, err := s.repos.Event.BulkAddParticipantsFromContacts(ctx, rule.Event.ID, accountID, stageID, []uuid.UUID{contactID})
-		if err != nil {
-			return addedTotal, fmt.Errorf("add contact participant: %w", err)
-		}
-		if added == 0 {
-			continue
-		}
+		added := impact.Created + impact.Activated
 		addedTotal += added
 		if s.hub != nil {
 			s.hub.BroadcastToAccount(accountID, "event_participant_update", map[string]interface{}{
 				"event_id": rule.Event.ID,
-				"action":   "contact_rule_add",
+				"action":   "contact_rule_reconcile",
 				"added":    added,
+				"removed":  impact.Deactivated,
 			})
 		}
 	}
@@ -2244,187 +2221,20 @@ func (s *EventService) HandleLeadTagAssigned(ctx context.Context, accountID, lea
 }
 
 func (s *EventService) HandleContactTagAssigned(ctx context.Context, accountID, contactID, tagID uuid.UUID) {
-	contact, err := s.repos.Contact.GetByID(ctx, contactID)
-	if err != nil || contact == nil || contact.AccountID != accountID || contact.IsGroup {
-		return
+	if _, err := s.ReconcileContactEventMembership(ctx, accountID, contactID); err != nil {
+		log.Printf("[EVENT-SYNC] tag assignment reconciliation failed for contact %s: %v", contactID, err)
 	}
-
-	// 1. Handle simple-formula events that reference this tag
-	events, err := s.repos.Event.FindActiveEventsByTagID(ctx, tagID)
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error finding events for tag %s: %v", tagID, err)
-		return
-	}
-	for _, ev := range events {
-		if ev.TagFormulaType == "advanced" {
-			continue // handled below
-		}
-		s.tryAddContactToSimpleEvent(ctx, ev, contactID)
-	}
-
-	// 2. Handle advanced-formula events for the same account
-	advEvents, err := s.repos.Event.GetActiveAdvancedFormulaEvents(ctx, accountID)
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error finding advanced formula events: %v", err)
-		return
-	}
-	for _, ev := range advEvents {
-		s.tryAddContactToAdvancedEvent(ctx, ev, contactID)
-	}
-}
-
-func (s *EventService) tryAddContactToSimpleEvent(ctx context.Context, ev *domain.Event, contactID uuid.UUID) {
-	exists, _ := s.repos.Event.ParticipantExistsForContact(ctx, ev.ID, ev.AccountID, contactID)
-	if exists {
-		return
-	}
-
-	includes, excludes, err := s.repos.Event.GetEventTagEntries(ctx, ev.ID)
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error getting event tag entries for event %s: %v", ev.ID, err)
-		return
-	}
-
-	matches, err := s.repos.Event.ContactMatchesFormula(ctx, ev.AccountID, contactID, ev.TagFormulaMode, includes, excludes)
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error checking formula for contact %s event %s: %v", contactID, ev.ID, err)
-		return
-	}
-	if !matches {
-		return
-	}
-
-	stageID := s.getDefaultStageID(ctx, ev)
-	added, err := s.repos.Event.BulkAddParticipantsFromContacts(ctx, ev.ID, ev.AccountID, stageID, []uuid.UUID{contactID})
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error adding contact %s to event %s: %v", contactID, ev.ID, err)
-		return
-	}
-	if added > 0 {
-		log.Printf("[EVENT-SYNC] Added contact %s to event '%s' (tag assigned, mode=%s)", contactID, ev.Name, ev.TagFormulaMode)
-		if s.hub != nil {
-			s.hub.BroadcastToAccount(ev.AccountID, "event_participant_update", map[string]interface{}{
-				"event_id": ev.ID,
-				"action":   "tag_sync_add",
-			})
-		}
-	}
-}
-
-func (s *EventService) tryAddContactToAdvancedEvent(ctx context.Context, ev *domain.Event, contactID uuid.UUID) {
-	exists, _ := s.repos.Event.ParticipantExistsForContact(ctx, ev.ID, ev.AccountID, contactID)
-	if exists {
-		return
-	}
-
-	tagNames, err := s.repos.Event.GetContactTagNames(ctx, ev.AccountID, contactID)
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error getting contact tags for %s: %v", contactID, err)
-		return
-	}
-
-	ast, err := formula.Parse(ev.TagFormula)
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error parsing formula for event %s: %v", ev.ID, err)
-		return
-	}
-
-	if !formula.Evaluate(ast, tagNames) {
-		return
-	}
-
-	stageID := s.getDefaultStageID(ctx, ev)
-	added, err := s.repos.Event.BulkAddParticipantsFromContacts(ctx, ev.ID, ev.AccountID, stageID, []uuid.UUID{contactID})
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error adding contact %s to event %s: %v", contactID, ev.ID, err)
-		return
-	}
-	if added > 0 {
-		log.Printf("[EVENT-SYNC] Added contact %s to event '%s' (advanced formula)", contactID, ev.Name)
-		if s.hub != nil {
-			s.hub.BroadcastToAccount(ev.AccountID, "event_participant_update", map[string]interface{}{
-				"event_id": ev.ID,
-				"action":   "tag_sync_add",
-			})
-		}
-	}
-}
-
-// getDefaultStageID returns the first stage ID for the event's pipeline.
-func (s *EventService) getDefaultStageID(ctx context.Context, ev *domain.Event) *uuid.UUID {
-	if ev.PipelineID != nil {
-		stages, _ := s.repos.EventPipeline.GetStagesByPipelineID(ctx, *ev.PipelineID)
-		if len(stages) > 0 {
-			return &stages[0].ID
-		}
-	}
-	return nil
 }
 
 // HandleLeadTagRemoved is called when a tag is removed from a lead.
 // Checks if the lead should be removed from any event that uses this tag (formula-aware).
 func (s *EventService) HandleLeadTagRemoved(ctx context.Context, accountID, leadID, tagID uuid.UUID) {
-	// Membership is historical and additive. Removing a tag never removes an
-	// existing participant; a user may still remove it explicitly.
-}
-
-// tryRemoveLeadFromSimpleEvent checks if the lead still matches the simple formula.
-func (s *EventService) tryRemoveLeadFromSimpleEvent(ctx context.Context, ev *domain.Event, leadID uuid.UUID) {
-	includes, excludes, err := s.repos.Event.GetEventTagEntries(ctx, ev.ID)
-	if err != nil {
+	lead, err := s.repos.Lead.GetByID(ctx, leadID)
+	if err != nil || lead == nil || lead.AccountID != accountID || lead.ContactID == nil {
 		return
 	}
-
-	stillMatches, err := s.repos.Event.LeadMatchesFormula(ctx, leadID, ev.TagFormulaMode, includes, excludes)
-	if err != nil || stillMatches {
-		return
-	}
-
-	removed, err := s.repos.Event.RemoveAutoSyncParticipantsByLeadIDs(ctx, ev.ID, []uuid.UUID{leadID})
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error removing lead %s from event %s: %v", leadID, ev.ID, err)
-		return
-	}
-	if removed > 0 {
-		log.Printf("[EVENT-SYNC] ❌ Removed lead %s from event '%s' (tag removed, mode=%s)", leadID, ev.Name, ev.TagFormulaMode)
-		if s.hub != nil {
-			s.hub.BroadcastToAccount(ev.AccountID, "event_participant_update", map[string]interface{}{
-				"event_id": ev.ID,
-				"action":   "tag_sync_remove",
-			})
-		}
-	}
-}
-
-// tryRemoveLeadFromAdvancedEvent checks if the lead still matches the text formula.
-func (s *EventService) tryRemoveLeadFromAdvancedEvent(ctx context.Context, ev *domain.Event, leadID uuid.UUID) {
-	tagNames, err := s.repos.Event.GetLeadTagNames(ctx, leadID)
-	if err != nil {
-		return
-	}
-
-	ast, err := formula.Parse(ev.TagFormula)
-	if err != nil {
-		return
-	}
-
-	if formula.Evaluate(ast, tagNames) {
-		return // still matches
-	}
-
-	removed, err := s.repos.Event.RemoveAutoSyncParticipantsByLeadIDs(ctx, ev.ID, []uuid.UUID{leadID})
-	if err != nil {
-		log.Printf("[EVENT-SYNC] Error removing lead %s from event %s: %v", leadID, ev.ID, err)
-		return
-	}
-	if removed > 0 {
-		log.Printf("[EVENT-SYNC] ❌ Removed lead %s from event '%s' (advanced formula)", leadID, ev.Name)
-		if s.hub != nil {
-			s.hub.BroadcastToAccount(ev.AccountID, "event_participant_update", map[string]interface{}{
-				"event_id": ev.ID,
-				"action":   "tag_sync_remove",
-			})
-		}
+	if _, err := s.ReconcileContactEventMembership(ctx, accountID, *lead.ContactID); err != nil {
+		log.Printf("[EVENT-SYNC] tag removal reconciliation failed for contact %s: %v", *lead.ContactID, err)
 	}
 }
 
@@ -2441,20 +2251,11 @@ func (s *EventService) ReconcileAllAccountEvents(ctx context.Context, accountID 
 		if ewt.Event.AccountID != accountID {
 			continue
 		}
-		var stageID *uuid.UUID
-		if ewt.Event.PipelineID != nil {
-			stages, _ := s.GetPipelineStages(ctx, *ewt.Event.PipelineID)
-			if len(stages) > 0 {
-				stageID = &stages[0].ID
-			}
+		impact, reconcileErr := s.repos.Event.ReconcileCurrentEvent(ctx, ewt.Event.ID, ewt.Event.AccountID, true, false, "account_recovery", nil)
+		if errors.Is(reconcileErr, repository.ErrEventMembershipAuditOnly) {
+			continue
 		}
-		var added, removed int
-		var reconcileErr error
-		if ewt.Event.TagFormulaType == "advanced" && ewt.Event.TagFormula != "" {
-			added, removed, reconcileErr = s.ReconcileEventParticipantsAdvanced(ctx, ewt.Event.ID, ewt.Event.AccountID, ewt.Event.TagFormula, stageID)
-		} else if len(ewt.Includes) > 0 {
-			added, removed, reconcileErr = s.ReconcileEventParticipants(ctx, ewt.Event.ID, ewt.Event.AccountID, ewt.Event.TagFormulaMode, ewt.Includes, ewt.Excludes, stageID)
-		}
+		added, removed := impact.Created+impact.Activated, impact.Deactivated
 		if reconcileErr != nil {
 			log.Printf("[EVENT-SYNC] Error reconciling event '%s': %v", ewt.Event.Name, reconcileErr)
 			continue

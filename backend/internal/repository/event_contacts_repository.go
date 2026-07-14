@@ -69,7 +69,14 @@ func (r *EventRepository) GetContactIDsByFormulaText(ctx context.Context, sql st
 // contact_tags. It does not depend on leads or their lifecycle.
 func (r *EventRepository) GetContactIDsByTagFormula(ctx context.Context, accountID uuid.UUID, mode string, includes, excludes []uuid.UUID) ([]uuid.UUID, error) {
 	if len(includes) == 0 {
-		return nil, nil
+		if len(excludes) == 0 {
+			return nil, nil
+		}
+		return r.GetContactIDsByFormulaText(ctx, `
+			SELECT c.id FROM contacts c
+			WHERE c.account_id=$1 AND c.is_group=FALSE
+			  AND NOT EXISTS (SELECT 1 FROM contact_tags ct WHERE ct.contact_id=c.id AND ct.tag_id=ANY($2))
+		`, []interface{}{accountID, excludes})
 	}
 	args := []interface{}{accountID, includes}
 	var query string
@@ -181,7 +188,8 @@ func (r *EventRepository) BulkAddParticipantsFromContacts(ctx context.Context, e
 		  AND ($4::uuid IS NULL OR EXISTS (
 			SELECT 1 FROM event_pipeline_stages eps WHERE eps.id=$4 AND eps.pipeline_id=e.pipeline_id
 		  ))
-		ON CONFLICT (event_id,contact_id) WHERE contact_id IS NOT NULL DO NOTHING
+		ON CONFLICT (event_id,contact_id) WHERE contact_id IS NOT NULL DO UPDATE SET
+			membership_state='active',membership_reason='',membership_source='rule',auto_tag_sync=TRUE,membership_changed_at=NOW(),updated_at=NOW()
 	`, eventID, accountID, contactIDs, stageID)
 	if err != nil {
 		return 0, err

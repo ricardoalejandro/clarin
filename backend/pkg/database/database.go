@@ -827,12 +827,8 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_campaign_recipients_contact ON campaign_recipients(contact_id) WHERE contact_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_interactions_account_lead_created ON interactions(account_id, lead_id, created_at DESC) WHERE lead_id IS NOT NULL`,
 
-		// Backfill participant_tags from contact_tags for existing participants
-		`INSERT INTO participant_tags (participant_id, tag_id)
-		 SELECT ep.id, ct.tag_id FROM event_participants ep
-		 JOIN contact_tags ct ON ct.contact_id = ep.contact_id
-		 WHERE ep.contact_id IS NOT NULL
-		 ON CONFLICT DO NOTHING`,
+		// participant_tags is legacy history only. contact_tags is the sole source
+		// of truth; never copy current contact tags back into historical snapshots.
 
 		// Program schedule fields
 		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS schedule_start_date TIMESTAMPTZ`,
@@ -1179,6 +1175,53 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE eros_files ADD COLUMN IF NOT EXISTS generation_spec JSONB NOT NULL DEFAULT '{}'::jsonb`,
 		`CREATE INDEX IF NOT EXISTS idx_eros_files_user_expires ON eros_files (account_id, user_id, expires_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_eros_files_message ON eros_files (message_id)`,
+
+		// Durable, account-scoped runs for the hybrid lead intelligence report.
+		`CREATE TABLE IF NOT EXISTS lead_intelligence_report_runs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			report_type TEXT NOT NULL DEFAULT 'lead_intelligence',
+			parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+			status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','completed','completed_with_warnings','failed','cancelled')),
+			phase TEXT NOT NULL DEFAULT 'queued',
+			selected_reasoning TEXT NOT NULL DEFAULT 'high',
+			recommended_reasoning TEXT NOT NULL DEFAULT 'high',
+			total_items INT NOT NULL DEFAULT 0,
+			processed_items INT NOT NULL DEFAULT 0,
+			ai_candidate_count INT NOT NULL DEFAULT 0,
+			ai_processed_count INT NOT NULL DEFAULT 0,
+			warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+			summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+			idempotency_key UUID NOT NULL,
+			cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+			error_code TEXT NOT NULL DEFAULT '',
+			safe_error TEXT NOT NULL DEFAULT '',
+			attempt_count INT NOT NULL DEFAULT 0,
+			heartbeat_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			started_at TIMESTAMPTZ,
+			completed_at TIMESTAMPTZ,
+			expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '7 days',
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(account_id,user_id,idempotency_key),
+			UNIQUE(id,account_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS lead_intelligence_report_items (
+			run_id UUID NOT NULL,
+			account_id UUID NOT NULL,
+			lead_id UUID NOT NULL,
+			position INT NOT NULL,
+			ai_analyzed BOOLEAN NOT NULL DEFAULT FALSE,
+			row_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+			PRIMARY KEY (run_id,lead_id),
+			UNIQUE(run_id,position),
+			FOREIGN KEY (run_id,account_id) REFERENCES lead_intelligence_report_runs(id,account_id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_lead_intelligence_runs_queue ON lead_intelligence_report_runs(status,created_at) WHERE status='queued'`,
+		`CREATE INDEX IF NOT EXISTS idx_lead_intelligence_runs_user ON lead_intelligence_report_runs(account_id,user_id,created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_lead_intelligence_runs_expiry ON lead_intelligence_report_runs(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_lead_intelligence_items_account_lead ON lead_intelligence_report_items(account_id,lead_id)`,
 		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_interactions_account_lead_manual ON interactions(account_id, lead_id, type) WHERE lead_id IS NOT NULL AND type IN ('note','call')`,
 		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_interactions_account_contact_manual ON interactions(account_id, contact_id, type) WHERE contact_id IS NOT NULL AND type IN ('note','call')`,
 		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_account_chat_direction_time ON messages(account_id, chat_id, is_from_me, timestamp DESC) WHERE NOT COALESCE(is_revoked,false)`,
@@ -1638,13 +1681,9 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// (lead_tags migration removed — table dropped, data already in contact_tags)
 
-		// Migrate participant_tags → contact_tags (for participants that have a contact_id)
-		`INSERT INTO contact_tags (contact_id, tag_id)
-		 SELECT DISTINCT p.contact_id, pt.tag_id
-		 FROM participant_tags pt
-		 JOIN event_participants p ON p.id = pt.participant_id
-		 WHERE p.contact_id IS NOT NULL
-		 ON CONFLICT DO NOTHING`,
+		// The participant_tags -> contact_tags conversion is intentionally absent
+		// here. It belongs only to the guarded legacy data migration below; running
+		// it on every startup resurrects tags users already removed.
 
 		// Index on contact_tags for frequent JOINs
 		`CREATE INDEX IF NOT EXISTS idx_contact_tags_contact ON contact_tags(contact_id)`,
@@ -2836,6 +2875,55 @@ func Migrate(db *pgxpool.Pool) error {
 				last_used_at TIMESTAMPTZ
 			)`,
 		`CREATE INDEX IF NOT EXISTS idx_mcp_oauth_refresh_tokens_client ON mcp_oauth_refresh_tokens(client_id, expires_at DESC)`,
+
+		// Authoritative, auditable event membership. Existing rows start active;
+		// strict reconciliation is enabled per account after a dry-run.
+		`ALTER TABLE events ADD COLUMN IF NOT EXISTS rule_revision BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS membership_state TEXT NOT NULL DEFAULT 'active'`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS membership_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS membership_source TEXT NOT NULL DEFAULT 'legacy'`,
+		`ALTER TABLE event_participants ADD COLUMN IF NOT EXISTS membership_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+		`UPDATE event_participants SET membership_source=CASE WHEN auto_tag_sync THEN 'rule' ELSE 'legacy' END WHERE membership_source='legacy'`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='chk_event_participant_membership_state' AND conrelid='event_participants'::regclass) THEN
+				ALTER TABLE event_participants ADD CONSTRAINT chk_event_participant_membership_state CHECK (membership_state IN ('active','inactive'));
+			END IF;
+		END $$`,
+		`CREATE INDEX IF NOT EXISTS idx_event_participants_active_event ON event_participants(event_id, stage_id) WHERE membership_state='active'`,
+		`CREATE INDEX IF NOT EXISTS idx_event_participants_active_contact ON event_participants(contact_id, event_id) WHERE membership_state='active'`,
+		`CREATE OR REPLACE VIEW active_event_participants AS SELECT * FROM event_participants WHERE membership_state='active'`,
+		`CREATE TABLE IF NOT EXISTS event_membership_policy_state (
+			account_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+			mode TEXT NOT NULL DEFAULT 'audit_only' CHECK (mode IN ('audit_only','strict')),
+			policy_version INTEGER NOT NULL DEFAULT 1,
+			audited_at TIMESTAMPTZ,
+			enabled_at TIMESTAMPTZ,
+			enabled_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`INSERT INTO event_membership_policy_state (account_id) SELECT id FROM accounts ON CONFLICT DO NOTHING`,
+		`CREATE TABLE IF NOT EXISTS crm_audit_events (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			category TEXT NOT NULL,
+			action TEXT NOT NULL,
+			event_id UUID REFERENCES events(id) ON DELETE SET NULL,
+			participant_id UUID REFERENCES event_participants(id) ON DELETE SET NULL,
+			contact_id UUID REFERENCES contacts(id) ON DELETE SET NULL,
+			tag_id UUID REFERENCES tags(id) ON DELETE SET NULL,
+			actor_type TEXT NOT NULL DEFAULT 'system',
+			actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+			source TEXT NOT NULL DEFAULT '',
+			correlation_id UUID NOT NULL DEFAULT gen_random_uuid(),
+			rule_revision BIGINT NOT NULL DEFAULT 0,
+			before_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+			after_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+			metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_crm_audit_account_created ON crm_audit_events(account_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_crm_audit_event_created ON crm_audit_events(event_id, created_at DESC) WHERE event_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_crm_audit_contact_created ON crm_audit_events(contact_id, created_at DESC) WHERE contact_id IS NOT NULL`,
 	}
 
 	var dataTx pgx.Tx

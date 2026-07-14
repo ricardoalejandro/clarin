@@ -35,6 +35,7 @@ type erosBridgeChatRequest struct {
 	AuthMode           string          `json:"auth_mode,omitempty"`
 	ErosContext        string          `json:"eros_context,omitempty"`
 	ResultMemory       any             `json:"result_memory,omitempty"`
+	DisableTools       bool            `json:"disable_tools,omitempty"`
 }
 
 type erosBridgeChatResponse struct {

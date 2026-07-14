@@ -137,6 +137,54 @@ func TestCRMMigrationDirtyAndIdempotent(t *testing.T) {
 		t.Fatalf("legacy participant was not linked: %v", err)
 	}
 	assertInt(t, db, `SELECT COUNT(*) FROM event_participants WHERE id=$1 AND contact_id=$2 AND lead_id IS NULL`, 1, legacyLeadParticipantID, contactID)
+
+	// Event rules are authoritative in strict mode, but membership history is
+	// preserved and a restart must never recreate a removed contact tag from the
+	// legacy participant_tags snapshot.
+	membershipTagID := uuid.New()
+	if _, err := db.Exec(ctx, `INSERT INTO tags(id,account_id,name,color) VALUES($1,$2,'JULIO','#10b981')`, membershipTagID, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO contact_tags(contact_id,tag_id) VALUES($1,$2)`, contactID, membershipTagID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO participant_tags(participant_id,tag_id) VALUES($1,$2)`, legacyLeadParticipantID, membershipTagID); err != nil {
+		t.Fatal(err)
+	}
+	if err := reposForMembership(db).Event.SetMembershipPolicy(ctx, accountID, "strict", nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg := repository.EventRuleConfig{FormulaType: "simple", FormulaMode: "OR", Includes: []uuid.UUID{membershipTagID}}
+	preview, err := reposForMembership(db).Event.PreviewEventRule(ctx, eventID, accountID, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reposForMembership(db).Event.SaveEventRule(ctx, eventID, accountID, cfg, preview.RuleRevision, preview.Fingerprint, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `DELETE FROM contact_tags WHERE contact_id=$1 AND tag_id=$2`, contactID, membershipTagID); err != nil {
+		t.Fatal(err)
+	}
+	impact, err := reposForMembership(db).Event.ReconcileCurrentEvent(ctx, eventID, accountID, true, false, "integration_test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Deactivated < 1 {
+		t.Fatalf("expected authoritative deactivation, got %+v", impact)
+	}
+	assertInt(t, db, `SELECT COUNT(*) FROM event_participants WHERE id=$1 AND membership_state='inactive'`, 1, legacyLeadParticipantID)
+	if err := Migrate(db); err != nil {
+		t.Fatalf("restart migration after tag removal: %v", err)
+	}
+	assertInt(t, db, `SELECT COUNT(*) FROM contact_tags WHERE contact_id=$1 AND tag_id=$2`, 0, contactID, membershipTagID)
+	if _, err := db.Exec(ctx, `INSERT INTO contact_tags(contact_id,tag_id) VALUES($1,$2)`, contactID, membershipTagID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reposForMembership(db).Event.ReconcileCurrentEvent(ctx, eventID, accountID, true, false, "integration_test", nil); err != nil {
+		t.Fatal(err)
+	}
+	assertInt(t, db, `SELECT COUNT(*) FROM event_participants WHERE id=$1 AND membership_state='active'`, 1, legacyLeadParticipantID)
+	assertInt(t, db, `SELECT COUNT(*) FROM crm_audit_events WHERE event_id=$1 AND participant_id=$2 AND category='event_membership'`, 2, eventID, legacyLeadParticipantID)
 	if _, err := db.Exec(ctx, `UPDATE contacts SET do_not_contact=TRUE, do_not_contact_reason='Solicitud del contacto' WHERE id=$1`, syntheticContactID); err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +210,10 @@ func TestCRMMigrationDirtyAndIdempotent(t *testing.T) {
 	if recreated == nil || !recreated.DoNotContact {
 		t.Fatal("recreated suppressed identity was not restored as DNC")
 	}
+}
+
+func reposForMembership(db *pgxpool.Pool) *repository.Repositories {
+	return repository.NewRepositories(db)
 }
 
 func assertInt(t *testing.T, db *pgxpool.Pool, query string, expected int, args ...any) {

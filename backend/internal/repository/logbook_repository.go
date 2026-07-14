@@ -17,9 +17,9 @@ import (
 // SnapshotFilter contains optional filter parameters for logbook snapshot capture.
 // When nil or all fields are zero-values, all participants are captured.
 type SnapshotFilter struct {
-	StageIDs        string   `json:"stage_ids"`         // comma-separated UUIDs
+	StageIDs        string   `json:"stage_ids"` // comma-separated UUIDs
 	TagNames        []string `json:"tag_names"`
-	TagMode         string   `json:"tag_mode"`          // "OR" or "AND"
+	TagMode         string   `json:"tag_mode"` // "OR" or "AND"
 	ExcludeTagNames []string `json:"exclude_tag_names"`
 	TagFormula      string   `json:"tag_formula"`
 	HasPhone        bool     `json:"has_phone"`
@@ -182,7 +182,7 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, logbookID uuid.
 	// Build dynamic WHERE clause for participants
 	args := []interface{}{lb.EventID}
 	argIdx := 2
-	whereClauses := []string{"ep.event_id = $1"}
+	whereClauses := []string{"ep.event_id = $1", "ep.membership_state = 'active'"}
 
 	if filter != nil {
 		// Tag formula (advanced mode)
@@ -432,12 +432,12 @@ func (r *LogbookRepository) AutoCreateFromDateRange(ctx context.Context, eventID
 	var created []*domain.EventLogbook
 	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
 		lb := &domain.EventLogbook{
-			EventID:   eventID,
-			AccountID: accountID,
-			Date:      d,
-			Title:     d.Format("02/01/2006"),
-			Status:    domain.LogbookStatusPending,
-			CreatedBy: createdBy,
+			EventID:       eventID,
+			AccountID:     accountID,
+			Date:          d,
+			Title:         d.Format("02/01/2006"),
+			Status:        domain.LogbookStatusPending,
+			CreatedBy:     createdBy,
 			StageSnapshot: make(map[string]interface{}),
 		}
 		err := r.db.QueryRow(ctx, `
@@ -477,7 +477,7 @@ func (r *LogbookRepository) PreviewParticipants(ctx context.Context, logbookID u
 	// Build dynamic WHERE clause (same logic as CaptureSnapshot)
 	args := []interface{}{lb.EventID}
 	argIdx := 2
-	whereClauses := []string{"ep.event_id = $1"}
+	whereClauses := []string{"ep.event_id = $1", "ep.membership_state = 'active'"}
 
 	if filter != nil {
 		if filter.TagFormula != "" {

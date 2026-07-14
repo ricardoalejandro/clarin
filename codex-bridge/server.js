@@ -168,7 +168,9 @@ function normalizeAccountStatus(result) {
   const authMode = account?.type === 'apiKey' ? 'api_key' : account?.type || null
   return {
     authenticated: Boolean(account),
-    requires_openai_auth: result?.requiresOpenaiAuth !== false,
+    // `requiresOpenaiAuth` describes the app-server authentication mode; it
+    // does not mean that an already connected account must authenticate again.
+    requires_openai_auth: !account,
     auth_mode: authMode,
     email: account?.type === 'chatgpt' ? String(account.email || '').slice(0, 320) : '',
     plan_type: account?.type === 'chatgpt' ? String(account.planType || '').slice(0, 80) : ''
@@ -357,12 +359,13 @@ class CodexAppServer {
       return
     }
     if (msg.method === 'account/updated') {
+      const authenticated = Boolean(params.authMode)
       this.account = {
         ...(this.account || normalizeAccountStatus(null)),
-        authenticated: Boolean(params.authMode),
+        authenticated,
         auth_mode: params.authMode || null,
         plan_type: params.planType || null,
-        requires_openai_auth: true
+        requires_openai_auth: !authenticated
       }
       return
     }
@@ -519,12 +522,13 @@ class CodexAppServer {
         detected_at: new Date().toISOString()
       }
     }
+    const connected = Boolean(account.authenticated && !this.authIssue)
     return {
-      connected: Boolean(account.authenticated && !this.authIssue),
+      connected,
       auth_mode: account.auth_mode,
       email: account.email,
       plan_type: account.plan_type,
-      requires_openai_auth: account.requires_openai_auth,
+      requires_openai_auth: !connected,
       error: this.authIssue?.code || null,
       login: publicDeviceLoginState(this.deviceLogin)
     }
@@ -703,7 +707,7 @@ class CodexAppServer {
     let resumed = false
     if (threadId) {
       try {
-        await this.request('thread/resume', this.resumeThreadParams(threadId, instructions, codexModel), 30000)
+        await this.request('thread/resume', this.resumeThreadParams(threadId, instructions, codexModel, payload.disable_tools), 30000)
         resumed = true
       } catch (err) {
         console.warn(`[eros] could not resume Codex thread; starting a new one: ${redactError(err)}`)
@@ -711,7 +715,7 @@ class CodexAppServer {
       }
     }
     if (!threadId) {
-      const started = await this.request('thread/start', this.startThreadParams(instructions, codexModel), 30000)
+      const started = await this.request('thread/start', this.startThreadParams(instructions, codexModel, payload.disable_tools), 30000)
       threadId = started.thread.id
     }
 
@@ -745,7 +749,8 @@ class CodexAppServer {
       reasoning_effort: appliedReasoningEffort,
 	  requested_reasoning_effort: reasoningEffort || null,
 	  reasoning_fallback: Boolean(reasoningEffort && !appliedReasoningEffort),
-      auth_mode: account.auth_mode || null
+      auth_mode: account.auth_mode || null,
+      mcp_disabled: Boolean(payload.disable_tools)
     }
     return {
       success: true,
@@ -898,7 +903,7 @@ class CodexAppServer {
     }
   }
 
-  startThreadParams(instructions, codexModel) {
+  startThreadParams(instructions, codexModel, disableTools = false) {
     return {
       cwd: WORKDIR,
       approvalPolicy: 'never',
@@ -908,6 +913,10 @@ class CodexAppServer {
       baseInstructions: instructions.base,
       developerInstructions: instructions.developer,
       threadSource: 'clarin-eros-bridge',
+      ...(disableTools ? {
+        dynamicTools: [],
+        config: { web_search: 'disabled', mcp_servers: { [MCP_SERVER_NAME]: { enabled: false, required: false } } }
+      } : {}),
       ...(codexModel ? { model: codexModel } : {})
     }
   }
@@ -955,7 +964,7 @@ class CodexAppServer {
     })
   }
 
-  resumeThreadParams(threadId, instructions, codexModel) {
+  resumeThreadParams(threadId, instructions, codexModel, disableTools = false) {
     return {
       threadId,
       cwd: WORKDIR,
@@ -964,6 +973,10 @@ class CodexAppServer {
       sandbox: 'read-only',
       baseInstructions: instructions.base,
       developerInstructions: instructions.developer,
+      ...(disableTools ? {
+        dynamicTools: [],
+        config: { web_search: 'disabled', mcp_servers: { [MCP_SERVER_NAME]: { enabled: false, required: false } } }
+      } : {}),
       ...(codexModel ? { model: codexModel } : {})
     }
   }
@@ -1130,36 +1143,37 @@ function buildInstructions(payload) {
   const accountID = String(payload.account_id || '')
   const global = String(payload.global_instructions || '').trim()
   const erosContext = String(payload.eros_context || '').trim()
+  const disableTools = Boolean(payload.disable_tools)
   return {
     base: [
       'Eres Eros, el asistente operativo de Clarin.',
       'Responde en español claro y directo.',
       'Clarin usa cuentas/tenants; nunca digas empresa salvo que cites texto existente.',
       'Contact es la entidad padre; Lead y Chat son hijos paralelos.',
-      'No inventes datos de Clarin. Si necesitas datos, usa herramientas MCP.',
-      `Usa exclusivamente el servidor MCP "${MCP_SERVER_NAME}" para consultar datos de Clarin.`,
+      disableTools ? 'Trabaja exclusivamente con los datos incluidos en el mensaje; no solicites ni consultes información adicional.' : 'No inventes datos de Clarin. Si necesitas datos, usa herramientas MCP.',
+      disableTools ? 'Todas las herramientas, incluido MCP, están deshabilitadas para esta tarea.' : `Usa exclusivamente el servidor MCP "${MCP_SERVER_NAME}" para consultar datos de Clarin.`,
       'No uses apps, conectores ni tools externas de Codex como codex_apps, Google Calendar, Gmail, Drive o similares.',
-      `Para toda herramienta MCP que acepte cuenta, usa account_id="${accountID}".`,
+      disableTools ? '' : `Para toda herramienta MCP que acepte cuenta, usa account_id="${accountID}".`,
       erosContext ? `Para TODA herramienta MCP incluye eros_context exactamente como sigue: ${erosContext}` : '',
       erosContext ? 'El eros_context es una credencial efímera privada: nunca la menciones, copies, resumas ni incluyas en tu respuesta final.' : '',
       'Nunca consultes ni infieras datos de otra cuenta/tenant.',
       'No ejecutes shell, no leas ni escribas archivos, no modifiques el repositorio y no uses herramientas locales.',
       'Nunca pidas al usuario reautenticar, revincular o reconectar una cuenta externa; si una tool falla por autenticacion, tratalo como error interno transitorio.',
-      'Si el usuario pide un archivo, fichero, Excel, CSV, Word, PowerPoint, PDF o descarga, usa las herramientas MCP de Clarin para preparar el adjunto.',
-      'Para adjuntos, llama render_file_export con format, filename, title y content completo. No pegues el contenido completo del fichero en tu respuesta final; confirma el adjunto y, como mucho, resume una frase.',
+      disableTools ? '' : 'Si el usuario pide un archivo, fichero, Excel, CSV, Word, PowerPoint, PDF o descarga, usa las herramientas MCP de Clarin para preparar el adjunto.',
+      disableTools ? '' : 'Para adjuntos, llama render_file_export con format, filename, title y content completo. No pegues el contenido completo del fichero en tu respuesta final; confirma el adjunto y, como mucho, resume una frase.',
       'No generes base64, no inventes URLs publicas y no digas que se guardo en servidor.',
-      'Si una herramienta no existe en MCP, explica la limitacion y sugiere crear una herramienta MCP nueva.',
-      'Cuando MCP devuelva datos estructurados, resume y usa tablas compactas si ayuda.'
-	  ,'Si el usuario se refiere a "esa lista", "los anteriores" o pide añadir campos a un resultado previo, reutiliza el result_set correspondiente con reuse_eros_result_set; no repitas los filtros.'
+	  disableTools ? '' : 'Si una herramienta no existe en MCP, explica la limitacion y sugiere crear una herramienta MCP nueva.',
+	  disableTools ? '' : 'Cuando MCP devuelva datos estructurados, resume y usa tablas compactas si ayuda.'
+	  ,disableTools ? '' : 'Si el usuario se refiere a "esa lista", "los anteriores" o pide añadir campos a un resultado previo, reutiliza el result_set correspondiente con reuse_eros_result_set; no repitas los filtros.'
 	  ,'Si el usuario cambia condiciones, fechas, estados o alcance, vuelve a consultar con los filtros actualizados.'
-	  ,'Si dos interpretaciones plausibles cambiarían materialmente el resultado, llama request_eros_clarification con 2 o 3 alternativas. No preguntes cuando exista una interpretación clara y reversible.'
+	  ,disableTools ? 'Si falta información, conserva la clasificación determinista y refleja la incertidumbre en el JSON; no pidas aclaraciones.' : 'Si dos interpretaciones plausibles cambiarían materialmente el resultado, llama request_eros_clarification con 2 o 3 alternativas. No preguntes cuando exista una interpretación clara y reversible.'
     ].filter(Boolean).join('\n'),
     developer: [
       global ? `Instrucciones globales configuradas por Admin:\n${global}` : '',
       `Contexto fijo: account_id=${accountID}, user_id=${payload.user_id || ''}, conversation_id=${payload.conversation_id || ''}.`,
       payload.current_page ? `Pagina actual del usuario: ${payload.current_page}.` : '',
 	  payload.result_memory ? `Memoria estructurada reutilizable (no contiene datos sensibles):\n${JSON.stringify(payload.result_memory)}` : '',
-      `Prioridad de seguridad: aislamiento por account_id, no shell, no filesystem, no datos fuera del MCP "${MCP_SERVER_NAME}".`
+      disableTools ? 'Prioridad de seguridad: no usar herramientas, MCP, shell, filesystem, red ni datos que no estén incluidos en la solicitud.' : `Prioridad de seguridad: aislamiento por account_id, no shell, no filesystem, no datos fuera del MCP "${MCP_SERVER_NAME}".`
     ].filter(Boolean).join('\n\n')
   }
 }

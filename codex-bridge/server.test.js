@@ -111,6 +111,7 @@ test('managed OpenAI device connection lifecycle', async t => {
   assert.equal(live.body.ok, true)
   const initial = await requestJSON(baseURL, '/auth/status', { headers })
   assert.equal(initial.body.connection.connected, false)
+  assert.equal(initial.body.connection.requires_openai_auth, true)
 
   const [firstLogin, duplicateLogin] = await Promise.all([
     requestJSON(baseURL, '/auth/device/start', { method: 'POST', headers, body: '{}' }),
@@ -137,10 +138,13 @@ test('managed OpenAI device connection lifecycle', async t => {
   assert.equal(connection.email, 'owner@example.com')
   assert.equal(connection.plan_type, 'plus')
   assert.equal(connection.login.status, 'completed')
+  assert.equal(connection.connected, true)
+  assert.equal(connection.requires_openai_auth, false)
 
   const health = await requestJSON(baseURL, '/health', { headers })
   assert.equal(health.response.status, 200, output)
   assert.equal(health.body.codex_authenticated, true)
+  assert.equal(health.body.codex_requires_openai_auth, false)
   assert.equal(health.body.mcp_tools_count, 1)
 
   const turnPayload = {
@@ -240,8 +244,18 @@ test('managed OpenAI device connection lifecycle', async t => {
   assert.equal(legacyChat.response.status, 200, output)
   assert.equal(legacyChat.body.response, 'Respuesta durable de Eros')
 
+  const isolatedChat = await requestJSON(baseURL, '/chat', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...turnPayload, message: 'Clasificación sin herramientas', disable_tools: true })
+  })
+  assert.equal(isolatedChat.response.status, 200, output)
+  assert.equal(isolatedChat.body.success, true, output)
+  assert.equal(isolatedChat.body.metadata.mcp_disabled, true)
+
   const logout = await requestJSON(baseURL, '/auth/logout', { method: 'POST', headers, body: '{}' })
   assert.equal(logout.response.status, 200)
   const finalStatus = await requestJSON(baseURL, '/auth/status', { headers })
   assert.equal(finalStatus.body.connection.connected, false)
+  assert.equal(finalStatus.body.connection.requires_openai_auth, true)
 })

@@ -457,7 +457,7 @@ SELECT e.id, e.name, e.status,
 COALESCE(TO_CHAR(e.event_date, 'DD/MM/YYYY'), 'Sin fecha'),
 COALESCE(e.location, 'Sin ubicación'),
 COALESCE(e.tag_formula, ''),
-(SELECT COUNT(*) FROM event_participants ep WHERE ep.event_id = e.id)
+(SELECT COUNT(*) FROM event_participants ep WHERE ep.event_id = e.id AND ep.membership_state='active')
 FROM events e
 WHERE e.account_id = $1 AND e.status != 'cancelled' AND e.name ILIKE '%' || $2 || '%'
 ORDER BY e.created_at DESC LIMIT 1
@@ -494,7 +494,7 @@ FROM event_logbooks lb WHERE lb.event_id = $1 ORDER BY lb.date ASC
 SELECT COALESCE(eps.name, 'Sin etapa'), COUNT(ep.id)
 FROM event_participants ep
 LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
-WHERE ep.event_id = $1 GROUP BY eps.name ORDER BY COUNT(ep.id) DESC
+WHERE ep.event_id = $1 AND ep.membership_state='active' GROUP BY eps.name ORDER BY COUNT(ep.id) DESC
 `, eid)
 	if err == nil {
 		defer stRows.Close()
@@ -710,7 +710,7 @@ WHERE ct.contact_id = ep.contact_id
 ), '')
 FROM event_participants ep
 LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
-WHERE ep.event_id = $1
+WHERE ep.event_id = $1 AND ep.membership_state='active'
 ORDER BY eps.position, ep.name
 LIMIT 50
 `, eid)
@@ -1060,7 +1060,7 @@ LIMIT 5
 SELECT e.id, e.name, e.status,
 COALESCE(TO_CHAR(e.event_date, 'DD/MM/YYYY'), 'Sin fecha'),
 COALESCE(e.location, 'Sin ubicación'),
-(SELECT COUNT(*) FROM event_participants ep WHERE ep.event_id = e.id),
+(SELECT COUNT(*) FROM event_participants ep WHERE ep.event_id = e.id AND ep.membership_state='active'),
 COALESCE(e.tag_formula, '')
 FROM events e
 WHERE e.account_id = $1 AND e.status != 'cancelled'

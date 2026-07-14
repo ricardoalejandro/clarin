@@ -40,7 +40,9 @@ Estas reglas deben mantenerse en frontend, API, repositorios, automatizaciones, 
 9. Eliminar una oportunidad es un borrado lógico con papelera durante 30 días. No elimina el contacto, chat, interacciones enlazables ni participaciones en eventos.
 10. `contacts.do_not_contact` es una preferencia ortogonal al estado comercial. Una oportunidad puede ser ganada y, a la vez, su contacto no contactable.
 11. “No contactar” debe revalidarse inmediatamente antes de cualquier envío, incluyendo mensajes manuales, campañas, automatizaciones y demás rutas de WhatsApp.
-12. La sincronización de etiquetas de eventos es aditiva: puede incorporar contactos, pero quitar una etiqueta nunca elimina un participante ya registrado.
+12. Una regla de evento activo es autoritativa para toda alta, manual o automática. Si un contacto deja de cumplir, su participación pasa a `inactive` y sale del padrón operativo sin borrar su fila, bitácoras ni interacciones; si vuelve a cumplir, se reactiva la misma fila.
+13. Sin reglas, las altas y bajas manuales son libres. Al eliminar todas las reglas, los participantes activos se conservan y los inactivos no se reactivan automáticamente.
+14. Las reglas exclusivamente negativas representan “todos los contactos de la cuenta salvo los excluidos” y exigen previsualización y confirmación de impacto.
 13. Kommo API permanece inactivo. La compatibilidad local de importación se conserva, pero este cambio no habilita pollers, webhooks ni sincronización remota.
 14. Una campaña construida desde oportunidades deduplica por contacto y canal: varias oportunidades coincidentes de la misma persona producen un solo destinatario.
 15. La supresión de mensajería se conserva también por identidad normalizada (`jid` y teléfono). Borrar el `Contact` no vuelve elegible una identidad que estaba bloqueada.
@@ -74,7 +76,8 @@ La pantalla de eventos trabaja con contactos:
 - Las etapas del evento son independientes de las etapas comerciales.
 - Editar datos personales desde el participante actualiza el contacto común.
 - Archivar, cerrar, enviar a papelera o purgar una oportunidad no remueve al participante.
-- La fórmula de etiquetas evalúa contactos y solo agrega nuevas coincidencias.
+- La fórmula de etiquetas evalúa contactos, activa coincidencias y desactiva del padrón operativo a quienes dejan de cumplir.
+- `contact_tags` es la única fuente vigente de etiquetas. `participant_tags` es histórico y nunca puede repoblar etiquetas del contacto durante un reinicio.
 - “No contactar” impide mensajería, pero no oculta ni elimina a la persona del evento.
 - Si el contacto padre fue eliminado y la participación quedó como snapshot histórico, no puede usarse como destinatario hasta volver a vincular un contacto vivo de la misma cuenta.
 - El backfill que convierte participantes históricos en contactos se ejecuta una sola vez mediante `app_data_migrations`; un reinicio posterior nunca “resucita” una desvinculación deliberada.
@@ -154,7 +157,8 @@ La migración de arranque debe ser idempotente y ejecutarse desde `Migrate()`:
 7. Traducir bloqueos históricos: resultados comerciales inequívocos a won/lost; todo bloqueo residual se conserva de forma fail-safe en `contacts.do_not_contact`. Los motivos no reconocidos quedan pendientes de revisión para evitar reactivar contactos accidentalmente.
 8. Completar una sola vez `event_participants.contact_id` por lead, coincidencia inequívoca de teléfono/email o contacto sintético aislado en la misma cuenta; registrar el marcador antes de futuros reinicios.
 9. No copiar notas personales y comerciales entre entidades durante el backfill.
-10. Crear índices para lifecycle, papelera, duplicados, etapas y participantes por contacto.
+10. Crear índices para lifecycle, papelera, duplicados, etapas y participantes activos por contacto.
+11. Inicializar la política de membresía por cuenta en `audit_only`; habilitar `strict` solo tras revisar el dry-run de esa cuenta.
 
 La migración nunca debe inferir como ganado términos ambiguos como “Confirmado” o “Inscrito” en pipelines históricos; una clasificación incorrecta altera métricas y requiere decisión humana.
 
@@ -168,7 +172,7 @@ La migración nunca debe inferir como ganado términos ambiguos como “Confirma
 - Reabrir limpia `closed_at`, `closed_by` y `close_reason`.
 - Ganado/Perdido aparecen en métricas aunque el contacto esté marcado “no contactar”.
 - Un participante histórico sin lead continúa visible y editable.
-- Quitar una etiqueta del contacto no lo expulsa de eventos anteriores.
+- Quitar una etiqueta desactiva su membresía en eventos activos cuyas reglas ya no cumple, preservando el historial; eventos completados o cancelados quedan congelados.
 - Ninguna operación masiva acepta IDs de participantes, contactos, etapas o eventos de otra cuenta.
 - Ninguna vía de WhatsApp envía a un contacto “no contactar”, incluso si fue bloqueado después de crear una campaña.
 - Una campaña desde tres oportunidades de un mismo contacto crea un destinatario único y reporta por separado oportunidades coincidentes y contactos elegibles.

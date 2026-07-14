@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { ArrowRight, BarChart3, Search, ShieldAlert, UsersRound } from 'lucide-react'
+import { ArrowRight, BarChart3, Search, ShieldAlert, Sparkles, UsersRound } from 'lucide-react'
 import { REPORT_CATALOG } from '@/lib/reportCatalog'
 
 type AccessState = 'loading' | 'allowed' | 'denied'
@@ -79,9 +79,14 @@ export default function ReportsPage() {
               {reports.map(report => (
                 <Link key={report.id} href={report.href} className="group rounded-2xl border border-slate-200 bg-slate-50/60 p-5 transition hover:-translate-y-0.5 hover:border-emerald-300 hover:bg-white hover:shadow-lg hover:shadow-emerald-900/5">
                   <div className="flex items-start gap-4">
-                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700"><UsersRound className="h-6 w-6" /></div>
+                    <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${report.usesAI ? 'bg-violet-100 text-violet-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                      {report.usesAI ? <Sparkles className="h-6 w-6" /> : <UsersRound className="h-6 w-6" />}
+                    </div>
                     <div className="min-w-0 flex-1">
-                      <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-700">{report.category}</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-700">{report.category}</span>
+                        {report.usesAI && <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-violet-700"><Sparkles className="h-3 w-3" /> Usa IA</span>}
+                      </div>
                       <h3 className="mt-3 text-base font-bold text-slate-800 group-hover:text-emerald-700">{report.title}</h3>
                       <p className="mt-1.5 text-sm leading-6 text-slate-500">{report.description}</p>
                       <div className="mt-4 flex items-center gap-1.5 text-xs font-bold text-emerald-600">Abrir reporte <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" /></div>

@@ -195,6 +195,7 @@ func main() {
 	server.StartEventTagSyncWorker(eventSyncCtx)
 	server.StartLeadTrashPurgeWorker(eventSyncCtx)
 	server.StartErosRunWorker(eventSyncCtx)
+	server.StartLeadIntelligenceReportWorker(eventSyncCtx)
 
 	// Start task reminder and overdue workers
 	taskCtx, taskCancel := context.WithCancel(context.Background())

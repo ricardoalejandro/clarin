@@ -841,6 +841,9 @@ func (r *TagRepository) SetEntityTagForAccount(ctx context.Context, accountID uu
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, accountID); err != nil {
+		return nil, err
+	}
 	var tagExists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tags WHERE id=$1 AND account_id=$2)`, tagID, accountID).Scan(&tagExists); err != nil {
 		return nil, err

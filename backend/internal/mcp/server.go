@@ -1325,7 +1325,7 @@ func (s *MCPServer) toolGetEventSummary(ctx context.Context, req mcp.CallToolReq
 		SELECT COALESCE(eps.name, 'Sin etapa') as stage_name, COUNT(*) as cnt
 		FROM event_participants ep
 		LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
-		WHERE ep.event_id = $1
+		WHERE ep.event_id = $1 AND ep.membership_state='active'
 		GROUP BY eps.name, eps.position
 		ORDER BY eps.position NULLS LAST
 	`, eventID)
@@ -2149,6 +2149,10 @@ func (s *MCPServer) toolGetLogbookDetail(ctx context.Context, req mcp.CallToolRe
 
 // ──── list_event_participants ────
 func (s *MCPServer) toolListEventParticipants(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
 	eventID, err := uuidArg(req, "event_id")
 	if err != nil {
 		return errResult("event_id inválido"), nil
@@ -2162,10 +2166,11 @@ func (s *MCPServer) toolListEventParticipants(ctx context.Context, req mcp.CallT
 
 	// Build dynamic query
 	baseSQL := ` FROM event_participants ep
+		JOIN events e ON e.id = ep.event_id
 		LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
-		WHERE ep.event_id = $1`
-	args := []interface{}{eventID}
-	argN := 2
+		WHERE e.account_id = $1 AND ep.event_id = $2 AND ep.membership_state='active'`
+	args := []interface{}{accountID, eventID}
+	argN := 3
 
 	if status != "" {
 		baseSQL += fmt.Sprintf(` AND ep.status = $%d`, argN)

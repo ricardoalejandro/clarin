@@ -1037,6 +1037,7 @@ type Event struct {
 	TagFormulaMode string     `json:"tag_formula_mode"` // OR, AND (used in simple mode)
 	TagFormula     string     `json:"tag_formula"`      // text-based formula (advanced mode)
 	TagFormulaType string     `json:"tag_formula_type"` // simple, advanced
+	RuleRevision   int64      `json:"rule_revision"`
 	CreatedBy      *uuid.UUID `json:"created_by,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
@@ -1075,33 +1076,37 @@ const (
 
 // EventParticipant represents a contact participating in an event
 type EventParticipant struct {
-	ID             uuid.UUID  `json:"id"`
-	EventID        uuid.UUID  `json:"event_id"`
-	ContactID      *uuid.UUID `json:"contact_id,omitempty"`
-	LeadID         *uuid.UUID `json:"lead_id,omitempty"`
-	StageID        *uuid.UUID `json:"stage_id,omitempty"`
-	Name           string     `json:"name"`
-	LastName       *string    `json:"last_name,omitempty"`
-	ShortName      *string    `json:"short_name,omitempty"`
-	Phone          *string    `json:"phone,omitempty"`
-	Email          *string    `json:"email,omitempty"`
-	Age            *int       `json:"age,omitempty"`
-	Company        *string    `json:"company,omitempty"`
-	DNI            *string    `json:"dni,omitempty"`
-	BirthDate      *time.Time `json:"birth_date,omitempty"`
-	Address        *string    `json:"address,omitempty"`
-	Distrito       *string    `json:"distrito,omitempty"`
-	Ocupacion      *string    `json:"ocupacion,omitempty"`
-	Status         string     `json:"status"` // invited, contacted, confirmed, declined, attended, no_show
-	Notes          *string    `json:"notes,omitempty"`
-	NextAction     *string    `json:"next_action,omitempty"`
-	NextActionDate *time.Time `json:"next_action_date,omitempty"`
-	InvitedAt      *time.Time `json:"invited_at,omitempty"`
-	ConfirmedAt    *time.Time `json:"confirmed_at,omitempty"`
-	AttendedAt     *time.Time `json:"attended_at,omitempty"`
-	AutoTagSync    bool       `json:"auto_tag_sync"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID                  uuid.UUID  `json:"id"`
+	EventID             uuid.UUID  `json:"event_id"`
+	ContactID           *uuid.UUID `json:"contact_id,omitempty"`
+	LeadID              *uuid.UUID `json:"lead_id,omitempty"`
+	StageID             *uuid.UUID `json:"stage_id,omitempty"`
+	Name                string     `json:"name"`
+	LastName            *string    `json:"last_name,omitempty"`
+	ShortName           *string    `json:"short_name,omitempty"`
+	Phone               *string    `json:"phone,omitempty"`
+	Email               *string    `json:"email,omitempty"`
+	Age                 *int       `json:"age,omitempty"`
+	Company             *string    `json:"company,omitempty"`
+	DNI                 *string    `json:"dni,omitempty"`
+	BirthDate           *time.Time `json:"birth_date,omitempty"`
+	Address             *string    `json:"address,omitempty"`
+	Distrito            *string    `json:"distrito,omitempty"`
+	Ocupacion           *string    `json:"ocupacion,omitempty"`
+	Status              string     `json:"status"` // invited, contacted, confirmed, declined, attended, no_show
+	Notes               *string    `json:"notes,omitempty"`
+	NextAction          *string    `json:"next_action,omitempty"`
+	NextActionDate      *time.Time `json:"next_action_date,omitempty"`
+	InvitedAt           *time.Time `json:"invited_at,omitempty"`
+	ConfirmedAt         *time.Time `json:"confirmed_at,omitempty"`
+	AttendedAt          *time.Time `json:"attended_at,omitempty"`
+	AutoTagSync         bool       `json:"auto_tag_sync"`
+	MembershipState     string     `json:"membership_state"`
+	MembershipReason    string     `json:"membership_reason,omitempty"`
+	MembershipSource    string     `json:"membership_source"`
+	MembershipChangedAt *time.Time `json:"membership_changed_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 
 	// Populated on demand
 	LastInteraction *Interaction `json:"last_interaction,omitempty"`

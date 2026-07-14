@@ -146,15 +146,15 @@ func (s *Server) handleGoogleStatus(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"success":        true,
-		"connected":      connected,
-		"email":          account.GoogleEmail,
-		"group_id":       account.GoogleContactGroupID,
-		"connected_at":   account.GoogleConnectedAt,
-		"sync_limit":     account.GoogleSyncLimit,
-		"sync_count":     syncCount,
-		"configured":     s.googleClient != nil,
-		"token_valid":    tokenValid,
+		"success":      true,
+		"connected":    connected,
+		"email":        account.GoogleEmail,
+		"group_id":     account.GoogleContactGroupID,
+		"connected_at": account.GoogleConnectedAt,
+		"sync_limit":   account.GoogleSyncLimit,
+		"sync_count":   syncCount,
+		"configured":   s.googleClient != nil,
+		"token_valid":  tokenValid,
 	})
 }
 
@@ -541,11 +541,19 @@ func (s *Server) syncContactToGoogle(ctx context.Context, accountID, contactID u
 		}
 	}
 	customName, contactName, phone := "<nil>", "<nil>", "<nil>"
-	if contact.CustomName != nil { customName = *contact.CustomName }
-	if contact.Name != nil { contactName = *contact.Name }
-	if contact.Phone != nil { phone = *contact.Phone }
+	if contact.CustomName != nil {
+		customName = *contact.CustomName
+	}
+	if contact.Name != nil {
+		contactName = *contact.Name
+	}
+	if contact.Phone != nil {
+		phone = *contact.Phone
+	}
 	resName := "<nil>"
-	if contact.GoogleResourceName != nil { resName = *contact.GoogleResourceName }
+	if contact.GoogleResourceName != nil {
+		resName = *contact.GoogleResourceName
+	}
 	log.Printf("[GOOGLE] Syncing contact %s (custom_name=%q, name=%q, phone=%s) → sending name=%q to Google resource=%s",
 		contactID, customName, contactName, phone, nameToSend, resName)
 
@@ -730,9 +738,8 @@ func (s *Server) handleEventGoogleSyncStatus(c *fiber.Ctx) error {
 			COUNT(CASE WHEN co.id IS NOT NULL AND co.google_sync = false THEN 1 END) AS pending,
 			COUNT(CASE WHEN co.id IS NULL THEN 1 END) AS no_contact
 		FROM event_participants ep
-		LEFT JOIN leads l ON l.id = ep.lead_id AND l.account_id = $2
-		LEFT JOIN contacts co ON co.id = l.contact_id AND co.account_id = $2
-		WHERE ep.event_id = $1
+		LEFT JOIN contacts co ON co.id = ep.contact_id AND co.account_id = $2
+		WHERE ep.event_id = $1 AND ep.membership_state='active'
 	`, eventID, accountID)
 
 	var total, synced, pending, noContact int
@@ -766,9 +773,8 @@ func (s *Server) handleEventGoogleSync(c *fiber.Ctx) error {
 	rows, err := s.repos.DB().Query(c.Context(), `
 		SELECT DISTINCT co.id
 		FROM event_participants ep
-		JOIN leads l ON l.id = ep.lead_id AND l.account_id = $2
-		JOIN contacts co ON co.id = l.contact_id AND co.account_id = $2
-		WHERE ep.event_id = $1 AND co.google_sync = false
+		JOIN contacts co ON co.id = ep.contact_id AND co.account_id = $2
+		WHERE ep.event_id = $1 AND ep.membership_state='active' AND co.google_sync = false
 	`, eventID, accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "database error"})
