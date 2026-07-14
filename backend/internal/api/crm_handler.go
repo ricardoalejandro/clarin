@@ -565,7 +565,7 @@ func (s *Server) handleMoveLeadToStage(c *fiber.Ctx) error {
 		return writeCRMError(c, repository.ErrCRMNotFound)
 	}
 	s.invalidateLeadsCache(accountID)
-	s.invalidateLeadDetailCache(leadID)
+	s.invalidateLeadDetailCache(accountID, leadID)
 	s.broadcastLeadDelta(accountID, "stage_changed", lead)
 	s.triggerAutomationLeadStageChanged(accountID, leadID, stageID)
 	return c.JSON(fiber.Map{"success": true, "lead": lead})
@@ -592,7 +592,7 @@ func (s *Server) handleTrashLead(c *fiber.Ctx) error {
 		return writeCRMError(c, err)
 	}
 	s.invalidateLeadsCache(accountID)
-	s.invalidateLeadDetailCache(leadID)
+	s.invalidateLeadDetailCache(accountID, leadID)
 	s.broadcastLeadDelta(accountID, "trashed", &domain.Lead{ID: leadID, AccountID: accountID})
 	return c.JSON(fiber.Map{"success": true, "message": "Oportunidad enviada a la papelera"})
 }
@@ -651,7 +651,7 @@ func (s *Server) handleRestoreLead(c *fiber.Ctx) error {
 	}
 	lead, _ := s.repos.Lead.GetByID(c.Context(), leadID)
 	s.invalidateLeadsCache(accountID)
-	s.invalidateLeadDetailCache(leadID)
+	s.invalidateLeadDetailCache(accountID, leadID)
 	s.broadcastLeadDelta(accountID, "restored", lead)
 	return c.JSON(fiber.Map{"success": true, "lead": lead})
 }
@@ -689,7 +689,7 @@ func (s *Server) handleArchiveLeadSafe(c *fiber.Ctx) error {
 		return writeCRMError(c, repository.ErrCRMNotFound)
 	}
 	s.invalidateLeadsCache(accountID)
-	s.invalidateLeadDetailCache(leadID)
+	s.invalidateLeadDetailCache(accountID, leadID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -829,7 +829,7 @@ func (s *Server) handlePurgeLead(c *fiber.Ctx) error {
 		return writeCRMError(c, err)
 	}
 	s.invalidateLeadsCache(accountID)
-	s.invalidateLeadDetailCache(leadID)
+	s.invalidateLeadDetailCache(accountID, leadID)
 	return c.JSON(fiber.Map{"success": true, "message": "Oportunidad purgada definitivamente"})
 }
 
@@ -897,7 +897,7 @@ func (s *Server) invalidateLeadDetailsForContacts(ctx context.Context, accountID
 	for rows.Next() {
 		var leadID uuid.UUID
 		if rows.Scan(&leadID) == nil {
-			s.invalidateLeadDetailCache(leadID)
+			s.invalidateLeadDetailCache(accountID, leadID)
 		}
 	}
 }

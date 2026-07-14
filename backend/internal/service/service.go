@@ -1959,6 +1959,14 @@ func (s *EventService) Update(ctx context.Context, event *domain.Event) error {
 	return s.repos.Event.Update(ctx, event)
 }
 
+func (s *EventService) UpdateWithExpectedStatus(ctx context.Context, event *domain.Event, expectedStatus string) (bool, error) {
+	return s.repos.Event.UpdateWithExpectedStatus(ctx, event, expectedStatus)
+}
+
+func (s *EventService) ActivateAndReconcile(ctx context.Context, event *domain.Event, actor *uuid.UUID) (repository.EventMembershipImpact, error) {
+	return s.repos.Event.ActivateEventAndReconcile(ctx, event, actor)
+}
+
 func (s *EventService) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repos.Event.Delete(ctx, id)
 }
@@ -1973,6 +1981,14 @@ func (s *EventService) GetParticipants(ctx context.Context, eventID uuid.UUID, s
 
 func (s *EventService) AddParticipant(ctx context.Context, p *domain.EventParticipant) error {
 	return s.repos.Participant.Add(ctx, p)
+}
+
+func (s *EventService) GetParticipantCandidates(ctx context.Context, accountID, eventID uuid.UUID, filter repository.EventParticipantCandidateFilter) (repository.EventParticipantCandidatePage, error) {
+	return s.repos.Event.ListParticipantCandidates(ctx, accountID, eventID, filter)
+}
+
+func (s *EventService) AddParticipantsStrict(ctx context.Context, accountID, eventID uuid.UUID, participants []*domain.EventParticipant, actor *uuid.UUID) (repository.EventParticipantAddSummary, error) {
+	return s.repos.Participant.AddStrict(ctx, accountID, eventID, participants, actor)
 }
 
 func (s *EventService) ValidateParticipantMembership(ctx context.Context, accountID, eventID, contactID uuid.UUID) error {
@@ -1994,20 +2010,31 @@ func (s *EventService) GetParticipant(ctx context.Context, id uuid.UUID) (*domai
 	return s.repos.Participant.GetByID(ctx, id)
 }
 
-func (s *EventService) UpdateParticipant(ctx context.Context, p *domain.EventParticipant) error {
-	return s.repos.Participant.Update(ctx, p)
+func (s *EventService) GetParticipantForEvent(ctx context.Context, accountID, eventID, participantID uuid.UUID) (*domain.EventParticipant, error) {
+	participant, err := s.repos.Participant.GetForEvent(ctx, accountID, eventID, participantID)
+	if err != nil || participant == nil {
+		return participant, err
+	}
+	if err := s.repos.Participant.EnrichRelatedLeads(ctx, accountID, []*domain.EventParticipant{participant}); err != nil {
+		return nil, err
+	}
+	return participant, nil
+}
+
+func (s *EventService) UpdateParticipant(ctx context.Context, accountID uuid.UUID, p *domain.EventParticipant) error {
+	return s.repos.Participant.Update(ctx, accountID, p)
 }
 
 func (s *EventService) SyncParticipantToContact(ctx context.Context, p *domain.EventParticipant) error {
 	return s.repos.Participant.SyncToContact(ctx, p)
 }
 
-func (s *EventService) UpdateParticipantStatus(ctx context.Context, id uuid.UUID, status string) error {
-	return s.repos.Participant.UpdateStatus(ctx, id, status)
+func (s *EventService) UpdateParticipantStatus(ctx context.Context, accountID, eventID, id uuid.UUID, status string) (int64, error) {
+	return s.repos.Participant.UpdateStatus(ctx, accountID, eventID, id, status)
 }
 
-func (s *EventService) BulkUpdateParticipantStatus(ctx context.Context, ids []uuid.UUID, status string) error {
-	return s.repos.Participant.BulkUpdateStatus(ctx, ids, status)
+func (s *EventService) BulkUpdateParticipantStatus(ctx context.Context, accountID, eventID uuid.UUID, ids []uuid.UUID, status string) (int64, error) {
+	return s.repos.Participant.BulkUpdateStatus(ctx, accountID, eventID, ids, status)
 }
 
 func (s *EventService) DeleteParticipant(ctx context.Context, id uuid.UUID) error {
@@ -2099,12 +2126,12 @@ func (s *EventService) GetParticipantCountsByStage(ctx context.Context, eventID 
 	return s.repos.EventPipeline.GetParticipantCountsByStage(ctx, eventID)
 }
 
-func (s *EventService) UpdateParticipantStage(ctx context.Context, id, stageID uuid.UUID) error {
-	return s.repos.Participant.UpdateStage(ctx, id, stageID)
+func (s *EventService) UpdateParticipantStage(ctx context.Context, accountID, eventID, id, stageID uuid.UUID) (int64, error) {
+	return s.repos.Participant.UpdateStage(ctx, accountID, eventID, id, stageID)
 }
 
-func (s *EventService) BulkUpdateParticipantStage(ctx context.Context, ids []uuid.UUID, stageID uuid.UUID) error {
-	return s.repos.Participant.BulkUpdateStage(ctx, ids, stageID)
+func (s *EventService) BulkUpdateParticipantStage(ctx context.Context, accountID, eventID uuid.UUID, ids []uuid.UUID, stageID uuid.UUID) (int64, error) {
+	return s.repos.Participant.BulkUpdateStage(ctx, accountID, eventID, ids, stageID)
 }
 
 // ── Event Tag Auto-Sync Methods ──────────────────────────────────────────────
@@ -2172,41 +2199,49 @@ func (s *EventService) reconcileWithMatchedContacts(ctx context.Context, eventID
 	return s.ReconcileEventParticipants(ctx, eventID, accountID, "", nil, nil, defaultStageID)
 }
 
-// ReconcileContactEventMembership evaluates one contact against every active
-// event rule in the same account. It is used by contact create/update and tag
-// assignment paths so enrollment is visible immediately; the periodic worker
-// remains only as a recovery mechanism.
-func (s *EventService) ReconcileContactEventMembership(ctx context.Context, accountID, contactID uuid.UUID) (int, error) {
-	contact, err := s.repos.Contact.GetByID(ctx, contactID)
-	if err != nil || contact == nil || contact.AccountID != accountID || contact.IsGroup {
-		return 0, err
+// ReconcileContactsEventMembership evaluates only the Contacts that changed,
+// aggregates impacts per event, and emits at most one notification per changed
+// event. Full reconciliation remains the recovery/rule-change path.
+func (s *EventService) ReconcileContactsEventMembership(ctx context.Context, accountID uuid.UUID, contactIDs []uuid.UUID) (int, error) {
+	type aggregate struct {
+		added   int
+		removed int
 	}
-	rules, err := s.repos.Event.GetActiveEventRulesByAccount(ctx, accountID)
-	if err != nil {
-		return 0, fmt.Errorf("get account event rules: %w", err)
-	}
-
-	addedTotal := 0
-	for _, rule := range rules {
-		impact, reconcileErr := s.repos.Event.ReconcileCurrentEvent(ctx, rule.Event.ID, accountID, true, false, "contact_tag_change", nil)
-		if errors.Is(reconcileErr, repository.ErrEventMembershipAuditOnly) {
+	byEvent := make(map[uuid.UUID]aggregate)
+	seen := make(map[uuid.UUID]struct{}, len(contactIDs))
+	for _, contactID := range contactIDs {
+		if _, duplicate := seen[contactID]; duplicate {
 			continue
 		}
-		if reconcileErr != nil {
-			return addedTotal, reconcileErr
+		seen[contactID] = struct{}{}
+		impacts, err := s.repos.Event.ReconcileContactMembership(ctx, accountID, contactID, "contact_tag_change")
+		if err != nil {
+			return 0, err
 		}
-		added := impact.Created + impact.Activated
-		addedTotal += added
-		if s.hub != nil {
-			s.hub.BroadcastToAccount(accountID, "event_participant_update", map[string]interface{}{
-				"event_id": rule.Event.ID,
-				"action":   "contact_rule_reconcile",
-				"added":    added,
-				"removed":  impact.Deactivated,
+		for _, impact := range impacts {
+			current := byEvent[impact.EventID]
+			current.added += impact.Created + impact.Reactivated
+			current.removed += impact.Deactivated
+			byEvent[impact.EventID] = current
+		}
+	}
+	addedTotal := 0
+	for eventID, impact := range byEvent {
+		addedTotal += impact.added
+		if s.hub != nil && (impact.added > 0 || impact.removed > 0) {
+			s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{
+				"event_id": eventID,
+				"action":   "tag_sync_reconcile",
+				"added":    impact.added,
+				"removed":  impact.removed,
 			})
 		}
 	}
 	return addedTotal, nil
+}
+
+func (s *EventService) ReconcileContactEventMembership(ctx context.Context, accountID, contactID uuid.UUID) (int, error) {
+	return s.ReconcileContactsEventMembership(ctx, accountID, []uuid.UUID{contactID})
 }
 
 // HandleLeadTagAssigned is called when a tag is assigned to a lead.
@@ -2284,30 +2319,31 @@ func (s *InteractionService) LogInteraction(ctx context.Context, interaction *do
 		return err
 	}
 
+	var participant *domain.EventParticipant
+	if interaction.ParticipantID != nil {
+		participant, _ = s.repos.Participant.GetByID(ctx, *interaction.ParticipantID)
+	}
+
 	// Auto-update participant status based on outcome
-	if interaction.ParticipantID != nil && interaction.Outcome != nil {
+	if participant != nil && interaction.Outcome != nil {
 		switch *interaction.Outcome {
 		case domain.InteractionOutcomeConfirmed:
-			s.repos.Participant.UpdateStatus(ctx, *interaction.ParticipantID, domain.ParticipantStatusConfirmed)
+			_, _ = s.repos.Participant.UpdateStatus(ctx, interaction.AccountID, participant.EventID, participant.ID, domain.ParticipantStatusConfirmed)
 		case domain.InteractionOutcomeDeclined:
-			s.repos.Participant.UpdateStatus(ctx, *interaction.ParticipantID, domain.ParticipantStatusDeclined)
+			_, _ = s.repos.Participant.UpdateStatus(ctx, interaction.AccountID, participant.EventID, participant.ID, domain.ParticipantStatusDeclined)
 		case domain.InteractionOutcomeAnswered, domain.InteractionOutcomeCallback, domain.InteractionOutcomeRescheduled:
 			// Move to contacted if still invited
-			p, _ := s.repos.Participant.GetByID(ctx, *interaction.ParticipantID)
-			if p != nil && p.Status == domain.ParticipantStatusInvited {
-				s.repos.Participant.UpdateStatus(ctx, *interaction.ParticipantID, domain.ParticipantStatusContacted)
+			if participant.Status == domain.ParticipantStatusInvited {
+				_, _ = s.repos.Participant.UpdateStatus(ctx, interaction.AccountID, participant.EventID, participant.ID, domain.ParticipantStatusContacted)
 			}
 		}
 	}
 
 	// Update next_action on participant if provided
-	if interaction.ParticipantID != nil && (interaction.NextAction != nil || interaction.NextActionDate != nil) {
-		p, _ := s.repos.Participant.GetByID(ctx, *interaction.ParticipantID)
-		if p != nil {
-			p.NextAction = interaction.NextAction
-			p.NextActionDate = interaction.NextActionDate
-			s.repos.Participant.Update(ctx, p)
-		}
+	if participant != nil && (interaction.NextAction != nil || interaction.NextActionDate != nil) {
+		participant.NextAction = interaction.NextAction
+		participant.NextActionDate = interaction.NextActionDate
+		_ = s.repos.Participant.Update(ctx, interaction.AccountID, participant)
 	}
 
 	return nil

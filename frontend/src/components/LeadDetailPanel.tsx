@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Phone, Mail, User, Calendar, MessageCircle, Trash2, ChevronDown,
-  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CheckCircle2, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff, MapPin, Briefcase, Map, SlidersHorizontal, LayoutList
+  Clock, FileText, X, Maximize2, Building2, Save, Edit2, Plus, RefreshCw, XCircle, CheckCircle2, CreditCard, Cake, Archive, ShieldBan, ArchiveRestore, ShieldOff, Smartphone, Cloud, CloudOff, MapPin, Briefcase, Map, SlidersHorizontal, LayoutList, ExternalLink, Loader2
 } from 'lucide-react'
 import { formatDistanceToNow, format, parseISO } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -17,6 +17,27 @@ import type { CustomFieldDefinition, CustomFieldValue } from '@/types/custom-fie
 import type { Task, TaskList as TaskListType } from '@/types/task'
 import { TASK_TYPE_CONFIG } from '@/types/task'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
+
+export interface EventRelatedLeadSummary {
+  id: string
+  title: string
+  status: string
+  pipeline_id?: string
+  pipeline_name?: string
+  stage_id?: string
+  stage_name?: string
+  stage_color?: string
+  is_archived: boolean
+  updated_at: string
+}
+
+export interface EventMembershipSummary {
+  state?: string
+  source?: string
+  reason?: string
+  autoTagSync?: boolean
+  changedAt?: string
+}
 
 // ─── Props ───────────────────────────────────────────────
 interface LeadDetailPanelProps {
@@ -36,6 +57,8 @@ interface LeadDetailPanelProps {
   hideDelete?: boolean
   /** Optional: hide WhatsApp button */
   hideWhatsApp?: boolean
+  /** Render entity fields and event membership controls without mutation actions. */
+  readOnly?: boolean
   /** Optional: extra CSS classes */
   className?: string
   /** Event mode: shows event-specific stage selector instead of lead pipelines */
@@ -46,6 +69,12 @@ interface LeadDetailPanelProps {
   eventStages?: PipelineStage[]
   /** The participant ID (required when eventMode is true) */
   participantId?: string
+  /** Read-only opportunities derived from the participant Contact. */
+  relatedLeads?: EventRelatedLeadSummary[]
+  relatedLeadsLoading?: boolean
+  relatedLeadsError?: string
+  onRetryRelatedLeads?: () => void
+  eventMembership?: EventMembershipSummary
   /** Callback when stage changes in event mode */
   onStageChange?: (stageId: string, stageName: string, stageColor: string) => void
   /** Lets the parent coordinate close/reopen semantics before moving an opportunity. */
@@ -93,11 +122,17 @@ export default function LeadDetailPanel({
   hideHeader = false,
   hideDelete = false,
   hideWhatsApp = false,
+  readOnly = false,
   className = '',
   eventMode = false,
   eventId,
   eventStages,
   participantId,
+  relatedLeads = [],
+  relatedLeadsLoading = false,
+  relatedLeadsError = '',
+  onRetryRelatedLeads,
+  eventMembership,
   onStageChange,
   onStageChangeRequest,
   onLifecycleAction,
@@ -159,6 +194,7 @@ export default function LeadDetailPanel({
   const [showTaskModal, setShowTaskModal] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
   const [taskLists, setTaskLists] = useState<TaskListType[]>([])
+  const panelEntityRequestRef = useRef(0)
 
   // Pipeline dropdown
   const [showPipelineDropdown, setShowPipelineDropdown] = useState(false)
@@ -261,7 +297,8 @@ export default function LeadDetailPanel({
   // ─── Fetch custom field definitions + values ───────────────
   useEffect(() => {
     const cid = contactMode ? contactId : lead.contact_id
-    if (!cid) { setCfDefs([]); setCfValues([]); return }
+    if (!cid) { setCfDefs([]); setCfValues([]); setCfLoading(false); return }
+    let active = true
     setCfLoading(true)
     const token = localStorage.getItem('token')
     const headers = { Authorization: `Bearer ${token}` }
@@ -269,9 +306,11 @@ export default function LeadDetailPanel({
       fetch('/api/custom-fields', { headers }).then(r => r.json()),
       fetch(`/api/contacts/${cid}/custom-fields`, { headers }).then(r => r.json()),
     ]).then(([defsData, valsData]) => {
+      if (!active) return
       if (defsData.success) setCfDefs(defsData.fields || [])
       if (valsData.success) setCfValues(valsData.values || [])
-    }).catch(() => {}).finally(() => setCfLoading(false))
+    }).catch(() => {}).finally(() => { if (active) setCfLoading(false) })
+    return () => { active = false }
   }, [leadProp.id, contactMode, contactId, lead.contact_id])
 
   const handleSaveCustomField = useCallback(async (fieldId: string, payload: any) => {
@@ -295,17 +334,22 @@ export default function LeadDetailPanel({
 
   // ─── Fetch observations when lead changes ──────────────
   useEffect(() => {
+    const requestId = ++panelEntityRequestRef.current
     setNotesValue(lead.notes || '')
     setEditingField(null)
     setEditingNotes(false)
     setObsDisplayCount(5)
     setActiveTab('general')
-    fetchObservations(lead.id)
+    setObservations([])
+    setLeadTasks([])
+    fetchObservations(lead.id, requestId)
     fetchTaskLists()
-    if (!contactMode) {
-      fetchLeadTasks(lead.id)
+    if (eventMode && eventId && lead.contact_id) {
+      fetchContactTasks(lead.contact_id, eventId, requestId)
+    } else if (!contactMode) {
+      fetchLeadTasks(lead.id, requestId)
     } else if (contactId) {
-      fetchContactTasks(contactId)
+      fetchContactTasks(contactId, undefined, requestId)
     }
   }, [leadProp.id, participantId, contactId])
 
@@ -343,7 +387,7 @@ export default function LeadDetailPanel({
   }, [])
 
   // ─── API helpers ───────────────────────────────────────
-  const fetchObservations = async (leadId: string) => {
+  const fetchObservations = async (leadId: string, requestId = panelEntityRequestRef.current) => {
     setLoadingObservations(true)
     const token = localStorage.getItem('token')
     try {
@@ -356,11 +400,11 @@ export default function LeadDetailPanel({
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) setObservations(data.interactions || [])
+      if (requestId === panelEntityRequestRef.current && data.success) setObservations(data.interactions || [])
     } catch (err) {
       console.error('Failed to fetch observations:', err)
     } finally {
-      setLoadingObservations(false)
+      if (requestId === panelEntityRequestRef.current) setLoadingObservations(false)
     }
   }
 
@@ -375,29 +419,32 @@ export default function LeadDetailPanel({
     } catch { /* ignore */ }
   }
 
-  const fetchLeadTasks = async (leadId: string) => {
+  const fetchLeadTasks = async (leadId: string, requestId = panelEntityRequestRef.current) => {
     try {
       const token = localStorage.getItem('token')
       const res = await fetch(`/api/tasks?lead_id=${leadId}&limit=20`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) setLeadTasks(data.tasks || [])
+      if (requestId === panelEntityRequestRef.current && data.success) setLeadTasks(data.tasks || [])
     } catch { /* ignore */ }
   }
 
-  const fetchContactTasks = async (cId: string) => {
+  const fetchContactTasks = async (cId: string, scopedEventId?: string, requestId = panelEntityRequestRef.current) => {
     try {
       const token = localStorage.getItem('token')
-      const res = await fetch(`/api/tasks?contact_id=${cId}&limit=20`, {
+      const params = new URLSearchParams({ contact_id: cId, limit: '20' })
+      if (scopedEventId) params.set('event_id', scopedEventId)
+      const res = await fetch(`/api/tasks?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) setLeadTasks(data.tasks || [])
+      if (requestId === panelEntityRequestRef.current && data.success) setLeadTasks(data.tasks || [])
     } catch { /* ignore */ }
   }
 
   const saveLeadField = async (field: string) => {
+    if (readOnly) return
     if (!lead?.id) return
     if (savingFieldRef.current) return
     savingFieldRef.current = field
@@ -455,6 +502,7 @@ export default function LeadDetailPanel({
   }
 
   const saveNotes = async () => {
+    if (readOnly) return
     setSavingNotes(true)
     const token = localStorage.getItem('token')
     try {
@@ -492,6 +540,7 @@ export default function LeadDetailPanel({
   }
 
   const handleUpdateLeadStage = async (leadId: string, stageId: string) => {
+    if (readOnly) return
     const token = localStorage.getItem('token')
     const prevLead = lead
     try {
@@ -661,6 +710,7 @@ export default function LeadDetailPanel({
   }
 
   const handleDeleteLead = async () => {
+    if (readOnly) return
     const confirmMsg = contactMode
       ? '¿Estás seguro de eliminar este contacto?'
       : eventMode
@@ -690,6 +740,7 @@ export default function LeadDetailPanel({
 
   // ─── Helpers ───────────────────────────────────────────
   const startEditing = (field: string, currentValue: string) => {
+    if (readOnly) return
     setEditingField(field)
     setEditValues({ ...editValues, [field]: currentValue })
   }
@@ -754,6 +805,13 @@ export default function LeadDetailPanel({
           )}
         </button>
       </div>
+
+      {readOnly && eventMode && (
+        <div className="mx-4 mt-4 flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-600">
+          <Archive className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>Evento cerrado: puedes consultar el historial, pero no cambiar la participación ni su etapa.</p>
+        </div>
+      )}
 
       <div className={`flex-1 overflow-y-auto p-6 space-y-6 ${activeTab !== 'general' ? 'hidden' : ''}`}>
         {/* Lead Avatar & Name */}
@@ -824,7 +882,7 @@ export default function LeadDetailPanel({
           )}
 
           {/* Archive/Block action buttons */}
-          {!contactMode && (
+          {!contactMode && !readOnly && (
             <div className="flex items-center justify-center gap-2 mt-2">
               {lead.is_blocked ? (
                 onUnblock && (
@@ -1088,18 +1146,26 @@ export default function LeadDetailPanel({
         {/* Tags belong to the person/contact, including inside an event. */}
         {(!eventMode || contactId || lead.contact_id) && <div className="space-y-2">
           <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Etiquetas</h5>
-          <TagInput
-            entityType={contactMode || eventMode ? "contact" : "lead"}
-            entityId={(contactMode || eventMode) && (contactId || lead.contact_id) ? (contactId || lead.contact_id)! : lead.id}
-            assignedTags={lead.structured_tags || []}
-            onTagsChange={(newTags) => {
-              const updated = { ...lead, structured_tags: newTags }
-              setLead(updated)
-              onLeadChange(updated)
-            }}
-            onBeforeAssign={eventMode ? onBeforeTagAssign : undefined}
-            onBeforeRemove={eventMode ? onBeforeTagRemove : undefined}
-          />
+          {readOnly ? (
+            <div className="flex flex-wrap gap-1.5">
+              {(lead.structured_tags || []).length > 0 ? (lead.structured_tags || []).map(tag => (
+                <span key={tag.id} className="rounded-full px-2 py-1 text-xs font-medium text-white" style={{ backgroundColor: tag.color || '#64748b' }}>{tag.name}</span>
+              )) : <span className="text-xs italic text-slate-400">Sin etiquetas</span>}
+            </div>
+          ) : (
+            <TagInput
+              entityType={contactMode || eventMode ? "contact" : "lead"}
+              entityId={(contactMode || eventMode) && (contactId || lead.contact_id) ? (contactId || lead.contact_id)! : lead.id}
+              assignedTags={lead.structured_tags || []}
+              onTagsChange={(newTags) => {
+                const updated = { ...lead, structured_tags: newTags }
+                setLead(updated)
+                onLeadChange(updated)
+              }}
+              onBeforeAssign={eventMode ? onBeforeTagAssign : undefined}
+              onBeforeRemove={eventMode ? onBeforeTagRemove : undefined}
+            />
+          )}
         </div>}
 
         {/* Pipeline & Stage Selector (hidden in contact mode) */}
@@ -1112,6 +1178,7 @@ export default function LeadDetailPanel({
           <div className="relative">
             {/* Main Button */}
             <button
+              disabled={readOnly}
               onClick={() => {
                 const willOpen = !showPipelineDropdown
                 setShowPipelineDropdown(willOpen)
@@ -1119,7 +1186,7 @@ export default function LeadDetailPanel({
                   setExpandedPipelineId(lead.pipeline_id)
                 }
               }}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border transition-all ${
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl border transition-all disabled:cursor-default ${
                 lead.stage_id
                   ? 'bg-white border-slate-200 text-slate-700 hover:border-emerald-300 hover:shadow-sm'
                   : 'bg-slate-50 border-slate-200 text-slate-500'
@@ -1143,11 +1210,11 @@ export default function LeadDetailPanel({
                   )}
                 </span>
               </div>
-              <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showPipelineDropdown ? 'rotate-180' : ''}`} />
+              {!readOnly && <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showPipelineDropdown ? 'rotate-180' : ''}`} />}
             </button>
 
             {/* Dropdown */}
-            {showPipelineDropdown && (
+            {showPipelineDropdown && !readOnly && (
               <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-20 max-h-[400px] overflow-y-auto">
                 {eventMode ? (
                   /* Event mode: flat list of event stages */
@@ -1221,17 +1288,115 @@ export default function LeadDetailPanel({
         </div>
         )}
 
-        {/* An event participant is a contact. A linked opportunity is provenance only. */}
-        {eventMode && (lead as any).original_lead_id && (
-          <div className="mt-1 border-t border-slate-100 pt-4">
-            <h5 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Oportunidad vinculada</h5>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-                {lead.lead_stage_color && <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: lead.lead_stage_color }} />}
-                <span className="truncate">{lead.lead_stage_name || 'Sin etapa comercial'}</span>
+        {eventMode && eventMembership && (eventMembership.state || eventMembership.source || eventMembership.autoTagSync !== undefined) && (
+          <div className="mt-1 rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Participación en el evento</p>
+                <p className="mt-1 text-sm font-semibold text-slate-700">
+                  {!eventMembership.state ? 'Verificando participación…' : eventMembership.state === 'inactive' ? 'Fuera del listado activo' : 'Participante activo'}
+                </p>
               </div>
-              <p className="mt-1 text-xs leading-relaxed text-slate-500">Se muestra como referencia. Los cambios comerciales se realizan desde Leads y no alteran la participación en este evento.</p>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${eventMembership.autoTagSync ? 'bg-violet-100 text-violet-700' : 'bg-slate-200 text-slate-600'}`}>
+                {eventMembership.autoTagSync === undefined ? 'Verificando…' : eventMembership.autoTagSync ? 'Sujeto a reglas' : 'Sin regla automática'}
+              </span>
             </div>
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
+              <span>Origen: {eventMembership.source === 'rule' ? 'regla automática' : eventMembership.source === 'manual' ? 'alta por usuario' : eventMembership.source || 'no registrado'}</span>
+              {eventMembership.changedAt && <span>Actualizado: {new Date(eventMembership.changedAt).toLocaleString('es-PE')}</span>}
+            </div>
+            {eventMembership.reason && (
+              <p className="mt-2 rounded-lg bg-amber-50 px-2.5 py-2 text-xs text-amber-800">
+                Motivo: {eventMembership.reason === 'rule_ineligible' ? 'ya no cumple las reglas actuales del evento' : eventMembership.reason}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Event membership is Contact-first; commercial opportunities are read-only context. */}
+        {eventMode && (
+          <div className="mt-1 border-t border-slate-100 pt-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h5 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Oportunidades del contacto</h5>
+              {!relatedLeadsLoading && relatedLeads.length > 0 && (
+                <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700">{relatedLeads.length}</span>
+              )}
+            </div>
+            {relatedLeadsLoading ? (
+              <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500">
+                <Loader2 className="h-4 w-4 animate-spin text-violet-500" /> Cargando oportunidades…
+              </div>
+            ) : relatedLeadsError ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-3">
+                <p className="text-sm font-medium text-amber-900">No se pudo verificar la ficha completa</p>
+                <p className="mt-1 text-xs leading-relaxed text-amber-800">{relatedLeadsError}</p>
+                {onRetryRelatedLeads && (
+                  <button type="button" onClick={onRetryRelatedLeads} className="mt-2 inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-800 transition hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500">
+                    <RefreshCw className="h-3.5 w-3.5" /> Reintentar
+                  </button>
+                )}
+              </div>
+            ) : relatedLeads.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-3 py-3">
+                <p className="text-sm font-medium text-slate-600">Sin oportunidades relacionadas</p>
+                <p className="mt-1 text-xs leading-relaxed text-slate-500">La participación pertenece al contacto y no necesita un lead para existir.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {[
+                  {
+                    label: 'Abiertas',
+                    historical: false,
+                    items: relatedLeads.filter(item => !item.is_archived && item.status === 'open'),
+                  },
+                  {
+                    label: 'Historial',
+                    historical: true,
+                    items: relatedLeads.filter(item => item.is_archived || item.status !== 'open'),
+                  },
+                ].filter(section => section.items.length > 0).map(section => (
+                  <div key={section.label} className="space-y-1.5">
+                    <div className="flex items-center justify-between px-1 pt-1">
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{section.label}</p>
+                      <span className="text-[10px] font-semibold text-slate-400">{section.items.length}</span>
+                    </div>
+                    {section.items.map(relatedLead => {
+                      const statusLabel = relatedLead.is_archived
+                        ? 'Archivada'
+                        : relatedLead.status === 'won'
+                          ? 'Ganada'
+                          : relatedLead.status === 'lost'
+                            ? 'Perdida'
+                            : 'Abierta'
+                      return (
+                        <a
+                          key={relatedLead.id}
+                          href={`/dashboard/leads?lead_id=${relatedLead.id}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="group block rounded-xl border border-slate-200 bg-white px-3 py-3 transition hover:border-violet-200 hover:bg-violet-50/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
+                        >
+                          <div className="flex items-start gap-2.5">
+                            <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full ring-2 ring-white" style={{ backgroundColor: relatedLead.stage_color || '#8b5cf6' }} />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="truncate text-sm font-semibold text-slate-800">{relatedLead.title || 'Oportunidad sin título'}</p>
+                                <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-400 transition group-hover:text-violet-600" />
+                              </div>
+                              <p className="mt-0.5 truncate text-xs text-slate-500">
+                                {relatedLead.pipeline_name || 'Sin pipeline'} <span className="text-slate-300">/</span> {relatedLead.stage_name || 'Sin etapa'}
+                              </p>
+                              <span className={`mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${section.historical ? 'bg-slate-100 text-slate-600' : 'bg-emerald-50 text-emerald-700'}`}>{statusLabel}</span>
+                            </div>
+                          </div>
+                        </a>
+                      )
+                    })}
+                  </div>
+                ))}
+                <p className="px-1 text-[11px] leading-relaxed text-slate-400">Las etapas comerciales se gestionan desde Leads y no cambian la etapa de este evento.</p>
+              </div>
+            )}
           </div>
         )}
 
@@ -1348,7 +1513,7 @@ export default function LeadDetailPanel({
             Generar Documento
           </button>
 
-          {!hideDelete && (
+          {!hideDelete && !readOnly && (
             <button
               onClick={handleDeleteLead}
               className="w-full flex items-center justify-center gap-2 px-4 py-2 border border-red-200 text-red-500 rounded-xl hover:bg-red-50 text-sm"
@@ -1384,7 +1549,8 @@ export default function LeadDetailPanel({
                   try {
                     const token = localStorage.getItem('token')
                     await fetch(`/api/tasks/${taskId}/complete`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
-                    if (contactMode && contactId) fetchContactTasks(contactId)
+                    if (eventMode && eventId && lead.contact_id) fetchContactTasks(lead.contact_id, eventId)
+                    else if (contactMode && contactId) fetchContactTasks(contactId)
                     else fetchLeadTasks(lead.id)
                   } catch { /* ignore */ }
                 }}
@@ -1396,7 +1562,8 @@ export default function LeadDetailPanel({
                       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                       body: JSON.stringify(fields),
                     })
-                    if (contactMode && contactId) fetchContactTasks(contactId)
+                    if (eventMode && eventId && lead.contact_id) fetchContactTasks(lead.contact_id, eventId)
+                    else if (contactMode && contactId) fetchContactTasks(contactId)
                     else fetchLeadTasks(lead.id)
                   } catch { /* ignore */ }
                 }}
@@ -1404,7 +1571,8 @@ export default function LeadDetailPanel({
                   try {
                     const token = localStorage.getItem('token')
                     await fetch(`/api/tasks/${taskId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
-                    if (contactMode && contactId) fetchContactTasks(contactId)
+                    if (eventMode && eventId && lead.contact_id) fetchContactTasks(lead.contact_id, eventId)
+                    else if (contactMode && contactId) fetchContactTasks(contactId)
                     else fetchLeadTasks(lead.id)
                   } catch { /* ignore */ }
                 }}
@@ -1577,14 +1745,16 @@ export default function LeadDetailPanel({
           onClose={() => { setShowTaskModal(false); setEditingTask(null) }}
           onSave={() => {
             setShowTaskModal(false); setEditingTask(null)
-            if (contactMode && contactId) { fetchContactTasks(contactId); fetchObservations(lead.id) }
+            if (eventMode && eventId && lead.contact_id) { fetchContactTasks(lead.contact_id, eventId); fetchObservations(lead.id) }
+            else if (contactMode && contactId) { fetchContactTasks(contactId); fetchObservations(lead.id) }
             else { fetchLeadTasks(lead.id); fetchObservations(lead.id) }
           }}
           task={editingTask}
-          leadId={contactMode ? undefined : lead.id}
-          leadName={contactMode ? undefined : lead.name}
-          contactId={contactMode ? contactId : undefined}
-          contactName={contactMode ? lead.name : undefined}
+          leadId={contactMode || eventMode ? undefined : lead.id}
+          leadName={contactMode || eventMode ? undefined : lead.name}
+          eventId={eventMode ? eventId : undefined}
+          contactId={eventMode ? lead.contact_id || undefined : contactMode ? contactId : undefined}
+          contactName={eventMode || contactMode ? lead.name : undefined}
           taskLists={taskLists}
         />
       )}

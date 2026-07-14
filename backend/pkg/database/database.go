@@ -225,6 +225,11 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Indexes for performance
 		`CREATE INDEX IF NOT EXISTS idx_users_account ON users(account_id)`,
+		// Login identifiers are global and case-insensitive. The original column
+		// UNIQUE constraints remain for compatibility; these expression indexes
+		// close variants such as "Nino"/"nino" and trim-only duplicates.
+		`CREATE UNIQUE INDEX IF NOT EXISTS users_username_normalized_key ON users ((LOWER(BTRIM(username))))`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS users_email_normalized_key ON users ((LOWER(BTRIM(email))))`,
 		`CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)`,

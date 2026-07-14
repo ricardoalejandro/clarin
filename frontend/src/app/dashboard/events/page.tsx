@@ -311,17 +311,33 @@ export default function EventsPage() {
   // Close modals on Escape
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setShowCreate(false); setEditEvent(null)
-        setShowFolderModal(false); setEditFolder(null)
-        setMenuEventID(null); setShowMoveMenu(null)
-        setShowTagDropdown(false)
-        resetEventForm()
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      const closeLayer = (close: () => void) => {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        close()
+      }
+
+      // Escape always dismisses only the topmost layer. A filter/dropdown must
+      // never collapse the form behind it or navigate away from the page.
+      if (showTagDropdown) { closeLayer(() => { setShowTagDropdown(false); setTagSearch('') }); return }
+      if (showMoveMenu) { closeLayer(() => setShowMoveMenu(null)); return }
+      if (menuEventID) { closeLayer(() => setMenuEventID(null)); return }
+      if (showCreate || editEvent) {
+        closeLayer(() => {
+          if (savingEvent) return
+          setShowCreate(false)
+          setEditEvent(null)
+        })
+        return
+      }
+      if (showFolderModal || editFolder) {
+        closeLayer(() => { setShowFolderModal(false); setEditFolder(null) })
       }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [])
+  }, [showTagDropdown, showMoveMenu, menuEventID, showCreate, editEvent, savingEvent, showFolderModal, editFolder])
 
   // Close tag dropdown on outside click
   useEffect(() => {
@@ -557,7 +573,13 @@ export default function EventsPage() {
   const handleCreateEvent = async () => {
     if (savingEvent) return
     setSavingEvent(true)
+    let provisionalEventID = ''
+    let canRollbackProvisional = false
     try {
+    const hasFormula = formData.tag_formula_type === 'advanced'
+      ? formData.tag_formula.trim() !== ''
+      : (formData.include_tag_ids.length > 0 || formData.exclude_tag_ids.length > 0)
+    const requestedStatus = formData.status
     const body: Record<string, unknown> = { ...formData }
     delete body.tag_ids
     delete body.formula_mode
@@ -572,6 +594,10 @@ export default function EventsPage() {
     if (!formData.description) delete body.description
     if (!formData.location) delete body.location
     if (currentFolderID) body.folder_id = currentFolderID
+    // Build rule-governed active events as draft -> saved rule -> active. This
+    // prevents an observable interval where the event is active without the
+    // admission rule selected in this form.
+    if (hasFormula && requestedStatus === 'active') body.status = 'draft'
 
     const res = await fetch('/api/events', {
       method: 'POST',
@@ -579,21 +605,48 @@ export default function EventsPage() {
       body: JSON.stringify(body),
     })
     const data = await res.json()
-    if (data.success) {
-      // Save tags with formula if there's any formula config
-      const hasFormula = formData.tag_formula_type === 'advanced'
-        ? formData.tag_formula.trim() !== ''
-        : (formData.include_tag_ids.length > 0 || formData.exclude_tag_ids.length > 0)
-      if (hasFormula && data.event?.id) {
-        const impact = await previewRuleChange(data.event.id)
-        if (impact) await applyRuleChange(data.event.id, impact)
+    if (!res.ok || !data.success || !data.event?.id) throw new Error(data.error || 'No se pudo crear el evento')
+    provisionalEventID = data.event.id
+    canRollbackProvisional = hasFormula
+
+    if (hasFormula) {
+      const impact = await previewRuleChange(provisionalEventID)
+      if (!impact) {
+        const cleanupRes = await fetch(`/api/events/${provisionalEventID}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
+        if (!cleanupRes.ok) throw new Error('No se confirmó la regla y no pudimos retirar el borrador provisional. Actualiza la lista antes de continuar.')
+        provisionalEventID = ''
+        canRollbackProvisional = false
+        return
       }
-      setShowCreate(false)
-      resetEventForm()
-      fetchEvents()
-      fetchFolders()
+      await applyRuleChange(provisionalEventID, impact)
     }
+    if (hasFormula && requestedStatus === 'active') {
+      // Once this request starts, a lost response could still mean success; do
+      // not auto-delete in the catch path. The backend transition itself is
+      // atomic and the next refresh reveals active vs draft safely.
+      canRollbackProvisional = false
+      const activateRes = await fetch(`/api/events/${provisionalEventID}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'active' }),
+      })
+      const activateData = await activateRes.json().catch(() => ({}))
+      if (!activateRes.ok || !activateData.success) throw new Error(activateData.error || 'La regla se guardó, pero el evento quedó en borrador. Vuelve a activarlo.')
+    }
+    canRollbackProvisional = false
+    provisionalEventID = ''
+    setShowCreate(false)
+    resetEventForm()
+    fetchEvents()
+    fetchFolders()
     } catch (e) {
+      if (provisionalEventID && canRollbackProvisional) {
+        try {
+          await fetch(`/api/events/${provisionalEventID}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
+          provisionalEventID = ''
+        } catch { /* a refresh below will reveal any recoverable draft */ }
+      }
+      fetchEvents()
       alert(e instanceof Error ? e.message : 'No se pudo crear el evento')
     } finally { setSavingEvent(false) }
   }
@@ -603,11 +656,20 @@ export default function EventsPage() {
     setSavingEvent(true)
     try {
     const frozen = editEvent.status === 'completed' || editEvent.status === 'cancelled'
-    const remainsFrozen = frozen && (formData.status === 'completed' || formData.status === 'cancelled')
-    // Reopening also previews and reapplies the rule so a frozen historical
-    // roster never becomes an active, stale roster.
-    const impact = remainsFrozen ? null : await previewRuleChange(editEvent.id)
-    if (!remainsFrozen && !impact) return
+    if (frozen && formData.status !== editEvent.status) {
+      throw new Error('Los eventos completados o cancelados son definitivos y no se pueden reabrir.')
+    }
+    const activatesDraft = editEvent.status === 'draft' && formData.status === 'active'
+    const closesEvent = !frozen && (formData.status === 'completed' || formData.status === 'cancelled')
+    const impact = frozen ? null : await previewRuleChange(editEvent.id)
+    if (!frozen && !impact) return
+
+    // A draft must persist its new rule before activation so the backend can
+    // reconcile that exact rule atomically with draft -> active. Likewise, a
+    // closing event applies its final rule before the roster becomes frozen.
+    if (impact && (activatesDraft || closesEvent)) {
+      await applyRuleChange(editEvent.id, impact)
+    }
     const body: Record<string, unknown> = { ...formData }
     delete body.tag_ids
     delete body.formula_mode
@@ -630,7 +692,7 @@ export default function EventsPage() {
     const data = await res.json()
     if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar el evento')
     if (data.success) {
-      if (impact) await applyRuleChange(editEvent.id, impact)
+      if (impact && !activatesDraft && !closesEvent) await applyRuleChange(editEvent.id, impact)
       setEditEvent(null)
       resetEventForm()
       fetchEvents()
@@ -794,9 +856,18 @@ export default function EventsPage() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Estado</label>
-                  <select value={formData.status} onChange={e => setFormData({ ...formData, status: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900">
-                    {STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label} — {s.desc}</option>)}
+                  <select
+                    value={formData.status}
+                    onChange={e => setFormData({ ...formData, status: e.target.value })}
+                    disabled={Boolean(editEvent && (editEvent.status === 'completed' || editEvent.status === 'cancelled'))}
+                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                  >
+                    {STATUS_OPTIONS.filter(option => {
+                      if (!editEvent) return option.value === 'draft' || option.value === 'active'
+                      if (editEvent.status === 'draft') return option.value === 'draft' || option.value === 'active' || option.value === 'cancelled'
+                      if (editEvent.status === 'active') return option.value === 'active' || option.value === 'completed' || option.value === 'cancelled'
+                      return option.value === editEvent.status
+                    }).map(s => <option key={s.value} value={s.value}>{s.label} — {s.desc}</option>)}
                   </select>
                   {(() => {
                     const opt = STATUS_OPTIONS.find(s => s.value === formData.status)
@@ -813,7 +884,10 @@ export default function EventsPage() {
             </div>
 
             {/* RIGHT COLUMN — Tag formula configuration */}
-            <div className="p-6 overflow-y-auto bg-slate-50/50">
+            <fieldset
+              disabled={Boolean(editEvent && (editEvent.status === 'completed' || editEvent.status === 'cancelled'))}
+              className="min-w-0 overflow-y-auto bg-slate-50/50 p-6 disabled:cursor-not-allowed"
+            >
               <div className="flex items-center gap-2 mb-1">
                 <Tag className="w-4 h-4 text-emerald-600" />
                 <span className="text-sm font-semibold text-slate-800">Incorporación automática de contactos</span>
@@ -824,7 +898,7 @@ export default function EventsPage() {
               </p>
               {editEvent && (editEvent.status === 'completed' || editEvent.status === 'cancelled') && (
                 <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                  La membresía y las reglas están congeladas porque el evento está {editEvent.status === 'completed' ? 'completado' : 'cancelado'}. Si lo reabres, se mostrará el impacto y la regla se reconciliará antes de terminar.
+                  La membresía y las reglas están congeladas porque el evento está {editEvent.status === 'completed' ? 'completado' : 'cancelado'}. Puedes corregir sus datos descriptivos, pero no reabrirlo ni alterar su historial.
                 </div>
               )}
 
@@ -1085,7 +1159,7 @@ export default function EventsPage() {
                   />
                 </div>
               )}
-            </div>
+            </fieldset>
           </div>
         </div>
 

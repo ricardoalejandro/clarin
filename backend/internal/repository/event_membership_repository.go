@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/formula"
 )
 
@@ -20,6 +22,9 @@ var (
 	ErrEventRulePreviewStale    = errors.New("event rule preview is stale")
 	ErrEventMembershipFrozen    = errors.New("event membership is frozen")
 	ErrEventMembershipAuditOnly = errors.New("event membership policy is audit only")
+	ErrEventStatusConflict      = errors.New("event status conflict")
+	ErrEventParticipantInactive = errors.New("event participant is missing or inactive")
+	ErrEventStageMismatch       = errors.New("event stage does not belong to event pipeline")
 )
 
 type EventRuleConfig struct {
@@ -65,6 +70,110 @@ type EventMembershipAuditEntry struct {
 	AfterState    json.RawMessage `json:"after_state"`
 	Metadata      json.RawMessage `json:"metadata"`
 	CreatedAt     string          `json:"created_at"`
+}
+
+func shouldApplyActivationRules(policyMode string, config EventRuleConfig) bool {
+	return policyMode == "strict" && normalizeRuleConfig(config).HasRules()
+}
+
+// ActivateEventAndReconcile updates draft -> active and applies its initial
+// rule membership in the same transaction. In audit_only accounts activation
+// still succeeds, but the calculated impact remains unapplied by design.
+func (r *EventRepository) ActivateEventAndReconcile(ctx context.Context, event *domain.Event, actor *uuid.UUID) (EventMembershipImpact, error) {
+	if event == nil {
+		return EventMembershipImpact{}, fmt.Errorf("event is required")
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return EventMembershipImpact{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, event.AccountID); err != nil {
+		return EventMembershipImpact{}, err
+	}
+
+	var currentStatus string
+	var revision int64
+	var config EventRuleConfig
+	if err := tx.QueryRow(ctx, `
+		SELECT status,rule_revision,tag_formula_type,tag_formula_mode,tag_formula
+		FROM events WHERE id=$1 AND account_id=$2 FOR UPDATE
+	`, event.ID, event.AccountID).Scan(&currentStatus, &revision, &config.FormulaType, &config.FormulaMode, &config.Formula); err != nil {
+		return EventMembershipImpact{}, err
+	}
+	if currentStatus != domain.EventStatusDraft {
+		return EventMembershipImpact{}, ErrEventStatusConflict
+	}
+
+	rows, err := tx.Query(ctx, `SELECT tag_id,negate FROM event_tags WHERE event_id=$1`, event.ID)
+	if err != nil {
+		return EventMembershipImpact{}, err
+	}
+	for rows.Next() {
+		var tagID uuid.UUID
+		var negate bool
+		if err := rows.Scan(&tagID, &negate); err != nil {
+			rows.Close()
+			return EventMembershipImpact{}, err
+		}
+		if negate {
+			config.Excludes = append(config.Excludes, tagID)
+		} else {
+			config.Includes = append(config.Includes, tagID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return EventMembershipImpact{}, err
+	}
+	rows.Close()
+	config = normalizeRuleConfig(config)
+
+	event.Status = domain.EventStatusActive
+	event.UpdatedAt = time.Now()
+	result, err := tx.Exec(ctx, `
+		UPDATE events SET name=$1,description=$2,event_date=$3,event_end=$4,location=$5,status='active',color=$6,pipeline_id=$7,updated_at=$8
+		WHERE id=$9 AND account_id=$10 AND status='draft'
+	`, event.Name, event.Description, event.EventDate, event.EventEnd, event.Location, event.Color, event.PipelineID, event.UpdatedAt, event.ID, event.AccountID)
+	if err != nil {
+		return EventMembershipImpact{}, err
+	}
+	if result.RowsAffected() != 1 {
+		return EventMembershipImpact{}, ErrEventStatusConflict
+	}
+
+	var policyMode string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT mode FROM event_membership_policy_state WHERE account_id=$1),'audit_only')`, event.AccountID).Scan(&policyMode); err != nil {
+		return EventMembershipImpact{}, err
+	}
+	matched := make([]uuid.UUID, 0)
+	if config.HasRules() {
+		matched, err = queryMatchedContactIDs(ctx, tx, event.AccountID, config)
+		if err != nil {
+			return EventMembershipImpact{}, err
+		}
+	}
+
+	var impact EventMembershipImpact
+	if shouldApplyActivationRules(policyMode, config) {
+		stageID, stageErr := defaultEventStageTx(ctx, tx, event.PipelineID)
+		if stageErr != nil {
+			return EventMembershipImpact{}, stageErr
+		}
+		impact, err = applyMatchedMembership(ctx, tx, event.AccountID, event.ID, stageID, config, matched, revision, "event_activated", actor)
+	} else {
+		impact, err = membershipImpact(ctx, tx, event.ID, config, matched)
+	}
+	if err != nil {
+		return EventMembershipImpact{}, err
+	}
+	impact.PolicyMode = policyMode
+	impact.RuleRevision = revision
+	impact.Fingerprint = membershipFingerprint(revision, config, matched)
+	if err := tx.Commit(ctx); err != nil {
+		return EventMembershipImpact{}, err
+	}
+	return impact, nil
 }
 
 func normalizeRuleConfig(cfg EventRuleConfig) EventRuleConfig {
@@ -569,9 +678,16 @@ func (r *EventRepository) SoftRemoveParticipant(ctx context.Context, accountID, 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, accountID); err != nil {
 		return err
 	}
+	var eventStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM events WHERE id=$1 AND account_id=$2 FOR UPDATE`, eventID, accountID).Scan(&eventStatus); err != nil {
+		return err
+	}
+	if eventStatus == domain.EventStatusCompleted || eventStatus == domain.EventStatusCancelled {
+		return ErrEventMembershipFrozen
+	}
 	var contactID *uuid.UUID
 	var state string
-	if err := tx.QueryRow(ctx, `SELECT ep.contact_id,ep.membership_state FROM event_participants ep JOIN events e ON e.id=ep.event_id WHERE ep.id=$1 AND ep.event_id=$2 AND e.account_id=$3 FOR UPDATE OF ep`, participantID, eventID, accountID).Scan(&contactID, &state); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT contact_id,membership_state FROM event_participants WHERE id=$1 AND event_id=$2 FOR UPDATE`, participantID, eventID).Scan(&contactID, &state); err != nil {
 		return err
 	}
 	if state == "inactive" {

@@ -1023,24 +1023,25 @@ type EventPipelineStage struct {
 
 // Event represents an activity/event to track contact interactions
 type Event struct {
-	ID             uuid.UUID  `json:"id"`
-	AccountID      uuid.UUID  `json:"account_id"`
-	FolderID       *uuid.UUID `json:"folder_id,omitempty"`
-	PipelineID     *uuid.UUID `json:"pipeline_id,omitempty"`
-	Name           string     `json:"name"`
-	Description    *string    `json:"description,omitempty"`
-	EventDate      *time.Time `json:"event_date,omitempty"`
-	EventEnd       *time.Time `json:"event_end,omitempty"`
-	Location       *string    `json:"location,omitempty"`
-	Status         string     `json:"status"` // draft, active, completed, cancelled
-	Color          string     `json:"color"`
-	TagFormulaMode string     `json:"tag_formula_mode"` // OR, AND (used in simple mode)
-	TagFormula     string     `json:"tag_formula"`      // text-based formula (advanced mode)
-	TagFormulaType string     `json:"tag_formula_type"` // simple, advanced
-	RuleRevision   int64      `json:"rule_revision"`
-	CreatedBy      *uuid.UUID `json:"created_by,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID                 uuid.UUID  `json:"id"`
+	AccountID          uuid.UUID  `json:"account_id"`
+	FolderID           *uuid.UUID `json:"folder_id,omitempty"`
+	PipelineID         *uuid.UUID `json:"pipeline_id,omitempty"`
+	Name               string     `json:"name"`
+	Description        *string    `json:"description,omitempty"`
+	EventDate          *time.Time `json:"event_date,omitempty"`
+	EventEnd           *time.Time `json:"event_end,omitempty"`
+	Location           *string    `json:"location,omitempty"`
+	Status             string     `json:"status"` // draft, active, completed, cancelled
+	Color              string     `json:"color"`
+	TagFormulaMode     string     `json:"tag_formula_mode"` // OR, AND (used in simple mode)
+	TagFormula         string     `json:"tag_formula"`      // text-based formula (advanced mode)
+	TagFormulaType     string     `json:"tag_formula_type"` // simple, advanced
+	RuleRevision       int64      `json:"rule_revision"`
+	HasMembershipRules bool       `json:"has_membership_rules"`
+	CreatedBy          *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 
 	// Populated on demand
 	ParticipantCounts map[string]int `json:"participant_counts,omitempty"`
@@ -1073,6 +1074,29 @@ const (
 	EventStatusCompleted = "completed"
 	EventStatusCancelled = "cancelled"
 )
+
+func IsValidEventStatus(status string) bool {
+	switch status {
+	case EventStatusDraft, EventStatusActive, EventStatusCompleted, EventStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func CanTransitionEventStatus(from, to string) bool {
+	if from == to {
+		return IsValidEventStatus(from)
+	}
+	switch from {
+	case EventStatusDraft:
+		return to == EventStatusActive || to == EventStatusCancelled
+	case EventStatusActive:
+		return to == EventStatusCompleted || to == EventStatusCancelled
+	default:
+		return false
+	}
+}
 
 // EventParticipant represents a contact participating in an event
 type EventParticipant struct {
@@ -1114,10 +1138,13 @@ type EventParticipant struct {
 	StageName       *string      `json:"stage_name,omitempty"`
 	StageColor      *string      `json:"stage_color,omitempty"`
 	// Lead pipeline info (populated on demand)
-	LeadPipelineID *uuid.UUID `json:"lead_pipeline_id,omitempty"`
-	LeadStageID    *uuid.UUID `json:"lead_stage_id,omitempty"`
-	LeadStageName  *string    `json:"lead_stage_name,omitempty"`
-	LeadStageColor *string    `json:"lead_stage_color,omitempty"`
+	LeadPipelineID   *uuid.UUID                      `json:"lead_pipeline_id,omitempty"`
+	LeadPipelineName *string                         `json:"lead_pipeline_name,omitempty"`
+	LeadStageID      *uuid.UUID                      `json:"lead_stage_id,omitempty"`
+	LeadStageName    *string                         `json:"lead_stage_name,omitempty"`
+	LeadStageColor   *string                         `json:"lead_stage_color,omitempty"`
+	RelatedLeads     *[]*EventParticipantRelatedLead `json:"related_leads,omitempty"`
+	ActiveLeadCount  *int                            `json:"active_lead_count,omitempty"`
 	// Lead archive/block status (populated on demand)
 	IsArchived bool `json:"is_archived,omitempty"`
 	IsBlocked  bool `json:"is_blocked,omitempty"`
@@ -1127,6 +1154,39 @@ type EventParticipant struct {
 	// It prevents event-only edits—or editing just one personal field—from
 	// overwriting unrelated Contact source-of-truth values.
 	PersonalFieldChanges map[string]bool `json:"-"`
+}
+
+// EventParticipantRelatedLead is a read-only opportunity summary derived from
+// the participant's Contact. Event membership remains Contact-first: this does
+// not make a Lead the participant's owner or provenance.
+type EventParticipantRelatedLead struct {
+	ID           uuid.UUID  `json:"id"`
+	Title        string     `json:"title"`
+	Status       string     `json:"status"`
+	PipelineID   *uuid.UUID `json:"pipeline_id,omitempty"`
+	PipelineName *string    `json:"pipeline_name,omitempty"`
+	StageID      *uuid.UUID `json:"stage_id,omitempty"`
+	StageName    *string    `json:"stage_name,omitempty"`
+	StageColor   *string    `json:"stage_color,omitempty"`
+	IsArchived   bool       `json:"is_archived"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+// EventParticipantCandidate describes one account Contact in the context of a
+// specific event. Existing participants remain visible so clients can explain
+// why a contact cannot be added instead of presenting a false empty result.
+type EventParticipantCandidate struct {
+	Contact          *Contact   `json:"contact"`
+	MembershipStatus string     `json:"membership_status"`
+	Eligibility      string     `json:"eligibility"`
+	RuleMatch        bool       `json:"rule_match"`
+	CanAdd           bool       `json:"can_add"`
+	ParticipantID    *uuid.UUID `json:"participant_id,omitempty"`
+	StageID          *uuid.UUID `json:"stage_id,omitempty"`
+	StageName        *string    `json:"stage_name,omitempty"`
+	StageColor       *string    `json:"stage_color,omitempty"`
+	MembershipSource *string    `json:"membership_source,omitempty"`
+	MembershipReason *string    `json:"membership_reason,omitempty"`
 }
 
 // Participant status constants

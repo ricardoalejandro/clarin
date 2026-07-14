@@ -60,13 +60,18 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
     if (!isOpen) return
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        e.stopPropagation()
-        onClose()
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        if (showUserDropdown) {
+          setShowUserDropdown(false)
+          return
+        }
+        if (!saving) onClose()
       }
     }
-    document.addEventListener('keydown', handleEsc)
-    return () => document.removeEventListener('keydown', handleEsc)
-  }, [isOpen, onClose])
+    document.addEventListener('keydown', handleEsc, true)
+    return () => document.removeEventListener('keydown', handleEsc, true)
+  }, [isOpen, onClose, saving, showUserDropdown])
 
   useEffect(() => {
     if (isOpen) {

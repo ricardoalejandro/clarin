@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Building2, Users, Plus, Pencil, Trash2, Power, KeyRound,
   Search, X, Shield, ChevronDown, Link2, Lock, CheckSquare, Square, Bot,
@@ -9,6 +9,7 @@ import {
   Loader2, Wifi, WifiOff
 } from 'lucide-react'
 import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
+import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 
 interface Account {
   id: string
@@ -283,6 +284,11 @@ interface NewUserAssignment {
   is_default: boolean
 }
 
+interface UserFormError {
+  message: string
+  field?: 'username' | 'email' | 'password' | 'accounts'
+}
+
 const ALL_MODULES = [
   { key: 'chats', label: 'Chats', color: 'emerald' },
   { key: 'contacts', label: 'Contactos', color: 'blue' },
@@ -406,6 +412,10 @@ export default function AdminPage() {
   const [editingAccount, setEditingAccount] = useState<Account | null>(null)
   const [showUserModal, setShowUserModal] = useState(false)
   const [editingUser, setEditingUser] = useState<User | null>(null)
+  const [userFormError, setUserFormError] = useState<UserFormError | null>(null)
+  const [userSubmitting, setUserSubmitting] = useState(false)
+  const usernameInputRef = useRef<HTMLInputElement>(null)
+  const userDialogRef = useRef<HTMLDivElement>(null)
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [passwordUserId, setPasswordUserId] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -462,6 +472,26 @@ export default function AdminPage() {
     account_id: '', username: '', email: '', password: '', password_confirm: '', display_name: '', role: 'agent'
   })
   const [userFormAssignments, setUserFormAssignments] = useState<NewUserAssignment[]>([])
+
+  const trimmedUsername = userForm.username.trim()
+  const usernameAlreadyExists = trimmedUsername !== '' && users.some(user =>
+    user.username.trim().toLowerCase() === trimmedUsername.toLowerCase() && user.id !== editingUser?.id
+  )
+  const userPasswordIssues = editingUser
+    ? []
+    : getPasswordIssues(userForm.password, userForm.password_confirm)
+  const hasValidUserAssignment = Boolean(editingUser) || userFormAssignments.some(item => item.account_id)
+  const canSaveUser = !userSubmitting
+    && trimmedUsername !== ''
+    && !usernameAlreadyExists
+    && !userFormError?.field
+    && hasValidUserAssignment
+    && userPasswordIssues.length === 0
+  const usernameError = userFormError?.field === 'username'
+    ? userFormError.message
+    : usernameAlreadyExists
+      ? 'Este nombre de usuario ya está en uso.'
+      : ''
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
@@ -853,6 +883,17 @@ export default function AdminPage() {
   }, [showErosOpenAIModal, erosOpenAI?.login?.status, erosOpenAI?.login?.login_id, token])
 
   // Close modals on Escape (topmost first)
+  useAccessibleDialog(
+    showUserModal,
+    userDialogRef,
+    () => {
+      if (userSubmitting) return
+      setShowUserModal(false)
+      setUserFormError(null)
+    },
+    usernameInputRef,
+  )
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
@@ -863,12 +904,18 @@ export default function AdminPage() {
       if (showIntegrationModal) { setShowIntegrationModal(false); return }
       if (showRoleModal) { setShowRoleModal(false); return }
       if (showAssignModal) { setShowAssignModal(false); return }
-      if (showUserModal) { setShowUserModal(false); return }
+      if (showUserModal) {
+        if (!userSubmitting) {
+          setShowUserModal(false)
+          setUserFormError(null)
+        }
+        return
+      }
       if (showAccountModal) { setShowAccountModal(false); return }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showErosOpenAIModal, showIntegrationMonitor, showPasswordModal, showPurgeModal, showIntegrationModal, showRoleModal, showAssignModal, showUserModal, showAccountModal])
+  }, [showErosOpenAIModal, showIntegrationMonitor, showPasswordModal, showPurgeModal, showIntegrationModal, showRoleModal, showAssignModal, showUserModal, showAccountModal, userSubmitting])
 
   // Account CRUD
 	  function openCreateAccount() {
@@ -1006,6 +1053,8 @@ export default function AdminPage() {
   // User CRUD
   function openCreateUser() {
     setEditingUser(null)
+    setUserFormError(null)
+    setUserSubmitting(false)
     const initialAccount = filterAccountId || accounts.find(a => a.is_active)?.id || ''
     setUserForm({ account_id: initialAccount, username: '', email: '', password: '', password_confirm: '', display_name: '', role: 'agent' })
     setUserFormAssignments(initialAccount ? [{ account_id: initialAccount, role: 'agent', role_id: '', is_default: true }] : [])
@@ -1014,6 +1063,8 @@ export default function AdminPage() {
 
   function openEditUser(u: User) {
     setEditingUser(u)
+    setUserFormError(null)
+    setUserSubmitting(false)
     setUserForm({ account_id: u.account_id, username: u.username, email: u.email, password: '', password_confirm: '', display_name: u.display_name, role: u.role })
     setUserFormAssignments([])
     setShowUserModal(true)
@@ -1022,10 +1073,12 @@ export default function AdminPage() {
   function addUserFormAssignment() {
     const nextAccount = accounts.find(a => a.is_active && !userFormAssignments.some(ua => ua.account_id === a.id))
     if (!nextAccount) return
+    setUserFormError(current => current?.field === 'accounts' ? null : current)
     setUserFormAssignments(prev => [...prev, { account_id: nextAccount.id, role: 'agent', role_id: '', is_default: prev.length === 0 }])
   }
 
   function updateUserFormAssignment(index: number, patch: Partial<NewUserAssignment>) {
+    setUserFormError(current => current?.field === 'accounts' ? null : current)
     setUserFormAssignments(prev => prev.map((item, i) => {
       if (i !== index) return item
       const next = { ...item, ...patch }
@@ -1043,35 +1096,83 @@ export default function AdminPage() {
   }
 
   async function saveUser() {
-    if (editingUser) {
-      const res = await fetch(`/api/admin/users/${editingUser.id}`, {
-        method: 'PUT', headers,
-        body: JSON.stringify({ username: userForm.username, email: userForm.email, display_name: userForm.display_name, role: userForm.role })
+    if (userSubmitting) return
+
+    setUserFormError(null)
+    if (!trimmedUsername) {
+      setUserFormError({ field: 'username', message: 'Ingresa un nombre de usuario.' })
+      usernameInputRef.current?.focus()
+      return
+    }
+    if (usernameAlreadyExists) {
+      setUserFormError({ field: 'username', message: 'Este nombre de usuario ya está en uso.' })
+      usernameInputRef.current?.focus()
+      return
+    }
+    if (!editingUser && userPasswordIssues.length > 0) {
+      setUserFormError({ field: 'password', message: `Completa los requisitos de contraseña: ${userPasswordIssues.join(', ')}.` })
+      return
+    }
+
+    const validAssignments = userFormAssignments.filter(item => item.account_id)
+    if (!editingUser && validAssignments.length === 0) {
+      setUserFormError({ field: 'accounts', message: 'Asigna al usuario al menos a una cuenta.' })
+      return
+    }
+
+    setUserSubmitting(true)
+    try {
+      const endpoint = editingUser ? `/api/admin/users/${editingUser.id}` : '/api/admin/users'
+      const payload = editingUser
+        ? {
+            username: trimmedUsername,
+            email: userForm.email.trim(),
+            display_name: userForm.display_name.trim(),
+            role: userForm.role,
+          }
+        : {
+            ...userForm,
+            username: trimmedUsername,
+            email: userForm.email.trim(),
+            display_name: userForm.display_name.trim(),
+            accounts: validAssignments,
+          }
+      const res = await fetch(endpoint, {
+        method: editingUser ? 'PUT' : 'POST',
+        headers,
+        body: JSON.stringify(payload),
       })
-      const data = await res.json()
-      if (data.success) {
-        setShowUserModal(false)
-        fetchUsers()
-      } else {
-        alert(data.error || 'Error al guardar')
+      const data = await res.json().catch(() => ({ success: false })) as {
+        success?: boolean
+        error?: string
+        code?: string
+        field?: string
       }
-    } else {
-      const passwordIssues = getPasswordIssues(userForm.password, userForm.password_confirm)
-      if (passwordIssues.length > 0) {
-        alert(`Usa una contraseña fuerte: ${passwordIssues.join(', ')}.`)
+      if (res.ok && data.success) {
+        setShowUserModal(false)
+        setUserFormError(null)
+        await fetchUsers()
         return
       }
-      const validAssignments = userFormAssignments.filter(item => item.account_id)
-      const res = await fetch('/api/admin/users', {
-        method: 'POST', headers, body: JSON.stringify({ ...userForm, accounts: validAssignments })
-      })
-      const data = await res.json()
-      if (data.success) {
-        setShowUserModal(false)
-        fetchUsers()
+
+      if (data.code === 'username_taken' || data.field === 'username') {
+        setUserFormError({ field: 'username', message: 'Este nombre de usuario ya está en uso.' })
+        window.requestAnimationFrame(() => usernameInputRef.current?.focus())
+      } else if (data.code === 'email_taken' || data.field === 'email') {
+        setUserFormError({ field: 'email', message: 'Este correo ya está asociado a otro usuario.' })
+      } else if (data.code === 'invalid_account_assignments' || data.field === 'accounts') {
+        setUserFormError({ field: 'accounts', message: data.error || 'Revisa las cuentas y roles seleccionados.' })
+      } else if (data.code === 'plan_limit_reached') {
+        setUserFormError({ message: data.error || 'La cuenta alcanzó el límite de usuarios de su plan.' })
+      } else if (res.status >= 500) {
+        setUserFormError({ message: 'No pudimos guardar el usuario. Inténtalo nuevamente.' })
       } else {
-        alert(data.error || 'Error al crear usuario')
+        setUserFormError({ message: data.error || `No se pudo ${editingUser ? 'guardar' : 'crear'} el usuario.` })
       }
+    } catch {
+      setUserFormError({ message: 'No se pudo conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.' })
+    } finally {
+      setUserSubmitting(false)
     }
   }
 
@@ -3085,14 +3186,52 @@ export default function AdminPage() {
 
       {/* User Modal */}
       {showUserModal && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
-            <div className="p-6 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900">
-                {editingUser ? 'Editar Usuario' : 'Nuevo Usuario'}
-              </h2>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-3 backdrop-blur-sm sm:p-6">
+          <div
+            ref={userDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="user-modal-title"
+            tabIndex={-1}
+            className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-white/60 bg-white shadow-2xl shadow-slate-950/20"
+          >
+            <div className="flex items-start justify-between border-b border-slate-200 bg-gradient-to-r from-emerald-50/80 via-white to-white px-5 py-5 sm:px-6">
+              <div className="flex min-w-0 items-start gap-3">
+                <div className="mt-0.5 rounded-xl bg-emerald-100 p-2.5 text-emerald-700">
+                  <Users className="h-5 w-5" aria-hidden="true" />
+                </div>
+                <div>
+                  <h2 id="user-modal-title" className="text-lg font-semibold text-slate-900">
+                    {editingUser ? 'Editar usuario' : 'Crear usuario'}
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {editingUser
+                      ? 'Actualiza sus datos de acceso y permisos principales.'
+                      : 'Configura el acceso y las cuentas en las que podrá trabajar.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (userSubmitting) return
+                  setShowUserModal(false)
+                  setUserFormError(null)
+                }}
+                disabled={userSubmitting}
+                className="rounded-lg p-2 text-slate-400 transition hover:bg-white hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="Cerrar"
+              >
+                <X className="h-5 w-5" />
+              </button>
             </div>
-            <div className="p-6 space-y-4">
+            <div className="space-y-5 overflow-y-auto px-5 py-5 sm:px-6">
+              {userFormError && !userFormError.field && (
+                <div role="alert" className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <p>{userFormError.message}</p>
+                </div>
+              )}
               {!editingUser && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
@@ -3103,7 +3242,7 @@ export default function AdminPage() {
                   </div>
                   <div className="space-y-2">
                     {userFormAssignments.map((assignment, index) => (
-                      <div key={`${assignment.account_id}-${index}`} className="grid grid-cols-[1fr_120px_1fr_auto_auto] gap-2 items-center bg-gray-50 border border-gray-200 rounded-lg p-2">
+                      <div key={`${assignment.account_id}-${index}`} className="grid grid-cols-1 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/80 p-3 lg:grid-cols-[1fr_120px_1fr_auto_auto]">
                         <select
                           value={assignment.account_id}
                           onChange={e => updateUserFormAssignment(index, { account_id: e.target.value })}
@@ -3145,58 +3284,101 @@ export default function AdminPage() {
                         Agregar primera cuenta
                       </button>
                     )}
+                    {userFormError?.field === 'accounts' && (
+                      <p role="alert" className="text-xs font-medium text-red-600">{userFormError.message}</p>
+                    )}
                   </div>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                  <label htmlFor="admin-user-username" className="mb-1 block text-sm font-medium text-slate-700">Nombre de usuario</label>
                   <input
+                    ref={usernameInputRef}
+                    id="admin-user-username"
                     type="text"
                     value={userForm.username}
-                    onChange={e => setUserForm(f => ({ ...f, username: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                    onChange={e => {
+                      setUserForm(f => ({ ...f, username: e.target.value }))
+                      setUserFormError(current => current?.field === 'username' ? null : current)
+                    }}
+                    autoComplete="username"
+                    aria-invalid={Boolean(usernameError)}
+                    aria-describedby={usernameError ? 'admin-user-username-error' : 'admin-user-username-help'}
+                    className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-2 ${usernameError ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
                   />
+                  {usernameError ? (
+                    <p id="admin-user-username-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{usernameError}</p>
+                  ) : (
+                    <p id="admin-user-username-help" className="mt-1.5 text-xs text-slate-500">Debe ser único en todo Clarin y se usará para iniciar sesión.</p>
+                  )}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Nombre</label>
+                  <label htmlFor="admin-user-display-name" className="mb-1 block text-sm font-medium text-slate-700">Nombre visible</label>
                   <input
+                    id="admin-user-display-name"
                     type="text"
                     value={userForm.display_name}
                     onChange={e => setUserForm(f => ({ ...f, display_name: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                    autoComplete="name"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
                   />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email opcional</label>
+                <label htmlFor="admin-user-email" className="mb-1 block text-sm font-medium text-slate-700">Correo electrónico <span className="font-normal text-slate-400">(opcional)</span></label>
                 <input
+                  id="admin-user-email"
                   type="email"
                   value={userForm.email}
-                  onChange={e => setUserForm(f => ({ ...f, email: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  onChange={e => {
+                    setUserForm(f => ({ ...f, email: e.target.value }))
+                    setUserFormError(current => current?.field === 'email' ? null : current)
+                  }}
+                  autoComplete="email"
+                  aria-invalid={userFormError?.field === 'email'}
+                  aria-describedby={userFormError?.field === 'email' ? 'admin-user-email-error' : undefined}
+                  className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-2 ${userFormError?.field === 'email' ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
                 />
+                {userFormError?.field === 'email' && (
+                  <p id="admin-user-email-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{userFormError.message}</p>
+                )}
               </div>
               {!editingUser && (
                 <>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Contraseña</label>
+                    <label htmlFor="admin-user-password" className="mb-1 block text-sm font-medium text-slate-700">Contraseña</label>
                     <input
+                      id="admin-user-password"
                       type="password"
                       value={userForm.password}
-                      onChange={e => setUserForm(f => ({ ...f, password: e.target.value }))}
-                      className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                      onChange={e => {
+                        setUserForm(f => ({ ...f, password: e.target.value }))
+                        setUserFormError(current => current?.field === 'password' ? null : current)
+                      }}
+                      autoComplete="new-password"
+                      aria-invalid={userFormError?.field === 'password'}
+                      className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-2 ${userFormError?.field === 'password' ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Confirmar contraseña</label>
+                    <label htmlFor="admin-user-password-confirm" className="mb-1 block text-sm font-medium text-slate-700">Confirmar contraseña</label>
                     <input
+                      id="admin-user-password-confirm"
                       type="password"
                       value={userForm.password_confirm}
-                      onChange={e => setUserForm(f => ({ ...f, password_confirm: e.target.value }))}
-                      className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                      onChange={e => {
+                        setUserForm(f => ({ ...f, password_confirm: e.target.value }))
+                        setUserFormError(current => current?.field === 'password' ? null : current)
+                      }}
+                      autoComplete="new-password"
+                      aria-invalid={userFormError?.field === 'password'}
+                      className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-2 ${userFormError?.field === 'password' ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
                     />
                   </div>
+                  {userFormError?.field === 'password' && (
+                    <p role="alert" className="text-xs font-medium text-red-600">{userFormError.message}</p>
+                  )}
                   <PasswordStrengthChecklist password={userForm.password} confirmPassword={userForm.password_confirm} compact />
                 </>
               )}
@@ -3213,12 +3395,27 @@ export default function AdminPage() {
                 </select>
               </div>}
             </div>
-            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
-              <button onClick={() => setShowUserModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
+            <div className="flex items-center justify-end gap-3 border-t border-slate-200 bg-slate-50/70 px-5 py-4 sm:px-6">
+              <button
+                type="button"
+                onClick={() => {
+                  if (userSubmitting) return
+                  setShowUserModal(false)
+                  setUserFormError(null)
+                }}
+                disabled={userSubmitting}
+                className="rounded-lg px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50"
+              >
                 Cancelar
               </button>
-              <button onClick={saveUser} className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
-                {editingUser ? 'Guardar' : 'Crear'}
+              <button
+                type="button"
+                onClick={saveUser}
+                disabled={!canSaveUser}
+                className="inline-flex min-w-28 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:shadow-none"
+              >
+                {userSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                {userSubmitting ? 'Guardando…' : editingUser ? 'Guardar cambios' : 'Crear usuario'}
               </button>
             </div>
           </div>

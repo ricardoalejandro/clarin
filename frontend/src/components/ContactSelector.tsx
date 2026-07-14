@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Search, X, Filter, Users, CheckCircle2, User, Tag, ChevronDown, CheckSquare, FileText, Code, Calendar, Smartphone } from 'lucide-react'
+import { Search, X, Filter, Users, CheckCircle2, User, Tag, ChevronDown, CheckSquare, FileText, Code, Calendar, Smartphone, AlertCircle, Loader2, Eye, UserCheck, RotateCcw } from 'lucide-react'
 import FormulaEditor from '@/components/FormulaEditor'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 
@@ -9,9 +9,28 @@ interface PersonResult {
   id: string
   name: string
   phone: string
+  phones?: { phone: string; label?: string }[]
   email: string
   source_type: 'contact' | 'lead'
   tags?: { id: string; name: string; color: string }[]
+  membership_status?: 'not_added' | 'active' | 'inactive'
+  eligibility?: 'eligible' | 'rule_ineligible' | 'event_frozen'
+  can_add?: boolean
+  participant_id?: string
+  stage_id?: string
+  stage_name?: string
+  stage_color?: string
+  membership_source?: string
+  membership_reason?: string
+  excluded?: boolean
+}
+
+interface CandidateCounts {
+  matches: number
+  available: number
+  already_active: number
+  inactive: number
+  ineligible: number
 }
 
 interface TagItem {
@@ -24,9 +43,19 @@ export interface SelectedPerson {
   id: string
   name: string
   phone: string
+  phones?: { phone: string; label?: string }[]
   email: string
   source_type: 'contact' | 'lead'
   tags?: { id: string; name: string; color: string }[]
+  membership_status?: 'not_added' | 'active' | 'inactive'
+  eligibility?: 'eligible' | 'rule_ineligible' | 'event_frozen'
+  can_add?: boolean
+  participant_id?: string
+  stage_id?: string
+  stage_name?: string
+  stage_color?: string
+  membership_source?: string
+  membership_reason?: string
 }
 
 interface DeviceItem {
@@ -48,6 +77,17 @@ const DATE_PRESETS = [
   { key: 'last_30d', label: 'Últimos 30 días' },
   { key: 'custom', label: 'Rango personalizado' },
 ] as const
+
+const MAX_SELECTION = 500
+
+function membershipReasonLabel(reason?: string) {
+  switch (reason) {
+    case 'rule_ineligible': return 'Dejó de cumplir las reglas actuales del evento.'
+    case 'legacy_rule_ineligible': return 'Dejó de cumplir una regla anterior del evento.'
+    case 'manual_removed': return 'Fue retirado manualmente del listado activo.'
+    default: return reason ? `Motivo registrado: ${reason.replaceAll('_', ' ')}.` : ''
+  }
+}
 
 function resolveDatePreset(preset: string, customFrom?: string, customTo?: string): { from: string; to: string } | null {
   const now = new Date()
@@ -80,6 +120,16 @@ interface ContactSelectorProps {
   advancedFilters?: boolean
   /** When selecting contacts, only show contacts without an active lead */
   withoutActiveLead?: boolean
+  /** Event-aware candidate search. Existing/ineligible contacts remain visible with context. */
+  eventId?: string
+  /** Open an existing participant directly from an event-aware result. */
+  onViewExisting?: (person: SelectedPerson) => void
+  /** Prevent double-submit and closing while the parent saves the selection. */
+  submitting?: boolean
+  /** Parent mutation error shown without dismissing the selector. */
+  errorMessage?: string
+  /** Forces an authoritative reload after a concurrent/partial mutation. */
+  refreshKey?: number
 }
 
 export default function ContactSelector({
@@ -93,13 +143,28 @@ export default function ContactSelector({
   sourceFilter,
   advancedFilters = false,
   withoutActiveLead = false,
+  eventId,
+  onViewExisting,
+  submitting = false,
+  errorMessage = '',
+  refreshKey = 0,
 }: ContactSelectorProps) {
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [results, setResults] = useState<PersonResult[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [nextOffset, setNextOffset] = useState(0)
+  const [loadError, setLoadError] = useState('')
+  const [loadMoreError, setLoadMoreError] = useState('')
+  const [candidateCounts, setCandidateCounts] = useState<CandidateCounts | null>(null)
+  const [candidateMetadataLoaded, setCandidateMetadataLoaded] = useState(false)
+  const [eventHasRules, setEventHasRules] = useState(false)
+  const [candidateEventStatus, setCandidateEventStatus] = useState('')
   const [selected, setSelected] = useState<Map<string, SelectedPerson>>(new Map())
+  const [selectionNotice, setSelectionNotice] = useState('')
 
   // Basic Filters
   const [sourceType, setSourceType] = useState<'all' | 'contact' | 'lead'>(sourceFilter || 'all')
@@ -128,9 +193,19 @@ export default function ContactSelector({
   const searchRef = useRef<HTMLInputElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
   const peopleRequestRef = useRef(0)
+  const peopleAbortRef = useRef<AbortController | null>(null)
+  const refreshKeyRef = useRef(refreshKey)
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : ''
 
-  useAccessibleDialog(open, dialogRef, onClose, searchRef)
+  const handleDialogEscape = useCallback(() => {
+    if (showFilterDropdown) {
+      setShowFilterDropdown(false)
+      return
+    }
+    if (!submitting) onClose()
+  }, [onClose, showFilterDropdown, submitting])
+
+  useAccessibleDialog(open, dialogRef, handleDialogEscape, searchRef)
 
   // Debounce search
   useEffect(() => {
@@ -145,11 +220,25 @@ export default function ContactSelector({
       if (useAdvanced) fetchDevices()
     } else {
       peopleRequestRef.current += 1
+      peopleAbortRef.current?.abort()
+      peopleAbortRef.current = null
       // Reset state on close
       setSearch('')
       setDebouncedSearch('')
       setResults([])
+      setTotal(0)
+      setLoading(false)
+      setLoadingMore(false)
+      setHasMore(false)
+      setNextOffset(0)
+      setLoadError('')
+      setLoadMoreError('')
+      setCandidateCounts(null)
+      setCandidateMetadataLoaded(false)
+      setEventHasRules(false)
+      setCandidateEventStatus('')
       setSelected(new Map())
+      setSelectionNotice('')
       setSourceType(sourceFilter || 'all')
       setFilterTagIds(new Set())
       setHasPhone(false)
@@ -173,6 +262,15 @@ export default function ContactSelector({
     if (!open) return
     fetchPeople()
   }, [debouncedSearch, sourceType, filterTagIds, hasPhone, open, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDevice, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, formulaType, formulaText])
+
+  useEffect(() => {
+    if (refreshKeyRef.current === refreshKey) return
+    refreshKeyRef.current = refreshKey
+    if (!open) return
+    setSelected(new Map())
+    setSelectionNotice('')
+    fetchPeople(0, false)
+  }, [refreshKey, open])
 
   // Click outside to close filter dropdown
   useEffect(() => {
@@ -202,11 +300,98 @@ export default function ContactSelector({
     } catch (e) { console.error(e) }
   }, [token])
 
-  const fetchPeople = useCallback(async () => {
+  const fetchPeople = useCallback(async (offset = 0, append = false) => {
+    peopleAbortRef.current?.abort()
+    const abortController = new AbortController()
+    peopleAbortRef.current = abortController
     const requestId = ++peopleRequestRef.current
-    setLoading(true)
+    if (append) setLoadingMore(true)
+    else setLoading(true)
+    if (append) setLoadMoreError('')
+    else {
+      setLoadError('')
+      setLoadMoreError('')
+    }
     try {
-      if (useAdvanced) {
+      const pageLimit = 50
+      const applyPage = (mapped: PersonResult[], rawCount: number, data: any) => {
+        if (requestId !== peopleRequestRef.current) return
+        setResults(previous => {
+          if (!append) return mapped
+          const byID = new Map(previous.map(person => [person.id, person]))
+          mapped.forEach(person => byID.set(person.id, person))
+          return Array.from(byID.values())
+        })
+        const responseTotal = Number(data.total || 0)
+        setTotal(responseTotal)
+        setNextOffset(offset + rawCount)
+        setHasMore(Boolean(data.has_more ?? (offset + rawCount < responseTotal)))
+      }
+
+      if (eventId) {
+        const params = new URLSearchParams()
+        if (debouncedSearch) params.set('search', debouncedSearch)
+        if (filterTagIds.size > 0) params.set('tag_ids', Array.from(filterTagIds).join(','))
+        if (hasPhone) params.set('has_phone', 'true')
+        params.set('limit', String(pageLimit))
+        params.set('offset', String(offset))
+
+        const res = await fetch(`/api/events/${eventId}/participant-candidates?${params}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: abortController.signal,
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.success) throw new Error('candidate_search_failed')
+
+        const rawCandidates = (data.candidates || []) as any[]
+        const mapped: PersonResult[] = rawCandidates.map(candidate => {
+          const contact = candidate.contact || {}
+          const rawTags = Array.isArray(contact.structured_tags) && contact.structured_tags.length > 0
+            ? contact.structured_tags
+            : Array.isArray(contact.tags) ? contact.tags : []
+          const mappedTags = rawTags.map((tag: any) => typeof tag === 'string'
+            ? { id: tag, name: tag, color: '#64748b' }
+            : { id: tag.id || tag.name, name: tag.name, color: tag.color || '#64748b' })
+          const extraPhones = Array.isArray(contact.extra_phones)
+            ? contact.extra_phones
+              .filter((phone: any) => typeof phone?.phone === 'string' && phone.phone.trim())
+              .map((phone: any) => ({ phone: phone.phone, label: phone.label || '' }))
+            : []
+          return {
+            id: contact.id,
+            name: contact.custom_name || contact.short_name || contact.name || contact.push_name || contact.phone || '',
+            phone: contact.phone || '',
+            phones: extraPhones,
+            email: contact.email || '',
+            source_type: 'contact' as const,
+            tags: mappedTags,
+            membership_status: candidate.membership_status,
+            eligibility: candidate.eligibility,
+            can_add: Boolean(candidate.can_add),
+            participant_id: candidate.participant_id,
+            stage_id: candidate.stage_id,
+            stage_name: candidate.stage_name,
+            stage_color: candidate.stage_color,
+            membership_source: candidate.membership_source,
+            membership_reason: candidate.membership_reason,
+          }
+        }).filter(person => Boolean(person.id))
+
+        if (requestId === peopleRequestRef.current) {
+          const counts = data.counts || {}
+          setCandidateCounts({
+            matches: Number(counts.matches ?? data.total ?? 0),
+            available: Number(counts.available ?? mapped.filter(person => person.can_add).length),
+            already_active: Number(counts.already_active ?? mapped.filter(person => person.membership_status === 'active').length),
+            inactive: Number(counts.inactive ?? mapped.filter(person => person.membership_status === 'inactive').length),
+            ineligible: Number(counts.ineligible ?? mapped.filter(person => person.eligibility === 'rule_ineligible').length),
+          })
+          setEventHasRules(Boolean(data.has_rules ?? data.has_membership_rules))
+          setCandidateEventStatus(data.event_status || '')
+          setCandidateMetadataLoaded(true)
+        }
+        applyPage(mapped, rawCandidates.length, data)
+      } else if (useAdvanced) {
         // Advanced path: use /api/contacts with full filter support
         const params = new URLSearchParams()
         if (debouncedSearch) params.set('search', debouncedSearch)
@@ -231,15 +416,18 @@ export default function ContactSelector({
           }
         }
 
-        params.set('limit', '100')
+        params.set('limit', String(pageLimit))
+        params.set('offset', String(offset))
         params.set('has_phone', 'false')
         if (withoutActiveLead) params.set('without_active_lead', 'true')
 
         const res = await fetch(`/api/contacts?${params}`, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: abortController.signal,
         })
-        const data = await res.json()
-        if (requestId === peopleRequestRef.current && data.success) {
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.success) throw new Error('people_search_failed')
+        if (requestId === peopleRequestRef.current) {
           // Map Contact → PersonResult
           const contacts = (data.contacts || []) as any[]
           const mapped: PersonResult[] = contacts.map((c: any) => ({
@@ -249,12 +437,9 @@ export default function ContactSelector({
             email: c.email || '',
             source_type: 'contact' as const,
             tags: (c.structured_tags || []).map((t: any) => ({ id: t.id, name: t.name, color: t.color })),
+            excluded: Boolean(excludeIds?.has(c.id)),
           }))
-          const filtered = excludeIds
-            ? mapped.filter(p => !excludeIds.has(p.id))
-            : mapped
-          setResults(filtered)
-          setTotal(data.total || 0)
+          applyPage(mapped, contacts.length, data)
         }
       } else {
         // Basic path: use /api/people/search
@@ -263,39 +448,78 @@ export default function ContactSelector({
         if (sourceType !== 'all') params.set('type', sourceType)
         if (filterTagIds.size > 0) params.set('tag_ids', Array.from(filterTagIds).join(','))
         if (hasPhone) params.set('has_phone', 'true')
-        params.set('limit', '100')
+        params.set('limit', String(pageLimit))
+        params.set('offset', String(offset))
 
         const res = await fetch(`/api/people/search?${params}`, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: abortController.signal,
         })
-        const data = await res.json()
-        if (requestId === peopleRequestRef.current && data.success) {
-          const filtered = excludeIds
-            ? (data.people || []).filter((p: PersonResult) => !excludeIds.has(p.id))
-            : data.people || []
-          setResults(filtered)
-          setTotal(data.total || 0)
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.success) throw new Error('people_search_failed')
+        if (requestId === peopleRequestRef.current) {
+          const people = (data.people || []) as PersonResult[]
+          const mapped = people.map(person => ({ ...person, excluded: Boolean(excludeIds?.has(person.id)) }))
+          applyPage(mapped, people.length, data)
         }
       }
     } catch (e) {
-      if (requestId === peopleRequestRef.current) console.error(e)
+      if (abortController.signal.aborted) return
+      if (requestId === peopleRequestRef.current) {
+        console.error(e)
+        if (append) {
+          setLoadMoreError('No pudimos cargar más contactos. Los resultados anteriores siguen disponibles.')
+        } else {
+          setLoadError('No pudimos cargar los contactos. Revisa tu conexión e inténtalo nuevamente.')
+          setResults([])
+          setTotal(0)
+          setHasMore(false)
+          setCandidateCounts(null)
+          setCandidateMetadataLoaded(false)
+        }
+      }
     } finally {
-      if (requestId === peopleRequestRef.current) setLoading(false)
+      if (requestId === peopleRequestRef.current) {
+        if (peopleAbortRef.current === abortController) peopleAbortRef.current = null
+        setLoading(false)
+        setLoadingMore(false)
+      }
     }
-  }, [debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
+  }, [debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, eventId, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
+
+  const isSelectable = useCallback((person: PersonResult) => {
+    if (eventId) return person.can_add === true
+    return !person.excluded
+  }, [eventId])
 
   const toggleSelect = (person: PersonResult) => {
+    if (!isSelectable(person)) return
     const next = new Map(selected)
     if (next.has(person.id)) {
       next.delete(person.id)
+      setSelectionNotice('')
     } else {
+      if (next.size >= MAX_SELECTION) {
+        setSelectionNotice(`Puedes agregar hasta ${MAX_SELECTION} contactos en una sola operación.`)
+        return
+      }
       next.set(person.id, {
         id: person.id,
         name: person.name,
         phone: person.phone,
+        phones: person.phones,
         email: person.email,
         source_type: person.source_type,
         tags: person.tags,
+        membership_status: person.membership_status,
+        eligibility: person.eligibility,
+        can_add: person.can_add,
+        participant_id: person.participant_id,
+        stage_id: person.stage_id,
+        stage_name: person.stage_name,
+        stage_color: person.stage_color,
+        membership_source: person.membership_source,
+        membership_reason: person.membership_reason,
       })
     }
     setSelected(next)
@@ -304,14 +528,25 @@ export default function ContactSelector({
   const selectAll = () => {
     const next = new Map(selected)
     results.forEach(p => {
-      if (!next.has(p.id)) {
-        next.set(p.id, { id: p.id, name: p.name, phone: p.phone, email: p.email, source_type: p.source_type, tags: p.tags })
+      if (next.size < MAX_SELECTION && isSelectable(p) && !next.has(p.id)) {
+        next.set(p.id, {
+          id: p.id, name: p.name, phone: p.phone, phones: p.phones, email: p.email, source_type: p.source_type, tags: p.tags,
+          membership_status: p.membership_status, eligibility: p.eligibility, can_add: p.can_add,
+          participant_id: p.participant_id, stage_id: p.stage_id, stage_name: p.stage_name,
+          stage_color: p.stage_color, membership_source: p.membership_source, membership_reason: p.membership_reason,
+        })
       }
     })
+    if (results.some(person => isSelectable(person) && !next.has(person.id))) {
+      setSelectionNotice(`Se seleccionaron los primeros ${MAX_SELECTION}. Agrega el resto en otra operación.`)
+    } else {
+      setSelectionNotice('')
+    }
     setSelected(next)
   }
 
   const handleConfirm = () => {
+    if (submitting) return
     onConfirm(Array.from(selected.values()))
   }
 
@@ -329,19 +564,21 @@ export default function ContactSelector({
     }
     return tag.name.toLowerCase().includes(term.toLowerCase())
   })
+  const selectableResults = results.filter(isSelectable)
+  const eventIsFrozen = candidateEventStatus === 'completed' || candidateEventStatus === 'cancelled'
 
   if (!open) return null
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-0 backdrop-blur-sm sm:p-4">
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="contact-selector-title" aria-describedby="contact-selector-description" tabIndex={-1} className="flex h-full max-h-none w-full max-w-5xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-3xl">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="contact-selector-title" aria-describedby="contact-selector-description" aria-busy={submitting} tabIndex={-1} className="flex h-full max-h-none w-full max-w-5xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-3xl">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
             <h2 id="contact-selector-title" className="text-lg font-semibold text-gray-900">{title}</h2>
             <p id="contact-selector-description" className="text-sm text-gray-500 mt-0.5">{subtitle}</p>
           </div>
-          <button onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar selector de contactos">
+          <button onClick={onClose} disabled={submitting} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar selector de contactos">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -782,6 +1019,19 @@ export default function ContactSelector({
               )}
             </div>
           )}
+
+          {eventId && !loading && !loadError && candidateMetadataLoaded && (
+            <div className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 text-xs ${eventIsFrozen ? 'border-slate-200 bg-slate-50 text-slate-600' : eventHasRules ? 'border-amber-200 bg-amber-50/70 text-amber-800' : 'border-emerald-200 bg-emerald-50/70 text-emerald-800'}`}>
+              {eventIsFrozen ? <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /> : eventHasRules ? <Filter className="mt-0.5 h-4 w-4 shrink-0" /> : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />}
+              <p>
+                {eventIsFrozen
+                  ? 'Este evento está cerrado y sus participantes son de solo lectura.'
+                  : eventHasRules
+                    ? 'Solo puedes agregar contactos que cumplan las reglas actuales del evento. Los demás se muestran con el motivo del bloqueo.'
+                    : 'Este evento no tiene reglas: puedes agregar cualquier contacto disponible de la cuenta.'}
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Results */}
@@ -790,12 +1040,15 @@ export default function ContactSelector({
           <div className="flex items-center justify-between px-6 py-2.5 bg-gray-50 border-b border-gray-100">
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500">
-                {loading ? 'Buscando...' : `${results.length} resultado${results.length !== 1 ? 's' : ''}`}
-                {total > results.length && ` de ${total}`}
+                {loading
+                  ? 'Buscando…'
+                  : eventId && candidateCounts
+                    ? `${candidateCounts.matches} coincidencia${candidateCounts.matches !== 1 ? 's' : ''} · ${candidateCounts.available} para añadir · ${candidateCounts.already_active} ya participa${candidateCounts.already_active !== 1 ? 'n' : ''}`
+                    : `${total} resultado${total !== 1 ? 's' : ''}`}
               </span>
-              {results.length > 0 && (
+              {selectableResults.length > 0 && (
                 <button onClick={selectAll} className="text-xs text-green-600 hover:text-green-700 font-medium">
-                  Seleccionar todos
+                  Seleccionar disponibles mostrados
                 </button>
               )}
             </div>
@@ -816,12 +1069,18 @@ export default function ContactSelector({
                     <span className={`px-1 py-0 rounded text-[9px] font-bold ${p.source_type === 'contact' ? 'bg-blue-100 text-blue-600' : 'bg-purple-100 text-purple-600'}`}>
                       {p.source_type === 'contact' ? 'C' : 'L'}
                     </span>
-                    <button onClick={() => { const n = new Map(selected); n.delete(p.id); setSelected(n) }} className="hover:text-green-900">
+                    <button onClick={() => { const n = new Map(selected); n.delete(p.id); setSelected(n); setSelectionNotice('') }} className="hover:text-green-900">
                       <X className="w-3 h-3" />
                     </button>
                   </span>
                 ))}
               </div>
+            </div>
+          )}
+
+          {selectionNotice && (
+            <div role="status" className="mx-6 mt-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {selectionNotice}
             </div>
           )}
 
@@ -833,85 +1092,149 @@ export default function ContactSelector({
                   <div key={i} className="h-14 bg-gray-100 rounded-lg animate-pulse" />
                 ))}
               </div>
+            ) : loadError ? (
+              <div className="flex flex-col items-center justify-center py-16 text-center" role="alert">
+                <div className="mb-3 rounded-2xl bg-red-50 p-3 text-red-500"><AlertCircle className="h-7 w-7" /></div>
+                <p className="font-medium text-slate-700">No pudimos cargar los contactos</p>
+                <p className="mt-1 max-w-sm text-sm text-slate-500">{loadError}</p>
+                <button type="button" onClick={() => fetchPeople(0, false)} className="mt-4 inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
+                  <RotateCcw className="h-4 w-4" /> Reintentar
+                </button>
+              </div>
             ) : results.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Users className="w-12 h-12 text-gray-300 mb-3" />
                 <p className="text-gray-500 font-medium">
-                  {debouncedSearch || activeFilterCount > 0 ? 'No se encontraron resultados' : 'Escribe para buscar contactos y leads'}
+                  {debouncedSearch || activeFilterCount > 0 ? 'No se encontraron coincidencias' : eventId ? 'Busca un contacto para añadirlo' : 'Escribe para buscar contactos y leads'}
                 </p>
                 <p className="text-gray-400 text-sm mt-1">
-                  {debouncedSearch ? 'Intenta con otro término o ajusta los filtros' : 'La búsqueda es por nombre, teléfono o email'}
+                  {debouncedSearch ? 'Prueba con otro nombre, teléfono o correo' : 'Puedes buscar por nombre, teléfono o email'}
                 </p>
               </div>
             ) : (
-              <div className="space-y-1 py-1">
+              <div className="space-y-2 py-1">
                 {results.map(person => {
                   const isSelected = selected.has(person.id)
+                  const selectable = isSelectable(person) && (isSelected || selected.size < MAX_SELECTION)
+                  const isActiveParticipant = person.membership_status === 'active'
+                  const extraPhones = (person.phones || []).filter(item => item.phone !== person.phone)
+                  const reasonLabel = membershipReasonLabel(person.membership_reason)
+                  let statusLabel = ''
+                  let statusClass = ''
+                  if (isActiveParticipant) {
+                    statusLabel = `Ya participa${person.stage_name ? ` · ${person.stage_name}` : ''}`
+                    statusClass = 'border-blue-200 bg-blue-50 text-blue-700'
+                  } else if (person.eligibility === 'rule_ineligible') {
+                    statusLabel = 'No cumple las reglas'
+                    statusClass = 'border-amber-200 bg-amber-50 text-amber-700'
+                  } else if (person.eligibility === 'event_frozen') {
+                    statusLabel = 'Evento cerrado'
+                    statusClass = 'border-slate-200 bg-slate-100 text-slate-600'
+                  } else if (person.excluded) {
+                    statusLabel = 'Ya agregado'
+                    statusClass = 'border-slate-200 bg-slate-100 text-slate-600'
+                  } else if (person.membership_status === 'inactive') {
+                    statusLabel = 'Disponible para reactivar'
+                    statusClass = 'border-violet-200 bg-violet-50 text-violet-700'
+                  } else if (eventId) {
+                    statusLabel = 'Disponible'
+                    statusClass = 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  }
                   return (
-                    <button
-                      key={person.id}
-                      onClick={() => toggleSelect(person)}
-                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg border text-left transition-all ${
-                        isSelected ? 'border-green-300 bg-green-50 shadow-sm' : 'border-gray-200 hover:bg-gray-50 hover:border-gray-300'
-                      }`}
-                    >
-                      <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0 ${
-                        isSelected ? 'bg-green-200 text-green-700' : 'bg-gray-200 text-gray-600'
-                      }`}>
-                        {person.name ? person.name.charAt(0).toUpperCase() : '?'}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-medium text-gray-900 truncate">{person.name || 'Sin nombre'}</p>
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                            person.source_type === 'contact'
-                              ? 'bg-blue-100 text-blue-600'
-                              : 'bg-purple-100 text-purple-600'
-                          }`}>
-                            {person.source_type === 'contact' ? 'Contacto' : 'Lead'}
-                          </span>
+                    <div key={person.id} className={`flex items-stretch overflow-hidden rounded-xl border transition ${isSelected ? 'border-emerald-300 bg-emerald-50/70 shadow-sm' : selectable ? 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/60' : 'border-slate-200 bg-slate-50/70'}`}>
+                      <button type="button" disabled={!selectable} onClick={() => toggleSelect(person)} className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left disabled:cursor-default">
+                        <div className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-xs font-semibold ${isSelected ? 'bg-emerald-200 text-emerald-800' : selectable ? 'bg-slate-200 text-slate-600' : 'bg-slate-100 text-slate-400'}`}>
+                          {person.name ? person.name.charAt(0).toUpperCase() : '?'}
                         </div>
-                        <div className="flex items-center gap-3 mt-0.5">
-                          {person.phone && <span className="text-xs text-gray-500">{person.phone}</span>}
-                          {person.email && <span className="text-xs text-gray-400">{person.email}</span>}
-                        </div>
-                        {person.tags && person.tags.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-1">
-                            {person.tags.slice(0, 4).map(tag => (
-                              <span
-                                key={tag.id}
-                                className="px-1.5 py-0.5 text-[10px] rounded-full text-white font-medium"
-                                style={{ backgroundColor: tag.color || '#6b7280' }}
-                              >
-                                {tag.name}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className={`truncate text-sm font-medium ${selectable ? 'text-slate-900' : 'text-slate-600'}`}>{person.name || 'Sin nombre'}</p>
+                            {statusLabel && (
+                              <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusClass}`}>
+                                {person.stage_color && isActiveParticipant && <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: person.stage_color }} />}
+                                {statusLabel}
                               </span>
-                            ))}
-                            {person.tags.length > 4 && (
-                              <span className="text-[10px] text-gray-400">+{person.tags.length - 4}</span>
                             )}
                           </div>
-                        )}
-                      </div>
-                      {isSelected && <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />}
-                    </button>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                            {person.phone && <span className="text-xs text-slate-500">{person.phone}</span>}
+                            {extraPhones.slice(0, 2).map((item, index) => (
+                              <span key={`${item.phone}-${index}`} className="text-xs text-slate-400">
+                                {item.phone}{item.label ? ` · ${item.label}` : ''}
+                              </span>
+                            ))}
+                            {extraPhones.length > 2 && <span className="text-[10px] font-medium text-slate-400">+{extraPhones.length - 2} teléfonos</span>}
+                            {person.email && <span className="truncate text-xs text-slate-400">{person.email}</span>}
+                          </div>
+                          {person.tags && person.tags.length > 0 && (
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              {person.tags.slice(0, 4).map(tag => (
+                                <span key={tag.id} className="rounded-full px-1.5 py-0.5 text-[10px] font-medium text-white" style={{ backgroundColor: tag.color || '#6b7280' }}>{tag.name}</span>
+                              ))}
+                              {person.tags.length > 4 && <span className="text-[10px] text-slate-400">+{person.tags.length - 4}</span>}
+                            </div>
+                          )}
+                          {(person.eligibility === 'rule_ineligible' || reasonLabel) && (
+                            <p className={`mt-1.5 text-xs ${person.eligibility === 'rule_ineligible' ? 'text-amber-700' : 'text-slate-500'}`}>
+                              {reasonLabel || 'Ajusta sus etiquetas para que cumpla la configuración del evento.'}
+                            </p>
+                          )}
+                        </div>
+                        {isSelected && <CheckCircle2 className="h-5 w-5 flex-shrink-0 text-emerald-600" />}
+                        {!isSelected && selectable && person.membership_status === 'inactive' && <RotateCcw className="h-4 w-4 flex-shrink-0 text-violet-500" />}
+                        {!isSelected && selectable && person.membership_status !== 'inactive' && eventId && <UserCheck className="h-4 w-4 flex-shrink-0 text-emerald-500" />}
+                      </button>
+                      {isActiveParticipant && person.participant_id && onViewExisting && (
+                        <button
+                          type="button"
+                          onClick={() => onViewExisting({ ...person })}
+                          className="inline-flex shrink-0 items-center gap-1.5 border-l border-slate-200 px-3 text-xs font-semibold text-blue-700 transition hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
+                        >
+                          <Eye className="h-4 w-4" /> <span className="hidden sm:inline">Ver participante</span>
+                        </button>
+                      )}
+                    </div>
                   )
                 })}
+                {hasMore && !loadMoreError && (
+                  <div className="flex justify-center py-3">
+                    <button type="button" onClick={() => fetchPeople(nextOffset, true)} disabled={loadingMore} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">
+                      {loadingMore && <Loader2 className="h-4 w-4 animate-spin" />}
+                      {loadingMore ? 'Cargando…' : 'Cargar más'}
+                    </button>
+                  </div>
+                )}
+                {loadMoreError && (
+                  <div role="alert" className="mx-auto my-2 flex max-w-lg items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-800">
+                    <span>{loadMoreError}</span>
+                    <button type="button" onClick={() => fetchPeople(nextOffset, true)} disabled={loadingMore} className="shrink-0 rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 font-semibold transition hover:bg-amber-100 disabled:cursor-wait disabled:opacity-60">
+                      {loadingMore ? 'Reintentando…' : 'Reintentar'}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
         </div>
 
         {/* Footer */}
+        {errorMessage && (
+          <div role="alert" className="mx-6 mb-0 flex items-start gap-2 rounded-t-xl border border-b-0 border-red-200 bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <p>{errorMessage}</p>
+          </div>
+        )}
         <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
-          <button onClick={onClose} className="min-h-11 rounded-xl px-4 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+          <button onClick={onClose} disabled={submitting} className="min-h-11 rounded-xl px-4 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
             Cancelar
           </button>
           <button
             onClick={handleConfirm}
-            disabled={selected.size === 0}
-            className="min-h-11 rounded-xl bg-green-600 px-6 text-sm font-medium text-white shadow-sm transition-colors hover:bg-green-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 focus-visible:ring-offset-2"
+            disabled={selected.size === 0 || submitting || eventIsFrozen}
+            className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-green-600 px-6 text-sm font-medium text-white shadow-sm transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 focus-visible:ring-offset-2"
           >
-            {confirmLabel} {selected.size > 0 ? `(${selected.size})` : ''}
+            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+            {submitting ? 'Agregando…' : confirmLabel} {!submitting && selected.size > 0 ? `(${selected.size})` : ''}
           </button>
         </div>
       </div>

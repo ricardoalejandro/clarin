@@ -245,7 +245,7 @@ func buildContactLiteral(node *Node, args []interface{}, argIdx int) (string, []
 		cond = fmt.Sprintf("LOWER(t.name) = $%d", argIdx)
 	}
 	sql := fmt.Sprintf(
-		`SELECT DISTINCT ct.contact_id AS contact_id FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id JOIN contacts c ON c.id = ct.contact_id WHERE c.account_id = $1 AND c.is_group = false AND %s`,
+		`SELECT DISTINCT ct.contact_id AS contact_id FROM contact_tags ct JOIN contacts c ON c.id = ct.contact_id JOIN tags t ON t.id = ct.tag_id AND t.account_id = c.account_id WHERE c.account_id = $1 AND c.is_group = false AND %s`,
 		cond,
 	)
 	args = append(args, node.Value)

@@ -75,6 +75,7 @@ interface Event {
   participant_counts?: Record<string, number>
   pipeline_id?: string; pipeline_name?: string
   tag_formula?: string; tag_formula_type?: string; tag_formula_mode?: string
+  has_membership_rules?: boolean
 }
 
 interface TagItem {
@@ -93,6 +94,26 @@ interface Participant {
   duplicate_contact?: boolean
   is_archived?: boolean
   is_blocked?: boolean
+  auto_tag_sync?: boolean
+  membership_state?: string
+  membership_source?: string
+  membership_reason?: string
+  membership_changed_at?: string
+  active_lead_count?: number
+  related_leads?: RelatedLeadSummary[]
+}
+
+interface RelatedLeadSummary {
+  id: string
+  title: string
+  status: string
+  pipeline_id?: string
+  pipeline_name?: string
+  stage_id?: string
+  stage_name?: string
+  stage_color?: string
+  is_archived: boolean
+  updated_at: string
 }
 
 interface PipelineStage {
@@ -203,6 +224,7 @@ interface ParticipantCardProps {
   isDragged: boolean
   selectionMode: boolean
   canDrag?: boolean
+  canDelete?: boolean
   onToggleSelection: (id: string) => void
   onOpenDetail: (p: Participant) => void
   onDelete: (id: string) => void
@@ -213,6 +235,7 @@ interface ParticipantCardProps {
 const ParticipantCard = memo(function ParticipantCard({
   participant: p, isSelected, isDetailActive, isDragged, selectionMode,
   canDrag = true,
+  canDelete = true,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd,
 }: ParticipantCardProps) {
   return (
@@ -247,7 +270,7 @@ const ParticipantCard = memo(function ParticipantCard({
             </span>
           )}
         </div>
-        {!selectionMode && (
+        {!selectionMode && canDelete && (
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(p.id) }}
             className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
@@ -443,6 +466,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
                     onDragStart={onDragStart}
                     onDragEnd={onDragEnd}
                     canDrag={canDragParticipants}
+                    canDelete={canDragParticipants}
                   />
                 </div>
               </div>
@@ -478,6 +502,10 @@ export default function EventDetailPage() {
   const [pipelineStages, setPipelineStages] = useState<PipelineStage[]>([])
   const [loading, setLoading] = useState(true)
   const [loadingMoreStages, setLoadingMoreStages] = useState<Set<string>>(new Set())
+  const participantRequestRef = useRef(0)
+  const participantAbortRef = useRef<AbortController | null>(null)
+  const participantGenerationRef = useRef(0)
+  const stageAbortRefs = useRef<Map<string, AbortController>>(new Map())
 
   // UI state
   const [viewMode, setViewMode] = useState<'kanban' | 'list' | 'logbook'>('kanban')
@@ -512,6 +540,11 @@ export default function EventDetailPage() {
   // Detail panel
   const [showDetailPanel, setShowDetailPanel] = useState(false)
   const [detailParticipant, setDetailParticipant] = useState<Participant | null>(null)
+  const [detailParticipantLoading, setDetailParticipantLoading] = useState(false)
+  const [detailParticipantError, setDetailParticipantError] = useState('')
+  const detailParticipantRequestRef = useRef(0)
+  const detailPanelDialogRef = useRef<HTMLDivElement>(null)
+  const detailPreviousFocusRef = useRef<HTMLElement | null>(null)
   const [showMembershipHistory, setShowMembershipHistory] = useState(false)
   const [membershipHistory, setMembershipHistory] = useState<MembershipHistoryEntry[]>([])
   const [membershipHistoryLoading, setMembershipHistoryLoading] = useState(false)
@@ -538,6 +571,8 @@ export default function EventDetailPage() {
   const [addTab, setAddTab] = useState<'search' | 'manual'>('search')
   const [manualForm, setManualForm] = useState({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
   const [addingParticipant, setAddingParticipant] = useState(false)
+  const [addParticipantError, setAddParticipantError] = useState('')
+  const [participantCandidatesRevision, setParticipantCandidatesRevision] = useState(0)
   const manualContactDialogRef = useRef<HTMLDivElement>(null)
   const manualContactNameRef = useRef<HTMLInputElement>(null)
   const doNotContactDialogRef = useRef<HTMLDivElement>(null)
@@ -586,6 +621,8 @@ export default function EventDetailPage() {
   const [listHasMore, setListHasMore] = useState(false)
   const [listLoading, setListLoading] = useState(false)
   const listOffsetRef = useRef(0)
+  const listRequestRef = useRef(0)
+  const listAbortRef = useRef<AbortController | null>(null)
   const listScrollRef = useRef<HTMLDivElement>(null)
   const [listObservations, setListObservations] = useState<Map<string, Observation[]>>(new Map())
   const [loadingListObs, setLoadingListObs] = useState<Set<string>>(new Set())
@@ -696,6 +733,14 @@ export default function EventDetailPage() {
   }, [eventId])
 
   const fetchParticipantsPaginated = useCallback(async () => {
+    participantAbortRef.current?.abort()
+    stageAbortRefs.current.forEach(controller => controller.abort())
+    stageAbortRefs.current.clear()
+    setLoadingMoreStages(new Set())
+    const abortController = new AbortController()
+    participantAbortRef.current = abortController
+    const requestId = ++participantRequestRef.current
+    participantGenerationRef.current += 1
     try {
       const params = new URLSearchParams()
       params.set('per_stage', '50')
@@ -717,23 +762,31 @@ export default function EventDetailPage() {
       }
       const res = await fetch(`/api/events/${eventId}/participants/paginated?${params}`, {
         headers: { Authorization: `Bearer ${getToken()}` },
+        signal: abortController.signal,
       })
       const data = await res.json()
-      if (data.success) {
+      if (requestId === participantRequestRef.current && data.success) {
         setStageData((data.stages || []).map((s: StageData) => ({ ...s, participants: s.participants || [] })))
         const ua = data.unassigned || { total_count: 0, participants: [], has_more: false }
         setUnassignedData({ ...ua, participants: ua.participants || [] })
         setAllTags(data.all_tags || [])
       }
     } catch (err) {
+      if (abortController.signal.aborted) return
       console.error('Failed to fetch participants:', err)
     } finally {
-      setLoading(false)
+      if (requestId === participantRequestRef.current) {
+        if (participantAbortRef.current === abortController) participantAbortRef.current = null
+        setLoading(false)
+      }
     }
   }, [eventId, debouncedSearch, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const loadMoreForStage = useCallback(async (stageId: string) => {
-    if (loadingMoreStages.has(stageId)) return
+    if (stageAbortRefs.current.has(stageId)) return
+    const abortController = new AbortController()
+    stageAbortRefs.current.set(stageId, abortController)
+    const generation = participantGenerationRef.current
     setLoadingMoreStages(prev => new Set(prev).add(stageId))
     try {
       const isUnassigned = stageId === '__unassigned__'
@@ -761,24 +814,43 @@ export default function EventDetailPage() {
       const endpoint = isUnassigned ? 'unassigned' : stageId
       const res = await fetch(`/api/events/${eventId}/participants/by-stage/${endpoint}?${params}`, {
         headers: { Authorization: `Bearer ${getToken()}` },
+        signal: abortController.signal,
       })
       const data = await res.json()
-      if (data.success) {
+      if (generation === participantGenerationRef.current && stageAbortRefs.current.get(stageId) === abortController && data.success) {
         const newP = data.participants || []
         if (isUnassigned) {
-          setUnassignedData(prev => ({ ...prev, participants: [...prev.participants, ...newP], has_more: data.has_more }))
+          setUnassignedData(prev => {
+            const byID = new Map(prev.participants.map(participant => [participant.id, participant]))
+            newP.forEach((participant: Participant) => byID.set(participant.id, participant))
+            return { ...prev, participants: Array.from(byID.values()), has_more: data.has_more }
+          })
         } else {
-          setStageData(prev => prev.map(s => s.id === stageId ? { ...s, participants: [...s.participants, ...newP], has_more: data.has_more } : s))
+          setStageData(prev => prev.map(s => {
+            if (s.id !== stageId) return s
+            const byID = new Map(s.participants.map(participant => [participant.id, participant]))
+            newP.forEach((participant: Participant) => byID.set(participant.id, participant))
+            return { ...s, participants: Array.from(byID.values()), has_more: data.has_more }
+          }))
         }
       }
     } catch (err) {
+      if (abortController.signal.aborted) return
       console.error('Failed to load more:', err)
     } finally {
-      setLoadingMoreStages(prev => { const next = new Set(prev); next.delete(stageId); return next })
+      if (stageAbortRefs.current.get(stageId) === abortController) {
+        stageAbortRefs.current.delete(stageId)
+        setLoadingMoreStages(prev => { const next = new Set(prev); next.delete(stageId); return next })
+      }
     }
-  }, [loadingMoreStages, stageData, unassignedData, eventId, debouncedSearch, filterTagNames, excludeFilterTagNames, tagFilterMode, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [stageData, unassignedData, eventId, debouncedSearch, filterTagNames, excludeFilterTagNames, tagFilterMode, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const fetchListParticipants = useCallback(async (reset: boolean = false) => {
+    if (!reset && listAbortRef.current) return
+    listAbortRef.current?.abort()
+    const abortController = new AbortController()
+    listAbortRef.current = abortController
+    const requestId = ++listRequestRef.current
     setListLoading(true)
     const offset = reset ? 0 : listOffsetRef.current
     try {
@@ -803,24 +875,33 @@ export default function EventDetailPage() {
       }
       const res = await fetch(`/api/events/${eventId}/participants?${params}`, {
         headers: { Authorization: `Bearer ${getToken()}` },
+        signal: abortController.signal,
       })
       const data = await res.json()
-      if (data.success) {
+      if (requestId === listRequestRef.current && data.success) {
         const participants = data.participants || []
         if (reset) {
           setListParticipants(participants)
           listOffsetRef.current = participants.length
         } else {
-          setListParticipants(prev => [...prev, ...participants])
+          setListParticipants(prev => {
+            const byID = new Map(prev.map(participant => [participant.id, participant]))
+            participants.forEach((participant: Participant) => byID.set(participant.id, participant))
+            return Array.from(byID.values())
+          })
           listOffsetRef.current = offset + participants.length
         }
         setListTotal(data.total || participants.length)
         setListHasMore(participants.length >= 100)
       }
     } catch (err) {
+      if (abortController.signal.aborted) return
       console.error('Failed to fetch list participants:', err)
     } finally {
-      setListLoading(false)
+      if (requestId === listRequestRef.current) {
+        if (listAbortRef.current === abortController) listAbortRef.current = null
+        setListLoading(false)
+      }
     }
   }, [eventId, debouncedSearch, filterStageIds, filterTagNames, excludeFilterTagNames, tagFilterMode, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
@@ -906,6 +987,9 @@ export default function EventDetailPage() {
     stageData.reduce((sum, s) => sum + s.total_count, 0) + unassignedData.total_count,
     [stageData, unassignedData]
   )
+  const eventHasMembershipRules = event?.has_membership_rules ?? Boolean(event?.tag_formula?.trim())
+  const eventIsReadOnly = event?.status === 'completed' || event?.status === 'cancelled'
+  const detailPanelOpen = showDetailPanel || showInlineChat
 
   const activeDraftStages = useMemo(() => (
     draftStages
@@ -1335,12 +1419,6 @@ export default function EventDetailPage() {
   }, [duplicatingEvent, eventId, router])
 
   // ─── Add Participants ────────────────────────────────────────────────────────
-  const existingContactIds = useMemo(() => {
-    const ids = new Set<string>()
-    allLoadedParticipants.forEach(p => { if (p.contact_id) ids.add(p.contact_id) })
-    return ids
-  }, [allLoadedParticipants])
-
   const handleAddFromSelector = async (selected: SelectedPerson[]) => {
     if (selected.length === 0 || addingParticipant) return
     const parts = selected.map(p => ({
@@ -1348,6 +1426,7 @@ export default function EventDetailPage() {
       name: p.name, phone: p.phone || '', email: p.email || '',
     }))
     setAddingParticipant(true)
+    setAddParticipantError('')
     try {
       const res = await fetch(`/api/events/${eventId}/participants/bulk`, {
         method: 'POST',
@@ -1355,13 +1434,43 @@ export default function EventDetailPage() {
         body: JSON.stringify({ participants: parts }),
       })
       const data = await res.json()
-      if (!data.success) { alert(data.error || 'Error al agregar participantes'); return }
+      if (!res.ok || !data.success) {
+        if (data.code === 'EVENT_RULE_NOT_MATCHED' || res.status === 422) {
+          setAddParticipantError(data.error || 'Uno de los contactos ya no cumple las reglas actuales del evento. Actualiza sus etiquetas y vuelve a intentarlo.')
+        } else if (res.status === 409) {
+          setAddParticipantError(data.error || 'El evento cambió de estado y ya no permite agregar participantes.')
+        } else {
+          setAddParticipantError(data.error || 'No pudimos agregar los contactos. Revisa la selección e inténtalo nuevamente.')
+        }
+        return
+      }
+
+      const summary = data.summary || {}
+      const created = Number(summary.created || 0)
+      const reactivated = Number(summary.reactivated || 0)
+      const alreadyActive = Number(summary.already_active || 0)
+      const rejected = Number(summary.rejected || 0)
+      const changed = created + reactivated
+      if (changed > 0) {
+        fetchParticipantsPaginated()
+        fetchEvent()
+      }
+      if (rejected > 0 || (changed === 0 && alreadyActive > 0)) {
+        setParticipantCandidatesRevision(current => current + 1)
+        const completedMessage = changed > 0
+          ? `${changed} contacto${changed !== 1 ? 's se añadieron' : ' se añadió'} correctamente. `
+          : ''
+        const rejectedMessage = rejected > 0
+          ? `${rejected} no ${rejected !== 1 ? 'pudieron añadirse' : 'pudo añadirse'} porque la configuración cambió o ya no cumple las reglas.`
+          : `${alreadyActive} contacto${alreadyActive !== 1 ? 's ya formaban' : ' ya formaba'} parte del evento.`
+        setAddParticipantError(completedMessage + rejectedMessage)
+        return
+      }
       setShowAddModal(false)
-      fetchParticipantsPaginated()
-      fetchEvent()
+      setAddParticipantError('')
     } catch (error) {
       console.error('[AddEventContacts]', error)
-      alert('No se pudieron agregar los contactos. Intenta nuevamente.')
+      setAddParticipantError('No pudimos conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.')
     } finally {
       setAddingParticipant(false)
     }
@@ -1369,6 +1478,14 @@ export default function EventDetailPage() {
 
   const handleAddManual = async () => {
     if (!manualForm.name.trim() || addingParticipant) return
+    if (eventHasMembershipRules) {
+      setAddParticipantError('Este evento tiene reglas. Crea o actualiza primero el contacto y sus etiquetas; después podrás seleccionarlo cuando cumpla la configuración.')
+      return
+    }
+    if (eventIsReadOnly) {
+      setAddParticipantError('Este evento está cerrado y ya no permite registrar participantes.')
+      return
+    }
     const body: Record<string, unknown> = {
       name: manualForm.name, last_name: manualForm.last_name,
       short_name: manualForm.short_name || undefined,
@@ -1376,6 +1493,7 @@ export default function EventDetailPage() {
     }
     if (manualForm.age) body.age = parseInt(manualForm.age)
     setAddingParticipant(true)
+    setAddParticipantError('')
     try {
       const res = await fetch(`/api/events/${eventId}/participants`, {
         method: 'POST',
@@ -1383,14 +1501,18 @@ export default function EventDetailPage() {
         body: JSON.stringify(body),
       })
       const data = await res.json()
-      if (!data.success) { alert(data.error || 'Error al agregar participante'); return }
+      if (!res.ok || !data.success) {
+        setAddParticipantError(data.error || 'No se pudo registrar y agregar el contacto.')
+        return
+      }
       setShowAddModal(false)
+      setAddParticipantError('')
       setManualForm({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
       fetchParticipantsPaginated()
       fetchEvent()
     } catch (error) {
       console.error('[CreateEventContact]', error)
-      alert('No se pudo registrar el contacto. Intenta nuevamente.')
+      setAddParticipantError('No pudimos conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.')
     } finally {
       setAddingParticipant(false)
     }
@@ -1414,7 +1536,57 @@ export default function EventDetailPage() {
   const openDetailPanel = useCallback((p: Participant) => {
     setDetailParticipant(p)
     setShowDetailPanel(true)
-  }, [])
+    setDetailParticipantLoading(true)
+    setDetailParticipantError('')
+    const requestID = ++detailParticipantRequestRef.current
+    void (async () => {
+      try {
+        const response = await fetch(`/api/events/${eventId}/participants/${p.id}`, {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        })
+        const data = await response.json().catch(() => ({}))
+        if (requestID !== detailParticipantRequestRef.current) return
+        if (!response.ok || !data.success || !data.participant) {
+          if (response.status === 404) {
+            setDetailParticipantError('Este participante ya no pertenece a este evento o dejó de estar disponible. Actualiza el listado e inténtalo nuevamente.')
+            fetchParticipantsPaginated()
+          } else {
+            setDetailParticipantError(data.error || 'No pudimos cargar la ficha completa ni sus oportunidades. Inténtalo nuevamente.')
+          }
+          return
+        }
+        setDetailParticipant(data.participant as Participant)
+      } catch (error) {
+        if (requestID === detailParticipantRequestRef.current) {
+          console.error('[EventParticipantDetail]', error)
+          setDetailParticipantError('No pudimos conectar con el servidor para cargar la ficha completa. Revisa tu conexión e inténtalo nuevamente.')
+        }
+      } finally {
+        if (requestID === detailParticipantRequestRef.current) setDetailParticipantLoading(false)
+      }
+    })()
+  }, [eventId, fetchParticipantsPaginated])
+
+  const handleViewExistingParticipant = useCallback((person: SelectedPerson) => {
+    if (!person.participant_id) return
+    setShowAddModal(false)
+    setAddParticipantError('')
+    openDetailPanel({
+      id: person.participant_id,
+      event_id: eventId,
+      contact_id: person.id,
+      name: person.name,
+      phone: person.phone,
+      email: person.email,
+      status: 'invited',
+      stage_id: person.stage_id,
+      stage_name: person.stage_name,
+      stage_color: person.stage_color,
+      membership_source: person.membership_source,
+      membership_reason: person.membership_reason,
+      tags: person.tags?.map(tag => ({ ...tag, account_id: '', created_at: '' })),
+    })
+  }, [eventId, openDetailPanel])
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds(prev => {
@@ -1892,6 +2064,13 @@ export default function EventDetailPage() {
     Promise.all([fetchEvent(), fetchDevices()]).then(() => {})
   }, [fetchEvent, fetchDevices])
 
+  useEffect(() => () => {
+    participantAbortRef.current?.abort()
+    listAbortRef.current?.abort()
+    stageAbortRefs.current.forEach(controller => controller.abort())
+    stageAbortRefs.current.clear()
+  }, [])
+
   useEffect(() => {
     if (event) fetchParticipantsPaginated()
   }, [event, fetchParticipantsPaginated])
@@ -1961,26 +2140,96 @@ export default function EventDetailPage() {
     }
   }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants, fetchLogbooks, listObservations, fetchBatchObservations])
 
+  useEffect(() => {
+    if (!detailPanelOpen) return
+    detailPreviousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const frame = window.requestAnimationFrame(() => detailPanelDialogRef.current?.focus({ preventScroll: true }))
+    const trapFocus = (keyboardEvent: KeyboardEvent) => {
+      if (keyboardEvent.key !== 'Tab') return
+      const dialog = detailPanelDialogRef.current
+      if (!dialog) return
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      )).filter(element => element.offsetParent !== null)
+      if (focusable.length === 0) {
+        keyboardEvent.preventDefault()
+        dialog.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (keyboardEvent.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        keyboardEvent.preventDefault()
+        last.focus()
+      } else if (!keyboardEvent.shiftKey && document.activeElement === last) {
+        keyboardEvent.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', trapFocus, true)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', trapFocus, true)
+      detailPreviousFocusRef.current?.focus({ preventScroll: true })
+      detailPreviousFocusRef.current = null
+    }
+  }, [detailPanelOpen])
+
   // Escape key
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      if (showGoogleSyncModal) { setShowGoogleSyncModal(false); return }
-      if (showExportModal) { setShowExportModal(false); return }
-      if (showDeviceSelector) { setShowDeviceSelector(false); return }
-      if (showInlineChat) { setShowInlineChat(false); return }
-      if (showCampaignModal) { setShowCampaignModal(false); return }
-      if (showAddModal) { setShowAddModal(false); return }
-      if (showStageEditorModal) { cancelStageEditMode(); return }
-      if (showDetailPanel) { setShowDetailPanel(false); setShowInlineChat(false); return }
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+
+      // These dialogs own their Escape handling (focus trap + topmost popover).
+      // Returning here prevents the page from navigating while they are open.
+      if (showAddModal || showBlockModal || listHistoryParticipant) return
+
+      const closeLayer = (close: () => void) => {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        close()
+      }
+
+      // Close exactly one visible layer. In particular, an open filter is a
+      // popover, not a request to leave the event.
+      if (showFilterConfirmDialog) { closeLayer(() => setShowFilterConfirmDialog(false)); return }
+      if (showMembershipHistory) { closeLayer(() => setShowMembershipHistory(false)); return }
+      if (showGoogleSyncModal) { closeLayer(() => { if (!googleSyncing) setShowGoogleSyncModal(false) }); return }
+      if (showExportModal) { closeLayer(() => { if (!exporting) setShowExportModal(false) }); return }
+      if (showDeviceSelector) { closeLayer(() => setShowDeviceSelector(false)); return }
+      if (showCampaignModal) { closeLayer(() => { if (!creatingCampaign) setShowCampaignModal(false) }); return }
+      if (showInlineChat) { closeLayer(() => setShowInlineChat(false)); return }
+      if (showStageModal) { closeLayer(() => setShowStageModal(false)); return }
+      if (showNewLogbookModal) { closeLayer(() => { if (!creatingLogbook) setShowNewLogbookModal(false) }); return }
+      if (showLogbookSettingsModal) { closeLayer(() => { if (!logbookSettingsUpdating) setShowLogbookSettingsModal(false) }); return }
+      if (showStageEditorModal) { closeLayer(cancelStageEditMode); return }
+      if (showMoreMenu) { closeLayer(() => setShowMoreMenu(false)); return }
+      if (showFilterDropdown) { closeLayer(() => setShowFilterDropdown(false)); return }
+      if (editingEventName) { closeLayer(() => setEditingEventName(false)); return }
+      if (editingEntryId) { closeLayer(() => setEditingEntryId(null)); return }
+      if (editingLogbookNotes) { closeLayer(() => setEditingLogbookNotes(false)); return }
+      if (editingLogbookTitle) { closeLayer(() => setEditingLogbookTitle(false)); return }
+      if (editingLogbookDate) { closeLayer(() => setEditingLogbookDate(false)); return }
+      if (showDetailPanel) { closeLayer(() => setShowDetailPanel(false)); return }
+      if (selectionMode) { closeLayer(() => { setSelectionMode(false); setSelectedIds(new Set()) }); return }
+      if (selectedLogbook) { closeLayer(() => setSelectedLogbook(null)); return }
       // If in logbook mode, return to kanban view instead of leaving the event
-      if (viewMode === 'logbook') { setViewMode('kanban'); setSelectedLogbook(null); return }
+      if (viewMode === 'logbook') { closeLayer(() => setViewMode('kanban')); return }
       // No modals open — go back to events list (preserves folder state)
-      router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : ''))
+      closeLayer(() => router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : '')))
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showGoogleSyncModal, showExportModal, showDeviceSelector, showInlineChat, showCampaignModal, showAddModal, showStageEditorModal, cancelStageEditMode, showDetailPanel, viewMode, router, folderParam])
+  }, [
+    showAddModal, showBlockModal, listHistoryParticipant, showFilterConfirmDialog,
+    showMembershipHistory, showGoogleSyncModal, googleSyncing, showExportModal,
+    exporting, showDeviceSelector, showCampaignModal, creatingCampaign,
+    showInlineChat, showStageModal, showNewLogbookModal, creatingLogbook,
+    showLogbookSettingsModal, logbookSettingsUpdating, showStageEditorModal,
+    cancelStageEditMode, showMoreMenu, showFilterDropdown, editingEventName,
+    editingEntryId, editingLogbookNotes, editingLogbookTitle, editingLogbookDate,
+    showDetailPanel, selectionMode, selectedLogbook, viewMode, router, folderParam,
+  ])
 
   // Close more menu on outside click
   useEffect(() => {
@@ -2150,12 +2399,12 @@ export default function EventDetailPage() {
             />
           ) : (
             <h1
-              className="font-bold text-lg text-slate-900 truncate cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded max-w-[280px]"
-              onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
+              className={`font-bold text-lg text-slate-900 truncate max-w-[280px] ${eventIsReadOnly ? 'cursor-default' : 'cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded'}`}
+              onClick={() => { if (!eventIsReadOnly) { setEditNameValue(event.name); setEditingEventName(true) } }}
               title={event.name}
             >{event.name}</h1>
           )}
-          {!editingEventName && (
+          {!editingEventName && !eventIsReadOnly && (
             <button
               onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
               className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition flex-shrink-0"
@@ -2542,8 +2791,9 @@ export default function EventDetailPage() {
         {viewMode === 'kanban' && !stageEditMode && (
           <button
             onClick={beginStageEditMode}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition-colors flex-shrink-0"
-            title="Editar etapas"
+            disabled={eventIsReadOnly}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition-colors flex-shrink-0 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+            title={eventIsReadOnly ? 'El evento está cerrado' : 'Editar etapas'}
           >
             <PenLine className="w-4 h-4" />
             <span className="hidden sm:inline">Editar etapas</span>
@@ -2569,8 +2819,10 @@ export default function EventDetailPage() {
             <div className="absolute right-0 top-full mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
               {/* 1. Agregar contacto */}
               <button
-                onClick={() => { setAddTab('search'); setShowAddModal(true); setShowMoreMenu(false) }}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors"
+                onClick={() => { setAddParticipantError(''); setAddTab('search'); setShowAddModal(true); setShowMoreMenu(false) }}
+                disabled={eventIsReadOnly}
+                title={eventIsReadOnly ? 'El evento está cerrado' : 'Buscar contactos para agregar'}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
               >
                 <UserPlus className="w-4 h-4 text-emerald-500" />
                 Agregar contacto
@@ -2609,17 +2861,23 @@ export default function EventDetailPage() {
 
               {/* 4. Registrar contacto */}
               <button
-                onClick={() => { setAddTab('manual'); setShowAddModal(true); setShowMoreMenu(false) }}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                onClick={() => { setAddParticipantError(''); setAddTab('manual'); setShowAddModal(true); setShowMoreMenu(false) }}
+                disabled={eventHasMembershipRules || eventIsReadOnly}
+                title={eventIsReadOnly ? 'El evento está cerrado' : eventHasMembershipRules ? 'Disponible solo para eventos sin reglas' : 'Crear y agregar un contacto'}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
               >
                 <Plus className="w-4 h-4 text-slate-400" />
-                Registrar contacto
+                <span>
+                  <span className="block">Registrar contacto</span>
+                  {eventHasMembershipRules && <span className="block text-[10px] font-normal text-amber-600">Requiere un evento sin reglas</span>}
+                </span>
               </button>
 
               {/* 5. Editar etapas */}
               <button
                 onClick={beginStageEditMode}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                disabled={eventIsReadOnly}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
               >
                 <PenLine className="w-4 h-4 text-slate-400" />
                 Editar etapas
@@ -2658,6 +2916,16 @@ export default function EventDetailPage() {
         </div>
       </div>
 
+      {eventIsReadOnly && (
+        <div className="mb-2 flex shrink-0 items-start gap-2.5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          <Lock className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
+          <div>
+            <p className="font-semibold">Evento de solo lectura</p>
+            <p className="mt-0.5 text-xs text-slate-500">Puedes consultar participantes, historial y oportunidades relacionadas, pero no agregar, mover ni retirar personas.</p>
+          </div>
+        </div>
+      )}
+
       {/* ═══ Kanban View ═══ */}
       {viewMode === 'kanban' && (
         <div className="flex-1 min-h-0 flex flex-col animate-view-enter">
@@ -2690,8 +2958,8 @@ export default function EventDetailPage() {
                   onRenameStage={handleRenameStage}
                   onColorStage={handleColorStage}
                   onDeleteStage={handleDeleteStage}
-                  canManageStage={stageEditMode}
-                  canDragParticipants={!stageEditMode}
+                  canManageStage={stageEditMode && !eventIsReadOnly}
+                  canDragParticipants={!stageEditMode && !eventIsReadOnly}
                   stageEditMode={stageEditMode}
                   onStageDragStart={setDraggedStageId}
                   onStageDrop={handleStageColumnDrop}
@@ -2720,7 +2988,7 @@ export default function EventDetailPage() {
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
                   canManageStage={false}
-                  canDragParticipants={!stageEditMode}
+                  canDragParticipants={!stageEditMode && !eventIsReadOnly}
                 />
               )}
             </div>
@@ -2810,9 +3078,11 @@ export default function EventDetailPage() {
                           ) : <span className="text-[10px] text-slate-300 italic">Sin observaciones</span>}
                         </div>
                         <div className="px-3 py-2.5 w-[40px]">
-                          <button onClick={(e) => { e.stopPropagation(); handleDeleteParticipant(p.id) }} className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" title="Eliminar">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {!eventIsReadOnly && (
+                            <button onClick={(e) => { e.stopPropagation(); handleDeleteParticipant(p.id) }} className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" title="Sacar del evento">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -3813,7 +4083,14 @@ export default function EventDetailPage() {
             className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
             onClick={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
           />
-          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
+          <div
+            ref={detailPanelDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Detalle del participante"
+            tabIndex={-1}
+            className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 outline-none ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}
+          >
             {showInlineChat && inlineChatId && (
               <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
                 <ChatPanel
@@ -3833,6 +4110,19 @@ export default function EventDetailPage() {
                 eventId={eventId}
                 eventStages={displayStages.map(s => ({ id: s.id, pipeline_id: s.pipeline_id || '', name: s.name, color: s.color, position: s.position, lead_count: 0 }))}
                 participantId={detailParticipant.id}
+                relatedLeads={detailParticipant.related_leads || []}
+                relatedLeadsLoading={detailParticipantLoading}
+                relatedLeadsError={detailParticipantError}
+                onRetryRelatedLeads={() => openDetailPanel(detailParticipant)}
+                eventMembership={{
+                  state: detailParticipant.membership_state,
+                  source: detailParticipant.membership_source,
+                  reason: detailParticipant.membership_reason,
+                  autoTagSync: detailParticipant.auto_tag_sync,
+                  changedAt: detailParticipant.membership_changed_at,
+                }}
+                readOnly={eventIsReadOnly}
+                hideDelete={eventIsReadOnly}
                 onLeadChange={(updatedLead: any) => {
                   // Map back from Lead shape to Participant update
                   updateParticipantInStages(detailParticipant.id, p => ({
@@ -3975,13 +4265,23 @@ export default function EventDetailPage() {
       {/* ═══ Add Participant — ContactSelector ═══ */}
       <ContactSelector
         open={showAddModal && addTab === 'search'}
-        onClose={() => setShowAddModal(false)}
+        onClose={() => {
+          if (addingParticipant) return
+          setShowAddModal(false)
+          setAddParticipantError('')
+        }}
         onConfirm={handleAddFromSelector}
         title="Agregar contactos"
-        subtitle="Selecciona uno o varios contactos para incorporarlos como participantes. No se crearán oportunidades automáticamente."
-        confirmLabel={addingParticipant ? 'Agregando…' : 'Agregar al evento'}
-        excludeIds={existingContactIds}
+        subtitle={eventHasMembershipRules
+          ? 'Busca por nombre, teléfono o correo. Solo se pueden agregar contactos que cumplan las reglas actuales del evento.'
+          : 'Busca por nombre, teléfono o correo. Como este evento no tiene reglas, puedes agregar cualquier contacto de la cuenta.'}
+        confirmLabel="Agregar al evento"
         sourceFilter="contact"
+        eventId={eventId}
+        onViewExisting={handleViewExistingParticipant}
+        submitting={addingParticipant}
+        errorMessage={addParticipantError}
+        refreshKey={participantCandidatesRevision}
       />
 
       {/* ═══ Add Participant — Manual contact ═══ */}
@@ -4003,7 +4303,12 @@ export default function EventDetailPage() {
               </div>
               <button
                 type="button"
-                onClick={() => setShowAddModal(false)}
+                onClick={() => {
+                  if (addingParticipant) return
+                  setShowAddModal(false)
+                  setAddParticipantError('')
+                }}
+                disabled={addingParticipant}
                 className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                 aria-label="Cerrar registro de contacto"
               >
@@ -4013,8 +4318,15 @@ export default function EventDetailPage() {
 
             <div className="flex-1 overflow-y-auto px-6 py-5">
               <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-sm text-emerald-800">
-                La incorporación manual es independiente de la regla automática de etiquetas y permanecerá en el historial del evento.
+                Este evento no tiene reglas automáticas. El contacto se creará —o se reutilizará si ya existe— y se añadirá directamente como participante.
               </div>
+
+              {addParticipantError && (
+                <p className="mt-4 flex items-start gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700" role="alert">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  {addParticipantError}
+                </p>
+              )}
 
               <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <label className="sm:col-span-2">
@@ -4099,6 +4411,7 @@ export default function EventDetailPage() {
                 type="button"
                 onClick={() => {
                   setShowAddModal(false)
+                  setAddParticipantError('')
                   setManualForm({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
                 }}
                 disabled={addingParticipant}
@@ -4109,7 +4422,7 @@ export default function EventDetailPage() {
               <button
                 type="button"
                 onClick={handleAddManual}
-                disabled={!manualForm.name.trim() || addingParticipant}
+                disabled={!manualForm.name.trim() || addingParticipant || eventHasMembershipRules || eventIsReadOnly}
                 className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
               >
                 {addingParticipant ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}

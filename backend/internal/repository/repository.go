@@ -4633,6 +4633,9 @@ func (r *EventRepository) Create(ctx context.Context, e *domain.Event) error {
 	if e.Status == "" {
 		e.Status = domain.EventStatusActive
 	}
+	if !domain.IsValidEventStatus(e.Status) {
+		return fmt.Errorf("invalid event status %q", e.Status)
+	}
 	if e.Color == "" {
 		e.Color = "#3b82f6"
 	}
@@ -4755,11 +4758,58 @@ func (r *EventRepository) Update(ctx context.Context, e *domain.Event) error {
 	}
 	// Rule fields are deliberately excluded. They are versioned and may only be
 	// changed by SaveEventRule after a confirmed impact preview.
-	_, err := r.db.Exec(ctx, `
+	result, err := r.db.Exec(ctx, `
 		UPDATE events SET name=$1, description=$2, event_date=$3, event_end=$4, location=$5, status=$6, color=$7, pipeline_id=$8, updated_at=$9
-		WHERE id=$10 AND account_id=$11
+		WHERE id=$10 AND account_id=$11 AND status=$6
 	`, e.Name, e.Description, e.EventDate, e.EventEnd, e.Location, e.Status, e.Color, e.PipelineID, e.UpdatedAt, e.ID, e.AccountID)
-	return err
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrEventStatusConflict
+	}
+	return nil
+}
+
+func (r *EventRepository) UpdateWithExpectedStatus(ctx context.Context, e *domain.Event, expectedStatus string) (bool, error) {
+	if !domain.CanTransitionEventStatus(expectedStatus, e.Status) {
+		return false, ErrEventStatusConflict
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	// Serialize lifecycle changes with rule/manual membership transactions. This
+	// prevents a reconciler from committing after an event becomes terminal.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, e.AccountID); err != nil {
+		return false, err
+	}
+	var currentStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM events WHERE id=$1 AND account_id=$2 FOR UPDATE`, e.ID, e.AccountID).Scan(&currentStatus); err != nil {
+		if err == pgx.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	if currentStatus != expectedStatus {
+		return false, nil
+	}
+	e.UpdatedAt = time.Now()
+	result, err := tx.Exec(ctx, `
+		UPDATE events SET name=$1,description=$2,event_date=$3,event_end=$4,location=$5,status=$6,color=$7,pipeline_id=$8,updated_at=$9
+		WHERE id=$10 AND account_id=$11 AND status=$12
+	`, e.Name, e.Description, e.EventDate, e.EventEnd, e.Location, e.Status, e.Color, e.PipelineID, e.UpdatedAt, e.ID, e.AccountID, expectedStatus)
+	if err != nil {
+		return false, err
+	}
+	if result.RowsAffected() != 1 {
+		return false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *EventRepository) Delete(ctx context.Context, id uuid.UUID) error {
@@ -6153,7 +6203,7 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 		COALESCE(NULLIF(BTRIM(c.custom_name),''), NULLIF(BTRIM(c.name),''), NULLIF(BTRIM(c.push_name),''), p.name),
 		COALESCE(c.last_name,p.last_name), COALESCE(c.short_name,p.short_name), COALESCE(c.phone,p.phone), COALESCE(c.email,p.email), COALESCE(c.age,p.age),
 		COALESCE(c.company,p.company), COALESCE(c.dni,p.dni), COALESCE(c.birth_date,p.birth_date), COALESCE(c.address,p.address), COALESCE(c.distrito,p.distrito), COALESCE(c.ocupacion,p.ocupacion),
-		p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at, p.created_at, p.updated_at,
+		p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.auto_tag_sync, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at, p.created_at, p.updated_at,
 		eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color,
 		COALESCE(l.is_archived, false) AS is_archived, COALESCE(c.do_not_contact, false) AS is_blocked`
 	if useDistinct {
@@ -6211,7 +6261,7 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 		p := &domain.EventParticipant{}
 		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age,
 			&p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion,
-			&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.MembershipState, &p.MembershipReason, &p.MembershipSource, &p.MembershipChangedAt, &p.CreatedAt, &p.UpdatedAt,
+			&p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.AutoTagSync, &p.MembershipState, &p.MembershipReason, &p.MembershipSource, &p.MembershipChangedAt, &p.CreatedAt, &p.UpdatedAt,
 			&p.StageName, &p.StageColor, &p.LeadPipelineID, &p.LeadStageID, &p.LeadStageName, &p.LeadStageColor, &p.IsArchived, &p.IsBlocked); err != nil {
 			return nil, err
 		}
@@ -6254,81 +6304,147 @@ func (r *ParticipantRepository) GetByID(ctx context.Context, id uuid.UUID) (*dom
 		       COALESCE(NULLIF(BTRIM(c.custom_name),''), NULLIF(BTRIM(c.name),''), NULLIF(BTRIM(c.push_name),''), p.name),
 		       COALESCE(c.last_name,p.last_name), COALESCE(c.short_name,p.short_name), COALESCE(c.phone,p.phone), COALESCE(c.email,p.email), COALESCE(c.age,p.age),
 		       COALESCE(c.company,p.company), COALESCE(c.dni,p.dni), COALESCE(c.birth_date,p.birth_date), COALESCE(c.address,p.address), COALESCE(c.distrito,p.distrito), COALESCE(c.ocupacion,p.ocupacion),
-		       p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at, p.created_at, p.updated_at
+		       p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.auto_tag_sync, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at, p.created_at, p.updated_at
 		FROM event_participants p LEFT JOIN contacts c ON c.id=p.contact_id
 		WHERE p.id = $1
-	`, id).Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.MembershipState, &p.MembershipReason, &p.MembershipSource, &p.MembershipChangedAt, &p.CreatedAt, &p.UpdatedAt)
+	`, id).Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.AutoTagSync, &p.MembershipState, &p.MembershipReason, &p.MembershipSource, &p.MembershipChangedAt, &p.CreatedAt, &p.UpdatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
 	return p, err
 }
 
-func (r *ParticipantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
-	now := time.Now()
-	query := `UPDATE event_participants SET status = $1, updated_at = $2`
-	args := []interface{}{status, now}
-	argNum := 3
-
-	switch status {
-	case domain.ParticipantStatusConfirmed:
-		query += fmt.Sprintf(", confirmed_at = $%d", argNum)
-		args = append(args, now)
-		argNum++
-	case domain.ParticipantStatusAttended:
-		query += fmt.Sprintf(", attended_at = $%d", argNum)
-		args = append(args, now)
-		argNum++
+// beginWritableEventParticipantMutation locks the event row before touching a
+// participant. Lifecycle transitions lock the same row, so a mutation either
+// commits before the event becomes terminal or observes the terminal state and
+// fails without writing.
+func (r *ParticipantRepository) beginWritableEventParticipantMutation(ctx context.Context, accountID, eventID uuid.UUID) (pgx.Tx, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	query += fmt.Sprintf(" WHERE id = $%d AND membership_state='active'", argNum)
-	args = append(args, id)
-
-	_, err := r.db.Exec(ctx, query, args...)
-	return err
+	var eventStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM events WHERE id=$1 AND account_id=$2 FOR UPDATE`, eventID, accountID).Scan(&eventStatus); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, err
+	}
+	if eventStatus == domain.EventStatusCompleted || eventStatus == domain.EventStatusCancelled {
+		_ = tx.Rollback(ctx)
+		return nil, ErrEventMembershipFrozen
+	}
+	return tx, nil
 }
 
-// UpdateStage updates a participant's stage_id (used when dragging in kanban)
-func (r *ParticipantRepository) UpdateStage(ctx context.Context, id, stageID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `UPDATE event_participants SET stage_id = $1, updated_at = NOW() WHERE id = $2 AND membership_state='active'`, stageID, id)
-	return err
+func ensureEventStageTx(ctx context.Context, tx pgx.Tx, accountID, eventID, stageID uuid.UUID) error {
+	var valid bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM events e
+			JOIN event_pipeline_stages eps ON eps.pipeline_id=e.pipeline_id
+			WHERE e.id=$1 AND e.account_id=$2 AND eps.id=$3
+		)
+	`, eventID, accountID, stageID).Scan(&valid); err != nil {
+		return err
+	}
+	if !valid {
+		return ErrEventStageMismatch
+	}
+	return nil
 }
 
-// BulkUpdateStage updates stage_id for multiple participants
-func (r *ParticipantRepository) BulkUpdateStage(ctx context.Context, ids []uuid.UUID, stageID uuid.UUID) error {
+func finishEventParticipantMutation(ctx context.Context, tx pgx.Tx, affected, expected int64) (int64, error) {
+	if affected != expected {
+		return affected, ErrEventParticipantInactive
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+func (r *ParticipantRepository) UpdateStatus(ctx context.Context, accountID, eventID, id uuid.UUID, status string) (int64, error) {
+	tx, err := r.beginWritableEventParticipantMutation(ctx, accountID, eventID)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `
+		UPDATE event_participants
+		SET status=$1,
+			confirmed_at=CASE WHEN $1='confirmed' THEN NOW() ELSE confirmed_at END,
+			attended_at=CASE WHEN $1='attended' THEN NOW() ELSE attended_at END,
+			updated_at=NOW()
+		WHERE id=$2 AND event_id=$3 AND membership_state='active'
+	`, status, id, eventID)
+	if err != nil {
+		return 0, err
+	}
+	return finishEventParticipantMutation(ctx, tx, result.RowsAffected(), 1)
+}
+
+func (r *ParticipantRepository) BulkUpdateStatus(ctx context.Context, accountID, eventID uuid.UUID, ids []uuid.UUID, status string) (int64, error) {
 	if len(ids) == 0 {
-		return nil
+		return 0, nil
 	}
-	_, err := r.db.Exec(ctx, `UPDATE event_participants SET stage_id = $1, updated_at = NOW() WHERE id = ANY($2::uuid[]) AND membership_state='active'`, stageID, ids)
-	return err
+	tx, err := r.beginWritableEventParticipantMutation(ctx, accountID, eventID)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `
+		UPDATE event_participants
+		SET status=$1,
+			confirmed_at=CASE WHEN $1='confirmed' THEN NOW() ELSE confirmed_at END,
+			attended_at=CASE WHEN $1='attended' THEN NOW() ELSE attended_at END,
+			updated_at=NOW()
+		WHERE event_id=$2 AND id=ANY($3::uuid[]) AND membership_state='active'
+	`, status, eventID, ids)
+	if err != nil {
+		return 0, err
+	}
+	return finishEventParticipantMutation(ctx, tx, result.RowsAffected(), int64(len(ids)))
 }
 
-func (r *ParticipantRepository) BulkUpdateStatus(ctx context.Context, ids []uuid.UUID, status string) error {
+// UpdateStage updates a participant's stage after revalidating the stage
+// against the event's current pipeline inside the same transaction.
+func (r *ParticipantRepository) UpdateStage(ctx context.Context, accountID, eventID, id, stageID uuid.UUID) (int64, error) {
+	tx, err := r.beginWritableEventParticipantMutation(ctx, accountID, eventID)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	if err := ensureEventStageTx(ctx, tx, accountID, eventID, stageID); err != nil {
+		return 0, err
+	}
+	result, err := tx.Exec(ctx, `UPDATE event_participants SET stage_id=$1,updated_at=NOW() WHERE id=$2 AND event_id=$3 AND membership_state='active'`, stageID, id, eventID)
+	if err != nil {
+		return 0, err
+	}
+	return finishEventParticipantMutation(ctx, tx, result.RowsAffected(), 1)
+}
+
+// BulkUpdateStage moves an exact participant set. Partial updates roll back.
+func (r *ParticipantRepository) BulkUpdateStage(ctx context.Context, accountID, eventID uuid.UUID, ids []uuid.UUID, stageID uuid.UUID) (int64, error) {
 	if len(ids) == 0 {
-		return nil
+		return 0, nil
 	}
-	now := time.Now()
-	query := `UPDATE event_participants SET status = $1, updated_at = $2`
-	args := []interface{}{status, now}
-	argNum := 3
-
-	switch status {
-	case domain.ParticipantStatusConfirmed:
-		query += fmt.Sprintf(", confirmed_at = $%d", argNum)
-		args = append(args, now)
-		argNum++
-	case domain.ParticipantStatusAttended:
-		query += fmt.Sprintf(", attended_at = $%d", argNum)
-		args = append(args, now)
-		argNum++
+	tx, err := r.beginWritableEventParticipantMutation(ctx, accountID, eventID)
+	if err != nil {
+		return 0, err
 	}
-	query += fmt.Sprintf(" WHERE id = ANY($%d::uuid[]) AND membership_state='active'", argNum)
-	args = append(args, ids)
-
-	_, err := r.db.Exec(ctx, query, args...)
-	return err
+	defer tx.Rollback(ctx)
+	if err := ensureEventStageTx(ctx, tx, accountID, eventID, stageID); err != nil {
+		return 0, err
+	}
+	result, err := tx.Exec(ctx, `UPDATE event_participants SET stage_id=$1,updated_at=NOW() WHERE event_id=$2 AND id=ANY($3::uuid[]) AND membership_state='active'`, stageID, eventID, ids)
+	if err != nil {
+		return 0, err
+	}
+	return finishEventParticipantMutation(ctx, tx, result.RowsAffected(), int64(len(ids)))
 }
 
-func (r *ParticipantRepository) Update(ctx context.Context, p *domain.EventParticipant) error {
+func (r *ParticipantRepository) Update(ctx context.Context, expectedAccountID uuid.UUID, p *domain.EventParticipant) error {
 	p.UpdatedAt = time.Now()
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -6336,13 +6452,45 @@ func (r *ParticipantRepository) Update(ctx context.Context, p *domain.EventParti
 	}
 	defer tx.Rollback(ctx)
 	var accountID uuid.UUID
+	var eventStatus string
+	if err := tx.QueryRow(ctx, `
+		SELECT account_id,status
+		FROM events
+		WHERE id=$1 AND account_id=$2
+		FOR UPDATE
+	`, p.EventID, expectedAccountID).Scan(&accountID, &eventStatus); err != nil {
+		return err
+	}
+	if eventStatus == domain.EventStatusCompleted || eventStatus == domain.EventStatusCancelled {
+		return ErrEventMembershipFrozen
+	}
 	var contactID *uuid.UUID
 	if err := tx.QueryRow(ctx, `
-		SELECT e.account_id, ep.contact_id
-		FROM event_participants ep JOIN events e ON e.id=ep.event_id
-		WHERE ep.id=$1 AND ep.membership_state='active' FOR UPDATE OF ep
-	`, p.ID).Scan(&accountID, &contactID); err != nil {
+		SELECT contact_id
+		FROM event_participants
+		WHERE id=$1 AND event_id=$2 AND membership_state='active'
+		FOR UPDATE
+	`, p.ID, p.EventID).Scan(&contactID); err != nil {
 		return err
+	}
+	if p.ContactID != nil {
+		if contactID != nil && *contactID != *p.ContactID {
+			return fmt.Errorf("participant is already linked to a different contact")
+		}
+		if contactID == nil {
+			var contactValid bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM contacts WHERE id=$1 AND account_id=$2)`, *p.ContactID, accountID).Scan(&contactValid); err != nil {
+				return err
+			}
+			if !contactValid {
+				return fmt.Errorf("participant contact does not belong to event account")
+			}
+			if _, err := tx.Exec(ctx, `UPDATE event_participants SET contact_id=$1,updated_at=NOW() WHERE id=$2 AND event_id=$3`, *p.ContactID, p.ID, p.EventID); err != nil {
+				return err
+			}
+			linkedContactID := *p.ContactID
+			contactID = &linkedContactID
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE event_participants
@@ -6419,19 +6567,26 @@ func (r *ParticipantRepository) SyncToContact(ctx context.Context, p *domain.Eve
 }
 
 func (r *ParticipantRepository) LinkContact(ctx context.Context, accountID, eventID, participantID, contactID uuid.UUID) error {
-	result, err := r.db.Exec(ctx, `
-		UPDATE event_participants ep SET contact_id=$4, updated_at=NOW()
-		FROM events e, contacts c
-		WHERE ep.id=$3 AND ep.event_id=$2 AND e.id=ep.event_id AND e.account_id=$1
-		  AND c.id=$4 AND c.account_id=$1
-	`, accountID, eventID, participantID, contactID)
+	tx, err := r.beginWritableEventParticipantMutation(ctx, accountID, eventID)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var contactValid bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM contacts WHERE id=$1 AND account_id=$2)`, contactID, accountID).Scan(&contactValid); err != nil {
+		return err
+	}
+	if !contactValid {
+		return fmt.Errorf("participant or contact not found in account")
+	}
+	result, err := tx.Exec(ctx, `UPDATE event_participants SET contact_id=$1,updated_at=NOW() WHERE id=$2 AND event_id=$3 AND membership_state='active'`, contactID, participantID, eventID)
 	if err != nil {
 		return err
 	}
 	if result.RowsAffected() != 1 {
 		return fmt.Errorf("participant or contact not found in account")
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *ParticipantRepository) Delete(ctx context.Context, id uuid.UUID) error {
@@ -6448,7 +6603,8 @@ func (r *ParticipantRepository) GetUpcomingActions(ctx context.Context, accountI
 		SELECT ep.id, ep.event_id, ep.contact_id, ep.lead_id, ep.stage_id,
 		       COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),ep.name),
 		       COALESCE(c.last_name,ep.last_name), COALESCE(c.short_name,ep.short_name), COALESCE(c.phone,ep.phone), COALESCE(c.email,ep.email), COALESCE(c.age,ep.age),
-		       ep.status, ep.notes, ep.next_action, ep.next_action_date, ep.invited_at, ep.confirmed_at, ep.attended_at, ep.created_at, ep.updated_at
+		       ep.status, ep.notes, ep.next_action, ep.next_action_date, ep.invited_at, ep.confirmed_at, ep.attended_at,
+		       ep.auto_tag_sync, ep.membership_state, ep.membership_reason, ep.membership_source, ep.membership_changed_at, ep.created_at, ep.updated_at
 		FROM event_participants ep
 		JOIN events e ON e.id = ep.event_id
 		LEFT JOIN contacts c ON c.id=ep.contact_id AND c.account_id=e.account_id
@@ -6464,7 +6620,7 @@ func (r *ParticipantRepository) GetUpcomingActions(ctx context.Context, accountI
 	var participants []*domain.EventParticipant
 	for rows.Next() {
 		p := &domain.EventParticipant{}
-		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.AutoTagSync, &p.MembershipState, &p.MembershipReason, &p.MembershipSource, &p.MembershipChangedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		participants = append(participants, p)

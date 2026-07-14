@@ -164,7 +164,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 			log.Printf("[TASK] Failed to auto-create observation for task %s: %v", task.ID, err)
 		} else {
 			if task.LeadID != nil {
-				s.invalidateLeadDetailCache(*task.LeadID)
+				s.invalidateLeadDetailCache(accountID, *task.LeadID)
 			}
 			if s.hub != nil {
 				leadIDStr := ""
