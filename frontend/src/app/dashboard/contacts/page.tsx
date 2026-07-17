@@ -362,6 +362,7 @@ export default function ContactsPage() {
   // Broadcast
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
   const [submittingBroadcast, setSubmittingBroadcast] = useState(false)
+  const [pendingBroadcastCampaignId, setPendingBroadcastCampaignId] = useState<string | null>(null)
 
   // Send message / Inline chat
   const [showSendMessage, setShowSendMessage] = useState(false)
@@ -651,7 +652,9 @@ export default function ContactsPage() {
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string }
-      if (msg.event === 'custom_field_def_update') {
+      if (msg.event === 'contact_update') {
+        void fetchContacts(true)
+      } else if (msg.event === 'custom_field_def_update') {
         if (token) {
           fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` } })
             .then(r => r.json())
@@ -661,7 +664,7 @@ export default function ContactsPage() {
       }
     })
     return () => unsubscribe()
-  }, [token])
+  }, [fetchContacts, token])
 
   // Debounced fetch: resets scroll to top on filter/search change
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -1097,11 +1100,31 @@ export default function ContactsPage() {
     }
   }
 
-  // Contacts with phone for broadcast
-  const broadcastableContacts = contacts.filter(c => c.phone)
-
   // Active filter count
   const activeFilterCount = filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + cfFilters.length
+
+  const buildBroadcastContactFilters = () => {
+    const params = new URLSearchParams()
+    if (debouncedSearch) params.set('search', debouncedSearch)
+    if (filterDevice) params.set('device_id', filterDevice)
+    if (appliedFormulaType === 'advanced' && appliedFormulaText) {
+      params.set('tag_formula', appliedFormulaText)
+    } else {
+      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
+      if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
+      if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
+    }
+    if (filterDatePreset) {
+      const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+      if (resolved) {
+        params.set('date_field', filterDateField)
+        if (resolved.from) params.set('date_from', resolved.from)
+        if (resolved.to) params.set('date_to', resolved.to)
+      }
+    }
+    if (cfFilters.length > 0) params.set('cf_filter', JSON.stringify(cfFilters))
+    return params
+  }
 
   // Filtered tags for tag browser
   const filteredTags = allTags.filter(t =>
@@ -1209,64 +1232,32 @@ export default function ContactsPage() {
 
   const handleCreateBroadcastFromContacts = async (formResult: CampaignFormResult) => {
     setSubmittingBroadcast(true)
+    let campaignId = pendingBroadcastCampaignId
     try {
-      // 1. Create the campaign
-      const res = await fetch('/api/campaigns', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          name: formResult.name,
-          device_id: formResult.device_id,
-          message_template: formResult.message_template,
-          attachments: formResult.attachments,
-          scheduled_at: formResult.scheduled_at || undefined,
-          settings: formResult.settings,
-        }),
-      })
-      const data = await res.json()
-      if (!data.success) {
-        alert(data.error || 'Error al crear campaña')
-        return
-      }
-
-      const campaignId = data.campaign?.id
+      // Create only once. Any failed downstream step leaves this same draft
+      // available for a safe retry instead of creating another campaign.
       if (!campaignId) {
-        alert('Error: no se recibió el ID de la campaña')
-        return
-      }
-
-      // 2. Schedule if needed
-      if (formResult.scheduled_at) {
-        await fetch(`/api/campaigns/${campaignId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
-        })
-      }
-
-      // 3. Add filtered contacts as recipients
-      const recipientsList = broadcastableContacts.map(contact => {
-        const cleanPhone = (contact.phone || '').replace(/[^0-9]/g, '')
-        return {
-          jid: cleanPhone ? cleanPhone + '@s.whatsapp.net' : '',
-          name: getDisplayName(contact),
-          phone: cleanPhone,
-          metadata: {
-            ...(contact.short_name ? { nombre_corto: contact.short_name } : {}),
-            ...(contact.company ? { empresa: contact.company } : {}),
-          },
-        }
-      }).filter(r => r.jid)
-
-      if (recipientsList.length > 0) {
-        await fetch(`/api/campaigns/${campaignId}/recipients`, {
+        const createRes = await fetch('/api/campaigns', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ recipients: recipientsList }),
+          body: JSON.stringify({
+            name: formResult.name,
+            device_id: formResult.device_id,
+            message_template: formResult.message_template,
+            attachments: formResult.attachments,
+            settings: formResult.settings,
+          }),
         })
+        const createData = await createRes.json()
+        if (!createRes.ok || !createData.success || !createData.campaign?.id) {
+          throw new Error(createData.error || 'No se pudo crear la campaña')
+        }
+        campaignId = createData.campaign.id
+        setPendingBroadcastCampaignId(campaignId)
       }
 
-      // Add spreadsheet recipients if any
+      // Spreadsheet rows become real Contacts before the filtered set is
+      // resolved. The unique campaign/contact index prevents retry duplicates.
       if (formResult.recipients && formResult.recipients.length > 0) {
         const sheetRecipients = formResult.recipients.map(r => ({
           jid: r.phone + '@s.whatsapp.net',
@@ -1274,17 +1265,58 @@ export default function ContactsPage() {
           phone: r.phone,
           metadata: r.metadata || {},
         }))
-        await fetch(`/api/campaigns/${campaignId}/recipients`, {
+        const sheetRes = await fetch(`/api/campaigns/${campaignId}/recipients`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ recipients: sheetRecipients }),
+          body: JSON.stringify({ recipients: sheetRecipients, save_as_contacts: true }),
         })
+        const sheetData = await sheetRes.json()
+        if (!sheetRes.ok || !sheetData.success) {
+          throw new Error(sheetData.error || 'No se pudieron agregar los teléfonos pegados')
+        }
       }
 
+      const filterParams = buildBroadcastContactFilters()
+      const recipientsRes = await fetch(`/api/campaigns/${campaignId}/recipients/from-contacts?${filterParams.toString()}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const recipientsData = await recipientsRes.json()
+      if (!recipientsRes.ok || !recipientsData.success) {
+        throw new Error(recipientsData.error || 'No se pudieron agregar los contactos filtrados')
+      }
+
+      // Scheduling is deliberately last: a campaign cannot become scheduled
+      // until the backend confirms that it has persisted recipients.
+      if (formResult.scheduled_at) {
+        const scheduleRes = await fetch(`/api/campaigns/${campaignId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
+        })
+        const scheduleData = await scheduleRes.json()
+        if (!scheduleRes.ok || !scheduleData.success) {
+          throw new Error(scheduleData.error || 'Los destinatarios se guardaron, pero no se pudo programar la campaña')
+        }
+      }
+
+      setPendingBroadcastCampaignId(null)
       setShowBroadcastModal(false)
+      const excluded = Number(recipientsData.excluded_count || 0)
+      const totalRecipients = Number(recipientsData.total_recipients || 0)
+      alert(
+        excluded > 0
+          ? `Campaña creada con ${totalRecipients} destinatarios. ${excluded} contacto(s) fueron excluidos por no tener teléfono o estar marcados como “No contactar”.`
+          : `Campaña creada con ${totalRecipients} destinatarios.`,
+      )
       router.push('/dashboard/broadcasts')
-    } catch {
-      alert('Error al crear campaña desde contactos')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error al crear campaña desde contactos'
+      if (campaignId) {
+        alert(`La campaña quedó guardada como borrador. ${message}`)
+      } else {
+        alert(message)
+      }
     } finally {
       setSubmittingBroadcast(false)
     }
@@ -1842,7 +1874,7 @@ export default function ContactsPage() {
                     </button>
                     <button
                       onClick={() => { fetchDevices(); setShowBroadcastModal(true); setShowMoreMenu(false) }}
-                      disabled={broadcastableContacts.length === 0}
+                      disabled={total === 0}
                       className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       <Radio className="w-4 h-4 text-slate-400" />
@@ -2840,12 +2872,16 @@ export default function ContactsPage() {
       {/* Broadcast from Contacts Modal */}
       <CreateCampaignModal
         open={showBroadcastModal}
-        onClose={() => setShowBroadcastModal(false)}
+        onClose={() => {
+          if (submittingBroadcast) return
+          setShowBroadcastModal(false)
+          setPendingBroadcastCampaignId(null)
+        }}
         onSubmit={handleCreateBroadcastFromContacts}
         devices={devices.filter(d => d.status === 'connected')}
         submitting={submittingBroadcast}
         title="Envío Masivo desde Contactos"
-        subtitle={`Se incluirán ${broadcastableContacts.length} contactos con teléfono`}
+        subtitle={`${total.toLocaleString()} contactos coinciden con la vista actual`}
         submitLabel={submittingBroadcast ? 'Creando...' : 'Crear y agregar destinatarios'}
         initialName={`Contactos - ${new Date().toLocaleDateString('es-PE', { day: 'numeric', month: 'short' })}`}
         infoPanel={
@@ -2855,15 +2891,13 @@ export default function ContactsPage() {
               <span className="font-medium">Destinatarios desde Contactos</span>
             </div>
             <p className="text-emerald-600">
-              Se agregarán automáticamente <strong>{broadcastableContacts.length}</strong> contactos
+              El servidor resolverá los <strong>{total.toLocaleString()}</strong> contactos
               {activeFilterCount > 0 || searchTerm || filterDevice
-                ? ' (filtrados)' : ''} como destinatarios de esta campaña.
+                ? ' filtrados' : ''}, incluso los que aún no se cargaron en la tabla.
             </p>
-            {contacts.length !== broadcastableContacts.length && (
-              <p className="text-amber-600 mt-1">
-                {contacts.length - broadcastableContacts.length} contacto(s) sin teléfono serán excluidos.
-              </p>
-            )}
+            <p className="text-slate-500 mt-1">
+              Se excluirán grupos, contactos sin teléfono y contactos marcados como “No contactar”.
+            </p>
           </div>
         }
       />

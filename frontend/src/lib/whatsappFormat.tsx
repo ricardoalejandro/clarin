@@ -132,16 +132,16 @@ function findClosing(text: string, start: number, char: string): number {
   return -1
 }
 
-export function renderFormattedText(text: string): React.ReactNode[] {
+function renderInlineFormattedText(text: string): React.ReactNode[] {
   const tokens = tokenize(text)
   return tokens.map((token, i) => {
     switch (token.type) {
       case 'bold':
-        return <strong key={i}>{renderFormattedText(token.content)}</strong>
+        return <strong key={i}>{renderInlineFormattedText(token.content)}</strong>
       case 'italic':
-        return <em key={i}>{renderFormattedText(token.content)}</em>
+        return <em key={i}>{renderInlineFormattedText(token.content)}</em>
       case 'strike':
-        return <del key={i}>{renderFormattedText(token.content)}</del>
+        return <del key={i}>{renderInlineFormattedText(token.content)}</del>
       case 'mono':
         return (
           <code key={i} className="bg-gray-200/60 px-1 py-0.5 rounded text-sm font-mono">
@@ -196,6 +196,69 @@ export function renderFormattedText(text: string): React.ReactNode[] {
       }
     }
   })
+}
+
+function renderFormattedLines(text: string, keyPrefix: string): React.ReactNode[] {
+  const lines = text.split('\n')
+  return lines.flatMap((line, index) => {
+    const nodes: React.ReactNode[] = []
+    const bullet = line.match(/^([-*]) (.*)$/)
+    const numbered = line.match(/^(\d{1,2}\. )(.+)$/)
+    const quote = line.match(/^(> )(.*)$/)
+    if (bullet) {
+      nodes.push(
+        <span key={`${keyPrefix}-line-${index}`} data-whatsapp-prefix={`${bullet[1]} `} className="inline-flex w-full gap-2 pl-1">
+          <span data-whatsapp-ignore="true" aria-hidden="true">•</span>
+          <span>{renderInlineFormattedText(bullet[2])}</span>
+        </span>,
+      )
+    } else if (numbered) {
+      nodes.push(
+        <span key={`${keyPrefix}-line-${index}`} data-whatsapp-prefix={numbered[1]} className="inline-flex w-full gap-2 pl-1">
+          <span data-whatsapp-ignore="true" aria-hidden="true">{numbered[1].trim()}</span>
+          <span>{renderInlineFormattedText(numbered[2])}</span>
+        </span>,
+      )
+    } else if (quote) {
+      nodes.push(
+        <span key={`${keyPrefix}-line-${index}`} data-whatsapp-prefix={quote[1]} className="inline-block w-full border-l-2 border-slate-400 pl-2 text-slate-700">
+          {renderInlineFormattedText(quote[2])}
+        </span>,
+      )
+    } else {
+      nodes.push(<React.Fragment key={`${keyPrefix}-line-${index}`}>{renderInlineFormattedText(line)}</React.Fragment>)
+    }
+    if (index < lines.length - 1) nodes.push(<br key={`${keyPrefix}-br-${index}`} />)
+    return nodes
+  })
+}
+
+export function renderFormattedText(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = []
+  let cursor = 0
+  let blockIndex = 0
+  while (cursor < text.length) {
+    const open = text.indexOf('```', cursor)
+    if (open === -1) {
+      nodes.push(...renderFormattedLines(text.slice(cursor), `plain-${blockIndex}`))
+      break
+    }
+    if (open > cursor) nodes.push(...renderFormattedLines(text.slice(cursor, open), `plain-${blockIndex}`))
+    const close = text.indexOf('```', open + 3)
+    if (close === -1) {
+      nodes.push(...renderFormattedLines(text.slice(open), `plain-${blockIndex}`))
+      break
+    }
+    nodes.push(
+      <pre key={`code-${blockIndex}`} className="my-1 overflow-x-auto rounded bg-gray-200/60 p-2 font-mono text-sm">
+        <code>{text.slice(open + 3, close)}</code>
+      </pre>,
+    )
+    cursor = close + 3
+    blockIndex += 1
+  }
+  if (text.length === 0) return []
+  return nodes
 }
 
 /**
@@ -253,6 +316,12 @@ export function formatToHtmlPreview(text: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+
+  // Line formats keep their literal markers so text offsets and caret mapping
+  // remain identical to the plain WhatsApp payload.
+  html = html.replace(/(^|\n)([-*] )/g, '$1<span class="opacity-40">$2</span>')
+  html = html.replace(/(^|\n)(\d{1,2}\. )/g, '$1<span class="opacity-40">$2</span>')
+  html = html.replace(/(^|\n)(&gt; )/g, '$1<span class="opacity-40">$2</span>')
 
   // Code blocks: ```text```
   html = html.replace(/```([\s\S]*?)```/g,

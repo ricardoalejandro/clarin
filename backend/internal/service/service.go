@@ -792,6 +792,7 @@ func (s *DeviceService) GetByAccountID(ctx context.Context, accountID uuid.UUID)
 	// Add live status from pool
 	for _, device := range devices {
 		if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
+			device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{}
 			continue
 		}
 		status := s.pool.GetDeviceStatus(device.ID)
@@ -799,6 +800,15 @@ func (s *DeviceService) GetByAccountID(ctx context.Context, accountID uuid.UUID)
 		qr := s.pool.GetQRCode(device.ID)
 		if qr != "" {
 			device.QRCode = &qr
+		}
+		connected := status == domain.DeviceStatusConnected
+		device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{
+			CanStartChat:           connected,
+			CanCheckWhatsApp:       connected,
+			CanSendSticker:         connected,
+			CanSendAnimatedSticker: false,
+			CanPublishStatus:       false,
+			CanSyncOwnStatus:       false,
 		}
 	}
 
@@ -811,6 +821,7 @@ func (s *DeviceService) GetByID(ctx context.Context, deviceID uuid.UUID) (*domai
 		return nil, err
 	}
 	if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
+		device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{}
 		return device, nil
 	}
 
@@ -819,6 +830,15 @@ func (s *DeviceService) GetByID(ctx context.Context, deviceID uuid.UUID) (*domai
 	qr := s.pool.GetQRCode(device.ID)
 	if qr != "" {
 		device.QRCode = &qr
+	}
+	connected := status == domain.DeviceStatusConnected
+	device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{
+		CanStartChat:           connected,
+		CanCheckWhatsApp:       connected,
+		CanSendSticker:         connected,
+		CanSendAnimatedSticker: false,
+		CanPublishStatus:       false,
+		CanSyncOwnStatus:       false,
 	}
 
 	return device, nil
@@ -866,19 +886,65 @@ func (s *ChatService) GetChatDetails(ctx context.Context, chatID uuid.UUID) (*do
 		Chat: chat,
 	}
 
-	// Get contact if exists
+	// Contact is the parent entity. Resolve the explicit relationship first;
+	// JID lookup is only a compatibility fallback for older rows.
+	var contact *domain.Contact
 	if chat.ContactID != nil {
-		// We need to get contact by ID, but for now get by JID
+		candidate, contactErr := s.repos.Contact.GetByID(ctx, *chat.ContactID)
+		if contactErr != nil {
+			return nil, contactErr
+		}
+		if candidate != nil && candidate.AccountID == chat.AccountID {
+			contact = candidate
+		}
 	}
-	contact, _ := s.repos.Contact.GetByJID(ctx, chat.AccountID, chat.JID)
+	if contact == nil {
+		contact, err = s.repos.Contact.GetByJID(ctx, chat.AccountID, chat.JID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if contact != nil {
 		details.Contact = contact
+		opportunities, opportunitiesErr := s.repos.Lead.GetSummariesByContactID(ctx, chat.AccountID, contact.ID)
+		if opportunitiesErr != nil {
+			return nil, opportunitiesErr
+		}
+		details.Opportunities = opportunities
+	}
+	if details.Opportunities == nil {
+		details.Opportunities = []*domain.OpportunitySummary{}
 	}
 
-	// Get lead
-	lead, _ := s.repos.Lead.GetByJID(ctx, chat.AccountID, chat.JID)
+	// Keep the legacy lead field temporarily, but derive it from the same
+	// ordered opportunity collection so the panel has one stable identity.
+	var lead *domain.Lead
+	if len(details.Opportunities) > 0 {
+		candidate, leadErr := s.repos.Lead.GetByID(ctx, details.Opportunities[0].ID)
+		if leadErr != nil {
+			return nil, leadErr
+		}
+		if candidate != nil && candidate.AccountID == chat.AccountID {
+			lead = candidate
+		}
+	} else {
+		lead, err = s.repos.Lead.GetByJID(ctx, chat.AccountID, chat.JID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if lead != nil {
 		details.Lead = lead
+		details.ActiveOpportunityID = &lead.ID
+	}
+	if chat.DeviceID != nil {
+		device, deviceErr := s.repos.Device.GetByID(ctx, *chat.DeviceID)
+		if deviceErr != nil {
+			return nil, deviceErr
+		}
+		if device != nil && device.AccountID == chat.AccountID {
+			details.Device = device
+		}
 	}
 
 	return details, nil
@@ -905,11 +971,37 @@ func (s *ChatService) CreateNewChat(ctx context.Context, accountID, deviceID uui
 	return chat, nil
 }
 
+func (s *ChatService) CreateNewChatForContact(ctx context.Context, accountID, deviceID, contactID uuid.UUID, jid, phone, name string) (*domain.Chat, error) {
+	return s.repos.Chat.GetOrCreateForContact(ctx, accountID, deviceID, contactID, jid, phone, name)
+}
+
+func (s *ChatService) LinkContact(ctx context.Context, accountID, chatID, contactID uuid.UUID) error {
+	return s.repos.Chat.LinkContact(ctx, accountID, chatID, contactID)
+}
+
+func (s *ChatService) CreateAndLinkContact(ctx context.Context, accountID, chatID uuid.UUID, name string) (uuid.UUID, error) {
+	return s.repos.Chat.CreateAndLinkContact(ctx, accountID, chatID, name)
+}
+
 func (s *ChatService) GetMessages(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*domain.Message, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	return s.repos.Message.GetByChatID(ctx, chatID, limit, offset)
+}
+
+func (s *ChatService) SearchMessages(ctx context.Context, accountID, chatID uuid.UUID, query string, limit, offset int) ([]*domain.Message, int, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return s.repos.Message.SearchByChat(ctx, accountID, chatID, query, limit, offset)
+}
+
+func (s *ChatService) GetMessageHistoryOffset(ctx context.Context, accountID, chatID, messageID uuid.UUID) (int, error) {
+	return s.repos.Message.GetHistoryOffset(ctx, accountID, chatID, messageID)
 }
 
 func (s *ChatService) RequestHistorySync(ctx context.Context, accountID, deviceID, chatID uuid.UUID, chatJID string) error {
@@ -932,6 +1024,13 @@ func (s *ChatService) SendMediaMessageWithFilename(ctx context.Context, deviceID
 		return nil, err
 	}
 	return s.pool.SendMediaMessageWithFilename(ctx, deviceID, to, caption, mediaURL, mediaType, mediaFilename)
+}
+
+func (s *ChatService) SendMediaReplyMessageWithFilename(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType, mediaFilename, quotedID, quotedBody, quotedSender string, quotedIsFromMe bool) (*domain.Message, error) {
+	if err := s.ensureWhatsAppWebOutbound(ctx, deviceID); err != nil {
+		return nil, err
+	}
+	return s.pool.SendMediaReplyMessageWithFilename(ctx, deviceID, to, caption, mediaURL, mediaType, mediaFilename, quotedID, quotedBody, quotedSender, quotedIsFromMe)
 }
 
 func (s *ChatService) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, to, body, quotedID, quotedBody, quotedSender string, quotedIsFromMe bool) (*domain.Message, error) {

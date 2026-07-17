@@ -1,15 +1,15 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
-  Repeat, ChevronRight, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid, HeartPulse, Target, NotebookPen
+  Repeat, ChevronRight, ChevronDown, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid, HeartPulse, Target, NotebookPen, Maximize2, Minimize2
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher';
-import { Program, ProgramParticipant, ProgramSession, ProgramAttendance, ProgramGoal, ProgramHealthSummary } from '@/types/program';
+import { Program, ProgramParticipant, ProgramSession, ProgramAttendance, ProgramGoal, ProgramHealthSummary, ProgramAttendanceStatsResponse } from '@/types/program';
 import { Chat } from '@/types/chat';
 import { Contact } from '@/types/contact';
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector';
@@ -17,8 +17,11 @@ import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCamp
 import LeadDetailPanel from '@/components/LeadDetailPanel';
 import ChatPanel from '@/components/chat/ChatPanel';
 import ObservationHistoryModal, { HistoryObservation } from '@/components/ObservationHistoryModal';
+import ContactPhotoPreview from '@/components/ContactPhotoPreview';
+import type { ContactAvatarInfo } from '@/components/ContactAvatarControl';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
+import { calendarDateKey, formatCalendarDate, localDateInputValue } from '@/utils/calendarDate';
 
 const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : '';
 
@@ -85,6 +88,7 @@ export default function ProgramDetailPage() {
   const [draggedParticipantID, setDraggedParticipantID] = useState<string | null>(null);
   const [dragOverStageID, setDragOverStageID] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'health' | 'participants' | 'sessions' | 'stats' | 'kanban'>('health');
+  const [healthSummaryExpanded, setHealthSummaryExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [devices, setDevices] = useState<Device[]>([]);
 
@@ -94,16 +98,22 @@ export default function ProgramDetailPage() {
   const [isAttendanceOpen, setIsAttendanceOpen] = useState(false);
   const [showCampaignModal, setShowCampaignModal] = useState(false);
   const [isGenerateSessionsOpen, setIsGenerateSessionsOpen] = useState(false);
+  const [addingParticipants, setAddingParticipants] = useState(false);
+  const [addParticipantError, setAddParticipantError] = useState('');
+  const [participantSelectorRevision, setParticipantSelectorRevision] = useState(0);
 
   // Form state
-  const [newSession, setNewSession] = useState({ date: new Date().toISOString().split('T')[0], topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
+  const [newSession, setNewSession] = useState({ date: localDateInputValue(), topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
   const [selectedSession, setSelectedSession] = useState<ProgramSession | null>(null);
-  const [attendanceData, setAttendanceData] = useState<Record<string, { status: string, notes: string, instructor_status?: string, instructor_notes?: string }>>({});
+  const [attendanceData, setAttendanceData] = useState<Record<string, { status: string, notes: string }>>({});
+  const [attendanceDirty, setAttendanceDirty] = useState<Record<string, boolean>>({});
+  const [savingAttendance, setSavingAttendance] = useState(false);
 
   // Edit session state
   const [editingSession, setEditingSession] = useState<ProgramSession | null>(null);
   const [editSessionForm, setEditSessionForm] = useState({ date: '', topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
   const [savingSession, setSavingSession] = useState(false);
+  const [maximizedSessionDialog, setMaximizedSessionDialog] = useState<'create' | 'edit' | 'recurring' | null>(null);
 
   // Campaign state
   const [creatingCampaign, setCreatingCampaign] = useState(false);
@@ -127,6 +137,14 @@ export default function ProgramDetailPage() {
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
   const [contactPanelMode, setContactPanelMode] = useState(false);
   const [selectedParticipantID, setSelectedParticipantID] = useState<string | null>(null);
+  const [participantDetailOpen, setParticipantDetailOpen] = useState(false);
+  const [participantDetailError, setParticipantDetailError] = useState('');
+  const participantDetailRequestRef = useRef<AbortController | null>(null);
+  const participantDetailSequence = useRef(0);
+  const participantDetailDialogRef = useRef<HTMLDivElement>(null);
+  const participantDetailReturnFocusRef = useRef<HTMLElement | null>(null);
+  const participantRosterRef = useRef<HTMLDivElement>(null);
+  const [compactParticipantRoster, setCompactParticipantRoster] = useState(false);
 
   // Column visibility (persisted in localStorage)
   const PARTICIPANT_COLUMNS: { id: string; label: string; always?: boolean }[] = [
@@ -140,6 +158,22 @@ export default function ProgramDetailPage() {
   const COLUMN_STORAGE_KEY = 'programParticipantColumns:v1';
   const [visibleColumns, setVisibleColumns] = useState<string[]>(DEFAULT_VISIBLE_COLUMNS);
   const [showColumnPicker, setShowColumnPicker] = useState(false);
+
+  const excludedParticipantIds = useMemo(
+    () => new Set(participants.map(participant => participant.contact_id)),
+    [participants]
+  );
+  const excludedParticipantLabels = useMemo(
+    () => new Map(participants.map(participant => [
+      participant.contact_id,
+      participant.status === 'completed'
+        ? 'Participante completado'
+        : participant.status === 'dropped'
+          ? 'Participante retirado'
+          : 'Ya participa',
+    ])),
+    [participants]
+  );
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -184,7 +218,7 @@ export default function ProgramDetailPage() {
 
   // Generate sessions form
   const [genForm, setGenForm] = useState({
-    start_date: new Date().toISOString().split('T')[0],
+    start_date: localDateInputValue(),
     end_date: '',
     days_of_week: [] as number[],
     start_time: '09:00',
@@ -195,8 +229,12 @@ export default function ProgramDetailPage() {
   const [generating, setGenerating] = useState(false);
 
   // Stats
-  const [statsData, setStatsData] = useState<{ session_stats: any[]; participant_stats: any[] } | null>(null);
-  const [loadingStats, setLoadingStats] = useState(false);
+  const [statsData, setStatsData] = useState<ProgramAttendanceStatsResponse | null>(null);
+  const [statsStatus, setStatsStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [statsError, setStatsError] = useState('');
+  const loadingStats = statsStatus === 'loading';
+  const statsRequestRef = useRef<AbortController | null>(null);
+  const statsRequestSequence = useRef(0);
   const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
   const [health, setHealth] = useState<ProgramHealthSummary | null>(null);
   const [loadingHealth, setLoadingHealth] = useState(false);
@@ -207,12 +245,62 @@ export default function ProgramDetailPage() {
   const [outcomeParticipant, setOutcomeParticipant] = useState<ProgramParticipant | null>(null);
   const [outcomeForm, setOutcomeForm] = useState({ status: 'completed', transferred_to_level: '', drop_reason: '', drop_notes: '' });
 
+  const closeParticipantDetail = useCallback(() => {
+    participantDetailRequestRef.current?.abort();
+    participantDetailSequence.current += 1;
+    setParticipantDetailOpen(false);
+    setParticipantDetailError('');
+    setSelectedLead(null);
+    setSelectedContact(null);
+    setContactPanelMode(false);
+    setShowInlineChat(false);
+    setSelectedParticipantID(null);
+    const returnTarget = participantDetailReturnFocusRef.current;
+    participantDetailReturnFocusRef.current = null;
+    window.setTimeout(() => returnTarget?.focus(), 0);
+  }, []);
+
   // Toast auto-dismiss
   useEffect(() => {
     if (!toastMessage) return;
     const t = setTimeout(() => setToastMessage(null), 3000);
     return () => clearTimeout(t);
   }, [toastMessage]);
+
+  useEffect(() => {
+    const element = participantRosterRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const update = () => setCompactParticipantRoster(element.getBoundingClientRect().width < 760);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [activeTab, health?.participants.length]);
+
+  useEffect(() => {
+    if (!participantDetailOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.setTimeout(() => participantDetailDialogRef.current?.focus(), 0);
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(participantDetailDialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || []);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        participantDetailDialogRef.current?.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', trapFocus, true);
+    return () => {
+      document.removeEventListener('keydown', trapFocus, true);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [participantDetailOpen]);
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToastMessage(message);
@@ -234,17 +322,17 @@ export default function ProgramDetailPage() {
       if (observationParticipant) { setObservationParticipant(null); return; }
       if (outcomeParticipant) { setOutcomeParticipant(null); return; }
       if (isAttendanceOpen) { setIsAttendanceOpen(false); return; }
-      if (isGenerateSessionsOpen) { setIsGenerateSessionsOpen(false); return; }
-      if (isCreateSessionOpen) { setIsCreateSessionOpen(false); return; }
-      if (editingSession) { setEditingSession(null); return; }
+      if (isGenerateSessionsOpen) { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); return; }
+      if (isCreateSessionOpen) { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); return; }
+      if (editingSession) { setEditingSession(null); setMaximizedSessionDialog(null); return; }
       if (isAddParticipantOpen) { setIsAddParticipantOpen(false); return; }
       if (isEditModalOpen) { setIsEditModalOpen(false); return; }
       if (showCampaignModal) { setShowCampaignModal(false); return; }
-      if (selectedLead) { setSelectedLead(null); setSelectedParticipantID(null); return; }
+      if (participantDetailOpen) { closeParticipantDetail(); return; }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [showDeviceSelector, showInlineChat, observationParticipant, outcomeParticipant, isAttendanceOpen, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, selectedLead]);
+  }, [showDeviceSelector, showInlineChat, observationParticipant, outcomeParticipant, isAttendanceOpen, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail]);
 
   const fetchProgramData = async () => {
     try {
@@ -281,7 +369,7 @@ export default function ProgramDetailPage() {
         } catch (e) { console.error('stages', e); }
         setActiveTab(prev => (prev === 'sessions' || prev === 'stats' || prev === 'health') ? 'kanban' : prev);
       } else {
-        setActiveTab(prev => prev === 'kanban' ? 'health' : prev);
+        setActiveTab(prev => (prev === 'kanban' || prev === 'participants') ? 'health' : prev);
       }
     } catch (error) {
       console.error('Error fetching program data:', error);
@@ -393,46 +481,93 @@ export default function ProgramDetailPage() {
     } catch (e) { console.error(e); }
   };
 
-  const fetchStats = useCallback(async (months?: string[]) => {
-    setLoadingStats(true);
+  const fetchStats = useCallback(async (months: string[]) => {
+    statsRequestRef.current?.abort();
+    const controller = new AbortController();
+    statsRequestRef.current = controller;
+    const requestID = ++statsRequestSequence.current;
+    setStatsStatus('loading');
+    setStatsError('');
     try {
       const params = new URLSearchParams();
-      const m = months ?? selectedMonths;
-      if (m.length > 0) params.set('months', m.join(','));
+      if (months.length > 0) params.set('months', [...months].sort().join(','));
       const qs = params.toString();
-      const res = await fetch(`/api/programs/${programId}/attendance-stats${qs ? '?' + qs : ''}`, { headers: { Authorization: `Bearer ${token()}` } });
-      const data = await res.json();
-      if (data.success) setStatsData({ session_stats: data.session_stats || [], participant_stats: data.participant_stats || [] });
-    } catch (e) { console.error(e); }
-    finally { setLoadingStats(false); }
-  }, [programId, selectedMonths]);
+      const res = await fetch(`/api/programs/${programId}/attendance-stats${qs ? '?' + qs : ''}`, {
+        headers: { Authorization: `Bearer ${token()}` },
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({})) as Partial<ProgramAttendanceStatsResponse>;
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'No se pudieron cargar las estadísticas.');
+      }
+      if (requestID !== statsRequestSequence.current) return;
+      setStatsData({
+        success: true,
+        session_stats: data.session_stats || [],
+        participant_stats: data.participant_stats || [],
+      });
+      setStatsStatus('success');
+    } catch (error) {
+      if (controller.signal.aborted || requestID !== statsRequestSequence.current) return;
+      setStatsError(error instanceof Error ? error.message : 'No se pudieron cargar las estadísticas.');
+      setStatsStatus('error');
+    }
+  }, [programId]);
 
-  // Fetch stats when tab is activated
-  useEffect(() => {
-    if (activeTab === 'stats' && !statsData && !loadingStats) fetchStats();
-  }, [activeTab, statsData, loadingStats, fetchStats]);
+  const selectedMonthsKey = useMemo(() => [...selectedMonths].sort().join(','), [selectedMonths]);
 
-  // Re-fetch stats when month filter changes
   useEffect(() => {
-    if (activeTab === 'stats' && statsData) fetchStats(selectedMonths);
-  }, [selectedMonths]);
+    if (activeTab !== 'stats') return;
+    void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
+    return () => statsRequestRef.current?.abort();
+  }, [activeTab, fetchStats, selectedMonthsKey]);
 
   const handleAddParticipants = async (selected: SelectedPerson[]) => {
+    if (selected.length === 0 || addingParticipants) return;
+    if (!program || program.status !== 'active') {
+      setAddParticipantError('Solo puedes agregar participantes a un programa activo.');
+      return;
+    }
+    setAddingParticipants(true);
+    setAddParticipantError('');
     try {
-      for (const person of selected) {
-        await api(`/api/programs/${programId}/participants`, {
-          method: 'POST',
-          body: JSON.stringify({
-            contact_id: person.id,
-            status: 'active'
-          })
-        });
+      const response = await api<{
+        success: boolean;
+        summary: { requested: number; created: number; already_present: number; rejected: number };
+      }>(`/api/programs/${programId}/participants/bulk`, {
+        method: 'POST',
+        body: JSON.stringify({ contact_ids: selected.map(person => person.id) }),
+      });
+      if (!response.success || !response.data?.success) {
+        setAddParticipantError(response.error || 'No pudimos agregar los contactos. Inténtalo nuevamente.');
+        return;
+      }
+
+      const summary = response.data.summary;
+      setParticipantSelectorRevision(current => current + 1);
+      fetchProgramData();
+      if (summary.rejected > 0 || summary.created === 0) {
+        const parts = [];
+        if (summary.created > 0) parts.push(`${summary.created} agregado${summary.created === 1 ? '' : 's'}`);
+        if (summary.already_present > 0) parts.push(`${summary.already_present} ya pertenecía${summary.already_present === 1 ? '' : 'n'} al programa`);
+        if (summary.rejected > 0) parts.push(`${summary.rejected} no pudo${summary.rejected === 1 ? '' : 'ieron'} agregarse`);
+        setAddParticipantError(parts.join('. ') + '.');
+        return;
       }
       setIsAddParticipantOpen(false);
-      fetchProgramData();
+      showToast(`${summary.created} participante${summary.created === 1 ? '' : 's'} agregado${summary.created === 1 ? '' : 's'}`, 'success');
     } catch (error) {
       console.error('Error adding participants:', error);
+      setAddParticipantError('No pudimos conectar con el servidor. Inténtalo nuevamente.');
+    } finally {
+      setAddingParticipants(false);
     }
+  };
+
+  const closeAddParticipantSelector = () => {
+    if (addingParticipants) return;
+    setIsAddParticipantOpen(false);
+    setAddParticipantError('');
   };
 
   // Edit program
@@ -517,25 +652,59 @@ export default function ProgramDetailPage() {
   };
 
   // Participant detail — programs are contact-only by spec (001-program-contacts-only)
-  const handleParticipantClick = async (participant: ProgramParticipant) => {
-    setSelectedParticipantID(participant.id);
-    if (!participant.contact_id) return;
+  const openParticipantDetail = async (participantID: string, contactID: string, returnFocus?: HTMLElement | null) => {
+    participantDetailRequestRef.current?.abort();
+    const controller = new AbortController();
+    participantDetailRequestRef.current = controller;
+    const requestID = ++participantDetailSequence.current;
+    if (returnFocus !== undefined) participantDetailReturnFocusRef.current = returnFocus;
+    setSelectedParticipantID(participantID);
+    setSelectedContact(null);
+    setSelectedLead(null);
     setContactPanelMode(true);
+    setParticipantDetailOpen(true);
+    setParticipantDetailError('');
     setLoadingLead(true);
     try {
-      const res = await fetch(`/api/contacts/${participant.contact_id}`, {
-        headers: { Authorization: `Bearer ${token()}` }
+      const res = await fetch(`/api/contacts/${contactID}`, {
+        headers: { Authorization: `Bearer ${token()}` },
+        signal: controller.signal,
       });
       const data = await res.json();
-      if (data.success && data.contact) {
-        setSelectedContact(data.contact);
-        setSelectedLead(contactToLead(data.contact));
-      }
+      if (!res.ok || !data.success || !data.contact) throw new Error(data.error || 'No se pudo cargar el contacto.');
+      if (controller.signal.aborted || requestID !== participantDetailSequence.current) return;
+      setSelectedContact(data.contact);
+      setSelectedLead(contactToLead(data.contact));
     } catch (error) {
-      console.error('Error fetching contact:', error);
+      if (controller.signal.aborted || requestID !== participantDetailSequence.current) return;
+      setParticipantDetailError(error instanceof Error ? error.message : 'No se pudo cargar el participante.');
     } finally {
-      setLoadingLead(false);
+      if (!controller.signal.aborted && requestID === participantDetailSequence.current) setLoadingLead(false);
     }
+  };
+
+  const handleParticipantClick = (participant: ProgramParticipant, returnFocus?: HTMLElement | null) => {
+    if (!participant.contact_id) return;
+    void openParticipantDetail(participant.id, participant.contact_id, returnFocus);
+  };
+
+  const retryParticipantDetail = () => {
+    if (!selectedParticipantID) return;
+    const participant = participants.find(item => item.id === selectedParticipantID);
+    const healthParticipant = health?.participants.find(item => item.participant_id === selectedParticipantID);
+    const contactID = participant?.contact_id || healthParticipant?.contact_id;
+    if (contactID) void openParticipantDetail(selectedParticipantID, contactID);
+  };
+
+  const handleParticipantAvatarChange = (avatar: ContactAvatarInfo) => {
+    if (!selectedParticipantID) return;
+    const avatarURL = avatar.avatar_url || null;
+    setSelectedContact(current => current ? { ...current, avatar_url: avatarURL, avatar_revision: avatar.revision } : current);
+    setParticipants(current => current.map(participant => participant.id === selectedParticipantID ? { ...participant, avatar_url: avatarURL, avatar_revision: avatar.revision } : participant));
+    setHealth(current => current ? {
+      ...current,
+      participants: current.participants.map(participant => participant.participant_id === selectedParticipantID ? { ...participant, avatar_url: avatarURL, avatar_revision: avatar.revision } : participant),
+    } : current);
   };
 
   // WhatsApp chat
@@ -613,6 +782,10 @@ export default function ProgramDetailPage() {
 
   const handleCreateSession = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (newSession.start_time && newSession.end_time && newSession.end_time <= newSession.start_time) {
+      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
+      return;
+    }
     try {
       const res = await api(`/api/programs/${programId}/sessions`, {
         method: 'POST',
@@ -625,7 +798,8 @@ export default function ProgramDetailPage() {
       });
       if (res.success) {
         setIsCreateSessionOpen(false);
-        setNewSession({ date: new Date().toISOString().split('T')[0], topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
+        setMaximizedSessionDialog(null);
+        setNewSession({ date: localDateInputValue(), topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
         showToast('Sesión creada', 'success');
         fetchProgramData();
       } else {
@@ -652,6 +826,10 @@ export default function ProgramDetailPage() {
   const handleUpdateSession = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSession) return;
+    if (editSessionForm.start_time && editSessionForm.end_time && editSessionForm.end_time <= editSessionForm.start_time) {
+      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
+      return;
+    }
     setSavingSession(true);
     try {
       const res = await api(`/api/programs/${programId}/sessions/${editingSession.id}`, {
@@ -665,6 +843,7 @@ export default function ProgramDetailPage() {
       });
       if (res.success) {
         setEditingSession(null);
+        setMaximizedSessionDialog(null);
         showToast('Sesión actualizada', 'success');
         fetchProgramData();
       } else {
@@ -703,15 +882,16 @@ export default function ProgramDetailPage() {
     setSelectedSession(session);
     try {
       const response = await api<ProgramAttendance[]>(`/api/programs/${programId}/sessions/${session.id}/attendance`);
-      const attMap: Record<string, { status: string, notes: string, instructor_status?: string, instructor_notes?: string }> = {};
+      const attMap: Record<string, { status: string, notes: string }> = {};
 
       if (response.success && response.data && Array.isArray(response.data)) {
         response.data.forEach((a: ProgramAttendance) => {
-          attMap[a.participant_id] = { status: a.status, notes: a.notes || '', instructor_status: a.instructor_status || '', instructor_notes: a.instructor_notes || '' };
+          attMap[a.participant_id] = { status: a.status || '', notes: a.notes || '' };
         });
       }
 
       setAttendanceData(attMap);
+      setAttendanceDirty({});
       setIsAttendanceOpen(true);
     } catch (error) {
       console.error('Error fetching attendance:', error);
@@ -721,28 +901,29 @@ export default function ProgramDetailPage() {
   const saveAttendance = async () => {
     if (!selectedSession) return;
     try {
+      setSavingAttendance(true);
       const records = Object.entries(attendanceData)
-        .filter(([, data]) => data.status || data.notes?.trim())
+        .filter(([participantId]) => attendanceDirty[participantId])
         .map(([participantId, data]) => ({
           participant_id: participantId,
           status: data.status || '',
-          notes: data.notes || '',
-          instructor_status: data.instructor_status || '',
-          instructor_notes: data.instructor_notes || ''
+          notes: data.notes || ''
         }));
-      const BATCH_SIZE = 100;
-      for (let i = 0; i < records.length; i += BATCH_SIZE) {
-        const chunk = records.slice(i, i + BATCH_SIZE);
-        await api(`/api/programs/${programId}/sessions/${selectedSession.id}/attendance/batch`, {
+      if (records.length > 0) {
+        const result = await api<{ success: boolean; count: number }>(`/api/programs/${programId}/sessions/${selectedSession.id}/attendance/batch`, {
           method: 'POST',
-          body: JSON.stringify({ records: chunk })
+          body: JSON.stringify({ records })
         });
+        if (!result.success) throw new Error(result.error || 'No se pudo guardar la asistencia');
       }
       setIsAttendanceOpen(false);
       fetchProgramData();
       fetchHealth();
     } catch (error) {
       console.error('Error saving attendance:', error);
+      showToast('No se pudo guardar la asistencia. No se aplicaron cambios parciales.', 'error');
+    } finally {
+      setSavingAttendance(false);
     }
   };
 
@@ -789,7 +970,15 @@ export default function ProgramDetailPage() {
   // Generate Sessions
   const handleGenerateSessions = async () => {
     if (!genForm.start_date || !genForm.end_date || genForm.days_of_week.length === 0) {
-      alert('Completa la fecha de inicio, fin y al menos un día de la semana.');
+      showToast('Completa la fecha de inicio, fin y al menos un día de la semana.', 'error');
+      return;
+    }
+    if (genForm.end_date < genForm.start_date) {
+      showToast('La fecha de fin debe ser igual o posterior a la fecha de inicio.', 'error');
+      return;
+    }
+    if (genForm.start_time && genForm.end_time && genForm.end_time <= genForm.start_time) {
+      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
       return;
     }
     setGenerating(true);
@@ -804,15 +993,16 @@ export default function ProgramDetailPage() {
       });
       const data = await res.json();
       if (data.success) {
-        alert(`Se generaron ${data.count} sesiones exitosamente.`);
+        showToast(`Se generaron ${data.count || data.sessions?.length || 0} sesiones exitosamente.`, 'success');
         setIsGenerateSessionsOpen(false);
+        setMaximizedSessionDialog(null);
         fetchProgramData();
       } else {
-        alert(data.error || 'Error al generar sesiones');
+        showToast(data.error || 'Error al generar sesiones', 'error');
       }
     } catch (e) {
       console.error(e);
-      alert('Error de conexión');
+      showToast('Error de conexión', 'error');
     } finally {
       setGenerating(false);
     }
@@ -1010,33 +1200,6 @@ export default function ProgramDetailPage() {
         </div>
       </div>
 
-      {/* Compact Stats Bar */}
-      <div className="flex items-center gap-3 lg:gap-5 bg-white border border-slate-200 rounded-xl px-4 py-2.5 shrink-0 text-sm flex-wrap">
-        <span className="flex items-center gap-1.5 text-slate-600">
-          <Users className="w-3.5 h-3.5 text-purple-500" />
-          <strong className="text-slate-800 font-semibold">{participants.length}</strong>
-          <span className="hidden sm:inline">participantes</span>
-        </span>
-        <span className="text-slate-200">|</span>
-        <span className="flex items-center gap-1.5 text-slate-600">
-          <Calendar className="w-3.5 h-3.5 text-blue-500" />
-          <strong className="text-slate-800 font-semibold">{sessions.length}</strong>
-          <span className="hidden sm:inline">sesiones</span>
-        </span>
-        <span className="text-slate-200">|</span>
-        <span className="flex items-center gap-1.5 text-slate-600">
-          <Phone className="w-3.5 h-3.5 text-emerald-500" />
-          <strong className="text-slate-800 font-semibold">{participantsWithPhone.length}</strong>
-          <span className="hidden sm:inline">con teléfono</span>
-        </span>
-        <span className="text-slate-200">|</span>
-        <span className="flex items-center gap-1.5 text-slate-600">
-          <CheckCircle2 className="w-3.5 h-3.5 text-amber-500" />
-          <strong className="text-slate-800 font-semibold">{sessions.reduce((sum, s) => sum + (s.attendance_stats?.present || 0), 0)}</strong>
-          <span className="hidden sm:inline">asistencias</span>
-        </span>
-      </div>
-
       {/* Tabs */}
       <div className="flex gap-1 bg-slate-100 rounded-xl p-1 shrink-0">
         {program?.type === 'event' ? (
@@ -1057,17 +1220,6 @@ export default function ProgramDetailPage() {
               onClick={() => setActiveTab('health')}
               className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
                 activeTab === 'health'
-                  ? 'bg-white text-slate-800 shadow-sm'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              <HeartPulse className="w-4 h-4" />
-              Salud
-            </button>
-            <button
-              onClick={() => setActiveTab('participants')}
-              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
-                activeTab === 'participants'
                   ? 'bg-white text-slate-800 shadow-sm'
                   : 'text-slate-500 hover:text-slate-700'
               }`}
@@ -1124,62 +1276,27 @@ export default function ProgramDetailPage() {
             </div>
           ) : (
             <>
-              <div className="bg-white border border-slate-200 rounded-xl p-4">
-                <div className="flex flex-col lg:flex-row lg:items-center gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <HeartPulse className="w-4 h-4 text-emerald-600" />
-                      <h2 className="text-base font-semibold text-slate-800">Salud del grupo</h2>
-                      <span className={`inline-flex px-2 py-0.5 rounded-full border text-xs font-medium ${healthClass(health?.health)}`}>
-                        {healthLabel(health?.health)}
-                      </span>
+              <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <button type="button" onClick={() => setHealthSummaryExpanded(value => !value)} aria-expanded={healthSummaryExpanded} className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors">
+                  <HeartPulse className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span className="text-sm font-semibold text-slate-800">Resumen de salud</span>
+                  <span className={`inline-flex px-2 py-0.5 rounded-full border text-xs font-medium ${healthClass(health?.health)}`}>{healthLabel(health?.health)}</span>
+                  <span className="text-xs text-slate-500 truncate">{health?.reasons?.join(' · ') || 'Sin datos suficientes todavía'}</span>
+                  <ChevronDown className={`ml-auto w-4 h-4 text-slate-400 transition-transform ${healthSummaryExpanded ? 'rotate-180' : ''}`} />
+                </button>
+                {healthSummaryExpanded && (
+                  <div className="border-t border-slate-100 px-4 py-3">
+                    <div className="flex flex-wrap items-end gap-2">
+                      <label className="text-xs text-slate-500">Meta asistencia<input type="number" min={1} max={100} value={programGoals.attendance_goal_percent} onChange={(e) => setProgramGoals(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))} className="mt-1 w-28 px-2.5 py-1.5 border border-slate-200 rounded-lg text-sm" /></label>
+                      <label className="text-xs text-slate-500">Meta traspaso<input type="number" min={1} max={100} value={programGoals.transfer_goal_percent} onChange={(e) => setProgramGoals(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))} className="mt-1 w-28 px-2.5 py-1.5 border border-slate-200 rounded-lg text-sm" /></label>
+                      <button onClick={saveProgramGoals} disabled={savingGoals} className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 disabled:opacity-50">{savingGoals ? 'Guardando...' : 'Guardar metas'}</button>
+                      <button onClick={() => { setNewSession(prev => ({ ...prev, session_type: 'recovery', topic: prev.topic || 'Clase de recuperación' })); setIsCreateSessionOpen(true); }} className="px-3 py-1.5 border border-blue-200 text-blue-700 bg-blue-50 rounded-lg text-xs font-medium hover:bg-blue-100">Recuperación</button>
                     </div>
-                    <p className="text-xs text-slate-500">{health?.reasons?.join(' · ') || 'Sin datos suficientes todavía'}</p>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 lg:w-[520px]">
-                    <label className="text-xs text-slate-500">
-                      Meta asistencia
-                      <input
-                        type="number"
-                        min={1}
-                        max={100}
-                        value={programGoals.attendance_goal_percent}
-                        onChange={(e) => setProgramGoals(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))}
-                        className="mt-1 w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm"
-                      />
-                    </label>
-                    <label className="text-xs text-slate-500">
-                      Meta traspaso
-                      <input
-                        type="number"
-                        min={1}
-                        max={100}
-                        value={programGoals.transfer_goal_percent}
-                        onChange={(e) => setProgramGoals(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))}
-                        className="mt-1 w-full px-2.5 py-2 border border-slate-200 rounded-lg text-sm"
-                      />
-                    </label>
-                    <button
-                      onClick={saveProgramGoals}
-                      disabled={savingGoals}
-                      className="self-end px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
-                    >
-                      {savingGoals ? 'Guardando...' : 'Guardar'}
-                    </button>
-                    <button
-                      onClick={() => {
-                        setNewSession(prev => ({ ...prev, session_type: 'recovery', topic: prev.topic || 'Clase de recuperación' }));
-                        setIsCreateSessionOpen(true);
-                      }}
-                      className="self-end px-3 py-2 border border-blue-200 text-blue-700 bg-blue-50 rounded-lg text-sm font-medium hover:bg-blue-100"
-                    >
-                      Recuperación
-                    </button>
-                  </div>
-                </div>
+                )}
               </div>
 
-              <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+              {healthSummaryExpanded && <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
                 <div className="bg-white rounded-xl border border-slate-200 p-4">
                   <p className="text-xs text-slate-500">Asistencia</p>
                   <p className={`text-2xl font-bold mt-1 ${(health?.attendance_rate || 0) >= (health?.attendance_goal_percent || 80) ? 'text-emerald-600' : 'text-amber-600'}`}>{formatPct(health?.attendance_rate)}</p>
@@ -1206,18 +1323,49 @@ export default function ProgramDetailPage() {
                   <p className="text-xs text-slate-500">Recuperación</p>
                   <p className="text-2xl font-bold text-indigo-600 mt-1">{health?.recovery_session_count || 0}</p>
                 </div>
-              </div>
+              </div>}
 
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-                <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-slate-800">Termómetro de inscritos</h3>
-                  <button onClick={fetchHealth} className="text-xs text-emerald-600 hover:underline">Actualizar</button>
+                <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-slate-800">Participantes</h3>
+                  <div className="flex items-center gap-2">
+                    <button onClick={fetchHealth} className="text-xs text-emerald-600 hover:underline">Actualizar</button>
+                    <button onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 disabled:opacity-50"><Plus className="w-3.5 h-3.5" /> Agregar</button>
+                  </div>
                 </div>
-                <div className="overflow-x-auto">
+                <div ref={participantRosterRef}>
+                  {compactParticipantRoster ? (
+                    <div className="divide-y divide-slate-100">
+                      {(health?.participants || []).length === 0 ? (
+                        <div className="px-4 py-10 text-center text-sm text-slate-400">Sin inscritos para evaluar</div>
+                      ) : (health?.participants || []).map(p => (
+                        <div key={p.participant_id} onClick={() => void openParticipantDetail(p.participant_id, p.contact_id)} className="cursor-pointer space-y-3 p-4 transition-colors hover:bg-slate-50">
+                          <div className="flex items-start gap-3">
+                            <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-12 w-12" />
+                            <button type="button" onClick={event => { event.stopPropagation(); void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="min-w-0 flex-1 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                              <span className="block truncate font-semibold text-slate-800">{p.name || 'Sin nombre'}</span>
+                              <span className="block truncate text-xs text-slate-400">{p.phone || 'Sin teléfono'}</span>
+                              <span className={`mt-1 inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-medium ${p.status === 'active' ? 'bg-emerald-50 text-emerald-700' : p.status === 'completed' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>{p.status === 'active' ? 'Activo' : p.status === 'completed' ? 'Completado' : 'Retirado'}</span>
+                            </button>
+                            <div onClick={event => event.stopPropagation()} className="flex shrink-0 items-center gap-0.5">
+                              <button onClick={() => openObservationHistory(p.participant_id)} className="p-2 rounded-lg hover:bg-emerald-50 text-slate-400 hover:text-emerald-600" title="Abrir observaciones"><NotebookPen className="h-4 w-4" /></button>
+                              <button onClick={() => openOutcomeModal(p.participant_id, 'completed')} className="p-2 rounded-lg hover:bg-blue-50 text-slate-400 hover:text-blue-600" title="Completar y traspasar"><Target className="h-4 w-4" /></button>
+                              <button onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="p-2 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-600" title="Registrar desistimiento"><XCircle className="h-4 w-4" /></button>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-3">
+                            <div><span className="block text-[10px] uppercase tracking-wide text-slate-400">Salud</span><span className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${healthClass(p.health)}`}>{healthLabel(p.health)}</span></div>
+                            <div><span className="block text-[10px] uppercase tracking-wide text-slate-400">Asistencia</span><span className="mt-1 block font-semibold text-slate-700">{formatPct(p.attendance_rate)}</span><span className="text-[10px] text-slate-400">{p.present} P · {p.late} T · {p.absent} A · {p.excused} J</span></div>
+                          </div>
+                          {(p.reasons || []).length > 0 && <div className="flex flex-wrap gap-1">{p.reasons.slice(0, 3).map(reason => <span key={reason} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">{reason}</span>)}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  ) : <div className="overflow-x-auto">
                   <table className="w-full text-left text-sm">
                     <thead className="bg-slate-50 text-slate-600">
                       <tr>
-                        <th className="px-4 py-3 font-medium">Inscrito</th>
+                        <th className="px-4 py-3 font-medium">Participante</th>
                         <th className="px-4 py-3 font-medium">Salud</th>
                         <th className="px-4 py-3 font-medium">Asistencia</th>
                         <th className="px-4 py-3 font-medium">Señales</th>
@@ -1231,10 +1379,16 @@ export default function ProgramDetailPage() {
                         </tr>
                       ) : (
                         (health?.participants || []).map(p => (
-                          <tr key={p.participant_id} className="hover:bg-slate-50">
+                          <tr key={p.participant_id} onClick={() => void openParticipantDetail(p.participant_id, p.contact_id)} className="cursor-pointer hover:bg-slate-50">
                             <td className="px-4 py-3">
-                              <div className="font-medium text-slate-800">{p.name || 'Sin nombre'}</div>
-                              <div className="text-xs text-slate-400">{p.phone || 'Sin teléfono'}</div>
+                              <div className="flex items-center gap-3">
+                                <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} />
+                                <button type="button" onClick={event => { event.stopPropagation(); void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="min-w-0 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+                                  <span className="block truncate font-medium text-slate-800">{p.name || 'Sin nombre'}</span>
+                                  <span className="block text-xs text-slate-400">{p.phone || 'Sin teléfono'}</span>
+                                  <span className={`inline-flex mt-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${p.status === 'active' ? 'bg-emerald-50 text-emerald-700' : p.status === 'completed' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>{p.status === 'active' ? 'Activo' : p.status === 'completed' ? 'Completado' : 'Retirado'}</span>
+                                </button>
+                              </div>
                             </td>
                             <td className="px-4 py-3">
                               <span className={`inline-flex px-2 py-0.5 rounded-full border text-xs font-medium ${healthClass(p.health)}`}>
@@ -1254,7 +1408,7 @@ export default function ProgramDetailPage() {
                               {p.transferred_to_level && <div className="text-[11px] text-emerald-600 mt-1">Traspaso: {p.transferred_to_level}</div>}
                             </td>
                             <td className="px-4 py-3 text-right">
-                              <div className="flex items-center justify-end gap-1">
+                              <div onClick={event => event.stopPropagation()} className="flex items-center justify-end gap-1">
                                 <button onClick={() => openObservationHistory(p.participant_id)} className="p-1.5 rounded-lg hover:bg-emerald-50 text-slate-400 hover:text-emerald-600" title="Abrir observaciones">
                                   <NotebookPen className="w-4 h-4" />
                                 </button>
@@ -1271,6 +1425,7 @@ export default function ProgramDetailPage() {
                       )}
                     </tbody>
                   </table>
+                  </div>}
                 </div>
               </div>
             </>
@@ -1320,7 +1475,9 @@ export default function ProgramDetailPage() {
               </div>
               <button
                 onClick={() => setIsAddParticipantOpen(true)}
-                className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm"
+                disabled={program?.status !== 'active'}
+                title={program?.status !== 'active' ? 'Solo disponible para programas activos' : 'Agregar participantes'}
+                className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Plus className="w-4 h-4" />
                 Agregar
@@ -1429,7 +1586,9 @@ export default function ProgramDetailPage() {
             <h2 className="text-base font-semibold text-slate-800">Kanban de Participantes</h2>
             <button
               onClick={() => setIsAddParticipantOpen(true)}
-              className="flex items-center gap-2 px-3.5 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm"
+              disabled={program?.status !== 'active'}
+              title={program?.status !== 'active' ? 'Solo disponible para programas activos' : 'Agregar participantes'}
+              className="flex items-center gap-2 px-3.5 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Plus className="w-4 h-4" /> Agregar
             </button>
@@ -1585,7 +1744,7 @@ export default function ProgramDetailPage() {
             <div className="space-y-3 pb-2">
               {sessions.map((session, idx) => {
                 const totalAtt = (session.attendance_stats?.present || 0) + (session.attendance_stats?.absent || 0) + (session.attendance_stats?.late || 0) + (session.attendance_stats?.excused || 0);
-                const isPast = new Date(session.date) < new Date();
+                const isPast = calendarDateKey(session.date) < localDateInputValue();
                 return (
                   <div
                     key={session.id}
@@ -1595,10 +1754,10 @@ export default function ProgramDetailPage() {
                       {/* Session number & date */}
                       <div className="hidden sm:flex flex-col items-center justify-center w-14 h-14 rounded-xl bg-slate-50 border border-slate-100 shrink-0">
                         <span className="text-xs text-slate-400 font-medium uppercase">
-                          {format(new Date(session.date), 'MMM', { locale: es })}
+                          {formatCalendarDate(session.date, 'MMM', { locale: es })}
                         </span>
                         <span className="text-lg font-bold text-slate-800 -mt-0.5">
-                          {format(new Date(session.date), 'dd')}
+                          {formatCalendarDate(session.date, 'dd')}
                         </span>
                       </div>
 
@@ -1622,7 +1781,7 @@ export default function ProgramDetailPage() {
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
                           <span className="flex items-center gap-1">
                             <CalendarDays className="w-3 h-3" />
-                            {format(new Date(session.date), "EEEE, d 'de' MMMM", { locale: es })}
+                            {formatCalendarDate(session.date, "EEEE, d 'de' MMMM", { locale: es })}
                           </span>
                           {session.start_time && (
                             <span className="flex items-center gap-1">
@@ -1692,9 +1851,22 @@ export default function ProgramDetailPage() {
       ) : (
         /* Stats Tab */
         <div className="h-full overflow-y-auto">
-          {loadingStats ? (
+          {loadingStats && !statsData ? (
             <div className="flex items-center justify-center py-20">
               <div className="w-8 h-8 border-4 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
+            </div>
+          ) : statsStatus === 'error' && !statsData ? (
+            <div className="flex min-h-[320px] items-center justify-center p-4">
+              <div className="w-full max-w-md rounded-2xl border border-red-200 bg-white p-6 text-center shadow-sm">
+                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-red-50">
+                  <AlertCircle className="h-6 w-6 text-red-500" />
+                </div>
+                <h3 className="font-semibold text-slate-800">No se pudieron cargar las estadísticas</h3>
+                <p className="mt-1 text-sm text-slate-500">{statsError || 'Ocurrió un problema al consultar la asistencia.'}</p>
+                <button type="button" onClick={() => void fetchStats(selectedMonths)} className="mt-4 inline-flex min-h-10 items-center justify-center rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700">
+                  Reintentar
+                </button>
+              </div>
             </div>
           ) : !statsData || (statsData.session_stats.length === 0 && statsData.participant_stats.length === 0) ? (
             <div className="text-center py-20">
@@ -1706,6 +1878,12 @@ export default function ProgramDetailPage() {
             </div>
           ) : (
             <div className="space-y-6 pb-4">
+              {(loadingStats || statsStatus === 'error') && (
+                <div className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${statsStatus === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>
+                  <span>{statsStatus === 'error' ? (statsError || 'No se pudo actualizar la información.') : 'Actualizando estadísticas…'}</span>
+                  {statsStatus === 'error' && <button type="button" onClick={() => void fetchStats(selectedMonths)} className="shrink-0 font-semibold underline underline-offset-2">Reintentar</button>}
+                </div>
+              )}
               {/* Month filter */}
               {(() => {
                 // Extract available months from ALL sessions (not just filtered stats)
@@ -1812,7 +1990,7 @@ export default function ProgramDetailPage() {
                     const lPct = total > 0 ? ((ss.late || 0) / total) * 100 : 0;
                     const ePct = total > 0 ? ((ss.excused || 0) / total) * 100 : 0;
                     const aPct = total > 0 ? ((ss.absent || 0) / total) * 100 : 0;
-                    const label = ss.topic || (ss.date ? format(new Date(ss.date), 'dd MMM', { locale: es }) : `Sesión ${i + 1}`);
+                    const label = ss.topic || (ss.date ? formatCalendarDate(ss.date, 'dd MMM', { locale: es }) : `Sesión ${i + 1}`);
                     return (
                       <div key={ss.session_id || i}>
                         <div className="flex items-center justify-between mb-1">
@@ -1850,7 +2028,7 @@ export default function ProgramDetailPage() {
                       {statsData.session_stats.map((ss: any, i: number) => {
                         const total = (ss.present || 0) + (ss.absent || 0) + (ss.late || 0) + (ss.excused || 0);
                         const rate = total > 0 ? Math.round(((ss.present || 0) + (ss.late || 0)) / total * 100) : 0;
-                        const label = ss.topic || (ss.date ? format(new Date(ss.date), 'dd/MM', { locale: es }) : `S${i + 1}`);
+                        const label = ss.topic || (ss.date ? formatCalendarDate(ss.date, 'dd/MM', { locale: es }) : `S${i + 1}`);
                         return (
                           <div key={ss.session_id || i} className="flex flex-col items-center gap-1 w-[44px] shrink-0">
                             <span className="text-[10px] font-semibold text-slate-700">{rate}%</span>
@@ -1872,7 +2050,7 @@ export default function ProgramDetailPage() {
                 <div className="bg-white rounded-xl border border-slate-200 p-5">
                   <h3 className="font-semibold text-slate-800 mb-4 text-sm">Ranking de asistencia por participante</h3>
                   <div className="space-y-2">
-                    {statsData.participant_stats
+                    {[...statsData.participant_stats]
                       .sort((a: any, b: any) => (b.rate || 0) - (a.rate || 0))
                       .map((ps: any, i: number) => {
                         const rate = ps.rate || 0;
@@ -1910,45 +2088,33 @@ export default function ProgramDetailPage() {
 
       {/* =================== MODALS =================== */}
 
-      {/* Add Participant Modal */}
-      {isAddParticipantOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-bold text-slate-800">Agregar Participantes</h2>
-              <button onClick={() => setIsAddParticipantOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto min-h-[400px]">
-              <ContactSelector
-                open={isAddParticipantOpen}
-                onClose={() => setIsAddParticipantOpen(false)}
-                onConfirm={handleAddParticipants}
-                title="Agregar Participantes"
-                confirmLabel="Agregar Seleccionados"
-                excludeIds={new Set(participants.map(p => p.contact_id))}
-                sourceFilter="contact"
-                advancedFilters
-              />
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Add Participant Selector */}
+      <ContactSelector
+        open={isAddParticipantOpen}
+        onClose={closeAddParticipantSelector}
+        onConfirm={handleAddParticipants}
+        title="Agregar participantes"
+        subtitle="Busca entre tus contactos por nombre, teléfono o correo."
+        confirmLabel="Agregar seleccionados"
+        excludeIds={excludedParticipantIds}
+        excludeLabels={excludedParticipantLabels}
+        sourceFilter="contact"
+        submitting={addingParticipants}
+        errorMessage={addParticipantError}
+        refreshKey={participantSelectorRevision}
+      />
 
       {/* Create Session Modal */}
       {isCreateSessionOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
-            <div className="flex justify-between items-center mb-5">
-              <h2 className="text-xl font-bold text-slate-800">Nueva Sesión</h2>
-              <button onClick={() => setIsCreateSessionOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
-                <X className="w-5 h-5" />
-              </button>
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-3 sm:p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="create-session-title" className={`bg-white rounded-2xl w-full shadow-2xl flex flex-col overflow-hidden ${maximizedSessionDialog === 'create' ? 'h-full max-w-none rounded-xl' : 'max-w-2xl max-h-[90vh]'}`}>
+            <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 shrink-0">
+              <h2 id="create-session-title" className="text-xl font-bold text-slate-800">Nueva Sesión</h2>
+              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'create' ? null : 'create')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'create' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'create' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"><X className="w-5 h-5" /></button></div>
             </div>
-            <form onSubmit={handleCreateSession}>
-              <div className="space-y-4">
-                <div>
+            <form onSubmit={handleCreateSession} className="flex flex-1 min-h-0 flex-col">
+              <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
                   <input
                     type="date"
@@ -2011,10 +2177,10 @@ export default function ProgramDetailPage() {
                   />
                 </div>
               </div>
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+              <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setIsCreateSessionOpen(false)}
+                  onClick={() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }}
                   className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium"
                 >
                   Cancelar
@@ -2033,16 +2199,14 @@ export default function ProgramDetailPage() {
 
       {/* Edit Session Modal */}
       {editingSession && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
-            <div className="flex justify-between items-center mb-5">
-              <h2 className="text-xl font-bold text-slate-800">Editar Sesión</h2>
-              <button onClick={() => setEditingSession(null)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
-                <X className="w-5 h-5" />
-              </button>
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-3 sm:p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="edit-session-title" className={`bg-white rounded-2xl w-full shadow-2xl flex flex-col overflow-hidden ${maximizedSessionDialog === 'edit' ? 'h-full max-w-none rounded-xl' : 'max-w-2xl max-h-[90vh]'}`}>
+            <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 shrink-0">
+              <h2 id="edit-session-title" className="text-xl font-bold text-slate-800">Editar Sesión</h2>
+              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'edit' ? null : 'edit')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'edit' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'edit' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { setEditingSession(null); setMaximizedSessionDialog(null); }} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"><X className="w-5 h-5" /></button></div>
             </div>
-            <form onSubmit={handleUpdateSession}>
-              <div className="space-y-4">
+            <form onSubmit={handleUpdateSession} className="flex flex-1 min-h-0 flex-col">
+              <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
                   <input
@@ -2106,10 +2270,10 @@ export default function ProgramDetailPage() {
                   />
                 </div>
               </div>
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+              <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setEditingSession(null)}
+                  onClick={() => { setEditingSession(null); setMaximizedSessionDialog(null); }}
                   className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium"
                 >
                   Cancelar
@@ -2129,24 +2293,22 @@ export default function ProgramDetailPage() {
 
       {/* Generate Sessions Modal - Google Calendar Style */}
       {isGenerateSessionsOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
-            <div className="flex justify-between items-center mb-5">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-3 sm:p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="recurring-session-title" className={`bg-white rounded-2xl w-full shadow-2xl flex flex-col overflow-hidden ${maximizedSessionDialog === 'recurring' ? 'h-full max-w-none rounded-xl' : 'max-w-3xl max-h-[90vh]'}`}>
+            <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 shrink-0">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center">
                   <Repeat className="w-5 h-5 text-emerald-600" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-bold text-slate-800">Generar Horario Recurrente</h2>
+                  <h2 id="recurring-session-title" className="text-xl font-bold text-slate-800">Generar Horario Recurrente</h2>
                   <p className="text-xs text-slate-500">Configura la recurrencia y genera todas las sesiones</p>
                 </div>
               </div>
-              <button onClick={() => setIsGenerateSessionsOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'recurring' ? null : 'recurring')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'recurring' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'recurring' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"><X className="w-5 h-5" /></button></div>
             </div>
 
-            <div className="space-y-5">
+            <div className="flex-1 min-h-0 overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Date range */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -2170,7 +2332,7 @@ export default function ProgramDetailPage() {
               </div>
 
               {/* Days of week - Google Calendar style */}
-              <div>
+              <div className="sm:col-span-2">
                 <label className="block text-sm font-medium text-slate-700 mb-2">Días de la semana</label>
                 <div className="flex gap-2">
                   {DAY_NAMES.map((name, idx) => (
@@ -2218,7 +2380,7 @@ export default function ProgramDetailPage() {
               </div>
 
               {/* Topic prefix */}
-              <div>
+              <div className="sm:col-span-2">
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">Prefijo del tema</label>
                 <input
                   type="text"
@@ -2259,9 +2421,9 @@ export default function ProgramDetailPage() {
               )}
             </div>
 
-            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+            <div className="flex justify-end gap-3 px-5 py-4 border-t border-slate-100 shrink-0">
               <button
-                onClick={() => setIsGenerateSessionsOpen(false)}
+                onClick={() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }}
                 className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium"
               >
                 Cancelar
@@ -2291,12 +2453,12 @@ export default function ProgramDetailPage() {
       {/* Attendance Modal */}
       {isAttendanceOpen && selectedSession && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-5xl max-h-[90vh] flex flex-col shadow-2xl">
+          <div className="bg-white rounded-2xl p-4 sm:p-6 w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl">
             <div className="flex justify-between items-center mb-4">
               <div>
                 <h2 className="text-xl font-bold text-slate-800">Tomar Asistencia</h2>
                 <p className="text-sm text-slate-500">
-                  {selectedSession.topic} — {format(new Date(selectedSession.date), "EEEE, d 'de' MMMM", { locale: es })}
+                  {selectedSession.topic} — {formatCalendarDate(selectedSession.date, "EEEE, d 'de' MMMM", { locale: es })}
                   {selectedSession.start_time && ` · ${selectedSession.start_time}`}
                 </p>
               </div>
@@ -2305,14 +2467,13 @@ export default function ProgramDetailPage() {
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto pr-1">
-              <table className="w-full text-left text-sm">
+            <div className="flex-1 overflow-auto pr-1">
+              <table className="w-full min-w-[720px] text-left text-sm">
                 <thead className="bg-slate-50 text-slate-600 sticky top-0 z-10 border-b border-slate-200">
                   <tr>
                     <th className="px-4 py-3 font-medium">Participante</th>
                     <th className="px-4 py-3 font-medium">Estado</th>
-                    <th className="px-4 py-3 font-medium">Notas</th>
-                    <th className="px-4 py-3 font-medium">Instructor</th>
+                    <th className="px-4 py-3 font-medium">Observaciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -2337,10 +2498,10 @@ export default function ProgramDetailPage() {
                             <button
                               key={opt.key}
                               type="button"
-                              onClick={() => setAttendanceData({
-                                ...attendanceData,
-                                [p.id]: { ...attendanceData[p.id], status: opt.key }
-                              })}
+                              onClick={() => {
+                                setAttendanceData({ ...attendanceData, [p.id]: { ...attendanceData[p.id], status: opt.key, notes: attendanceData[p.id]?.notes || '' } });
+                                setAttendanceDirty(prev => ({ ...prev, [p.id]: true }));
+                              }}
                               title={opt.title}
                               className={`w-8 h-8 rounded-lg text-xs font-bold transition-all ${
                                 attendanceData[p.id]?.status === opt.key
@@ -2360,48 +2521,11 @@ export default function ProgramDetailPage() {
                         <input
                           type="text"
                           value={attendanceData[p.id]?.notes || ''}
-                          onChange={(e) => setAttendanceData({
-                            ...attendanceData,
-                            [p.id]: { ...attendanceData[p.id], notes: e.target.value }
-                          })}
-                          placeholder="Opcional..."
-                          className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex gap-1 mb-2">
-                          {[
-                            { key: 'good', label: 'Bien', color: 'emerald' },
-                            { key: 'watch', label: 'Obs.', color: 'amber' },
-                            { key: 'risk', label: 'Riesgo', color: 'red' },
-                          ].map(opt => (
-                            <button
-                              key={opt.key}
-                              type="button"
-                              onClick={() => setAttendanceData({
-                                ...attendanceData,
-                                [p.id]: { ...attendanceData[p.id], instructor_status: attendanceData[p.id]?.instructor_status === opt.key ? '' : opt.key }
-                              })}
-                              className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-all ${
-                                attendanceData[p.id]?.instructor_status === opt.key
-                                  ? opt.color === 'emerald' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-300'
-                                  : opt.color === 'amber' ? 'bg-amber-100 text-amber-700 ring-2 ring-amber-300'
-                                  : 'bg-red-100 text-red-700 ring-2 ring-red-300'
-                                  : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                              }`}
-                            >
-                              {opt.label}
-                            </button>
-                          ))}
-                        </div>
-                        <input
-                          type="text"
-                          value={attendanceData[p.id]?.instructor_notes || ''}
-                          onChange={(e) => setAttendanceData({
-                            ...attendanceData,
-                            [p.id]: { ...attendanceData[p.id], instructor_notes: e.target.value }
-                          })}
-                          placeholder="Feedback..."
+                          onChange={(e) => {
+                            setAttendanceData({ ...attendanceData, [p.id]: { ...attendanceData[p.id], status: attendanceData[p.id]?.status || '', notes: e.target.value } });
+                            setAttendanceDirty(prev => ({ ...prev, [p.id]: true }));
+                          }}
+                          placeholder="Escribir observación..."
                           className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                         />
                       </td>
@@ -2418,12 +2542,9 @@ export default function ProgramDetailPage() {
               >
                 Cancelar
               </button>
-              <button
-                onClick={saveAttendance}
-                className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium flex items-center gap-2"
-              >
+              <button onClick={saveAttendance} disabled={savingAttendance} className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium flex items-center gap-2 disabled:opacity-50">
                 <Check className="w-4 h-4" />
-                Guardar Asistencia
+                {savingAttendance ? 'Guardando...' : 'Guardar Asistencia'}
               </button>
             </div>
           </div>
@@ -2433,8 +2554,11 @@ export default function ProgramDetailPage() {
       <ObservationHistoryModal
         isOpen={!!observationParticipant}
         onClose={() => setObservationParticipant(null)}
-        leadId={observationParticipant?.lead_id || observationParticipant?.contact_id || ''}
+        leadId={undefined}
         contactId={observationParticipant?.contact_id || null}
+        programId={programId}
+        programParticipantId={observationParticipant?.id || null}
+        defaultNewType="note"
         name={observationParticipant?.contact_name || 'Participante sin nombre'}
         observations={observationHistory}
         onObservationChange={fetchHealth}
@@ -2596,13 +2720,13 @@ export default function ProgramDetailPage() {
       )}
 
       {/* Lead/Contact Detail Side Panel with Inline Chat */}
-      {selectedLead && (
+      {participantDetailOpen && (
         <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
-            onClick={() => { setSelectedLead(null); setSelectedContact(null); setContactPanelMode(false); setShowInlineChat(false); setSelectedParticipantID(null); }}
+            onClick={closeParticipantDetail}
           />
-          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
+          <div ref={participantDetailDialogRef} role="dialog" aria-modal="true" aria-label="Detalle del participante" tabIndex={-1} className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 outline-none ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
             {/* Chat Panel - Left Side */}
             {showInlineChat && inlineChatId && (
               <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
@@ -2618,13 +2742,29 @@ export default function ProgramDetailPage() {
             )}
             {/* Detail Panel - Right Side (programs are contact-only by spec) */}
             <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
-              {selectedContact && (
+              {loadingLead && !selectedContact ? (
+                <div className="flex h-full flex-col">
+                  <div className="flex h-16 items-center justify-between border-b border-slate-100 px-4"><div className="h-4 w-40 animate-pulse rounded bg-slate-200" /><button type="button" onClick={closeParticipantDetail} className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Cerrar"><X className="h-4 w-4" /></button></div>
+                  <div className="space-y-5 p-6"><div className="mx-auto h-16 w-16 animate-pulse rounded-full bg-slate-200" /><div className="mx-auto h-5 w-44 animate-pulse rounded bg-slate-200" /><div className="h-28 animate-pulse rounded-xl bg-slate-100" /><div className="h-40 animate-pulse rounded-xl bg-slate-100" /></div>
+                </div>
+              ) : participantDetailError ? (
+                <div className="flex h-full flex-col">
+                  <div className="flex h-16 items-center justify-between border-b border-slate-100 px-4"><h2 className="text-sm font-semibold text-slate-900">Detalle del participante</h2><button type="button" onClick={closeParticipantDetail} className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Cerrar"><X className="h-4 w-4" /></button></div>
+                  <div className="flex flex-1 items-center justify-center p-6"><div className="text-center"><AlertCircle className="mx-auto h-9 w-9 text-red-400" /><p className="mt-3 font-medium text-slate-800">No se pudo cargar el participante</p><p className="mt-1 text-sm text-slate-500">{participantDetailError}</p><button type="button" onClick={retryParticipantDetail} className="mt-4 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700">Reintentar</button></div></div>
+                </div>
+              ) : selectedContact && selectedLead ? (
                 <LeadDetailPanel
                   contactMode
                   contactId={selectedContact.id}
+                  avatarContextType="program_participant"
+                  avatarContextId={selectedParticipantID || undefined}
                   lead={contactToLead(selectedContact)}
                   pushName={selectedContact.push_name}
                   avatarUrl={selectedContact.avatar_url}
+                  detailTitle="Detalle del participante"
+                  programContext={selectedParticipantID ? { programId, participantId: selectedParticipantID } : undefined}
+                  defaultObservationType="note"
+                  onAvatarChange={handleParticipantAvatarChange}
                   onLeadChange={() => {}}
                   onContactUpdate={(updated: any) => {
                     setSelectedContact(updated);
@@ -2635,14 +2775,18 @@ export default function ProgramDetailPage() {
                         ? { ...p, contact_name: updated.custom_name || updated.name || p.contact_name, contact_phone: updated.phone || p.contact_phone }
                         : p
                     ));
+                    setHealth(prev => prev ? {
+                      ...prev,
+                      participants: prev.participants.map(p => p.contact_id === updated.id ? { ...p, name: updated.custom_name || updated.name || p.name, phone: updated.phone || p.phone } : p),
+                    } : prev);
                   }}
-                  onClose={() => { setSelectedLead(null); setSelectedContact(null); setContactPanelMode(false); setSelectedParticipantID(null); }}
+                  onClose={closeParticipantDetail}
                   onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-                  onObservationChange={() => {}}
+                  onObservationChange={() => { void fetchHealth(); }}
                   hideDelete
                   hideWhatsApp={showInlineChat}
                 />
-              )}
+              ) : null}
             </div>
           </div>
         </div>

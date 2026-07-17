@@ -327,7 +327,7 @@ export const apiPut = <T>(endpoint: string, body: unknown) =>
 export const apiDelete = <T>(endpoint: string) =>
   api<T>(endpoint, { method: 'DELETE' })
 
-export async function apiUpload<T = any>(endpoint: string, formData: FormData): Promise<{ success: boolean; data?: T; error?: string }> {
+export async function apiUpload<T = any>(endpoint: string, formData: FormData, options: { signal?: AbortSignal } = {}): Promise<{ success: boolean; data?: T; error?: string }> {
   if (isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
     return { success: false, error: 'Sesión expirada por inactividad' }
@@ -338,6 +338,7 @@ export async function apiUpload<T = any>(endpoint: string, formData: FormData): 
       method: 'POST',
       body: formData,
       credentials: 'include',
+      signal: options.signal,
     })
   }
 
@@ -357,6 +358,9 @@ export async function apiUpload<T = any>(endpoint: string, formData: FormData): 
     markAuthActivity()
     return { success: true, data: data as T }
   } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      return { success: false, error: 'Solicitud cancelada' }
+    }
     console.error('Upload Error:', err)
     return { success: false, error: 'Error de conexión' }
   }
@@ -630,6 +634,10 @@ export interface Contact {
   custom_name: string | null
   push_name: string | null
   avatar_url: string | null
+  avatar_media_asset_id?: string | null
+  avatar_source?: 'legacy' | 'whatsapp' | 'manual' | null
+  avatar_updated_at?: string | null
+  avatar_revision?: number
   email: string | null
   company: string | null
   tags: string[] | null

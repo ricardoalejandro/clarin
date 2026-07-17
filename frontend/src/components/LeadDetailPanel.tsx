@@ -13,6 +13,7 @@ import TaskList from '@/components/TaskList'
 import TaskFormModal from '@/components/TaskFormModal'
 import GenerateDocumentModal from '@/components/GenerateDocumentModal'
 import CustomFieldInput from '@/components/CustomFieldInput'
+import ContactAvatarControl, { type ContactAvatarContextType, type ContactAvatarInfo } from '@/components/ContactAvatarControl'
 import type { CustomFieldDefinition, CustomFieldValue } from '@/types/custom-field'
 import type { Task, TaskList as TaskListType } from '@/types/task'
 import { TASK_TYPE_CONFIG } from '@/types/task'
@@ -53,6 +54,12 @@ interface LeadDetailPanelProps {
   onDelete?: (leadId: string) => void
   /** Optional: hide the header (useful when embedding inside another panel with its own header) */
   hideHeader?: boolean
+  /** Optional: hide the duplicated person identity when a parent already renders it. */
+  hideIdentity?: boolean
+  /** Embedded CRM view: keep opportunity fields/actions and hide Contact-owned personal data. */
+  commercialOnly?: boolean
+  /** Let an embedding panel own the vertical scroll instead of creating a nested viewport. */
+  parentOwnsScroll?: boolean
   /** Optional: hide delete button */
   hideDelete?: boolean
   /** Optional: hide WhatsApp button */
@@ -101,6 +108,13 @@ interface LeadDetailPanelProps {
   pushName?: string | null
   /** Avatar URL in contact mode */
   avatarUrl?: string | null
+  /** Explicit authorization context when contactMode is embedded outside Contacts. */
+  avatarContextType?: ContactAvatarContextType
+  avatarContextId?: string
+  detailTitle?: string
+  programContext?: { programId: string; participantId: string }
+  defaultObservationType?: 'note' | 'call'
+  onAvatarChange?: (avatar: ContactAvatarInfo) => void
 
   /** Called when "Send Message" is clicked in contact mode */
   onSendMessage?: () => void
@@ -120,6 +134,9 @@ export default function LeadDetailPanel({
   onSendWhatsApp,
   onDelete,
   hideHeader = false,
+  hideIdentity = false,
+  commercialOnly = false,
+  parentOwnsScroll = false,
   hideDelete = false,
   hideWhatsApp = false,
   readOnly = false,
@@ -146,6 +163,12 @@ export default function LeadDetailPanel({
   deviceNames,
   pushName,
   avatarUrl,
+  avatarContextType,
+  avatarContextId,
+  detailTitle,
+  programContext,
+  defaultObservationType = 'call',
+  onAvatarChange,
   onSendMessage,
   onContactUpdate,
   onObservationChange,
@@ -153,6 +176,12 @@ export default function LeadDetailPanel({
 }: LeadDetailPanelProps) {
   // Internal lead state — updates immediately on save, syncs with prop
   const [lead, setLead] = useState(leadProp)
+
+  const avatarContactId = contactMode ? contactId : leadProp.contact_id || undefined
+  const resolvedAvatarContextType: ContactAvatarContextType = avatarContextType
+    || (eventMode ? 'event_participant' : contactMode ? 'contact' : 'lead')
+  const resolvedAvatarContextId = avatarContextId
+    || (eventMode ? participantId : contactMode ? contactId : leadProp.id)
   useEffect(() => {
     // Preserve relations that the parent may not refresh in-place (avoids visual wipe
     // of tags / custom fields while the local state is still authoritative).
@@ -182,7 +211,7 @@ export default function LeadDetailPanel({
   const [observations, setObservations] = useState<Observation[]>([])
   const [loadingObservations, setLoadingObservations] = useState(false)
   const [newObservation, setNewObservation] = useState('')
-  const [newObservationType, setNewObservationType] = useState<'note' | 'call'>('call')
+  const [newObservationType, setNewObservationType] = useState<'note' | 'call'>(defaultObservationType)
   const [savingObservation, setSavingObservation] = useState(false)
   const [obsDisplayCount, setObsDisplayCount] = useState(5)
 
@@ -623,7 +652,7 @@ export default function LeadDetailPanel({
             notes: newObservation.trim(),
           }
         : contactMode && contactId
-        ? { contact_id: contactId, type: newObservationType, notes: newObservation.trim() }
+        ? { contact_id: contactId, program_id: programContext?.programId, program_participant_id: programContext?.participantId, type: newObservationType, notes: newObservation.trim() }
         : { lead_id: lead.id, type: newObservationType, notes: newObservation.trim() }
       const res = await fetch('/api/interactions', {
         method: 'POST',
@@ -758,11 +787,11 @@ export default function LeadDetailPanel({
 
   // ─── Render ────────────────────────────────────────────
   return (
-    <div className={`flex flex-col h-full overflow-hidden bg-white ${className}`}>
+    <div className={`flex flex-col bg-white ${parentOwnsScroll ? 'h-auto overflow-visible' : 'h-full overflow-hidden'} ${className}`}>
       {/* Header */}
       {!hideHeader && (
         <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 p-4 flex items-center justify-between z-10 shrink-0">
-          <h2 className="text-sm font-semibold text-slate-900">{contactMode ? 'Detalle del contacto' : eventMode ? 'Detalle del participante' : 'Detalle del lead'}</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{detailTitle || (contactMode ? 'Detalle del contacto' : eventMode ? 'Detalle del participante' : 'Detalle del lead')}</h2>
           <div className="flex items-center gap-1">
             <button onClick={onClose} className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar panel de detalle">
               <X className="w-4 h-4 text-slate-400" />
@@ -782,7 +811,7 @@ export default function LeadDetailPanel({
           }`}
         >
           <LayoutList className="w-3.5 h-3.5" />
-          General
+          {commercialOnly ? 'Oportunidad' : 'General'}
         </button>
         <button
           onClick={() => setActiveTab('campos')}
@@ -793,7 +822,7 @@ export default function LeadDetailPanel({
           }`}
         >
           <SlidersHorizontal className="w-3.5 h-3.5" />
-          Campos
+          {commercialOnly ? 'Campos comerciales' : 'Campos'}
           {cfDefs.length > 0 && (
             <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
               activeTab === 'campos'
@@ -813,11 +842,20 @@ export default function LeadDetailPanel({
         </div>
       )}
 
-      <div className={`flex-1 overflow-y-auto p-6 space-y-6 ${activeTab !== 'general' ? 'hidden' : ''}`}>
+      <div className={`${parentOwnsScroll ? 'p-4 sm:p-5' : 'flex-1 overflow-y-auto p-6'} space-y-6 ${activeTab !== 'general' ? 'hidden' : ''}`}>
         {/* Lead Avatar & Name */}
         <div className="text-center">
-          {contactMode && avatarUrl ? (
-            <img src={avatarUrl} alt="" className="w-14 h-14 rounded-full object-cover mx-auto mb-2" />
+          {!hideIdentity && <>
+          {avatarContactId && resolvedAvatarContextId ? (
+            <ContactAvatarControl
+              contactId={avatarContactId}
+              contextType={resolvedAvatarContextType}
+              contextId={resolvedAvatarContextId}
+              displayName={lead.name || lead.phone || 'Contacto'}
+              avatarUrl={avatarUrl}
+              disabled={readOnly}
+              onChange={onAvatarChange}
+            />
           ) : (
           <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
             <span className="text-emerald-700 font-bold text-base">
@@ -862,9 +900,10 @@ export default function LeadDetailPanel({
           {contactMode && lead.jid && (
             <p className="text-xs text-slate-400">{lead.jid}</p>
           )}
+          </>}
 
           {/* Archive/Block status badges */}
-          {!contactMode && (lead.is_archived || lead.is_blocked) && (
+          {!contactMode && (lead.is_archived || (!commercialOnly && lead.is_blocked)) && (
             <div className="flex items-center justify-center gap-2 mt-2">
               {lead.is_archived && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-50 border border-amber-200 rounded-full text-xs font-medium text-amber-700">
@@ -872,7 +911,7 @@ export default function LeadDetailPanel({
                   Archivado
                 </span>
               )}
-              {lead.is_blocked && (
+              {!commercialOnly && lead.is_blocked && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-50 border border-red-200 rounded-full text-xs font-medium text-red-700" title={lead.block_reason || ''}>
                   <ShieldBan className="w-3 h-3" />
                   No contactable{lead.block_reason ? `: ${lead.block_reason}` : ''}
@@ -884,7 +923,7 @@ export default function LeadDetailPanel({
           {/* Archive/Block action buttons */}
           {!contactMode && !readOnly && (
             <div className="flex items-center justify-center gap-2 mt-2">
-              {lead.is_blocked ? (
+              {!commercialOnly && lead.is_blocked ? (
                 onUnblock && (
                   <button
                     onClick={() => onUnblock(lead.id)}
@@ -958,7 +997,7 @@ export default function LeadDetailPanel({
                   {lead.kommo_deleted_at ? `Eliminado de Kommo #${lead.kommo_id}` : `Kommo #${lead.kommo_id}`}
                 </span>
             )}
-            {googleConnected && (contactMode ? contactId : lead.contact_id) && (
+            {!commercialOnly && googleConnected && (contactMode ? contactId : lead.contact_id) && (
               <button
                 onClick={googleSynced ? handleGoogleDesync : handleGoogleSync}
                 disabled={googleSyncing}
@@ -1006,7 +1045,8 @@ export default function LeadDetailPanel({
           </div>
         )}
 
-        {/* Inline editable info fields */}
+        {/* Contact-owned fields are rendered once by the parent in commercial-only mode. */}
+        {!commercialOnly && <>
         <div className="space-y-3">
           <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Información</h5>
 
@@ -1167,6 +1207,7 @@ export default function LeadDetailPanel({
             />
           )}
         </div>}
+        </>}
 
         {/* Pipeline & Stage Selector (hidden in contact mode) */}
         {!contactMode && (
@@ -1667,10 +1708,11 @@ export default function LeadDetailPanel({
                         {obs.type !== 'note' && obs.type !== 'call' && <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 text-[10px] rounded-full">{obs.type}</span>}
                         {obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-600 text-[10px] rounded-full font-medium">↕ Kommo</span>}
                       </div>
+                      {obs.program_id && obs.source_label && <p className={`mt-1.5 text-[10px] font-medium ${obs.type === 'attendance' ? 'text-emerald-700' : 'text-slate-500'}`}>{obs.source_label}</p>}
                     </div>
-                    <button onClick={() => handleDeleteObservation(obs.id)} className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" title="Eliminar">
+                    {obs.type !== 'attendance' && <button onClick={() => handleDeleteObservation(obs.id)} className="p-1 text-gray-300 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0" title="Eliminar">
                       <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    </button>}
                   </div>
                 </div>
               ))}
@@ -1692,7 +1734,7 @@ export default function LeadDetailPanel({
       </div>
 
       {/* Custom Fields Tab */}
-      <div className={`flex-1 overflow-y-auto p-6 space-y-6 ${activeTab !== 'campos' ? 'hidden' : ''}`}>
+      <div className={`${parentOwnsScroll ? 'p-4 sm:p-5' : 'flex-1 overflow-y-auto p-6'} space-y-6 ${activeTab !== 'campos' ? 'hidden' : ''}`}>
         {(contactMode ? contactId : lead.contact_id) ? (
           cfLoading ? (
             <div className="space-y-3">
@@ -1733,6 +1775,9 @@ export default function LeadDetailPanel({
         participantId={eventMode ? participantId : undefined}
         eventId={eventMode ? eventId : undefined}
         contactId={eventMode ? lead.contact_id : contactMode ? contactId : undefined}
+        programId={programContext?.programId}
+        programParticipantId={programContext?.participantId}
+        defaultNewType={defaultObservationType}
         name={lead.name || 'Sin nombre'}
         observations={observations}
         onObservationChange={() => { fetchObservations(lead.id); onObservationChange?.(lead.id) }}

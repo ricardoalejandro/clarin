@@ -16,6 +16,7 @@ interface DeviceSelectorProps {
   onDeviceChange: (ids: string[]) => void
   mode?: 'single' | 'multi'
   placeholder?: string
+  className?: string
 }
 
 export default function DeviceSelector({
@@ -23,7 +24,8 @@ export default function DeviceSelector({
   selectedDeviceIds,
   onDeviceChange,
   mode = 'multi',
-  placeholder = 'Todos los dispositivos'
+  placeholder = 'Todos los dispositivos',
+  className = '',
 }: DeviceSelectorProps) {
   const [isOpen, setIsOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
@@ -81,50 +83,57 @@ export default function DeviceSelector({
   }
 
   return (
-    <div className="relative" ref={dropdownRef}>
+    <div className={`relative min-w-0 ${className}`} ref={dropdownRef}>
       <button
+        type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 rounded-lg hover:border-green-500 focus:ring-2 focus:ring-green-500 focus:border-transparent min-w-[200px]"
+        className="flex h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 transition hover:border-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
       >
-        <Smartphone className="w-4 h-4 text-green-600" />
-        <span className="flex-1 text-left text-sm font-medium text-gray-800 truncate">{getDisplayText()}</span>
-        <ChevronDown className={`w-4 h-4 text-gray-600 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        <Smartphone className="h-4 w-4 shrink-0 text-emerald-600" />
+        <span className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-slate-700">{getDisplayText()}</span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
 
       {isOpen && (
-        <div className="absolute top-full left-0 mt-1 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+        <div role="listbox" aria-label="Dispositivos" className="absolute left-0 right-0 top-full z-50 mt-1 min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl shadow-slate-900/10">
           {mode === 'multi' && (
-            <div
+            <button
+              type="button"
               onClick={handleSelectAll}
-              className="px-3 py-2.5 cursor-pointer hover:bg-green-50 border-b border-gray-200 flex items-center justify-between"
+              className="flex min-h-11 w-full items-center justify-between border-b border-slate-200 px-3 py-2.5 text-left hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500"
             >
-              <span className="text-sm font-semibold text-gray-800">Todos los dispositivos</span>
+              <span className="min-w-0 truncate text-sm font-semibold text-slate-800">Todos los dispositivos</span>
               {selectedDeviceIds.length === 0 || selectedDeviceIds.length === connectedDevices.length ? (
-                <Check className="w-5 h-5 text-green-600" />
+                <Check className="h-5 w-5 shrink-0 text-emerald-600" />
               ) : null}
-            </div>
+            </button>
           )}
 
           <div className="max-h-48 overflow-y-auto">
             {connectedDevices.map(device => (
-              <div
+              <button
+                type="button"
+                role="option"
+                aria-selected={selectedDeviceIds.includes(device.id)}
                 key={device.id}
                 onClick={() => handleToggle(device.id)}
-                className={`px-3 py-2.5 cursor-pointer hover:bg-green-50 flex items-center justify-between ${selectedDeviceIds.includes(device.id) ? 'bg-green-50' : ''}`}
+                className={`flex min-h-11 w-full items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${selectedDeviceIds.includes(device.id) ? 'bg-emerald-50' : ''}`}
               >
-                <div className="flex items-center gap-3">
-                  <div className="w-2.5 h-2.5 bg-green-500 rounded-full flex-shrink-0" />
-                  <div>
-                    <p className="text-sm font-semibold text-gray-800">{device.name}</p>
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="h-2.5 w-2.5 flex-shrink-0 rounded-full bg-emerald-500" />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-800">{device.name}</p>
                     {device.phone && (
-                      <p className="text-xs font-medium text-gray-600">{device.phone}</p>
+                      <p className="truncate text-xs font-medium text-slate-500">{device.phone}</p>
                     )}
                   </div>
                 </div>
                 {selectedDeviceIds.includes(device.id) && (
-                  <Check className="w-5 h-5 text-green-600" />
+                  <Check className="h-5 w-5 shrink-0 text-emerald-600" />
                 )}
-              </div>
+              </button>
             ))}
           </div>
 

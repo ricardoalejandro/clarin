@@ -150,6 +150,9 @@ services:
       # WhatsApp Cloud API webhook authentication
       WHATSAPP_CLOUD_VERIFY_TOKEN: ${WHATSAPP_CLOUD_VERIFY_TOKEN:-}
       WHATSAPP_CLOUD_APP_SECRET: ${WHATSAPP_CLOUD_APP_SECRET:-}
+      # Own statuses remain disabled until each capability is proven with a real WhatsApp Web device.
+      WHATSAPP_STATUS_ENABLED: ${WHATSAPP_STATUS_ENABLED:-true}
+      WHATSAPP_STATUS_SYNC_ENABLED: ${WHATSAPP_STATUS_SYNC_ENABLED:-true}
       PUBLIC_URL: "https://clarin.naperu.cloud"
       # AI Assistant (Eros)
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}

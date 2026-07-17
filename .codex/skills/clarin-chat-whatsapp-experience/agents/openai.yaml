@@ -1,0 +1,4 @@
+interface:
+  display_name: "Clarin Chat & WhatsApp Experience"
+  short_description: "Build reliable, polished Clarin WhatsApp chat UX"
+  default_prompt: "Use $clarin-chat-whatsapp-experience to implement and verify this Clarin chat or WhatsApp experience change."

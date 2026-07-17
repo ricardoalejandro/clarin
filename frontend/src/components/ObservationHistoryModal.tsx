@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { X, Clock, FileText, Phone, Trash2, Plus, XCircle, ChevronDown, Filter, SlidersHorizontal } from 'lucide-react'
+import { X, Clock, FileText, Phone, Trash2, Plus, XCircle, ChevronDown, Filter, SlidersHorizontal, CalendarCheck2 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 
@@ -15,6 +15,10 @@ export interface HistoryObservation {
   notes: string | null
   created_by_name: string | null
   created_at: string
+  program_id?: string | null
+  program_session_id?: string | null
+  program_participant_id?: string | null
+  source_label?: string | null
 }
 
 interface ObservationHistoryModalProps {
@@ -28,6 +32,9 @@ interface ObservationHistoryModalProps {
   eventId?: string | null
   /** Contact ID — if provided, API calls use /api/contacts/:id/interactions */
   contactId?: string | null
+  programId?: string | null
+  programParticipantId?: string | null
+  defaultNewType?: 'note' | 'call'
   /** Display name for header */
   name: string
   /** Initial observations (caller already has them). Component refreshes internally after add/delete. */
@@ -45,6 +52,9 @@ export default function ObservationHistoryModal({
   participantId,
   eventId,
   contactId,
+  programId,
+  programParticipantId,
+  defaultNewType = 'call',
   name,
   observations: initialObservations,
   onObservationChange,
@@ -59,7 +69,7 @@ export default function ObservationHistoryModal({
   const [toolbarOpen, setToolbarOpen] = useState(false)
 
   // Add observation form
-  const [newType, setNewType] = useState<'note' | 'call'>('call')
+  const [newType, setNewType] = useState<'note' | 'call'>(defaultNewType)
   const [newText, setNewText] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -75,10 +85,10 @@ export default function ObservationHistoryModal({
   // Reset state when modal closes
   useEffect(() => {
     if (!isOpen) {
-      setFilterType(''); setFilterFrom(''); setFilterTo(''); setNewText('')
+      setFilterType(''); setFilterFrom(''); setFilterTo(''); setNewText(''); setNewType(defaultNewType)
       setToolbarOpen(false); setVisibleCount(PAGE_SIZE)
     }
-  }, [isOpen])
+  }, [defaultNewType, isOpen])
 
   // Escape key — capture phase to prevent parent handlers from firing
   useEffect(() => {
@@ -138,7 +148,7 @@ export default function ObservationHistoryModal({
       const body = participantId
         ? { event_id: eventId || undefined, participant_id: participantId, contact_id: contactId || undefined, type: newType, notes: newText.trim() }
         : contactId
-        ? { contact_id: contactId, type: newType, notes: newText.trim() }
+        ? { contact_id: contactId, program_id: programId || undefined, program_participant_id: programParticipantId || undefined, type: newType, notes: newText.trim() }
         : { lead_id: leadId, type: newType, notes: newText.trim() }
       const res = await fetch('/api/interactions', {
         method: 'POST',
@@ -196,11 +206,12 @@ export default function ObservationHistoryModal({
   const hasMore = visibleCount < filtered.length
 
   const typeLabel = (t: string) =>
-    t === 'note' ? 'Nota' : t === 'call' ? 'Llamada' : t === 'whatsapp' ? 'WhatsApp' : t === 'email' ? 'Email' : t === 'meeting' ? 'Reunión' : t
+    t === 'note' ? 'Nota' : t === 'call' ? 'Llamada' : t === 'attendance' ? 'Asistencia' : t === 'whatsapp' ? 'WhatsApp' : t === 'email' ? 'Email' : t === 'meeting' ? 'Reunión' : t
 
   const typeStyle = (t: string) =>
     t === 'note' ? 'bg-amber-50 text-amber-700 border-amber-200/60'
     : t === 'call' ? 'bg-blue-50 text-blue-700 border-blue-200/60'
+    : t === 'attendance' ? 'bg-emerald-50 text-emerald-700 border-emerald-200/60'
     : t === 'whatsapp' ? 'bg-green-50 text-green-700 border-green-200/60'
     : t === 'email' ? 'bg-purple-50 text-purple-700 border-purple-200/60'
     : 'bg-orange-50 text-orange-700 border-orange-200/60'
@@ -244,6 +255,7 @@ export default function ObservationHistoryModal({
                   <option value="">Todos</option>
                   <option value="note">Nota</option>
                   <option value="call">Llamada</option>
+                  <option value="attendance">Asistencia</option>
                   <option value="whatsapp">WhatsApp</option>
                   <option value="email">Email</option>
                   <option value="meeting">Reunión</option>
@@ -350,10 +362,9 @@ export default function ObservationHistoryModal({
                         {kommoEnabled && obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-px bg-emerald-50 text-emerald-600 text-[9px] rounded-full font-medium border border-emerald-100">Kommo</span>}
                       </div>
                       <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
+                      {obs.program_id && obs.source_label && <p className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium ${obs.type === 'attendance' ? 'text-emerald-700' : 'text-slate-500'}`}><CalendarCheck2 className="h-3 w-3" />{obs.source_label}</p>}
                     </div>
-                    <button onClick={() => handleDelete(obs.id)} className="p-1 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-md sm:opacity-0 sm:group-hover:opacity-100 transition-all shrink-0" title="Eliminar">
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+                    {obs.type !== 'attendance' && <button onClick={() => handleDelete(obs.id)} className="p-1 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-md sm:opacity-0 sm:group-hover:opacity-100 transition-all shrink-0" title="Eliminar"><Trash2 className="w-3 h-3" /></button>}
                   </div>
                 </div>
               ))}

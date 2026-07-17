@@ -18,12 +18,15 @@ description: Use when working with Clarin MinIO/S3 media, storage_objects, media
 - Deleted-account orphan: object prefix belongs to an account ID that no longer exists. This can be deleted only after a dry-run confirms the target prefix.
 - Active-account orphan: object belongs to an existing account but has no known database reference. Treat as candidate only.
 - Known references include messages, contact avatars, campaigns, campaign attachments, document thumbnails, dynamic media, quick replies, saved stickers, survey uploads, and active `media_assets`.
+- WhatsApp own-status media and any derivative/edited status media are known references until their retention record expires and no other entity references the asset.
 
 ## Safety Rules
 
 - Always run a dry-run or count before deleting storage.
 - Never delete active-account candidates without explicit confirmation and an age rule.
 - Never infer safety from filename alone; use account prefix plus reference scan.
+- On replacement workflows, attach the new asset before scheduling the old one. Recheck references immediately before physical deletion because deduplication can make several entities share one asset.
+- If an upload succeeds but the database attachment fails, register/schedule a durable orphan cleanup path; never leave cleanup dependent on an HTTP request remaining alive.
 - Prefer MinIO/S3 APIs or clients over direct filesystem deletion.
 - Do not print MinIO secrets, `.env`, signed URLs, cookies, JWTs, or raw object contents.
 

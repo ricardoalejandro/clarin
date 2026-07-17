@@ -44,8 +44,8 @@ func (s *ProgramService) GetProgram(ctx context.Context, accountID, id uuid.UUID
 	return s.repo.Program.GetByID(ctx, accountID, id)
 }
 
-func (s *ProgramService) ListPrograms(ctx context.Context, accountID uuid.UUID) ([]*domain.Program, error) {
-	return s.repo.Program.List(ctx, accountID)
+func (s *ProgramService) ListPrograms(ctx context.Context, accountID uuid.UUID, status string) ([]*domain.Program, error) {
+	return s.repo.Program.List(ctx, accountID, status)
 }
 
 func (s *ProgramService) UpdateProgram(ctx context.Context, p *domain.Program) error {
@@ -71,12 +71,16 @@ func (s *ProgramService) AddParticipant(ctx context.Context, pp *domain.ProgramP
 	return s.repo.Program.AddParticipant(ctx, pp)
 }
 
+func (s *ProgramService) AddParticipantsByContactIDs(ctx context.Context, accountID, programID uuid.UUID, contactIDs []uuid.UUID) (repository.ProgramParticipantBulkResult, error) {
+	return s.repo.Program.AddParticipantsByContactIDs(ctx, accountID, programID, contactIDs)
+}
+
 func (s *ProgramService) UpdateParticipantStage(ctx context.Context, programID, participantID uuid.UUID, stageID *uuid.UUID) error {
 	return s.repo.Program.UpdateParticipantStage(ctx, programID, participantID, stageID)
 }
 
-func (s *ProgramService) ListParticipants(ctx context.Context, programID uuid.UUID) ([]*domain.ProgramParticipant, error) {
-	return s.repo.Program.ListParticipants(ctx, programID)
+func (s *ProgramService) ListParticipants(ctx context.Context, accountID, programID uuid.UUID) ([]*domain.ProgramParticipant, error) {
+	return s.repo.Program.ListParticipants(ctx, accountID, programID)
 }
 
 func (s *ProgramService) RemoveParticipant(ctx context.Context, programID, participantID uuid.UUID) error {
@@ -121,12 +125,27 @@ func (s *ProgramService) DeleteSession(ctx context.Context, programID, sessionID
 
 // --- Attendance ---
 
-func (s *ProgramService) MarkAttendance(ctx context.Context, a *domain.ProgramAttendance) error {
-	return s.repo.Program.MarkAttendance(ctx, a)
+func (s *ProgramService) MarkAttendance(ctx context.Context, accountID, userID, programID, sessionID uuid.UUID, a *domain.ProgramAttendance) error {
+	return s.BatchMarkAttendance(ctx, accountID, userID, programID, sessionID, []*domain.ProgramAttendance{a})
 }
 
-func (s *ProgramService) BatchMarkAttendance(ctx context.Context, attendances []*domain.ProgramAttendance) error {
-	return s.repo.Program.BatchMarkAttendance(ctx, attendances)
+func (s *ProgramService) BatchMarkAttendance(ctx context.Context, accountID, userID, programID, sessionID uuid.UUID, attendances []*domain.ProgramAttendance) error {
+	validStatuses := map[string]bool{"": true, domain.AttendanceStatusPresent: true, domain.AttendanceStatusAbsent: true, domain.AttendanceStatusLate: true, domain.AttendanceStatusExcused: true}
+	seen := make(map[uuid.UUID]struct{}, len(attendances))
+	for _, attendance := range attendances {
+		if attendance == nil || attendance.ParticipantID == uuid.Nil {
+			return errors.New("participant_id is required")
+		}
+		if !validStatuses[attendance.Status] {
+			return fmt.Errorf("invalid attendance status: %s", attendance.Status)
+		}
+		if _, exists := seen[attendance.ParticipantID]; exists {
+			return errors.New("duplicate participant in attendance batch")
+		}
+		seen[attendance.ParticipantID] = struct{}{}
+		attendance.SessionID = sessionID
+	}
+	return s.repo.Program.BatchMarkAttendance(ctx, accountID, userID, programID, sessionID, attendances)
 }
 
 func (s *ProgramService) GetAttendanceBySession(ctx context.Context, sessionID uuid.UUID) ([]*domain.ProgramAttendance, error) {
@@ -191,8 +210,8 @@ func (s *ProgramService) GenerateSessions(ctx context.Context, programID uuid.UU
 
 // --- Folders ---
 
-func (s *ProgramService) GetFolders(ctx context.Context, accountID uuid.UUID) ([]*domain.ProgramFolder, error) {
-	return s.repo.ProgramFolder.GetByAccountID(ctx, accountID)
+func (s *ProgramService) GetFolders(ctx context.Context, accountID uuid.UUID, programStatus string) ([]*domain.ProgramFolder, error) {
+	return s.repo.ProgramFolder.GetByAccountID(ctx, accountID, programStatus)
 }
 
 func (s *ProgramService) GetFolderByID(ctx context.Context, id uuid.UUID) (*domain.ProgramFolder, error) {
@@ -217,8 +236,8 @@ func (s *ProgramService) MoveProgramToFolder(ctx context.Context, programID uuid
 
 // --- Attendance Stats ---
 
-func (s *ProgramService) GetAttendanceStats(ctx context.Context, programID uuid.UUID, months string) ([]map[string]interface{}, []map[string]interface{}, error) {
-	return s.repo.Program.GetAttendanceStats(ctx, programID, months)
+func (s *ProgramService) GetAttendanceStats(ctx context.Context, accountID, programID uuid.UUID, months []time.Time) ([]*domain.ProgramSessionAttendanceStat, []*domain.ProgramParticipantAttendanceStat, error) {
+	return s.repo.Program.GetAttendanceStats(ctx, accountID, programID, months)
 }
 
 func (s *ProgramService) GetProgramGoals(ctx context.Context, accountID uuid.UUID, programID *uuid.UUID) (*domain.ProgramGoal, error) {

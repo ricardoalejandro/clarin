@@ -19,8 +19,8 @@ import {
   type NotificationSettings,
 } from '@/lib/notificationSounds'
 import { useNotifications } from '@/components/NotificationProvider'
-import PipelineCreationWizard from '@/components/pipelines/PipelineCreationWizard'
 import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
+import PipelineManagementDialog from '@/components/pipelines/PipelineManagementDialog'
 import type { Pipeline } from '@/types/contact'
 
 interface Account {
@@ -1113,7 +1113,7 @@ export default function SettingsPage() {
   const [managedPipelines, setManagedPipelines] = useState<Pipeline[]>([])
   const [loadingPipelines, setLoadingPipelines] = useState(false)
   const [expandedPipelineId, setExpandedPipelineId] = useState<string | null>(null)
-  const [showPipelineWizard, setShowPipelineWizard] = useState(false)
+  const [showPipelineManagement, setShowPipelineManagement] = useState(false)
   const [stageManagerPipeline, setStageManagerPipeline] = useState<Pipeline | null>(null)
   const [editingPipelineId, setEditingPipelineId] = useState<string | null>(null)
   const [editPipelineName, setEditPipelineName] = useState('')
@@ -2080,10 +2080,10 @@ export default function SettingsPage() {
                     <h3 className="text-sm font-medium text-slate-900">Pipelines y Etapas</h3>
                   </div>
                   <button
-                    onClick={() => setShowPipelineWizard(true)}
+                    onClick={() => setShowPipelineManagement(true)}
                     className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
                   >
-                    <Plus className="h-4 w-4" /> Nuevo pipeline
+                    <Settings className="h-4 w-4" /> Administrar pipelines
                   </button>
                 </div>
                 <p className="text-xs text-slate-500 mb-4">
@@ -2101,7 +2101,7 @@ export default function SettingsPage() {
                     <GripVertical className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                     <p className="text-sm font-semibold text-slate-700">Todavía no hay pipelines</p>
                     <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-500">Crea el primero con un asistente que te ayudará a elegir y personalizar las etapas.</p>
-                    <button onClick={() => setShowPipelineWizard(true)} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"><Plus className="h-4 w-4" />Crear mi primer pipeline</button>
+                    <button onClick={() => setShowPipelineManagement(true)} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"><Plus className="h-4 w-4" />Crear mi primer pipeline</button>
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -3301,13 +3301,12 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <PipelineCreationWizard
-        open={showPipelineWizard}
-        onClose={() => setShowPipelineWizard(false)}
-        onCreated={async (pipeline) => {
-          setExpandedPipelineId(pipeline.id)
-          showMessage('success', `Pipeline “${pipeline.name}” creado`)
-          await Promise.all([fetchManagedPipelines(), fetchPipelineStages()])
+      <PipelineManagementDialog
+        open={showPipelineManagement}
+        onClose={() => setShowPipelineManagement(false)}
+        onChanged={async (nextPipelines) => {
+          setManagedPipelines(nextPipelines)
+          await fetchPipelineStages()
         }}
       />
 

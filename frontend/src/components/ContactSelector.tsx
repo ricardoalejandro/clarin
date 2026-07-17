@@ -23,6 +23,7 @@ interface PersonResult {
   membership_source?: string
   membership_reason?: string
   excluded?: boolean
+  excluded_label?: string
 }
 
 interface CandidateCounts {
@@ -114,6 +115,8 @@ interface ContactSelectorProps {
   confirmLabel?: string
   /** Exclude these IDs from results (e.g. already-added participants) */
   excludeIds?: Set<string>
+  /** Optional reason shown for excluded contacts (e.g. historical participant status). */
+  excludeLabels?: Map<string, string>
   /** Force a source type and hide the type filter */
   sourceFilter?: 'contact' | 'lead'
   /** Enable advanced filter panel (device, date, tag include/exclude, formula) */
@@ -140,6 +143,7 @@ export default function ContactSelector({
   subtitle = 'Busca entre tus contactos y leads',
   confirmLabel = 'Agregar',
   excludeIds,
+  excludeLabels,
   sourceFilter,
   advancedFilters = false,
   withoutActiveLead = false,
@@ -438,6 +442,7 @@ export default function ContactSelector({
             source_type: 'contact' as const,
             tags: (c.structured_tags || []).map((t: any) => ({ id: t.id, name: t.name, color: t.color })),
             excluded: Boolean(excludeIds?.has(c.id)),
+            excluded_label: excludeLabels?.get(c.id),
           }))
           applyPage(mapped, contacts.length, data)
         }
@@ -459,7 +464,11 @@ export default function ContactSelector({
         if (!res.ok || !data.success) throw new Error('people_search_failed')
         if (requestId === peopleRequestRef.current) {
           const people = (data.people || []) as PersonResult[]
-          const mapped = people.map(person => ({ ...person, excluded: Boolean(excludeIds?.has(person.id)) }))
+          const mapped = people.map(person => ({
+            ...person,
+            excluded: Boolean(excludeIds?.has(person.id)),
+            excluded_label: excludeLabels?.get(person.id),
+          }))
           applyPage(mapped, people.length, data)
         }
       }
@@ -485,7 +494,7 @@ export default function ContactSelector({
         setLoadingMore(false)
       }
     }
-  }, [debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, eventId, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
+  }, [debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, excludeLabels, eventId, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
 
   const isSelectable = useCallback((person: PersonResult) => {
     if (eventId) return person.can_add === true
@@ -1066,9 +1075,11 @@ export default function ContactSelector({
                 {Array.from(selected.values()).map(p => (
                   <span key={p.id} className="inline-flex items-center gap-1 px-2.5 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium">
                     {p.name || p.phone || 'Sin nombre'}
-                    <span className={`px-1 py-0 rounded text-[9px] font-bold ${p.source_type === 'contact' ? 'bg-blue-100 text-blue-600' : 'bg-purple-100 text-purple-600'}`}>
-                      {p.source_type === 'contact' ? 'C' : 'L'}
-                    </span>
+                    {sourceFilter !== 'contact' && (
+                      <span className={`px-1 py-0 rounded text-[9px] font-bold ${p.source_type === 'contact' ? 'bg-blue-100 text-blue-600' : 'bg-purple-100 text-purple-600'}`}>
+                        {p.source_type === 'contact' ? 'C' : 'L'}
+                      </span>
+                    )}
                     <button onClick={() => { const n = new Map(selected); n.delete(p.id); setSelected(n); setSelectionNotice('') }} className="hover:text-green-900">
                       <X className="w-3 h-3" />
                     </button>
@@ -1105,7 +1116,7 @@ export default function ContactSelector({
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Users className="w-12 h-12 text-gray-300 mb-3" />
                 <p className="text-gray-500 font-medium">
-                  {debouncedSearch || activeFilterCount > 0 ? 'No se encontraron coincidencias' : eventId ? 'Busca un contacto para añadirlo' : 'Escribe para buscar contactos y leads'}
+                  {debouncedSearch || activeFilterCount > 0 ? 'No se encontraron coincidencias' : eventId || sourceFilter === 'contact' ? 'Busca un contacto para añadirlo' : 'Escribe para buscar contactos y leads'}
                 </p>
                 <p className="text-gray-400 text-sm mt-1">
                   {debouncedSearch ? 'Prueba con otro nombre, teléfono o correo' : 'Puedes buscar por nombre, teléfono o email'}
@@ -1131,7 +1142,7 @@ export default function ContactSelector({
                     statusLabel = 'Evento cerrado'
                     statusClass = 'border-slate-200 bg-slate-100 text-slate-600'
                   } else if (person.excluded) {
-                    statusLabel = 'Ya agregado'
+                    statusLabel = person.excluded_label || 'Ya agregado'
                     statusClass = 'border-slate-200 bg-slate-100 text-slate-600'
                   } else if (person.membership_status === 'inactive') {
                     statusLabel = 'Disponible para reactivar'

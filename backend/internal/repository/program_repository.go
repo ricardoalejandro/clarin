@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,6 +15,13 @@ import (
 
 type ProgramRepository struct {
 	db *pgxpool.Pool
+}
+
+type ProgramParticipantBulkResult struct {
+	Requested      int `json:"requested"`
+	Created        int `json:"created"`
+	AlreadyPresent int `json:"already_present"`
+	Rejected       int `json:"rejected"`
 }
 
 // --- Programs ---
@@ -66,8 +74,8 @@ WHERE p.id = $1 AND p.account_id = $2
 	return p, err
 }
 
-func (r *ProgramRepository) List(ctx context.Context, accountID uuid.UUID) ([]*domain.Program, error) {
-	rows, err := r.db.Query(ctx, `
+func (r *ProgramRepository) List(ctx context.Context, accountID uuid.UUID, status string) ([]*domain.Program, error) {
+	query := `
 SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at,
 p.schedule_start_date, p.schedule_end_date, p.schedule_days, p.schedule_start_time, p.schedule_end_time,
 p.pipeline_id, COALESCE(p.tag_formula, ''), COALESCE(p.tag_formula_mode, 'OR'), COALESCE(p.tag_formula_type, 'simple'),
@@ -76,9 +84,14 @@ p.event_date, p.event_end, p.location, ep.name as pipeline_name,
 (SELECT COUNT(*) FROM program_sessions WHERE program_id = p.id) as session_count
 FROM programs p
 LEFT JOIN event_pipelines ep ON ep.id = p.pipeline_id
-WHERE p.account_id = $1
-ORDER BY p.created_at DESC
-`, accountID)
+WHERE p.account_id = $1`
+	args := []interface{}{accountID}
+	if status != "" {
+		query += " AND p.status = $2"
+		args = append(args, status)
+	}
+	query += " ORDER BY p.created_at DESC"
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -128,16 +141,85 @@ func (r *ProgramRepository) Delete(ctx context.Context, accountID, id uuid.UUID)
 
 func (r *ProgramRepository) AddParticipant(ctx context.Context, pp *domain.ProgramParticipant) error {
 	err := r.db.QueryRow(ctx, `
-INSERT INTO program_participants (program_id, contact_id, lead_id, stage_id, status, auto_tag_sync)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO program_participants (program_id, contact_id, stage_id, status, auto_tag_sync)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (program_id, contact_id) DO UPDATE SET
 status = EXCLUDED.status,
-lead_id = COALESCE(EXCLUDED.lead_id, program_participants.lead_id),
 stage_id = COALESCE(EXCLUDED.stage_id, program_participants.stage_id),
 auto_tag_sync = EXCLUDED.auto_tag_sync
 RETURNING id, enrolled_at
-`, pp.ProgramID, pp.ContactID, pp.LeadID, pp.StageID, pp.Status, pp.AutoTagSync).Scan(&pp.ID, &pp.EnrolledAt)
+`, pp.ProgramID, pp.ContactID, pp.StageID, pp.Status, pp.AutoTagSync).Scan(&pp.ID, &pp.EnrolledAt)
 	return err
+}
+
+func (r *ProgramRepository) AddParticipantsByContactIDs(ctx context.Context, accountID, programID uuid.UUID, contactIDs []uuid.UUID) (ProgramParticipantBulkResult, error) {
+	result := ProgramParticipantBulkResult{}
+	seen := make(map[uuid.UUID]struct{}, len(contactIDs))
+	uniqueIDs := make([]uuid.UUID, 0, len(contactIDs))
+	for _, contactID := range contactIDs {
+		if contactID == uuid.Nil {
+			continue
+		}
+		if _, exists := seen[contactID]; exists {
+			continue
+		}
+		seen[contactID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, contactID)
+	}
+	result.Requested = len(uniqueIDs)
+	if result.Requested == 0 {
+		return result, nil
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var active bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM programs
+			WHERE id=$1 AND account_id=$2 AND status='active'
+		)
+	`, programID, accountID).Scan(&active); err != nil {
+		return result, err
+	}
+	if !active {
+		return result, pgx.ErrNoRows
+	}
+
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM contacts
+		WHERE account_id=$1 AND id=ANY($2::uuid[]) AND is_group=FALSE
+	`, accountID, uniqueIDs).Scan(&result.Created); err != nil {
+		return result, err
+	}
+	validContacts := result.Created
+	result.Rejected = result.Requested - validContacts
+
+	commandTag, err := tx.Exec(ctx, `
+		INSERT INTO program_participants (program_id, contact_id, status)
+		SELECT $1, c.id, 'active'
+		FROM contacts c
+		WHERE c.account_id=$2 AND c.id=ANY($3::uuid[]) AND c.is_group=FALSE
+		ON CONFLICT (program_id, contact_id) DO NOTHING
+	`, programID, accountID, uniqueIDs)
+	if err != nil {
+		return result, err
+	}
+	result.Created = int(commandTag.RowsAffected())
+	result.AlreadyPresent = validContacts - result.Created
+	if result.AlreadyPresent < 0 {
+		result.AlreadyPresent = 0
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (r *ProgramRepository) UpdateParticipantStage(ctx context.Context, programID, participantID uuid.UUID, stageID *uuid.UUID) error {
@@ -147,21 +229,21 @@ UPDATE program_participants SET stage_id = $1 WHERE id = $2 AND program_id = $3
 	return err
 }
 
-func (r *ProgramRepository) ListParticipants(ctx context.Context, programID uuid.UUID) ([]*domain.ProgramParticipant, error) {
+func (r *ProgramRepository) ListParticipants(ctx context.Context, accountID, programID uuid.UUID) ([]*domain.ProgramParticipant, error) {
 	rows, err := r.db.Query(ctx, `
-SELECT pp.id, pp.program_id, pp.contact_id, pp.lead_id, pp.stage_id, pp.status, pp.enrolled_at,
+SELECT pp.id, pp.program_id, pp.contact_id, pp.stage_id, pp.status, pp.enrolled_at,
 pp.dropped_at, COALESCE(pp.drop_reason, ''), COALESCE(pp.drop_notes, ''), pp.completed_at,
 COALESCE(pp.transferred_to_level, ''), pp.transferred_at, COALESCE(pp.auto_tag_sync, false),
 COALESCE(c.custom_name, c.name, c.push_name, c.phone, '') as display_name, c.phone,
-COALESCE(pp.lead_id, l.id) as resolved_lead_id,
+c.avatar_url, COALESCE(c.avatar_revision, 0),
 s.name as stage_name, s.color as stage_color
 FROM program_participants pp
-JOIN contacts c ON c.id = pp.contact_id
-LEFT JOIN leads l ON l.contact_id = pp.contact_id AND l.account_id = (SELECT account_id FROM programs WHERE id = pp.program_id)
+JOIN programs p ON p.id = pp.program_id AND p.account_id = $1
+JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
 LEFT JOIN event_pipeline_stages s ON s.id = pp.stage_id
-WHERE pp.program_id = $1
+WHERE pp.program_id = $2
 ORDER BY COALESCE(c.custom_name, c.name, c.push_name, c.phone) ASC
-`, programID)
+`, accountID, programID)
 	if err != nil {
 		return nil, err
 	}
@@ -170,19 +252,14 @@ ORDER BY COALESCE(c.custom_name, c.name, c.push_name, c.phone) ASC
 	var participants []*domain.ProgramParticipant
 	for rows.Next() {
 		pp := &domain.ProgramParticipant{}
-		var resolvedLeadID *uuid.UUID
 		err := rows.Scan(
-			&pp.ID, &pp.ProgramID, &pp.ContactID, &pp.LeadID, &pp.StageID, &pp.Status, &pp.EnrolledAt,
+			&pp.ID, &pp.ProgramID, &pp.ContactID, &pp.StageID, &pp.Status, &pp.EnrolledAt,
 			&pp.DroppedAt, &pp.DropReason, &pp.DropNotes, &pp.CompletedAt, &pp.TransferredToLevel, &pp.TransferredAt, &pp.AutoTagSync,
-			&pp.ContactName, &pp.ContactPhone, &resolvedLeadID,
+			&pp.ContactName, &pp.ContactPhone, &pp.AvatarURL, &pp.AvatarRevision,
 			&pp.StageName, &pp.StageColor,
 		)
 		if err != nil {
 			return nil, err
-		}
-		// Use resolved lead_id if the stored one is nil
-		if pp.LeadID == nil && resolvedLeadID != nil {
-			pp.LeadID = resolvedLeadID
 		}
 		participants = append(participants, pp)
 	}
@@ -268,36 +345,84 @@ func (r *ProgramRepository) DeleteSession(ctx context.Context, programID, sessio
 
 // --- Attendance ---
 
-func (r *ProgramRepository) MarkAttendance(ctx context.Context, a *domain.ProgramAttendance) error {
-	err := r.db.QueryRow(ctx, `
-INSERT INTO program_attendance (session_id, participant_id, status, notes, instructor_status, instructor_notes)
-VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6)
-ON CONFLICT (session_id, participant_id) DO UPDATE
-SET status = NULLIF(EXCLUDED.status, ''), notes = EXCLUDED.notes,
-instructor_status = EXCLUDED.instructor_status, instructor_notes = EXCLUDED.instructor_notes,
-updated_at = NOW()
-RETURNING id, created_at, updated_at
-`, a.SessionID, a.ParticipantID, a.Status, a.Notes, a.InstructorStatus, a.InstructorNotes).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
-	return err
-}
-
-func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, attendances []*domain.ProgramAttendance) error {
+func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, accountID, userID, programID, sessionID uuid.UUID, attendances []*domain.ProgramAttendance) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 
+	var programName, sessionTopic string
+	var sessionDate time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT p.name, COALESCE(NULLIF(ps.topic, ''), 'Sesión'), ps.date
+		FROM program_sessions ps
+		JOIN programs p ON p.id = ps.program_id
+		WHERE p.account_id = $1 AND p.id = $2 AND ps.id = $3
+		FOR SHARE
+	`, accountID, programID, sessionID).Scan(&programName, &sessionTopic, &sessionDate); err != nil {
+		if err == pgx.ErrNoRows {
+			return errors.New("session does not belong to this account and program")
+		}
+		return err
+	}
+
 	for _, a := range attendances {
-		_, err := tx.Exec(ctx, `
-			INSERT INTO program_attendance (session_id, participant_id, status, notes, instructor_status, instructor_notes)
-			VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6)
+		var contactID uuid.UUID
+		if err := tx.QueryRow(ctx, `
+			SELECT pp.contact_id
+			FROM program_participants pp
+			JOIN programs p ON p.id = pp.program_id
+			JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
+			WHERE p.account_id = $1 AND pp.program_id = $2 AND pp.id = $3
+		`, accountID, programID, a.ParticipantID).Scan(&contactID); err != nil {
+			if err == pgx.ErrNoRows {
+				return fmt.Errorf("participant %s does not belong to this account and program", a.ParticipantID)
+			}
+			return err
+		}
+
+		notes := ""
+		if a.Notes != nil {
+			notes = strings.TrimSpace(*a.Notes)
+		}
+		if a.Status == "" && notes == "" {
+			if _, err := tx.Exec(ctx, `DELETE FROM interactions WHERE account_id=$1 AND type='attendance' AND program_session_id=$2 AND program_participant_id=$3`, accountID, sessionID, a.ParticipantID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM program_attendance WHERE session_id=$1 AND participant_id=$2`, sessionID, a.ParticipantID); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO program_attendance (session_id, participant_id, status, notes)
+			VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''))
 			ON CONFLICT (session_id, participant_id) DO UPDATE
-			SET status = NULLIF(EXCLUDED.status, ''), notes = EXCLUDED.notes,
-			    instructor_status = EXCLUDED.instructor_status, instructor_notes = EXCLUDED.instructor_notes,
-			    updated_at = NOW()
-		`, a.SessionID, a.ParticipantID, a.Status, a.Notes, a.InstructorStatus, a.InstructorNotes)
-		if err != nil {
+			SET status = NULLIF(EXCLUDED.status, ''), notes = EXCLUDED.notes, updated_at = NOW()
+			RETURNING id, created_at, updated_at
+		`, sessionID, a.ParticipantID, a.Status, notes).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return err
+		}
+
+		if notes == "" {
+			if _, err := tx.Exec(ctx, `DELETE FROM interactions WHERE account_id=$1 AND type='attendance' AND program_session_id=$2 AND program_participant_id=$3`, accountID, sessionID, a.ParticipantID); err != nil {
+				return err
+			}
+			continue
+		}
+
+		sourceLabel := fmt.Sprintf("%s · %s · %s", programName, sessionTopic, sessionDate.Format("02/01/2006"))
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO interactions (account_id, contact_id, type, notes, created_by, program_id, program_session_id, program_participant_id, source_label)
+			VALUES ($1, $2, 'attendance', $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (program_session_id, program_participant_id)
+			WHERE type = 'attendance' AND program_session_id IS NOT NULL AND program_participant_id IS NOT NULL
+			DO UPDATE SET contact_id=EXCLUDED.contact_id, notes=EXCLUDED.notes,
+			              source_label=EXCLUDED.source_label,
+			              created_by=COALESCE(interactions.created_by, EXCLUDED.created_by)
+		`, accountID, contactID, notes, userID, programID, sessionID, a.ParticipantID, sourceLabel); err != nil {
 			return err
 		}
 	}
@@ -308,7 +433,7 @@ func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, attendances
 func (r *ProgramRepository) GetAttendanceBySession(ctx context.Context, sessionID uuid.UUID) ([]*domain.ProgramAttendance, error) {
 	rows, err := r.db.Query(ctx, `
 SELECT a.id, a.session_id, a.participant_id, COALESCE(a.status, ''), a.notes,
-COALESCE(a.instructor_status, ''), COALESCE(a.instructor_notes, ''), a.created_at, a.updated_at,
+a.created_at, a.updated_at,
 c.name, c.phone
 FROM program_attendance a
 JOIN program_participants pp ON pp.id = a.participant_id
@@ -324,7 +449,7 @@ WHERE a.session_id = $1
 	for rows.Next() {
 		a := &domain.ProgramAttendance{}
 		err := rows.Scan(
-			&a.ID, &a.SessionID, &a.ParticipantID, &a.Status, &a.Notes, &a.InstructorStatus, &a.InstructorNotes, &a.CreatedAt, &a.UpdatedAt,
+			&a.ID, &a.SessionID, &a.ParticipantID, &a.Status, &a.Notes, &a.CreatedAt, &a.UpdatedAt,
 			&a.ParticipantName, &a.ParticipantPhone,
 		)
 		if err != nil {
@@ -442,16 +567,23 @@ func (r *ProgramFolderRepository) Create(ctx context.Context, f *domain.ProgramF
 	return err
 }
 
-func (r *ProgramFolderRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.ProgramFolder, error) {
-	rows, err := r.db.Query(ctx, `
+func (r *ProgramFolderRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID, programStatus string) ([]*domain.ProgramFolder, error) {
+	query := `
 		SELECT pf.id, pf.account_id, pf.parent_id, pf.name, pf.color, pf.icon, pf.position, pf.created_at, pf.updated_at,
 		       COUNT(p.id) AS program_count
 		FROM program_folders pf
-		LEFT JOIN programs p ON p.folder_id = pf.id
+		LEFT JOIN programs p ON p.folder_id = pf.id AND p.account_id = pf.account_id`
+	args := []interface{}{accountID}
+	if programStatus != "" {
+		query += " AND p.status = $2"
+		args = append(args, programStatus)
+	}
+	query += `
 		WHERE pf.account_id = $1
 		GROUP BY pf.id
 		ORDER BY pf.position, pf.name
-	`, accountID)
+	`
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -504,111 +636,97 @@ func (r *ProgramFolderRepository) MoveProgram(ctx context.Context, programID uui
 
 // --- Attendance Stats ---
 
-func (r *ProgramRepository) GetAttendanceStats(ctx context.Context, programID uuid.UUID, months string) ([]map[string]interface{}, []map[string]interface{}, error) {
-	// Build date filter: by default sessions up to today; if months provided, filter by those months
+func (r *ProgramRepository) GetAttendanceStats(ctx context.Context, accountID, programID uuid.UUID, months []time.Time) ([]*domain.ProgramSessionAttendanceStat, []*domain.ProgramParticipantAttendanceStat, error) {
 	dateFilter := "AND ps.date <= CURRENT_DATE"
-	args := []interface{}{programID}
-	if months != "" {
-		// Parse comma-separated YYYY-MM into OR conditions
-		parts := []string{}
-		for _, m := range splitMonths(months) {
-			if len(m) == 7 { // YYYY-MM format
-				args = append(args, m+"-01")
-				parts = append(parts, fmt.Sprintf("(ps.date >= $%d::date AND ps.date < ($%d::date + INTERVAL '1 month'))", len(args), len(args)))
-			}
+	args := []interface{}{accountID, programID}
+	if len(months) > 0 {
+		parts := make([]string, 0, len(months))
+		for _, month := range months {
+			args = append(args, month.Format("2006-01-02"))
+			placeholder := len(args)
+			parts = append(parts, fmt.Sprintf("(ps.date >= $%d::date AND ps.date < ($%d::date + INTERVAL '1 month'))", placeholder, placeholder))
 		}
-		if len(parts) > 0 {
-			dateFilter = "AND (" + joinStrings(parts, " OR ") + ")"
-		}
+		dateFilter = "AND (" + strings.Join(parts, " OR ") + ")"
 	}
 
-	// Per-session stats
-	sessionQuery := fmt.Sprintf(`
-		SELECT ps.id, ps.topic, ps.date,
-			COUNT(CASE WHEN pa.status = 'present' THEN 1 END) as present,
-			COUNT(CASE WHEN pa.status = 'absent' THEN 1 END) as absent,
-			COUNT(CASE WHEN pa.status = 'late' THEN 1 END) as late,
-			COUNT(CASE WHEN pa.status = 'excused' THEN 1 END) as excused
-		FROM program_sessions ps
-		LEFT JOIN program_attendance pa ON pa.session_id = ps.id
-		WHERE ps.program_id = $1 %s
-		GROUP BY ps.id, ps.topic, ps.date
-		ORDER BY ps.date ASC
+	filteredSessions := fmt.Sprintf(`
+		WITH filtered_sessions AS (
+			SELECT ps.id, ps.topic, ps.date
+			FROM program_sessions ps
+			JOIN programs p ON p.id = ps.program_id AND p.account_id = $1
+			WHERE p.id = $2 %s
+		)
 	`, dateFilter)
+	sessionQuery := filteredSessions + `
+		SELECT fs.id, fs.topic, fs.date,
+			COUNT(*) FILTER (WHERE pa.status = 'present') AS present,
+			COUNT(*) FILTER (WHERE pa.status = 'absent') AS absent,
+			COUNT(*) FILTER (WHERE pa.status = 'late') AS late,
+			COUNT(*) FILTER (WHERE pa.status = 'excused') AS excused
+		FROM filtered_sessions fs
+		LEFT JOIN program_attendance pa ON pa.session_id = fs.id
+		GROUP BY fs.id, fs.topic, fs.date
+		ORDER BY fs.date ASC
+	`
 	sessionRows, err := r.db.Query(ctx, sessionQuery, args...)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer sessionRows.Close()
 
-	var sessionStats []map[string]interface{}
+	var sessionStats []*domain.ProgramSessionAttendanceStat
 	for sessionRows.Next() {
-		var id uuid.UUID
+		stat := &domain.ProgramSessionAttendanceStat{}
 		var topic *string
 		var date time.Time
-		var present, absent, late, excused int
-		if err := sessionRows.Scan(&id, &topic, &date, &present, &absent, &late, &excused); err != nil {
+		if err := sessionRows.Scan(&stat.SessionID, &topic, &date, &stat.Present, &stat.Absent, &stat.Late, &stat.Excused); err != nil {
 			return nil, nil, err
 		}
-		label := ""
 		if topic != nil {
-			label = *topic
+			stat.Topic = *topic
 		}
-		sessionStats = append(sessionStats, map[string]interface{}{
-			"session_id": id,
-			"topic":      label,
-			"date":       date,
-			"present":    present,
-			"absent":     absent,
-			"late":       late,
-			"excused":    excused,
-		})
+		stat.Date = date.Format("2006-01-02")
+		sessionStats = append(sessionStats, stat)
+	}
+	if err := sessionRows.Err(); err != nil {
+		return nil, nil, err
 	}
 
-	// Per-participant stats — only count sessions that match the date filter
-	participantQuery := fmt.Sprintf(`
+	participantQuery := filteredSessions + `
 		SELECT pp.id, COALESCE(c.custom_name, c.name, c.push_name, c.phone, '') as name,
-			COUNT(CASE WHEN pa.status = 'present' THEN 1 END) as present,
-			COUNT(CASE WHEN pa.status = 'absent' THEN 1 END) as absent,
-			COUNT(CASE WHEN pa.status = 'late' THEN 1 END) as late,
-			COUNT(CASE WHEN pa.status = 'excused' THEN 1 END) as excused,
-			(SELECT COUNT(*) FROM program_sessions ps WHERE ps.program_id = $1 %s) as total_sessions
+			COUNT(*) FILTER (WHERE pa.status = 'present') as present,
+			COUNT(*) FILTER (WHERE pa.status = 'absent') as absent,
+			COUNT(*) FILTER (WHERE pa.status = 'late') as late,
+			COUNT(*) FILTER (WHERE pa.status = 'excused') as excused,
+			(SELECT COUNT(*) FROM filtered_sessions) as total_sessions
 		FROM program_participants pp
-		JOIN contacts c ON c.id = pp.contact_id
+		JOIN programs p ON p.id = pp.program_id AND p.account_id = $1
+		JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
 		LEFT JOIN program_attendance pa ON pa.participant_id = pp.id
-			AND pa.session_id IN (SELECT ps.id FROM program_sessions ps WHERE ps.program_id = $1 %s)
-		WHERE pp.program_id = $1
+			AND pa.session_id IN (SELECT id FROM filtered_sessions)
+		WHERE pp.program_id = $2
 		GROUP BY pp.id, c.custom_name, c.name, c.push_name, c.phone
-		ORDER BY COUNT(CASE WHEN pa.status = 'present' THEN 1 END) DESC, name ASC
-	`, dateFilter, dateFilter)
+		ORDER BY COUNT(*) FILTER (WHERE pa.status = 'present') DESC, name ASC
+	`
 	participantRows, err := r.db.Query(ctx, participantQuery, args...)
 	if err != nil {
 		return sessionStats, nil, err
 	}
 	defer participantRows.Close()
 
-	var participantStats []map[string]interface{}
+	var participantStats []*domain.ProgramParticipantAttendanceStat
 	for participantRows.Next() {
-		var id uuid.UUID
-		var name string
-		var present, absent, late, excused, totalSessions int
-		if err := participantRows.Scan(&id, &name, &present, &absent, &late, &excused, &totalSessions); err != nil {
+		stat := &domain.ProgramParticipantAttendanceStat{}
+		if err := participantRows.Scan(&stat.ParticipantID, &stat.Name, &stat.Present, &stat.Absent, &stat.Late, &stat.Excused, &stat.TotalSessions); err != nil {
 			return sessionStats, nil, err
 		}
-		rate := 0.0
-		if totalSessions > 0 {
-			rate = float64(present+late) / float64(totalSessions) * 100
+		if stat.TotalSessions > 0 {
+			stat.Rate = float64(stat.Present+stat.Late) / float64(stat.TotalSessions) * 100
 		}
-		participantStats = append(participantStats, map[string]interface{}{
-			"participant_id": id,
-			"name":           name,
-			"present":        present,
-			"absent":         absent,
-			"late":           late,
-			"excused":        excused,
-			"total_sessions": totalSessions,
-			"rate":           rate,
-		})
+		participantStats = append(participantStats, stat)
+	}
+	if err := participantRows.Err(); err != nil {
+		return sessionStats, nil, err
 	}
 
 	return sessionStats, participantStats, nil
@@ -807,9 +925,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 			       COUNT(*) FILTER (WHERE pa.status = 'late') AS late,
 			       COUNT(*) FILTER (WHERE pa.status = 'absent') AS absent,
 			       COUNT(*) FILTER (WHERE pa.status = 'excused') AS excused,
-			       COUNT(*) FILTER (WHERE ps.session_type = 'recovery' AND pa.status IN ('present','late')) AS recovery_sessions,
-			       COUNT(*) FILTER (WHERE pa.instructor_status = 'risk') AS instructor_risk_count,
-			       COUNT(*) FILTER (WHERE pa.instructor_status = 'watch') AS instructor_watch_count
+			       COUNT(*) FILTER (WHERE ps.session_type = 'recovery' AND pa.status IN ('present','late')) AS recovery_sessions
 			FROM program_attendance pa
 			JOIN program_sessions ps ON ps.id = pa.session_id
 			WHERE ps.program_id = $2 AND ps.date <= CURRENT_DATE
@@ -838,13 +954,14 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 			GROUP BY pp2.id
 		)
 		SELECT pp.id, pp.contact_id, COALESCE(c.custom_name, c.name, c.push_name, c.phone, '') AS name, c.phone,
+		       c.avatar_url, COALESCE(c.avatar_revision, 0),
 		       pp.status, COALESCE(pp.transferred_to_level, ''),
 		       COALESCE(att.present, 0), COALESCE(att.late, 0), COALESCE(att.absent, 0), COALESCE(att.excused, 0),
-		       COALESCE(att.recovery_sessions, 0), COALESCE(att.instructor_risk_count, 0), COALESCE(att.instructor_watch_count, 0),
+		       COALESCE(att.recovery_sessions, 0),
 		       COALESCE(notes.notes_count, 0), notes.last_note_at
 		FROM program_participants pp
 		JOIN programs p ON p.id = pp.program_id
-		JOIN contacts c ON c.id = pp.contact_id
+		JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
 		LEFT JOIN att ON att.participant_id = pp.id
 		LEFT JOIN notes ON notes.participant_id = pp.id
 		WHERE p.account_id = $1 AND pp.program_id = $2
@@ -866,8 +983,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 	var presentTotal, lateTotal int
 	for rows.Next() {
 		p := &domain.ProgramHealthParticipant{}
-		var watchCount int
-		if err := rows.Scan(&p.ParticipantID, &p.ContactID, &p.Name, &p.Phone, &p.Status, &p.TransferredToLevel, &p.Present, &p.Late, &p.Absent, &p.Excused, &p.RecoverySessions, &p.InstructorRiskCount, &watchCount, &p.NotesCount, &p.LastNoteAt); err != nil {
+		if err := rows.Scan(&p.ParticipantID, &p.ContactID, &p.Name, &p.Phone, &p.AvatarURL, &p.AvatarRevision, &p.Status, &p.TransferredToLevel, &p.Present, &p.Late, &p.Absent, &p.Excused, &p.RecoverySessions, &p.NotesCount, &p.LastNoteAt); err != nil {
 			return nil, err
 		}
 		if sessionCount > 0 {
@@ -881,13 +997,6 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 		if p.Status == "dropped" {
 			p.Health = "critical"
 			p.Reasons = append(p.Reasons, "desistio del curso")
-		}
-		if p.InstructorRiskCount > 0 {
-			p.Health = "critical"
-			p.Reasons = append(p.Reasons, "instructor marco riesgo")
-		} else if watchCount > 0 && p.Health == "healthy" {
-			p.Health = "watch"
-			p.Reasons = append(p.Reasons, "instructor pidio observar")
 		}
 		if unresolvedAbsences >= 2 {
 			p.Health = "critical"
@@ -966,18 +1075,19 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 	rows, err := r.db.Query(ctx, `
 		WITH fp AS (
 			SELECT p.*
-			FROM programs p
+		FROM programs p
 			WHERE p.account_id = $1
 			  AND p.type = 'course'
-			  AND ($2::timestamptz IS NULL OR p.created_at >= $2 OR EXISTS (SELECT 1 FROM program_sessions ps WHERE ps.program_id = p.id AND ps.date >= $2))
-			  AND ($3::timestamptz IS NULL OR p.created_at <= $3 OR EXISTS (SELECT 1 FROM program_sessions ps WHERE ps.program_id = p.id AND ps.date <= $3))
+			  AND p.status = 'active'
+			  AND ($2::date IS NULL OR p.created_at::date >= $2::date OR EXISTS (SELECT 1 FROM program_sessions ps WHERE ps.program_id = p.id AND ps.date >= $2::date))
+			  AND ($3::date IS NULL OR p.created_at::date <= $3::date OR EXISTS (SELECT 1 FROM program_sessions ps WHERE ps.program_id = p.id AND ps.date <= $3::date))
 		),
 		sessions AS (
 			SELECT ps.program_id, COUNT(*) AS session_count
 			FROM program_sessions ps
 			JOIN fp ON fp.id = ps.program_id
-			WHERE ($2::timestamptz IS NULL OR ps.date >= $2)
-			  AND ($3::timestamptz IS NULL OR ps.date <= $3)
+			WHERE ($2::date IS NULL OR ps.date >= $2::date)
+			  AND ($3::date IS NULL OR ps.date <= $3::date)
 			GROUP BY ps.program_id
 		),
 		att AS (
@@ -986,13 +1096,12 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 			       COUNT(*) FILTER (WHERE pa.status = 'late') AS late,
 			       COUNT(*) FILTER (WHERE pa.status = 'absent') AS absent,
 			       COUNT(*) FILTER (WHERE pa.status = 'excused') AS excused,
-			       COUNT(DISTINCT pa.participant_id) FILTER (WHERE pa.status = 'absent') AS absent_people,
-			       COUNT(DISTINCT pa.participant_id) FILTER (WHERE pa.instructor_status = 'risk') AS instructor_risk_people
+			       COUNT(DISTINCT pa.participant_id) FILTER (WHERE pa.status = 'absent') AS absent_people
 			FROM program_attendance pa
 			JOIN program_sessions ps ON ps.id = pa.session_id
 			JOIN fp ON fp.id = ps.program_id
-			WHERE ($2::timestamptz IS NULL OR ps.date >= $2)
-			  AND ($3::timestamptz IS NULL OR ps.date <= $3)
+			WHERE ($2::date IS NULL OR ps.date >= $2::date)
+			  AND ($3::date IS NULL OR ps.date <= $3::date)
 			GROUP BY ps.program_id
 		),
 		pp AS (
@@ -1009,7 +1118,7 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 		SELECT fp.id, fp.name, fp.status, fp.color,
 		       COALESCE(pp.participant_count, 0), COALESCE(pp.active_count, 0), COALESCE(pp.completed_count, 0),
 		       COALESCE(pp.dropped_count, 0), COALESCE(pp.transferred_count, 0), COALESCE(sessions.session_count, 0),
-		       COALESCE(att.present, 0), COALESCE(att.late, 0), COALESCE(att.absent_people, 0), COALESCE(att.instructor_risk_people, 0),
+		       COALESCE(att.present, 0), COALESCE(att.late, 0), COALESCE(att.absent_people, 0),
 		       COALESCE(pg.attendance_goal_percent, gg.attendance_goal_percent, 80),
 		       COALESCE(pg.transfer_goal_percent, gg.transfer_goal_percent, 70)
 		FROM fp
@@ -1034,8 +1143,8 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 	var totalAttended, totalAttendanceSlots int
 	for rows.Next() {
 		g := &domain.ProgramDashboardGroup{}
-		var present, late, absentPeople, instructorRiskPeople int
-		if err := rows.Scan(&g.ProgramID, &g.Name, &g.Status, &g.Color, &g.ParticipantCount, &g.ActiveCount, &g.CompletedCount, &g.DroppedCount, &g.TransferredCount, &g.SessionCount, &present, &late, &absentPeople, &instructorRiskPeople, &g.AttendanceGoalPercent, &g.TransferGoalPercent); err != nil {
+		var present, late, absentPeople int
+		if err := rows.Scan(&g.ProgramID, &g.Name, &g.Status, &g.Color, &g.ParticipantCount, &g.ActiveCount, &g.CompletedCount, &g.DroppedCount, &g.TransferredCount, &g.SessionCount, &present, &late, &absentPeople, &g.AttendanceGoalPercent, &g.TransferGoalPercent); err != nil {
 			return nil, err
 		}
 		if g.ParticipantCount > 0 && g.SessionCount > 0 {
@@ -1044,12 +1153,12 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 		if g.ParticipantCount > 0 {
 			g.TransferRate = float64(g.TransferredCount) / float64(g.ParticipantCount) * 100
 		}
-		g.AtRiskCount = g.DroppedCount + absentPeople + instructorRiskPeople
+		g.AtRiskCount = g.DroppedCount + absentPeople
 		g.Health = "healthy"
 		if g.AtRiskCount > 0 || (g.ParticipantCount > 0 && g.SessionCount > 0 && g.AttendanceRate < float64(g.AttendanceGoalPercent)) {
 			g.Health = "watch"
 		}
-		if g.DroppedCount > 0 || instructorRiskPeople > 0 {
+		if g.DroppedCount > 0 {
 			g.Health = "critical"
 		}
 		if g.ParticipantCount > 0 && g.SessionCount > 0 && g.AttendanceRate < float64(g.AttendanceGoalPercent) {
@@ -1075,26 +1184,4 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 		summary.TransferRate = float64(summary.TransferredCount) / float64(summary.ParticipantCount) * 100
 	}
 	return summary, nil
-}
-
-func splitMonths(s string) []string {
-	var result []string
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
-		}
-	}
-	return result
-}
-
-func joinStrings(parts []string, sep string) string {
-	result := ""
-	for i, p := range parts {
-		if i > 0 {
-			result += sep
-		}
-		result += p
-	}
-	return result
 }

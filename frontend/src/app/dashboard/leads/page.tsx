@@ -403,6 +403,7 @@ export default function LeadsPage() {
   const [searchTerm, setSearchTerm] = useState('')
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('')
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
+  const [filterPanelPosition, setFilterPanelPosition] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null)
   const [filterStageIds, setFilterStageIds] = useState<Set<string>>(new Set())
   const [filterTagNames, setFilterTagNames] = useState<Set<string>>(new Set())
   const [excludeFilterTagNames, setExcludeFilterTagNames] = useState<Set<string>>(new Set())
@@ -595,6 +596,7 @@ export default function LeadsPage() {
   const listScrollRef = useRef<HTMLDivElement>(null)
   const listOffsetRef = useRef(0)
   const filterDropdownRef = useRef<HTMLDivElement>(null)
+  const filterDialogRef = useRef<HTMLDivElement>(null)
   const syncingScroll = useRef(false)
   const activePipelineIdRef = useRef<string | null>(null)
   const kanbanRequestRef = useRef(0)
@@ -661,6 +663,8 @@ export default function LeadsPage() {
     filterSnapshotRef.current = null
     setShowFilterDropdown(false)
   }, [])
+
+  useAccessibleDialog(showFilterDropdown, filterDialogRef, discardFilterDraft)
 
   useEffect(() => {
     activePipelineIdRef.current = activePipeline?.id || null
@@ -1227,9 +1231,12 @@ export default function LeadsPage() {
   useEffect(() => {
     if (!showFilterDropdown) {
       setTagSearchTerm('')
+      setFilterPanelPosition(null)
       return
     }
     const handleClickOutside = (e: MouseEvent) => {
+      const path = e.composedPath()
+      if (path.some(target => target instanceof HTMLElement && target.dataset.formulaSuggestions === 'true')) return
       if (filterDropdownRef.current && !filterDropdownRef.current.contains(e.target as Node)) {
         discardFilterDraft()
       }
@@ -1237,6 +1244,46 @@ export default function LeadsPage() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [showFilterDropdown, discardFilterDraft])
+
+  useEffect(() => {
+    if (!showFilterDropdown) return
+    const updatePosition = () => {
+      if (window.innerWidth < 640) {
+        setFilterPanelPosition(null)
+        return
+      }
+      const anchor = filterDropdownRef.current
+      if (!anchor) return
+      const rect = anchor.getBoundingClientRect()
+      const viewport = window.visualViewport
+      const viewportLeft = viewport?.offsetLeft || 0
+      const viewportTop = viewport?.offsetTop || 0
+      const viewportWidth = viewport?.width || window.innerWidth
+      const viewportHeight = viewport?.height || window.innerHeight
+      const margin = 12
+      const width = Math.min(760, viewportWidth - margin * 2)
+      const left = Math.min(
+        Math.max(rect.left, viewportLeft + margin),
+        viewportLeft + viewportWidth - width - margin,
+      )
+      const below = viewportTop + viewportHeight - rect.bottom - margin
+      const useBelow = below >= 420
+      const top = useBelow ? rect.bottom + 6 : viewportTop + margin
+      const maxHeight = useBelow ? Math.min(560, below - 6) : Math.min(560, viewportHeight - margin * 2)
+      setFilterPanelPosition({ left, top, width, maxHeight })
+    }
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    window.visualViewport?.addEventListener('resize', updatePosition)
+    window.visualViewport?.addEventListener('scroll', updatePosition)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+      window.visualViewport?.removeEventListener('resize', updatePosition)
+      window.visualViewport?.removeEventListener('scroll', updatePosition)
+    }
+  }, [showFilterDropdown])
 
   // Sync horizontal scroll between top scrollbar and kanban
   const handleTopScroll = () => {
@@ -2277,7 +2324,7 @@ export default function LeadsPage() {
   // Escape key closes modals/panels (topmost first)
   useEffect(() => {
     const handleEscapeKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
         if (lifecycleRequest) return // handled by the accessible lifecycle dialog
         if (showDeviceSelector) { setShowDeviceSelector(false); return }
         if (showStageModal) { setShowStageModal(false); return }
@@ -2621,36 +2668,42 @@ export default function LeadsPage() {
         )}
 
         <div ref={filterDropdownRef} className="relative max-w-lg flex-1">
-          <div className="flex items-center gap-2">
-            <div className="relative min-w-0 flex-1">
-              <Search className="absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
-              <input
-                type="search"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Buscar oportunidades…"
-                aria-label="Buscar oportunidades en todos los pipelines"
-                className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-              />
-            </div>
+          <div className="relative min-w-0 flex-1">
+            <Search className="absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+            <input
+              type="search"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Buscar oportunidades…"
+              aria-label="Buscar oportunidades en todos los pipelines"
+              className={`h-11 w-full rounded-xl border bg-white pl-9 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500 ${activeFilterCount > 0 ? 'border-emerald-300 pr-20' : 'border-slate-200 pr-12'}`}
+            />
             <button
               type="button"
               onClick={() => showFilterDropdown ? discardFilterDraft() : openFilters()}
-              className={`relative inline-flex h-11 shrink-0 items-center gap-2 rounded-xl border px-3 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${showFilterDropdown || activeFilterCount > 0 ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
+              className={`absolute right-1.5 top-1/2 inline-flex h-8 min-w-8 -translate-y-1/2 items-center justify-center gap-1 rounded-lg px-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${showFilterDropdown || activeFilterCount > 0 ? 'bg-emerald-100 text-emerald-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'}`}
               aria-expanded={showFilterDropdown}
               aria-haspopup="dialog"
+              aria-label={activeFilterCount > 0 ? `Filtros, ${activeFilterCount} activos` : 'Abrir filtros'}
+              title="Filtros"
             >
               <Filter className="h-4 w-4" aria-hidden="true" />
-              <span className="hidden sm:inline">Filtros</span>
               {activeFilterCount > 0 && <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-emerald-600 px-1.5 text-[10px] font-bold text-white">{activeFilterCount}</span>}
             </button>
           </div>
 
           {/* Filter Dropdown — Two-Column Layout */}
           {showFilterDropdown && (
-            <div className="fixed inset-0 z-[70] flex max-h-none w-full flex-col rounded-none border border-slate-200/80 bg-white shadow-2xl shadow-slate-200/50 sm:absolute sm:inset-auto sm:left-0 sm:top-full sm:z-30 sm:mt-1 sm:max-h-[70vh] sm:w-[min(600px,90vw)] sm:rounded-2xl" role="dialog" aria-modal="true" aria-label="Filtros de oportunidades">
+            <div
+              ref={filterDialogRef}
+              className={`fixed inset-0 z-[70] flex w-full flex-col rounded-none border border-slate-200/80 bg-white shadow-2xl shadow-slate-900/15 sm:inset-auto sm:rounded-2xl ${filterPanelPosition ? 'sm:opacity-100' : 'sm:pointer-events-none sm:opacity-0'}`}
+              style={filterPanelPosition ? { left: filterPanelPosition.left, top: filterPanelPosition.top, width: filterPanelPosition.width, maxHeight: filterPanelPosition.maxHeight } : undefined}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Filtros de oportunidades"
+            >
               {/* ─── Header ─── */}
-              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
+              <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-3 py-2">
                 <div className="flex items-center gap-2.5">
                   <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
                   <span className="text-sm font-semibold text-slate-800">Filtros</span>
@@ -2667,22 +2720,22 @@ export default function LeadsPage() {
                       Limpiar todo
                     </button>
                   )}
-                  <button onClick={discardFilterDraft} className="inline-flex h-10 w-10 items-center justify-center rounded-xl hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Descartar cambios y cerrar filtros">
+                  <button onClick={discardFilterDraft} className="inline-flex h-8 w-8 items-center justify-center rounded-lg hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Descartar cambios y cerrar filtros">
                     <X className="w-4 h-4 text-slate-400" />
                   </button>
                 </div>
               </div>
 
               {/* ─── Responsive Body: 2 cols when space, 1 col when narrow ─── */}
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto sm:flex-row sm:overflow-hidden">
+              <div className={`grid min-h-0 flex-1 grid-cols-1 overflow-y-auto ${cfDefs.length > 0 ? 'md:grid-cols-[210px_180px_minmax(0,1fr)]' : 'md:grid-cols-[220px_minmax(0,1fr)]'}`}>
 
                 {/* ══ Left Column — Selections ══ */}
-                <div className="w-full shrink-0 space-y-4 border-b border-slate-100 bg-slate-50/30 p-3 sm:w-[240px] sm:overflow-y-auto sm:border-b-0 sm:border-r">
+                <div className="w-full space-y-3 border-b border-slate-100 bg-slate-50/50 p-2.5 md:border-b-0 md:border-r">
 
                   {/* Stage pills */}
                   {filterableStages.length > 0 && (
                     <div>
-                      <div className="flex items-center gap-2 mb-2.5">
+                      <div className="mb-2 flex items-center gap-2">
                         <div className="w-1 h-3.5 bg-slate-300 rounded-full" />
                         <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Etapas</p>
                       </div>
@@ -2697,7 +2750,7 @@ export default function LeadsPage() {
                                 if (isActive) next.delete(stage.id); else next.add(stage.id)
                                 setFilterStageIds(next)
                               }}
-                              className={`inline-flex min-h-10 items-center gap-1.5 rounded-xl border px-2.5 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+                              className={`inline-flex min-h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
                                 isActive ? 'border-emerald-300 bg-emerald-50 text-emerald-800 shadow-sm' : 'border-slate-200 text-slate-600 hover:bg-white hover:shadow-sm'
                               }`}
                               aria-pressed={isActive}
@@ -2714,7 +2767,7 @@ export default function LeadsPage() {
 
                   {/* ── Date Filter ── */}
                   <div>
-                    <div className="flex items-center gap-2 mb-2.5">
+                    <div className="mb-2 flex items-center gap-2">
                       <div className="w-1 h-3.5 bg-blue-400 rounded-full" />
                       <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Fecha</p>
                     </div>
@@ -2722,13 +2775,13 @@ export default function LeadsPage() {
                     <div className="flex rounded-lg border border-slate-200 bg-slate-50/50 overflow-hidden mb-2">
                       <button
                         onClick={() => setFilterDateField('created_at')}
-                        className={`flex-1 px-2 py-1.5 text-[10px] font-semibold transition-all ${filterDateField === 'created_at' ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
+                        className={`flex-1 px-2 py-1 text-[10px] font-semibold transition-all ${filterDateField === 'created_at' ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
                       >
                         Creación
                       </button>
                       <button
                         onClick={() => setFilterDateField('updated_at')}
-                        className={`flex-1 px-2 py-1.5 text-[10px] font-semibold transition-all ${filterDateField === 'updated_at' ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
+                        className={`flex-1 px-2 py-1 text-[10px] font-semibold transition-all ${filterDateField === 'updated_at' ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-500 hover:bg-white'}`}
                       >
                         Modificación
                       </button>
@@ -2742,7 +2795,7 @@ export default function LeadsPage() {
                             if (filterDatePreset === p.key) { setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo('') }
                             else { setFilterDatePreset(p.key); if (p.key !== 'custom') { setFilterDateFrom(''); setFilterDateTo('') } }
                           }}
-                          className={`px-2 py-1.5 rounded-lg text-[10px] font-medium transition-all border ${
+                          className={`rounded-lg border px-2 py-1 text-[10px] font-medium transition-all ${
                             filterDatePreset === p.key
                               ? 'bg-blue-500 text-white border-blue-500 shadow-sm'
                               : 'border-slate-200 text-slate-600 hover:bg-white hover:shadow-sm'
@@ -2789,13 +2842,13 @@ export default function LeadsPage() {
 
                   {devices.length > 0 && (
                     <div>
-                      <div className="mb-2.5 flex items-center gap-2">
+                      <div className="mb-2 flex items-center gap-2">
                         <div className="h-3.5 w-1 rounded-full bg-violet-400" />
                         <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Dispositivo</p>
                       </div>
                       <div className="space-y-1">
                         {devices.map(device => (
-                          <label key={device.id} className="flex min-h-10 cursor-pointer items-center gap-2 rounded-lg px-2 text-xs text-slate-700 hover:bg-white">
+                          <label key={device.id} className="flex min-h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-xs text-slate-700 hover:bg-white">
                             <input
                               type="checkbox"
                               checked={filterDeviceIds.has(device.id)}
@@ -2817,18 +2870,18 @@ export default function LeadsPage() {
                   {/* Active tag selections */}
                   {allUniqueTags.length > 0 && (
                     <div>
-                      <div className="flex items-center gap-2 mb-2.5">
+                      <div className="mb-2 flex items-center gap-2">
                         <div className="w-1 h-3.5 bg-emerald-400 rounded-full" />
                         <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Selección</p>
                       </div>
 
                       {filterTagNames.size === 0 && excludeFilterTagNames.size === 0 ? (
-                        <div className="border-2 border-dashed border-slate-200 rounded-xl p-4 text-center">
+                        <div className="rounded-xl border-2 border-dashed border-slate-200 p-3 text-center">
                           <Tag className="w-5 h-5 text-slate-300 mx-auto mb-1.5" />
                           <p className="text-[11px] text-slate-400">Haz click en las etiquetas para filtrar</p>
                         </div>
                       ) : (
-                        <div className="space-y-3">
+                        <div className="space-y-2">
                           {/* Include chips */}
                           {filterTagNames.size > 0 && (
                             <div>
@@ -2885,7 +2938,7 @@ export default function LeadsPage() {
                       )}
 
                       {/* Click instructions */}
-                      <div className="mt-3 pt-3 border-t border-slate-100">
+                      <div className="mt-2 border-t border-slate-100 pt-2">
                         <div className="space-y-1">
                           <div className="flex items-center gap-2 text-[10px] text-slate-400">
                             <div className="w-3 h-3 rounded-full bg-emerald-500 flex items-center justify-center shrink-0"><CheckSquare className="w-2 h-2 text-white" /></div>
@@ -2907,7 +2960,7 @@ export default function LeadsPage() {
 
                 {/* ══ Center Column — Custom Fields ══ */}
                 {cfDefs.length > 0 && (
-                <div className="w-full shrink-0 space-y-3 border-b border-slate-100 p-3 sm:w-[220px] sm:overflow-y-auto sm:border-b-0 sm:border-r">
+                <div className="w-full space-y-3 border-b border-slate-100 p-2.5 md:border-b-0 md:border-r">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="w-1 h-3.5 bg-violet-400 rounded-full" />
@@ -3037,14 +3090,14 @@ export default function LeadsPage() {
                   {allUniqueTags.length > 0 && (
                     <>
                       {/* Top controls — shrink-0 */}
-                      <div className="p-3 pb-0 shrink-0 space-y-2.5">
+                      <div className="shrink-0 space-y-2 p-2.5 pb-0">
                         {/* Simple / Advanced tabs */}
-                        <div className="flex overflow-hidden rounded-xl border border-slate-200 bg-slate-50/50" role="tablist" aria-label="Modo de filtrado por etiquetas">
+                        <div className="flex overflow-hidden rounded-lg border border-slate-200 bg-slate-50/50" role="tablist" aria-label="Modo de filtrado por etiquetas">
                           <button type="button"
                             onClick={() => setLeadFormulaType('simple')}
                             role="tab"
                             aria-selected={leadFormulaType === 'simple'}
-                            className={`flex min-h-11 flex-1 items-center justify-center gap-1.5 px-3 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${
+                            className={`flex min-h-9 flex-1 items-center justify-center gap-1.5 px-3 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${
                               leadFormulaType === 'simple'
                                 ? 'bg-emerald-500 text-white shadow-sm'
                                 : 'text-slate-500 hover:bg-white hover:text-slate-700'
@@ -3056,7 +3109,7 @@ export default function LeadsPage() {
                             onClick={() => setLeadFormulaType('advanced')}
                             role="tab"
                             aria-selected={leadFormulaType === 'advanced'}
-                            className={`flex min-h-11 flex-1 items-center justify-center gap-1.5 px-3 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500 ${
+                            className={`flex min-h-9 flex-1 items-center justify-center gap-1.5 px-3 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-500 ${
                               leadFormulaType === 'advanced'
                                 ? 'bg-violet-500 text-white shadow-sm'
                                 : 'text-slate-500 hover:bg-white hover:text-slate-700'
@@ -3076,7 +3129,7 @@ export default function LeadsPage() {
                                   onClick={() => setTagFilterMode('OR')}
                                   role="radio"
                                   aria-checked={tagFilterMode === 'OR'}
-                                  className={`min-h-10 px-3 text-[10px] font-bold tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${
+                                  className={`min-h-8 px-3 text-[10px] font-bold tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${
                                     tagFilterMode === 'OR' ? 'bg-emerald-500 text-white' : 'bg-white text-slate-400 hover:bg-slate-50'
                                   }`}>
                                   Cualquiera
@@ -3086,7 +3139,7 @@ export default function LeadsPage() {
                                   onClick={() => setTagFilterMode('AND')}
                                   role="radio"
                                   aria-checked={tagFilterMode === 'AND'}
-                                  className={`min-h-10 px-3 text-[10px] font-bold tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${
+                                  className={`min-h-8 px-3 text-[10px] font-bold tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${
                                     tagFilterMode === 'AND' ? 'bg-blue-500 text-white' : 'bg-white text-slate-400 hover:bg-slate-50'
                                   }`}>
                                   Todas
@@ -3105,7 +3158,7 @@ export default function LeadsPage() {
                                 onChange={(e) => setTagSearchTerm(e.target.value)}
                                 onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault() }}
                                 placeholder="Buscar etiquetas... (% = comodín)"
-                                className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all"
+                                className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-9 pr-3 text-xs text-slate-800 placeholder:text-slate-400 transition-all focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/30"
                               />
                             </div>
                           </>
@@ -3114,61 +3167,43 @@ export default function LeadsPage() {
 
                       {/* ─── SIMPLE MODE — Tag list (scrollable, fills space) ─── */}
                       {leadFormulaType === 'simple' && (
-                        <div className="min-h-0 flex-1 p-3 pt-2 sm:overflow-y-auto">
-                          <div className="space-y-0.5">
+                        <div className="min-h-0 flex-1 p-2.5 pt-2">
+                          <div className="flex flex-wrap gap-1.5">
                             {filteredTags.map(tag => {
                               const isIncluded = filterTagNames.has(tag.name)
                               const isExcluded = excludeFilterTagNames.has(tag.name)
                               const count = tagLeadCounts.get(tag.name) || 0
                               return (
-                                <div
+                                <button
                                   key={tag.id}
-                                  className={`flex items-center gap-2 px-2.5 py-1.5 rounded-xl transition-all ${
+                                  type="button"
+                                  onClick={() => {
+                                    const include = new Set(filterTagNames)
+                                    const exclude = new Set(excludeFilterTagNames)
+                                    if (!isIncluded && !isExcluded) {
+                                      include.add(tag.name)
+                                    } else if (isIncluded) {
+                                      include.delete(tag.name)
+                                      exclude.add(tag.name)
+                                    } else {
+                                      exclude.delete(tag.name)
+                                    }
+                                    setFilterTagNames(include)
+                                    setExcludeFilterTagNames(exclude)
+                                  }}
+                                  className={`inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
                                     isIncluded
-                                      ? 'bg-emerald-50 ring-1 ring-emerald-200'
+                                      ? 'border-emerald-600 bg-emerald-600 text-white shadow-sm focus-visible:ring-emerald-500'
                                       : isExcluded
-                                        ? 'bg-red-50 ring-1 ring-red-200'
-                                        : 'hover:bg-white hover:shadow-sm'
+                                        ? 'border-red-600 bg-red-600 text-white shadow-sm line-through decoration-white/80 focus-visible:ring-red-500'
+                                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:shadow-sm focus-visible:ring-emerald-500'
                                   }`}
+                                  aria-label={`${tag.name}: ${isIncluded ? 'incluida; activar para excluir' : isExcluded ? 'excluida; activar para quitar' : 'sin filtro; activar para incluir'}`}
                                 >
-                                  <div className="h-3.5 w-3.5 shrink-0 rounded-full ring-2 ring-white shadow-sm" style={{ backgroundColor: tag.color }} aria-hidden="true" />
-                                  <span className={`flex-1 text-[12px] transition-colors ${
-                                    isIncluded
-                                      ? 'text-emerald-700 font-semibold'
-                                      : isExcluded
-                                        ? 'text-red-700 font-semibold'
-                                        : 'text-slate-700'
-                                  }`}>{tag.name}</span>
-                                  <span className={`text-[10px] tabular-nums font-medium px-1.5 py-0.5 rounded-md ${
-                                    isIncluded ? 'bg-emerald-100 text-emerald-600' : isExcluded ? 'bg-red-100 text-red-500' : 'bg-slate-100 text-slate-400'
-                                  }`}>{count}</span>
-                                  <div className="inline-flex overflow-hidden rounded-lg border border-slate-200 bg-white" aria-label={`Filtro para ${tag.name}`}>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const include = new Set(filterTagNames)
-                                        const exclude = new Set(excludeFilterTagNames)
-                                        if (isIncluded) include.delete(tag.name)
-                                        else { include.add(tag.name); exclude.delete(tag.name) }
-                                        setFilterTagNames(include); setExcludeFilterTagNames(exclude)
-                                      }}
-                                      className={`min-h-10 px-2 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${isIncluded ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-emerald-50 hover:text-emerald-700'}`}
-                                      aria-pressed={isIncluded}
-                                    >Incluir</button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const include = new Set(filterTagNames)
-                                        const exclude = new Set(excludeFilterTagNames)
-                                        if (isExcluded) exclude.delete(tag.name)
-                                        else { exclude.add(tag.name); include.delete(tag.name) }
-                                        setFilterTagNames(include); setExcludeFilterTagNames(exclude)
-                                      }}
-                                      className={`min-h-10 border-l border-slate-200 px-2 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500 ${isExcluded ? 'bg-red-600 text-white' : 'text-slate-500 hover:bg-red-50 hover:text-red-700'}`}
-                                      aria-pressed={isExcluded}
-                                    >Excluir</button>
-                                  </div>
-                                </div>
+                                  {isIncluded ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : isExcluded ? <XCircle className="h-3.5 w-3.5 shrink-0" /> : <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: tag.color }} />}
+                                  <span className="min-w-0 truncate">{tag.name}</span>
+                                  <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] tabular-nums ${isIncluded || isExcluded ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-400'}`}>{count}</span>
+                                </button>
                               )
                             })}
                             {filteredTags.length === 0 && tagSearchTerm.trim() && (
@@ -3178,13 +3213,20 @@ export default function LeadsPage() {
                               </div>
                             )}
                           </div>
+                          {filteredTags.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 border-t border-slate-100 pt-2 text-[10px] text-slate-400">
+                              <span><strong className="text-emerald-600">1 clic</strong> incluir</span>
+                              <span><strong className="text-red-600">2 clics</strong> excluir</span>
+                              <span><strong className="text-slate-500">3 clics</strong> quitar</span>
+                            </div>
+                          )}
                         </div>
                       )}
 
                       {/* ─── ADVANCED MODE ─── */}
                       {leadFormulaType === 'advanced' && (
-                        <div className="min-h-0 flex-1 space-y-3 p-3 sm:overflow-y-auto">
-                          <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-100">
+                        <div className="min-h-0 flex-1 space-y-2 p-2.5">
+                          <div className="rounded-xl border border-slate-100 bg-slate-50 p-2">
                             <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Sintaxis</div>
                             <div className="grid grid-cols-2 gap-1 text-[10px] text-slate-600">
                               <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;etiqueta&quot;</code> exacta</div>
@@ -3218,7 +3260,14 @@ export default function LeadsPage() {
               </div>
 
               {/* ─── Footer — Aplicar ─── */}
-              <div className="px-4 py-3 border-t border-slate-100 shrink-0 bg-white rounded-b-2xl">
+              <div className="flex shrink-0 items-center gap-2 rounded-b-2xl border-t border-slate-100 bg-white px-3 py-2">
+                <button
+                  type="button"
+                  onClick={discardFilterDraft}
+                  className="min-h-10 rounded-xl border border-slate-200 px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                >
+                  Cancelar
+                </button>
                 <button
                   onClick={() => {
                     setAppliedFormulaType(leadFormulaType)
@@ -3227,7 +3276,7 @@ export default function LeadsPage() {
                     setShowFilterDropdown(false)
                   }}
                   disabled={leadFormulaType === 'advanced' && !leadFormulaIsValid}
-                  className="min-h-11 w-full rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm shadow-emerald-200 transition-all hover:bg-emerald-700 hover:shadow-md hover:shadow-emerald-200 active:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="min-h-10 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm shadow-emerald-200 transition-all hover:bg-emerald-700 hover:shadow-md hover:shadow-emerald-200 active:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Aplicar
                 </button>
@@ -3492,31 +3541,30 @@ export default function LeadsPage() {
           </button>
         </div>
         </div>
-        {pipelines.length > 0 && (
-          <div className="relative shrink-0">
-            <select
-              value={activePipeline?.id || ''}
-              disabled={Boolean(debouncedSearchTerm)}
-              onChange={(e) => {
-                const val = e.target.value
-                if (val === '__no_pipeline__') {
-                  setActivePipeline({ id: '__no_pipeline__', name: 'Sin pipeline', is_default: false, stages: [] })
-                } else {
-                  const p = pipelines.find(p => p.id === val)
-                  if (p) setActivePipeline(p)
-                }
-              }}
-              className="h-10 max-w-[170px] appearance-none truncate rounded-xl border border-slate-200 bg-white pl-3 pr-8 text-xs font-medium text-slate-700 focus:ring-2 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
-              title={debouncedSearchTerm ? 'La búsqueda consulta todos los pipelines' : 'Seleccionar pipeline'}
-            >
-              {pipelines.map(p => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-              <option value="__no_pipeline__" className="text-slate-400 italic">── Sin pipeline ──</option>
-            </select>
-            <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400 pointer-events-none" />
-          </div>
-        )}
+        <div className="relative shrink-0">
+          <Building2 className={`pointer-events-none absolute left-3 top-1/2 z-10 h-3.5 w-3.5 -translate-y-1/2 ${debouncedSearchTerm ? 'text-blue-600' : 'text-slate-500'}`} aria-hidden="true" />
+          <select
+            value={debouncedSearchTerm ? '__all__' : activePipeline?.id || '__no_pipeline__'}
+            disabled={Boolean(debouncedSearchTerm)}
+            onChange={event => {
+              const pipelineId = event.target.value
+              if (pipelineId === '__no_pipeline__') {
+                setActivePipeline({ id: '__no_pipeline__', name: 'Sin pipeline', is_default: false, stages: [] })
+                return
+              }
+              const pipeline = pipelines.find(item => item.id === pipelineId)
+              if (pipeline) setActivePipeline(pipeline)
+            }}
+            className={`min-h-10 max-w-[210px] appearance-none truncate rounded-xl border py-2 pl-8 pr-8 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed ${debouncedSearchTerm ? 'border-blue-200 bg-blue-50 text-blue-700 opacity-100' : 'border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50'}`}
+            title={debouncedSearchTerm ? 'La búsqueda consulta todos los pipelines' : 'Cambiar pipeline'}
+            aria-label="Seleccionar pipeline"
+          >
+            {debouncedSearchTerm && <option value="__all__">Todos los pipelines</option>}
+            {!debouncedSearchTerm && pipelines.map(pipeline => <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>)}
+            {!debouncedSearchTerm && <option value="__no_pipeline__">Sin pipeline</option>}
+          </select>
+          <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+        </div>
       </div>
 
       {/* Hidden leads banner */}

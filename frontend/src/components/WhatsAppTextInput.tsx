@@ -1,8 +1,10 @@
 'use client'
 
 import { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle } from 'react'
-import { Bold, Italic, Strikethrough, Code } from 'lucide-react'
+import { Bold, Braces, Code, Italic, List, ListOrdered, Quote, Strikethrough } from 'lucide-react'
 import { formatToHtmlPreview, getCaretOffset, setCaretOffset } from '@/lib/whatsappFormat'
+import { applyWhatsAppFormat, insertTextAtSelection } from '@/lib/whatsappEditor'
+import type { TextSelection, WhatsAppFormatCommand } from '@/lib/whatsappEditor'
 
 export interface WhatsAppTextInputHandle {
   focus: () => void
@@ -23,11 +25,15 @@ interface WhatsAppTextInputProps {
   singleLine?: boolean
 }
 
-const FORMAT_ACTIONS = [
-  { icon: Bold, label: 'Negrita', prefix: '*', suffix: '*' },
-  { icon: Italic, label: 'Cursiva', prefix: '_', suffix: '_' },
-  { icon: Strikethrough, label: 'Tachado', prefix: '~', suffix: '~' },
-  { icon: Code, label: 'Monoespaciado', prefix: '`', suffix: '`' },
+const FORMAT_ACTIONS: Array<{ icon: typeof Bold; label: string; command: WhatsAppFormatCommand; shortcut?: string }> = [
+  { icon: Bold, label: 'Negrita', command: 'bold', shortcut: 'Ctrl+B' },
+  { icon: Italic, label: 'Cursiva', command: 'italic', shortcut: 'Ctrl+I' },
+  { icon: Strikethrough, label: 'Tachado', command: 'strike', shortcut: 'Ctrl+Mayús+X' },
+  { icon: Code, label: 'Código en línea', command: 'inline_code', shortcut: 'Ctrl+`' },
+  { icon: Braces, label: 'Monoespaciado', command: 'monospace' },
+  { icon: List, label: 'Lista con viñetas', command: 'bullet_list' },
+  { icon: ListOrdered, label: 'Lista numerada', command: 'numbered_list' },
+  { icon: Quote, label: 'Cita', command: 'quote' },
 ]
 
 const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputProps>(function WhatsAppTextInput({
@@ -45,7 +51,19 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   const [toolbar, setToolbar] = useState<{ x: number; y: number; selStart: number; selEnd: number } | null>(null)
   const toolbarRef = useRef<HTMLDivElement>(null)
   const valueRef = useRef(value)
+  const selectionRef = useRef<TextSelection>({ start: value.length, end: value.length })
   valueRef.current = value
+
+  const commitEdit = useCallback((nextValue: string, selection: TextSelection) => {
+    selectionRef.current = selection
+    onChange(nextValue)
+    requestAnimationFrame(() => {
+      if (!editorRef.current) return
+      editorRef.current.innerHTML = formatToHtmlPreview(nextValue) || ''
+      editorRef.current.focus()
+      setCaretOffset(editorRef.current, selection.end)
+    })
+  }, [onChange])
 
   useImperativeHandle(ref, () => ({
     focus() {
@@ -53,24 +71,15 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     },
     insertAtCaret(text: string) {
       if (!editorRef.current) return
-      editorRef.current.focus()
-      const caretPos = getCaretOffset(editorRef.current)
-      const cur = valueRef.current
-      const newVal = cur.slice(0, caretPos) + text + cur.slice(caretPos)
-      onChange(newVal)
-      requestAnimationFrame(() => {
-        if (editorRef.current) {
-          editorRef.current.innerHTML = formatToHtmlPreview(newVal) || ''
-          setCaretOffset(editorRef.current, caretPos + text.length)
-        }
-      })
+      const edit = insertTextAtSelection(valueRef.current, selectionRef.current, text)
+      commitEdit(edit.value, edit.selection)
     },
     clear() {
       if (editorRef.current) {
         editorRef.current.innerHTML = ''
       }
     },
-  }))
+  }), [commitEdit])
 
   // Sync HTML when value changes externally
   useEffect(() => {
@@ -79,6 +88,8 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     if (currentText !== value) {
       const html = formatToHtmlPreview(value)
       editorRef.current.innerHTML = html || ''
+      const caret = Math.min(value.length, selectionRef.current.end)
+      selectionRef.current = { start: caret, end: caret }
     }
   }, [value])
 
@@ -86,6 +97,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     if (!editorRef.current) return
     const text = (editorRef.current.innerText || '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n')
     const caretPos = getCaretOffset(editorRef.current)
+    selectionRef.current = { start: caretPos, end: caretPos }
     onChange(text)
     const html = formatToHtmlPreview(text)
     editorRef.current.innerHTML = html || ''
@@ -131,17 +143,18 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     // Splice pasted text at caret/selection position
     const newText = currentText.slice(0, caretStart) + pastedText + currentText.slice(caretEnd)
 
-    onChange(newText)
-    const html = formatToHtmlPreview(newText)
-    editorRef.current.innerHTML = html || ''
-    setCaretOffset(editorRef.current, caretStart + pastedText.length)
-  }, [onChange, onPasteFiles])
+    commitEdit(newText, { start: caretStart + pastedText.length, end: caretStart + pastedText.length })
+  }, [commitEdit, onPasteFiles])
 
   // Show toolbar on text selection
   const checkSelection = useCallback(() => {
     if (!editorRef.current) return
     const sel = window.getSelection()
     if (!sel || sel.isCollapsed || !sel.rangeCount) {
+      if (sel?.rangeCount && editorRef.current.contains(sel.anchorNode)) {
+        const caret = getCaretOffset(editorRef.current)
+        selectionRef.current = { start: caret, end: caret }
+      }
       setToolbar(null)
       return
     }
@@ -166,6 +179,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
       setToolbar(null)
       return
     }
+    selectionRef.current = { start: selStart, end: selEnd }
     setToolbar({
       x: rect.left + rect.width / 2 - editorRect.left,
       y: rect.top - editorRect.top - 8,
@@ -190,38 +204,34 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     return () => document.removeEventListener('mousedown', handleMouseDown)
   }, [])
 
-  const applyFormat = (prefix: string, suffix: string) => {
-    if (!toolbar || !editorRef.current) return
-    const text = valueRef.current
-    const { selStart, selEnd } = toolbar
-    const selected = text.slice(selStart, selEnd)
-    // Trim whitespace so markers wrap content tightly (WhatsApp requires no spaces next to markers)
-    const leadingWs = selected.match(/^\s*/)?.[0] || ''
-    const trailingWs = selected.match(/\s*$/)?.[0] || ''
-    const trimmed = selected.slice(leadingWs.length, selected.length - (trailingWs.length || 0))
-    if (!trimmed) return
-    const before = text.slice(0, selStart) + leadingWs
-    const after = trailingWs + text.slice(selEnd)
-    let newText: string
-    let newCaretEnd: number
-    if (before.endsWith(prefix) && after.startsWith(suffix)) {
-      // Remove wrapping format chars
-      newText = before.slice(0, -prefix.length) + trimmed + after.slice(suffix.length)
-      newCaretEnd = before.length - prefix.length + trimmed.length
-    } else {
-      newText = before + prefix + trimmed + suffix + after
-      newCaretEnd = before.length + prefix.length + trimmed.length + suffix.length
-    }
-    onChange(newText)
+  const applyFormat = useCallback((command: WhatsAppFormatCommand, selection = selectionRef.current) => {
+    if (!editorRef.current) return
+    const edit = applyWhatsAppFormat(valueRef.current, selection, command)
     setToolbar(null)
-    // Re-render and restore caret
-    requestAnimationFrame(() => {
-      if (editorRef.current) {
-        editorRef.current.innerHTML = formatToHtmlPreview(newText) || ''
-        setCaretOffset(editorRef.current, newCaretEnd)
+    commitEdit(edit.value, edit.selection)
+  }, [commitEdit])
+
+  const handleEditorKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!event.nativeEvent.isComposing && (event.ctrlKey || event.metaKey) && !event.altKey) {
+      const key = event.key.toLowerCase()
+      const command = !event.shiftKey && key === 'b'
+        ? 'bold'
+        : !event.shiftKey && key === 'i'
+          ? 'italic'
+          : event.shiftKey && key === 'x'
+            ? 'strike'
+            : !event.shiftKey && (event.key === '`' || event.code === 'Backquote')
+              ? 'inline_code'
+              : null
+      if (command) {
+        event.preventDefault()
+        event.stopPropagation()
+        applyFormat(command)
+        return
       }
-    })
-  }
+    }
+    onKeyDown?.(event)
+  }, [applyFormat, onKeyDown])
 
   const minH = singleLine ? 'min-h-[42px]' : `min-h-[${Math.max(rows * 24, 64)}px]`
   const maxH = singleLine ? 'max-h-32' : 'max-h-60'
@@ -240,7 +250,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
         aria-label={placeholder}
         contentEditable={!disabled}
         onInput={handleInput}
-        onKeyDown={onKeyDown}
+        onKeyDown={handleEditorKeyDown}
         onPaste={handlePaste}
         className={`w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 ${minH} ${maxH} overflow-y-auto whitespace-pre-wrap break-words outline-none text-sm ${className}`}
       />
@@ -248,7 +258,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
       {toolbar && (
         <div
           ref={toolbarRef}
-          className="absolute z-50 flex items-center gap-0.5 bg-gray-800 rounded-lg shadow-xl px-1 py-0.5 -translate-x-1/2 -translate-y-full"
+          className="absolute z-50 grid w-[148px] grid-cols-4 gap-0.5 rounded-lg bg-gray-800 px-1 py-0.5 shadow-xl -translate-x-1/2 -translate-y-full"
           style={{ left: toolbar.x, top: toolbar.y }}
           onMouseDown={e => e.preventDefault()}
         >
@@ -256,9 +266,10 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
             <button
               key={action.label}
               type="button"
-              onClick={() => applyFormat(action.prefix, action.suffix)}
+              onClick={() => applyFormat(action.command, { start: toolbar.selStart, end: toolbar.selEnd })}
               className="p-1.5 text-white hover:bg-gray-700 rounded transition-colors"
-              title={action.label}
+              title={action.shortcut ? `${action.label} (${action.shortcut})` : action.label}
+              aria-label={action.shortcut ? `${action.label}, ${action.shortcut}` : action.label}
             >
               <action.icon className="w-3.5 h-3.5" />
             </button>

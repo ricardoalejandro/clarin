@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -41,9 +40,22 @@ import (
 // recipient identity is protected by Contact DNC or its durable tombstone.
 var ErrOutboundSuppressed = errors.New("contacto marcado como no contactar")
 
+// ErrHistorySyncInProgress protects a WhatsApp Web device from overlapping
+// on-demand history requests, which cannot be correlated safely by the
+// protocol when they run concurrently.
+var ErrHistorySyncInProgress = errors.New("ya hay una recuperación de historial activa en este dispositivo")
+
+// ErrHistorySyncReceiveDisabled avoids reserving a protocol request that the
+// device is configured to discard when its response arrives.
+var ErrHistorySyncReceiveDisabled = errors.New("la recepción de mensajes está desactivada en este dispositivo")
+
 // strPtr returns a pointer to a string
 func strPtr(s string) *string {
 	return &s
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func canonicalReactionSenderJID(raw string) string {
@@ -88,12 +100,6 @@ func reactionEventTimestamp(fallback time.Time, senderTimestampMS int64) time.Ti
 	}
 	return fallback
 }
-
-const (
-	avatarExistingRefreshTTL = 7 * 24 * time.Hour
-	avatarMissingRefreshTTL  = 24 * time.Hour
-	avatarFetchTimeout       = 12 * time.Second
-)
 
 // DeviceHealthMetrics tracks health-related counters per device
 type DeviceHealthMetrics struct {
@@ -140,19 +146,24 @@ type onDemandSyncTarget struct {
 	DeviceID  uuid.UUID
 	ChatID    uuid.UUID
 	ChatJID   string
+	RequestID uuid.UUID
+	StartedAt time.Time
+	Saved     int
 }
 
+type historySyncChainContextKey struct{}
+
 type DevicePool struct {
-	devices            map[uuid.UUID]*DeviceInstance
-	store              *sqlstore.Container
-	repos              *repository.Repositories
-	hub                *ws.Hub
-	cfg                *config.Config
-	storage            *storage.Storage
-	cache              *cache.Cache
-	mu                 sync.RWMutex
-	startTime          time.Time
-	onDemandSyncTarget *onDemandSyncTarget // currently active on-demand sync target for auto-chaining
+	devices             map[uuid.UUID]*DeviceInstance
+	store               *sqlstore.Container
+	repos               *repository.Repositories
+	hub                 *ws.Hub
+	cfg                 *config.Config
+	storage             *storage.Storage
+	cache               *cache.Cache
+	mu                  sync.RWMutex
+	startTime           time.Time
+	onDemandSyncTargets map[uuid.UUID]*onDemandSyncTarget // one active request per device
 }
 
 // NewDevicePool creates a new device pool
@@ -174,12 +185,13 @@ func NewDevicePool(cfg *config.Config, repos *repository.Repositories, hub *ws.H
 	}
 
 	return &DevicePool{
-		devices:   make(map[uuid.UUID]*DeviceInstance),
-		store:     container,
-		repos:     repos,
-		hub:       hub,
-		cfg:       cfg,
-		startTime: time.Now(),
+		devices:             make(map[uuid.UUID]*DeviceInstance),
+		store:               container,
+		repos:               repos,
+		hub:                 hub,
+		cfg:                 cfg,
+		startTime:           time.Now(),
+		onDemandSyncTargets: make(map[uuid.UUID]*onDemandSyncTarget),
 	}, nil
 }
 
@@ -730,6 +742,9 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 	} else if vidMsg := waMsg.GetVideoMessage(); vidMsg != nil {
 		r.Body = vidMsg.GetCaption()
 		r.MessageType = domain.MessageTypeVideo
+		if vidMsg.GetGifPlayback() {
+			r.MessageType = domain.MessageTypeGIF
+		}
 		r.MediaMimetype = strPtr(vidMsg.GetMimetype())
 		if p.storage != nil && instance != nil {
 			stored, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, chatJID, msgID, vidMsg.GetMimetype(), ".mp4")
@@ -821,6 +836,9 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 				}
 			} else if vidMsg := inner.GetVideoMessage(); vidMsg != nil {
 				r.MessageType = domain.MessageTypeVideo
+				if vidMsg.GetGifPlayback() {
+					r.MessageType = domain.MessageTypeGIF
+				}
 				r.Body = vidMsg.GetCaption()
 				r.MediaMimetype = strPtr(vidMsg.GetMimetype())
 				if p.storage != nil && instance != nil {
@@ -851,6 +869,9 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 				}
 			} else if vidMsg := inner.GetVideoMessage(); vidMsg != nil {
 				r.MessageType = domain.MessageTypeVideo
+				if vidMsg.GetGifPlayback() {
+					r.MessageType = domain.MessageTypeGIF
+				}
 				r.Body = vidMsg.GetCaption()
 				r.MediaMimetype = strPtr(vidMsg.GetMimetype())
 				if p.storage != nil && instance != nil {
@@ -870,8 +891,20 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 
 // handleMessage processes incoming messages
 func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance, evt *events.Message) {
-	// Skip status broadcasts
-	if evt.Info.Chat.Server == "broadcast" {
+	// Statuses are a separate domain. Persist only statuses sent by this
+	// account's own device and deliberately discard every contact status. A
+	// revoke is processed before the broadcast early return so remote deletion
+	// also removes the corresponding local own-status row.
+	if evt.Info.Chat.Server == types.BroadcastServer {
+		if evt.Info.Chat.User == types.StatusBroadcastJID.User {
+			if protocolMessage := evt.Message.GetProtocolMessage(); protocolMessage != nil && protocolMessage.GetType() == waE2E.ProtocolMessage_REVOKE {
+				p.handleOwnStatusRevoke(ctx, instance, protocolMessage.GetKey().GetID())
+				return
+			}
+			if p.cfg != nil && p.cfg.WhatsAppStatusEnabled && p.cfg.WhatsAppStatusSyncEnabled && evt.Info.IsFromMe {
+				p.handleOwnStatus(ctx, instance, evt)
+			}
+		}
 		return
 	}
 
@@ -1009,6 +1042,9 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	} else if vidMsg := evt.Message.GetVideoMessage(); vidMsg != nil {
 		body = vidMsg.GetCaption()
 		msgType = domain.MessageTypeVideo
+		if vidMsg.GetGifPlayback() {
+			msgType = domain.MessageTypeGIF
+		}
 		mediaMimetype = strPtr(vidMsg.GetMimetype())
 		if p.storage != nil {
 			stored, err := p.downloadAndStoreMedia(ctx, instance, vidMsg, evt.Info.Chat.ToNonAD().String(), evt.Info.ID, vidMsg.GetMimetype(), ".mp4")
@@ -1114,6 +1150,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 
 	// Extract quoted/reply context from incoming message
 	var quotedMessageID, quotedBody, quotedSender *string
+	var quotedIsFromMe *bool
 	// Check ContextInfo from various message types
 	var contextInfo *waE2E.ContextInfo
 	if ext := evt.Message.GetExtendedTextMessage(); ext != nil && ext.GetContextInfo() != nil {
@@ -1148,6 +1185,46 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				quotedBody = strPtr("[media]")
 			}
 		}
+		// Prefer the already-persisted original message. This is account/chat
+		// scoped and gives both an exact author direction and a better preview
+		// than the abbreviated protobuf quote supplied by WhatsApp.
+		if original, lookupErr := p.repos.Message.GetByReference(ctx, instance.AccountID, chat.ID, contextInfo.GetStanzaID()); lookupErr == nil && original != nil {
+			quotedIsFromMe = boolPtr(original.IsFromMe)
+			if original.FromJID != nil && strings.TrimSpace(*original.FromJID) != "" {
+				quotedSender = strPtr(*original.FromJID)
+			} else if original.FromName != nil && strings.TrimSpace(*original.FromName) != "" {
+				quotedSender = strPtr(*original.FromName)
+			}
+			preview := ""
+			if original.Body != nil {
+				preview = strings.TrimSpace(*original.Body)
+			}
+			if preview == "" && original.MediaFilename != nil {
+				preview = strings.TrimSpace(*original.MediaFilename)
+			}
+			if preview == "" && original.MessageType != nil {
+				preview = map[string]string{
+					domain.MessageTypeImage: "📷 Imagen", domain.MessageTypeVideo: "🎥 Video", domain.MessageTypeGIF: "GIF",
+					domain.MessageTypeAudio: "🎵 Audio", domain.MessageTypeDocument: "📄 Documento",
+					domain.MessageTypeSticker: "Sticker",
+				}[*original.MessageType]
+			}
+			if preview != "" {
+				quotedBody = strPtr(preview)
+			}
+		} else if participant := strings.TrimSpace(contextInfo.GetParticipant()); participant != "" {
+			// History may not contain the quoted stanza yet. Participant is still a
+			// useful exact signal when it identifies this connected account.
+			if participantJID, parseErr := types.ParseJID(participant); parseErr == nil && instance.Client.Store.ID != nil {
+				isOwn := participantJID.ToNonAD().String() == instance.Client.Store.ID.ToNonAD().String()
+				if !isOwn {
+					if ownJID, ownErr := types.ParseJID(instance.JID); ownErr == nil {
+						isOwn = participantJID.ToNonAD().String() == ownJID.ToNonAD().String()
+					}
+				}
+				quotedIsFromMe = boolPtr(isOwn)
+			}
+		}
 	}
 
 	// Create message
@@ -1176,6 +1253,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		QuotedMessageID: quotedMessageID,
 		QuotedBody:      quotedBody,
 		QuotedSender:    quotedSender,
+		QuotedIsFromMe:  quotedIsFromMe,
 	}
 
 	// Populate location data
@@ -1216,7 +1294,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 					}
 				}
 			} else if vidMsg := inner.GetVideoMessage(); vidMsg != nil {
-				msg.MessageType = strPtr(domain.MessageTypeVideo)
+				messageType := domain.MessageTypeVideo
+				if vidMsg.GetGifPlayback() {
+					messageType = domain.MessageTypeGIF
+				}
+				msg.MessageType = strPtr(messageType)
 				msg.Body = strPtr(vidMsg.GetCaption())
 				mediaMimetype = strPtr(vidMsg.GetMimetype())
 				msg.MediaMimetype = mediaMimetype
@@ -1248,7 +1330,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 					}
 				}
 			} else if vidMsg := inner.GetVideoMessage(); vidMsg != nil {
-				msg.MessageType = strPtr(domain.MessageTypeVideo)
+				messageType := domain.MessageTypeVideo
+				if vidMsg.GetGifPlayback() {
+					messageType = domain.MessageTypeGIF
+				}
+				msg.MessageType = strPtr(messageType)
 				msg.Body = strPtr(vidMsg.GetCaption())
 				mediaMimetype = strPtr(vidMsg.GetMimetype())
 				msg.MediaMimetype = mediaMimetype
@@ -1288,23 +1374,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		_ = p.repos.Contact.SyncToLead(ctx, contact)
 	}
 
-	// Refresh avatar opportunistically for active contacts only, bounded by TTL.
-	if contact != nil && !isFromMe {
-		avatarJID := evt.Info.Chat.ToNonAD()
-		// If chat JID is @lid, resolve to @s.whatsapp.net for GetProfilePictureInfo
-		if avatarJID.Server == types.HiddenUserServer {
-			if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, avatarJID); err == nil && !pnJID.IsEmpty() {
-				avatarJID = pnJID
-			}
-		}
-		if ttl := avatarRefreshTTL(contact); ttl > 0 {
-			claimed, err := p.repos.Contact.ClaimAvatarRefresh(ctx, instance.AccountID, contactJID, ttl)
-			if err != nil {
-				log.Printf("[Avatar] Failed to claim avatar refresh for %s: %v", contactJID, err)
-			} else if claimed {
-				go p.fetchAndStoreAvatar(instance, contactJID, avatarJID)
-			}
-		}
+	// Automatic profile-photo retrieval is a one-shot creation behavior. The
+	// repository claim rejects existing contacts and duplicate incoming events;
+	// every later refresh must be explicitly requested by a user.
+	if contact != nil && chat.ContactCreated && !isFromMe {
+		go p.FetchInitialContactAvatar(instance, contact.ID, contactJID)
 	}
 
 	// Auto-create lead if not exists and is incoming message
@@ -1361,89 +1435,236 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	log.Printf("[Message] %s -> %s: %s", senderName, chatJID, truncate(body, 50))
 }
 
-// fetchAndStoreAvatar fetches a WhatsApp profile picture and stores it
-func (p *DevicePool) fetchAndStoreAvatar(instance *DeviceInstance, contactJID string, jid types.JID) {
-	if p.storage == nil || instance.Client == nil {
+func (p *DevicePool) handleOwnStatus(_ context.Context, instance *DeviceInstance, evt *events.Message) {
+	if instance == nil || evt == nil || evt.Message == nil || p.repos == nil || p.repos.WhatsAppStatus == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), avatarFetchTimeout)
+	// Event handlers may inherit the context used to connect the device. That
+	// request can finish long before a from-me status arrives, so status media
+	// and metadata use their own bounded lifecycle.
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer statusCancel()
+	messageID := string(evt.Info.ID)
+	sentAt := evt.Info.Timestamp
+	if sentAt.IsZero() {
+		sentAt = time.Now()
+	}
+	status := &domain.WhatsAppStatus{
+		AccountID:         instance.AccountID,
+		DeviceID:          instance.ID,
+		WhatsAppMessageID: &messageID,
+		Source:            "device",
+		Kind:              "text",
+		Status:            "sent",
+		SentAt:            &sentAt,
+		ExpiresAt:         sentAt.Add(24 * time.Hour),
+	}
+
+	switch {
+	case evt.Message.GetExtendedTextMessage() != nil:
+		textMessage := evt.Message.GetExtendedTextMessage()
+		text := textMessage.GetText()
+		background := int64(textMessage.GetBackgroundArgb())
+		font := int(textMessage.GetFont())
+		status.Text = &text
+		status.BackgroundARGB = &background
+		status.FontStyle = &font
+	case evt.Message.GetConversation() != "":
+		text := evt.Message.GetConversation()
+		status.Text = &text
+	case evt.Message.GetImageMessage() != nil:
+		imageMessage := evt.Message.GetImageMessage()
+		status.Kind = "image"
+		caption := imageMessage.GetCaption()
+		status.Caption = &caption
+		mimetype := imageMessage.GetMimetype()
+		status.MediaMimetype = &mimetype
+		if p.storage != nil {
+			stored, err := p.downloadAndStoreMediaWithSource(statusCtx, instance, imageMessage, types.StatusBroadcastJID.String(), messageID, mimetype, ".jpg", "whatsapp_status")
+			if err == nil {
+				status.MediaURL = &stored.URL
+				status.MediaAssetID = stored.AssetID
+				status.MediaSize = &stored.SizeBytes
+			}
+		}
+	case evt.Message.GetVideoMessage() != nil:
+		videoMessage := evt.Message.GetVideoMessage()
+		status.Kind = "video"
+		caption := videoMessage.GetCaption()
+		status.Caption = &caption
+		mimetype := videoMessage.GetMimetype()
+		status.MediaMimetype = &mimetype
+		if p.storage != nil {
+			stored, err := p.downloadAndStoreMediaWithSource(statusCtx, instance, videoMessage, types.StatusBroadcastJID.String(), messageID, mimetype, ".mp4", "whatsapp_status")
+			if err == nil {
+				status.MediaURL = &stored.URL
+				status.MediaAssetID = stored.AssetID
+				status.MediaSize = &stored.SizeBytes
+			}
+		}
+	default:
+		return
+	}
+
+	if err := p.repos.WhatsAppStatus.UpsertOwnDeviceStatus(statusCtx, status); err != nil {
+		log.Printf("[WhatsAppStatus] failed to persist own status for account %s: %v", instance.AccountID, err)
+		return
+	}
+	if p.hub != nil {
+		presentedStatus := *status
+		if status.MediaURL != nil && strings.TrimSpace(*status.MediaURL) != "" {
+			protectedURL := fmt.Sprintf("/api/whatsapp/statuses/%s/media", status.ID)
+			presentedStatus.MediaURL = &protectedURL
+		}
+		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventWhatsAppStatus, map[string]interface{}{
+			"action":    "upsert",
+			"device_id": instance.ID,
+			"status":    &presentedStatus,
+		})
+	}
+}
+
+func (p *DevicePool) handleOwnStatusRevoke(_ context.Context, instance *DeviceInstance, messageID string) {
+	messageID = strings.TrimSpace(messageID)
+	if instance == nil || messageID == "" || p.repos == nil || p.repos.WhatsAppStatus == nil {
+		return
+	}
+	statusCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("[Avatar] Panic recovering avatar for %s: %v", jid.String(), r)
+	deleted, err := p.repos.WhatsAppStatus.DeleteByWhatsAppMessageID(statusCtx, instance.AccountID, instance.ID, messageID)
+	if err != nil {
+		log.Printf("[WhatsAppStatus] failed to reconcile remote status deletion account=%s device=%s: %v", instance.AccountID, instance.ID, err)
+		return
+	}
+	if deleted == nil {
+		return
+	}
+	if deleted.MediaAssetID != nil {
+		if _, err := p.repos.WhatsAppStatus.ScheduleMediaCleanup(statusCtx, deleted.AccountID, *deleted.MediaAssetID, time.Now()); err != nil {
+			log.Printf("[WhatsAppStatus] failed to schedule revoked status media cleanup account=%s: %v", deleted.AccountID, err)
 		}
-	}()
-
-	picInfo, err := instance.Client.GetProfilePictureInfo(ctx, jid, &whatsmeow.GetProfilePictureParams{})
-	if err != nil || picInfo == nil {
-		log.Printf("[Avatar] No profile picture for %s: %v", jid.String(), err)
-		return
-	}
-
-	// Download the avatar image
-	resp, err := http.Get(picInfo.URL)
-	if err != nil {
-		log.Printf("[Avatar] Failed to download avatar for %s: %v", jid.String(), err)
-		return
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil || len(data) == 0 {
-		log.Printf("[Avatar] Failed to read avatar for %s: %v", jid.String(), err)
-		return
-	}
-
-	// Upload to MinIO using a content hash so unchanged pictures keep the same URL.
-	hash := sha256.Sum256(data)
-	filename := fmt.Sprintf("%s_%x.jpg", jid.ToNonAD().User, hash[:8])
-	_, err = p.storage.UploadFile(ctx, instance.AccountID, "avatars", filename, data, "image/jpeg")
-	if err != nil {
-		log.Printf("[Avatar] Failed to store avatar for %s: %v", jid.String(), err)
-		return
-	}
-
-	// Store proxy URL in contact
-	proxyURL := fmt.Sprintf("/api/media/file/%s/avatars/%s", instance.AccountID.String(), filename)
-	changed, err := p.repos.Contact.UpdateAvatarURL(ctx, instance.AccountID, contactJID, proxyURL)
-	if err != nil {
-		log.Printf("[Avatar] Failed to update contact avatar: %v", err)
-		return
-	}
-	if changed {
-		if p.cache != nil {
-			_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
-			_ = p.cache.DelPattern(context.Background(), "contacts:"+instance.AccountID.String()+":*")
-		}
-		if p.hub != nil {
-			p.hub.BroadcastToAccount(instance.AccountID, ws.EventContactUpdate, map[string]interface{}{
-				"action":     "avatar_updated",
-				"jid":        contactJID,
-				"avatar_url": proxyURL,
-			})
-			p.hub.BroadcastToAccount(instance.AccountID, ws.EventChatUpdate, map[string]interface{}{
-				"jid":        contactJID,
-				"avatar_url": proxyURL,
-			})
+	} else if p.storage != nil && strings.TrimSpace(deleted.MediaURL) != "" {
+		if objectKey, extractErr := p.storage.ExtractObjectKey(deleted.MediaURL); extractErr == nil {
+			objectKey = strings.TrimPrefix(objectKey, "/")
+			if _, err := p.repos.WhatsAppStatus.ScheduleLegacyObjectCleanup(statusCtx, deleted.AccountID, objectKey, time.Now()); err != nil {
+				log.Printf("[WhatsAppStatus] failed to schedule revoked legacy media cleanup account=%s: %v", deleted.AccountID, err)
+			}
 		}
 	}
-
-	log.Printf("[Avatar] Stored avatar for %s", jid.String())
+	if p.hub != nil {
+		p.hub.BroadcastToAccountWithPermission(deleted.AccountID, domain.PermChats, ws.EventWhatsAppStatus, map[string]interface{}{
+			"action":    "deleted",
+			"device_id": deleted.DeviceID,
+			"status": &domain.WhatsAppStatus{
+				ID: deleted.ID, AccountID: deleted.AccountID, DeviceID: deleted.DeviceID, Status: "deleted",
+			},
+		})
+	}
 }
 
-func avatarRefreshTTL(contact *domain.Contact) time.Duration {
-	if contact == nil || contact.IsGroup || strings.HasSuffix(contact.JID, "@g.us") || strings.HasSuffix(contact.JID, "@newsletter") || strings.HasSuffix(contact.JID, "@broadcast") {
-		return 0
+func (p *DevicePool) canonicalStatusViewerJID(ctx context.Context, instance *DeviceInstance, evt *events.Receipt) string {
+	if instance == nil || evt == nil {
+		return ""
 	}
-	if contact.AvatarURL == nil || strings.TrimSpace(*contact.AvatarURL) == "" {
-		return avatarMissingRefreshTTL
+	candidates := []types.JID{
+		evt.MessageSource.SenderAlt,
+		evt.MessageSource.Sender,
+		evt.MessageSource.BroadcastListOwner,
+		evt.MessageSender,
+		evt.MessageSource.RecipientAlt,
 	}
-	return avatarExistingRefreshTTL
+	isOwn := func(jid types.JID) bool {
+		jid = jid.ToNonAD()
+		if jid.IsEmpty() || jid.User == types.StatusBroadcastJID.User {
+			return true
+		}
+		if instance.Client != nil && instance.Client.Store != nil {
+			if instance.Client.Store.ID != nil && jid.User == instance.Client.Store.ID.ToNonAD().User {
+				return true
+			}
+			if !instance.Client.Store.LID.IsEmpty() && jid.User == instance.Client.Store.LID.ToNonAD().User {
+				return true
+			}
+		}
+		return false
+	}
+	// Prefer an explicit phone-number JID over a LID. This also handles the
+	// common Sender=LID/SenderAlt=PN receipt without a database lookup.
+	for _, candidate := range candidates {
+		candidate = candidate.ToNonAD()
+		if candidate.Server == types.DefaultUserServer && !isOwn(candidate) {
+			return candidate.String()
+		}
+	}
+	for _, candidate := range candidates {
+		candidate = candidate.ToNonAD()
+		if candidate.Server != types.HiddenUserServer || isOwn(candidate) || p.store == nil || p.store.LIDMap == nil {
+			continue
+		}
+		pnJID, err := p.store.LIDMap.GetPNForLID(ctx, candidate)
+		if err == nil && !pnJID.IsEmpty() && pnJID.Server == types.DefaultUserServer && !isOwn(pnJID) {
+			return pnJID.ToNonAD().String()
+		}
+	}
+	return ""
 }
 
-// downloadAndStoreMedia downloads media from WhatsApp and stores one canonical object per account/content hash.
+func (p *DevicePool) handleOwnStatusReceipt(_ context.Context, instance *DeviceInstance, evt *events.Receipt) {
+	if instance == nil || evt == nil || p.repos == nil || p.repos.WhatsAppStatus == nil || len(evt.MessageIDs) == 0 {
+		return
+	}
+	receiptType := string(evt.Type)
+	if receiptType != "read" && receiptType != "played" {
+		return
+	}
+	receiptCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	viewerJID := p.canonicalStatusViewerJID(receiptCtx, instance, evt)
+	if viewerJID == "" {
+		return
+	}
+	contactID, err := p.repos.WhatsAppStatus.FindExistingContactForStatusViewer(receiptCtx, instance.AccountID, viewerJID)
+	if err != nil {
+		log.Printf("[WhatsAppStatus] failed to match existing viewer contact account=%s: %v", instance.AccountID, err)
+		contactID = nil
+	}
+	viewedAt := evt.Timestamp
+	if viewedAt.IsZero() {
+		viewedAt = time.Now()
+	}
+	for _, rawMessageID := range evt.MessageIDs {
+		view, err := p.repos.WhatsAppStatus.UpsertView(receiptCtx, repository.WhatsAppStatusViewUpsert{
+			AccountID: instance.AccountID, DeviceID: instance.ID,
+			MessageID: string(rawMessageID), ViewerJID: viewerJID, ContactID: contactID,
+			ReceiptType: receiptType, ViewedAt: viewedAt,
+		})
+		if err != nil {
+			log.Printf("[WhatsAppStatus] failed to persist status viewer account=%s device=%s: %v", instance.AccountID, instance.ID, err)
+			continue
+		}
+		if view == nil || p.hub == nil {
+			continue
+		}
+		viewCount, countErr := p.repos.WhatsAppStatus.CountViews(receiptCtx, instance.AccountID, view.StatusID)
+		if countErr != nil {
+			viewCount = 0
+		}
+		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventWhatsAppStatus, map[string]interface{}{
+			"action": "viewer_added", "device_id": instance.ID,
+			"status_id": view.StatusID, "viewer": view, "view_count": viewCount,
+		})
+	}
+}
+
+// downloadAndStoreMedia downloads chat media and stores one canonical object
+// per account/content hash.
 func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *DeviceInstance, msg whatsmeow.DownloadableMessage, chatJID, msgID, mimetype, extension string) (*storedMediaResult, error) {
+	return p.downloadAndStoreMediaWithSource(ctx, instance, msg, chatJID, msgID, mimetype, extension, "chat")
+}
+
+// downloadAndStoreMediaWithSource keeps storage inventory accurate for media
+// domains that are not chat messages (for example own WhatsApp statuses).
+func (p *DevicePool) downloadAndStoreMediaWithSource(ctx context.Context, instance *DeviceInstance, msg whatsmeow.DownloadableMessage, chatJID, msgID, mimetype, extension, source string) (*storedMediaResult, error) {
 	if p.storage == nil {
 		return nil, fmt.Errorf("storage not configured")
 	}
@@ -1455,18 +1676,40 @@ func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *Device
 		return nil, err
 	}
 	hashBytes := sha256.Sum256(data)
-	contentHash := fmt.Sprintf("%x", hashBytes[:])
+	rawContentHash := fmt.Sprintf("%x", hashBytes[:])
+	contentHash := rawContentHash
 	mediaType := strings.TrimPrefix(strings.ToLower(extension), ".")
 	if mediaType == "" {
 		mediaType = "bin"
 	}
-	filename := contentHash + extension
+	// Upload to a unique candidate key. The media_assets upsert below picks one
+	// canonical object per hash and removes concurrent losers. This prevents a
+	// new download from overwriting an object already staged for retention.
+	filename := rawContentHash + "-" + uuid.NewString() + extension
 	objectKey := fmt.Sprintf("%s/media/%s/%s", instance.AccountID.String(), mediaType, filename)
+	if source == "whatsapp_status" {
+		contentHash = domain.MediaAssetHashWhatsAppStatusPrefix + rawContentHash
+		objectKey = storage.PrivateObjectKey(instance.AccountID, "statuses", filename)
+	}
 	proxyURL := "/api/media/file/" + objectKey
 	sizeBytes := int64(len(data))
 
 	if p.repos != nil && p.repos.MediaAsset != nil {
-		if existing, err := p.repos.MediaAsset.GetByHash(ctx, instance.AccountID, contentHash); err == nil && existing != nil {
+		existing, lookupErr := p.repos.MediaAsset.GetByHash(ctx, instance.AccountID, contentHash)
+		if lookupErr == nil && existing != nil && source != "whatsapp_status" && storage.IsAccountStatusObjectKey(instance.AccountID, existing.ObjectKey) {
+			contentHash = domain.MediaAssetHashNonStatusFallback + rawContentHash
+			existing, lookupErr = p.repos.MediaAsset.GetByHash(ctx, instance.AccountID, contentHash)
+		}
+		if lookupErr != nil {
+			return nil, fmt.Errorf("look up media asset: %w", lookupErr)
+		}
+		if lookupErr == nil && existing != nil {
+			if source != "whatsapp_status" {
+				_, _ = p.repos.DB().Exec(ctx, `UPDATE storage_objects
+					SET source=CASE WHEN source='whatsapp_status' THEN $3 ELSE source END,
+					    status='active',deleted_at=NULL,updated_at=NOW()
+					WHERE account_id=$1 AND object_key=$2`, instance.AccountID, existing.ObjectKey, source)
+			}
 			existingURL := "/api/media/file/" + existing.ObjectKey
 			log.Printf("[Media] Reused %s for message %s (%d bytes)", existingURL, msgID, existing.SizeBytes)
 			return &storedMediaResult{
@@ -1492,6 +1735,14 @@ func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *Device
 			}
 		}
 	}
+	if source == "whatsapp_status" {
+		if p.repos == nil || p.repos.WhatsAppStatus == nil {
+			return nil, fmt.Errorf("status media repository not configured")
+		}
+		if err := p.repos.WhatsAppStatus.PrepareMediaUpload(ctx, instance.AccountID, objectKey, mediaType, mimetype, filename, sizeBytes, time.Now()); err != nil {
+			return nil, fmt.Errorf("prepare status media upload: %w", err)
+		}
+	}
 
 	if _, err = p.storage.UploadObject(ctx, objectKey, data, mimetype); err != nil {
 		log.Printf("[Media] Failed to upload: %v", err)
@@ -1499,7 +1750,9 @@ func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *Device
 	}
 
 	var assetID *uuid.UUID
+	deduped := false
 	if p.repos != nil && p.repos.MediaAsset != nil {
+		uploadedObjectKey := objectKey
 		asset, assetErr := p.repos.MediaAsset.Upsert(ctx, repository.MediaAssetUpsert{
 			AccountID:   instance.AccountID,
 			ContentHash: contentHash,
@@ -1511,19 +1764,38 @@ func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *Device
 		})
 		if assetErr != nil {
 			log.Printf("[Media] Failed to upsert media asset: %v", assetErr)
+			if source == "whatsapp_status" {
+				if deleteErr := p.storage.DeleteFile(ctx, uploadedObjectKey); deleteErr != nil {
+					log.Printf("[WhatsAppStatus] Failed to remove untracked media %s: %v", uploadedObjectKey, deleteErr)
+				}
+				return nil, fmt.Errorf("persist status media asset: %w", assetErr)
+			}
 		} else if asset != nil {
 			assetID = &asset.ID
 			objectKey = asset.ObjectKey
 			proxyURL = "/api/media/file/" + objectKey
+			sizeBytes = asset.SizeBytes
+			mediaType = asset.MediaType
+			filename = asset.Filename
+			mimetype = asset.ContentType
+			if uploadedObjectKey != asset.ObjectKey {
+				deduped = true
+				if deleteErr := p.storage.DeleteFile(ctx, uploadedObjectKey); deleteErr != nil {
+					log.Printf("[Media] Failed to remove concurrent duplicate %s: %v", uploadedObjectKey, deleteErr)
+				}
+			}
 		}
 	}
 
+	if strings.TrimSpace(source) == "" {
+		source = "unknown"
+	}
 	_, _ = p.repos.DB().Exec(ctx, `
 		INSERT INTO storage_objects (account_id, object_key, media_type, content_type, filename, size_bytes, source, status, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'chat', 'active', NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW())
 		ON CONFLICT (account_id, object_key) DO UPDATE
 		SET size_bytes = EXCLUDED.size_bytes, content_type = EXCLUDED.content_type, status = 'active', updated_at = NOW()
-	`, instance.AccountID, objectKey, mediaType, mimetype, filename, sizeBytes)
+	`, instance.AccountID, objectKey, mediaType, mimetype, filename, sizeBytes, source)
 
 	log.Printf("[Media] Stored %s (%d bytes)", proxyURL, len(data))
 	return &storedMediaResult{
@@ -1532,7 +1804,7 @@ func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *Device
 		SizeBytes:  sizeBytes,
 		ObjectKey:  objectKey,
 		Hash:       contentHash,
-		Deduped:    false,
+		Deduped:    deduped,
 		MediaType:  mediaType,
 		Filename:   filename,
 		ContentTyp: mimetype,
@@ -1541,6 +1813,14 @@ func (p *DevicePool) downloadAndStoreMedia(ctx context.Context, instance *Device
 
 // handleReceipt processes delivery/read receipts
 func (p *DevicePool) handleReceipt(ctx context.Context, instance *DeviceInstance, evt *events.Receipt) {
+	// Status read/played receipts identify viewers of the device owner's own
+	// status. They must never flow into chat message delivery state.
+	if evt != nil && evt.Chat.Server == types.BroadcastServer && evt.Chat.User == types.StatusBroadcastJID.User {
+		if p.cfg != nil && p.cfg.WhatsAppStatusEnabled && (evt.Type == types.ReceiptTypeRead || evt.Type == types.ReceiptTypePlayed) {
+			p.handleOwnStatusReceipt(ctx, instance, evt)
+		}
+		return
+	}
 	// Determine status from receipt type
 	var status string
 	switch evt.Type {
@@ -1701,9 +1981,56 @@ func (p *DevicePool) handlePushName(ctx context.Context, instance *DeviceInstanc
 
 // handleHistorySync processes history sync events
 func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInstance, evt *events.HistorySync) {
-	// If receive_messages is disabled, skip importing historical messages
-	if !instance.ReceiveMessages {
-		log.Printf("[HistorySync] Skipping history sync for device %s (receive_messages disabled)", instance.ID)
+	// StatusV3Messages may contain statuses from many contacts. Parse and
+	// persist only the device owner's active statuses; every other status is
+	// intentionally ignored and no CRM entity is created. This runs before the
+	// receive_messages gate because own statuses are not incoming CRM chats.
+	if p.cfg != nil && p.cfg.WhatsAppStatusEnabled && p.cfg.WhatsAppStatusSyncEnabled {
+		for _, webMessage := range evt.Data.GetStatusV3Messages() {
+			if webMessage == nil {
+				continue
+			}
+			parsedEvent, err := instance.Client.ParseWebMessage(types.StatusBroadcastJID, webMessage)
+			if err != nil || parsedEvent == nil || parsedEvent.Message == nil {
+				continue
+			}
+			// Explicit revokes are authoritative even though an historical status
+			// list is not. Process the revoke, but never infer deletion merely from
+			// a status being absent from this batch.
+			if protocolMessage := parsedEvent.Message.GetProtocolMessage(); protocolMessage != nil && protocolMessage.GetType() == waE2E.ProtocolMessage_REVOKE {
+				p.handleOwnStatusRevoke(ctx, instance, protocolMessage.GetKey().GetID())
+				continue
+			}
+			if !parsedEvent.Info.IsFromMe {
+				continue
+			}
+			if parsedEvent.Info.Timestamp.Before(time.Now().Add(-24 * time.Hour)) {
+				continue
+			}
+			p.handleOwnStatus(ctx, instance, parsedEvent)
+		}
+	}
+
+	// If receive_messages is disabled, skip importing historical conversations
+	// after recovering the device owner's statuses above.
+	instance.mu.RLock()
+	receiveMessages := instance.ReceiveMessages
+	instance.mu.RUnlock()
+	if !receiveMessages {
+		log.Printf("[HistorySync] Skipping history conversations for device %s (receive_messages disabled)", instance.ID)
+		p.mu.Lock()
+		target := p.onDemandSyncTargets[instance.ID]
+		if target != nil {
+			delete(p.onDemandSyncTargets, instance.ID)
+		}
+		p.mu.Unlock()
+		if target != nil {
+			p.hub.BroadcastToAccountWithPermission(target.AccountID, domain.PermChats, ws.EventHistorySyncComplete, map[string]interface{}{
+				"device_id": target.DeviceID.String(), "chat_id": target.ChatID.String(),
+				"request_id": target.RequestID.String(), "messages_saved": target.Saved,
+				"finished": true, "error": "Activa la recepción de mensajes del dispositivo para recuperar el historial.",
+			})
+		}
 		return
 	}
 
@@ -1877,42 +2204,66 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 	log.Printf("[HistorySync] Complete: saved=%d duplicates=%d groups=%d lidFail=%d empty=%d protocol=%d parseErr=%d conversations=%d",
 		totalSaved, totalDuplicates, totalGroups, totalLIDFail, totalEmpty, totalProtocol, totalParseErr, totalConversations)
 
-	// Notify frontend that history sync completed
 	if totalSaved > 0 {
 		if p.cache != nil {
 			_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
 		}
 		p.invalidateAccountMessageCaches(instance.AccountID)
-
-		p.hub.BroadcastToAccount(instance.AccountID, ws.EventHistorySyncComplete, map[string]interface{}{
-			"device_id":      instance.ID.String(),
-			"messages_saved": totalSaved,
-			"duplicates":     totalDuplicates,
-		})
 	}
 
 	// Auto-chain: if this was an ON_DEMAND response with saved messages, fire another request
 	// Only process on the device that owns the sync target to avoid duplicates
 	if syncType == "ON_DEMAND" {
 		p.mu.RLock()
-		target := p.onDemandSyncTarget
+		target := p.onDemandSyncTargets[instance.ID]
 		p.mu.RUnlock()
 
 		// Only act if this device is the target device (avoids duplicate event processing)
 		if target != nil && target.DeviceID == instance.ID {
+			p.mu.Lock()
+			if current := p.onDemandSyncTargets[instance.ID]; current != nil && current.RequestID == target.RequestID {
+				current.Saved += totalSaved
+				snapshot := *current
+				target = &snapshot
+			}
+			p.mu.Unlock()
+			finished := totalSaved == 0
+			p.hub.BroadcastToAccountWithPermission(target.AccountID, domain.PermChats, ws.EventHistorySyncComplete, map[string]interface{}{
+				"account_id":     target.AccountID.String(),
+				"device_id":      target.DeviceID.String(),
+				"chat_id":        target.ChatID.String(),
+				"request_id":     target.RequestID.String(),
+				"messages_saved": target.Saved,
+				"batch_saved":    totalSaved,
+				"duplicates":     totalDuplicates,
+				"finished":       finished,
+			})
 			if totalSaved > 0 {
 				log.Printf("[HistorySync] Auto-chaining: requesting more messages for %s (saved %d in this batch)", target.ChatJID, totalSaved)
 				// Small delay to avoid hammering the phone
 				go func() {
 					time.Sleep(3 * time.Second)
-					if err := p.RequestHistorySync(context.Background(), target.AccountID, target.DeviceID, target.ChatID, target.ChatJID); err != nil {
+					chainCtx := context.WithValue(context.Background(), historySyncChainContextKey{}, true)
+					if err := p.RequestHistorySync(chainCtx, target.AccountID, target.DeviceID, target.ChatID, target.ChatJID); err != nil {
 						log.Printf("[HistorySync] Auto-chain failed: %v", err)
+						p.mu.Lock()
+						if current := p.onDemandSyncTargets[target.DeviceID]; current != nil && current.RequestID == target.RequestID {
+							delete(p.onDemandSyncTargets, target.DeviceID)
+						}
+						p.mu.Unlock()
+						p.hub.BroadcastToAccountWithPermission(target.AccountID, domain.PermChats, ws.EventHistorySyncComplete, map[string]interface{}{
+							"device_id": target.DeviceID.String(), "chat_id": target.ChatID.String(),
+							"request_id": target.RequestID.String(), "messages_saved": target.Saved,
+							"finished": true, "error": "WhatsApp no pudo continuar recuperando el historial.",
+						})
 					}
 				}()
 			} else {
 				// No more messages to fetch — clear the target
 				p.mu.Lock()
-				p.onDemandSyncTarget = nil
+				if current := p.onDemandSyncTargets[instance.ID]; current != nil && current.RequestID == target.RequestID {
+					delete(p.onDemandSyncTargets, instance.ID)
+				}
 				p.mu.Unlock()
 				log.Printf("[HistorySync] On-demand sync complete — no more older messages available")
 			}
@@ -1940,10 +2291,47 @@ func (p *DevicePool) RequestHistorySync(ctx context.Context, accountID uuid.UUID
 	if instance == nil {
 		return fmt.Errorf("device %s not connected", deviceID)
 	}
+	if instance.AccountID != accountID {
+		return fmt.Errorf("device does not belong to account")
+	}
+	instance.mu.RLock()
+	receiveMessages := instance.ReceiveMessages
+	instance.mu.RUnlock()
+	if !receiveMessages {
+		return ErrHistorySyncReceiveDisabled
+	}
+
+	isChain, _ := ctx.Value(historySyncChainContextKey{}).(bool)
+	p.mu.Lock()
+	target := p.onDemandSyncTargets[deviceID]
+	if target != nil && time.Since(target.StartedAt) > 5*time.Minute {
+		delete(p.onDemandSyncTargets, deviceID)
+		target = nil
+	}
+	if target != nil && (!isChain || target.AccountID != accountID || target.ChatID != chatID) {
+		p.mu.Unlock()
+		return ErrHistorySyncInProgress
+	}
+	if target == nil {
+		target = &onDemandSyncTarget{
+			AccountID: accountID, DeviceID: deviceID, ChatID: chatID, ChatJID: chatJID,
+			RequestID: uuid.New(), StartedAt: time.Now(),
+		}
+		p.onDemandSyncTargets[deviceID] = target
+	}
+	p.mu.Unlock()
+	cleanupReservation := func() {
+		p.mu.Lock()
+		if current := p.onDemandSyncTargets[deviceID]; current != nil && current.RequestID == target.RequestID {
+			delete(p.onDemandSyncTargets, deviceID)
+		}
+		p.mu.Unlock()
+	}
 
 	// Parse chat JID
 	targetJID, err := types.ParseJID(chatJID)
 	if err != nil {
+		cleanupReservation()
 		return fmt.Errorf("invalid chat JID: %w", err)
 	}
 
@@ -1980,18 +2368,9 @@ func (p *DevicePool) RequestHistorySync(ctx context.Context, accountID uuid.UUID
 	histReq := instance.Client.BuildHistorySyncRequest(msgInfo, 50)
 	resp, err := instance.Client.SendPeerMessage(ctx, histReq)
 	if err != nil {
+		cleanupReservation()
 		return fmt.Errorf("failed to send history sync request: %w", err)
 	}
-
-	// Track this as the active on-demand sync target for auto-chaining
-	p.mu.Lock()
-	p.onDemandSyncTarget = &onDemandSyncTarget{
-		AccountID: accountID,
-		DeviceID:  deviceID,
-		ChatID:    chatID,
-		ChatJID:   chatJID,
-	}
-	p.mu.Unlock()
 
 	log.Printf("[HistorySync] Requested on-demand sync for chat %s (device=%s, before=%v, peerMsgID=%s, timestamp=%s)",
 		chatJID, instance.ID, msgInfo != nil, resp.ID, resp.Timestamp.Format(time.RFC3339))
@@ -2445,10 +2824,15 @@ func (p *DevicePool) IsOnWhatsApp(ctx context.Context, deviceID uuid.UUID, phone
 
 	var checkResults []domain.WhatsAppCheckResult
 	for _, r := range results {
+		verifiedName := ""
+		if r.VerifiedName != nil && r.VerifiedName.Details != nil {
+			verifiedName = r.VerifiedName.Details.GetVerifiedName()
+		}
 		checkResults = append(checkResults, domain.WhatsAppCheckResult{
 			Phone:        r.Query,
 			IsOnWhatsApp: r.IsIn,
 			JID:          r.JID.String(),
+			VerifiedName: verifiedName,
 		})
 	}
 
@@ -2751,6 +3135,7 @@ func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, t
 		QuotedMessageID: strPtr(quotedID),
 		QuotedBody:      strPtr(quotedBody),
 		QuotedSender:    strPtr(quotedSender),
+		QuotedIsFromMe:  boolPtr(quotedIsFromMe),
 	}
 
 	if err := p.repos.Message.Create(ctx, message); err != nil {
@@ -3021,6 +3406,170 @@ type PreUploadedMedia struct {
 	MediaType        string // domain.MessageType*
 	OriginalURL      string // original media URL for proxy URL resolution
 	OriginalFilename string // user-visible filename for document messages
+	OriginalMimetype string // MIME type of the stored source before WhatsApp conversion
+}
+
+// StatusPublishRequest describes an own ephemeral WhatsApp status. Statuses
+// are sent directly to status@broadcast and are never persisted as chats.
+type StatusPublishRequest struct {
+	Kind           string
+	Text           string
+	Caption        string
+	MediaURL       string
+	BackgroundARGB uint32
+	FontStyle      int32
+}
+
+type StatusPublishResult struct {
+	MessageID string
+	SentAt    time.Time
+	Privacy   string
+}
+
+// GetStatusPrivacy returns a human-readable summary of the privacy configured
+// on WhatsApp. Clarin deliberately does not override that audience.
+func (p *DevicePool) GetStatusPrivacy(ctx context.Context, deviceID uuid.UUID) (string, error) {
+	p.mu.RLock()
+	instance, exists := p.devices[deviceID]
+	p.mu.RUnlock()
+	if !exists || instance.Client == nil {
+		return "", fmt.Errorf("device not connected: %s", deviceID)
+	}
+	privacy, err := instance.Client.GetStatusPrivacy(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(privacy) == 0 {
+		return string(types.StatusPrivacyTypeContacts), nil
+	}
+	return string(privacy[0].Type), nil
+}
+
+// StatusReadReceiptsEnabled reports whether WhatsApp can report who viewed
+// statuses. When disabled, the viewer list is necessarily incomplete.
+func (p *DevicePool) StatusReadReceiptsEnabled(ctx context.Context, deviceID uuid.UUID) (bool, error) {
+	p.mu.RLock()
+	instance, exists := p.devices[deviceID]
+	p.mu.RUnlock()
+	if !exists || instance.Client == nil {
+		return false, fmt.Errorf("device not connected: %s", deviceID)
+	}
+	settings, err := instance.Client.TryFetchPrivacySettings(ctx, false)
+	if err != nil {
+		return false, err
+	}
+	return settings.ReadReceipts != types.PrivacySettingNone, nil
+}
+
+// RevokeStatus removes a previously published own status from WhatsApp. Local
+// metadata is deleted separately after the server acknowledges this revoke.
+func (p *DevicePool) RevokeStatus(ctx context.Context, deviceID uuid.UUID, messageID string) error {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return fmt.Errorf("status message ID is required")
+	}
+	p.mu.RLock()
+	instance, exists := p.devices[deviceID]
+	p.mu.RUnlock()
+	if !exists || instance.Client == nil {
+		return fmt.Errorf("device not connected: %s", deviceID)
+	}
+	if _, err := instance.Client.SendMessage(ctx, types.StatusBroadcastJID,
+		instance.Client.BuildRevoke(types.StatusBroadcastJID, types.EmptyJID, types.MessageID(messageID))); err != nil {
+		return fmt.Errorf("failed to revoke WhatsApp status: %w", err)
+	}
+	return nil
+}
+
+// PublishStatus sends a text, image, or video status through WhatsApp Web.
+// It does not create Contact, Lead, Chat, or Message rows.
+func (p *DevicePool) PublishStatus(ctx context.Context, deviceID uuid.UUID, req StatusPublishRequest) (*StatusPublishResult, error) {
+	p.mu.RLock()
+	instance, exists := p.devices[deviceID]
+	p.mu.RUnlock()
+	if !exists || instance.Client == nil {
+		return nil, fmt.Errorf("device not connected: %s", deviceID)
+	}
+
+	privacy, err := p.GetStatusPrivacy(ctx, deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read status privacy: %w", err)
+	}
+
+	var message *waE2E.Message
+	switch req.Kind {
+	case "text":
+		text := strings.TrimSpace(req.Text)
+		if text == "" {
+			return nil, fmt.Errorf("status text is required")
+		}
+		background := req.BackgroundARGB
+		if background == 0 {
+			background = 0xff0f766e
+		}
+		textColor := uint32(0xffffffff)
+		font := waE2E.ExtendedTextMessage_FontType(req.FontStyle)
+		if req.FontStyle < int32(waE2E.ExtendedTextMessage_SYSTEM) || req.FontStyle > int32(waE2E.ExtendedTextMessage_COURIERPRIME_BOLD) {
+			font = waE2E.ExtendedTextMessage_SYSTEM
+		}
+		message = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:           proto.String(text),
+			TextArgb:       proto.Uint32(textColor),
+			BackgroundArgb: proto.Uint32(background),
+			Font:           &font,
+		}}
+	case "image", "video":
+		if strings.TrimSpace(req.MediaURL) == "" {
+			return nil, fmt.Errorf("status media is required")
+		}
+		mediaType := domain.MessageTypeImage
+		if req.Kind == "video" {
+			mediaType = domain.MessageTypeVideo
+		}
+		media, uploadErr := p.UploadMedia(ctx, deviceID, req.MediaURL, mediaType)
+		if uploadErr != nil {
+			return nil, uploadErr
+		}
+		if req.Kind == "image" {
+			message = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+				URL:           proto.String(media.URL),
+				DirectPath:    proto.String(media.DirectPath),
+				MediaKey:      media.MediaKey,
+				Mimetype:      proto.String(media.Mimetype),
+				FileEncSHA256: media.FileEncSHA256,
+				FileSHA256:    media.FileSHA256,
+				FileLength:    proto.Uint64(media.FileLength),
+				Caption:       proto.String(req.Caption),
+			}}
+		} else {
+			message = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+				URL:           proto.String(media.URL),
+				DirectPath:    proto.String(media.DirectPath),
+				MediaKey:      media.MediaKey,
+				Mimetype:      proto.String(media.Mimetype),
+				FileEncSHA256: media.FileEncSHA256,
+				FileSHA256:    media.FileSHA256,
+				FileLength:    proto.Uint64(media.FileLength),
+				Caption:       proto.String(req.Caption),
+			}}
+		}
+	default:
+		return nil, fmt.Errorf("unsupported status kind: %s", req.Kind)
+	}
+
+	response, err := instance.Client.SendMessage(ctx, types.StatusBroadcastJID, message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to publish WhatsApp status: %w", err)
+	}
+	sentAt := response.Timestamp
+	if sentAt.IsZero() {
+		sentAt = time.Now()
+	}
+	return &StatusPublishResult{
+		MessageID: response.ID,
+		SentAt:    sentAt,
+		Privacy:   privacy,
+	}, nil
 }
 
 func mediaDisplayFilename(preferred, rawURL string) string {
@@ -3055,13 +3604,25 @@ func (p *DevicePool) UploadMedia(ctx context.Context, deviceID uuid.UUID, mediaU
 	if err != nil {
 		return nil, fmt.Errorf("failed to load media: %w", err)
 	}
+	originalMimetype := mimetype
+	if mediaType == domain.MessageTypeGIF {
+		if isGIF(data) {
+			data, err = convertGIFToWhatsAppVideo(ctx, data)
+			if err != nil {
+				return nil, err
+			}
+			mimetype = "video/mp4"
+		} else if !strings.EqualFold(mimetype, "video/mp4") {
+			return nil, fmt.Errorf("el GIF almacenado no tiene un formato compatible")
+		}
+	}
 
 	// Determine the correct WhatsApp media type for upload
 	var waMediaType whatsmeow.MediaType
 	switch mediaType {
 	case domain.MessageTypeImage:
 		waMediaType = whatsmeow.MediaImage
-	case domain.MessageTypeVideo:
+	case domain.MessageTypeVideo, domain.MessageTypeGIF:
 		waMediaType = whatsmeow.MediaVideo
 	case domain.MessageTypeAudio:
 		waMediaType = whatsmeow.MediaAudio
@@ -3106,21 +3667,44 @@ func (p *DevicePool) UploadMedia(ctx context.Context, deviceID uuid.UUID, mediaU
 
 	log.Printf("[UploadMedia] Upload complete: %s (%d bytes) -> %s", mediaType, len(data), uploaded.URL)
 	return &PreUploadedMedia{
-		URL:           uploaded.URL,
-		DirectPath:    uploaded.DirectPath,
-		MediaKey:      uploaded.MediaKey,
-		FileEncSHA256: uploaded.FileEncSHA256,
-		FileSHA256:    uploaded.FileSHA256,
-		FileLength:    uint64(len(data)),
-		Mimetype:      mimetype,
-		MediaType:     mediaType,
-		OriginalURL:   mediaURL,
+		URL:              uploaded.URL,
+		DirectPath:       uploaded.DirectPath,
+		MediaKey:         uploaded.MediaKey,
+		FileEncSHA256:    uploaded.FileEncSHA256,
+		FileSHA256:       uploaded.FileSHA256,
+		FileLength:       uint64(len(data)),
+		Mimetype:         mimetype,
+		MediaType:        mediaType,
+		OriginalURL:      mediaURL,
+		OriginalMimetype: originalMimetype,
 	}, nil
+}
+
+type outboundMediaQuote struct {
+	messageID string
+	body      string
+	sender    string
+	isFromMe  bool
 }
 
 // SendPreUploadedMediaMessage sends a pre-uploaded media to a recipient, without re-downloading/re-uploading.
 // Used by campaign worker to send the same media to many recipients efficiently.
 func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption string, media *PreUploadedMedia) (*domain.Message, error) {
+	return p.sendPreUploadedMediaMessage(ctx, deviceID, to, caption, media, nil)
+}
+
+// SendPreUploadedMediaReplyMessage preserves WhatsApp's native reply context
+// for images, videos, audio, documents and stickers.
+func (p *DevicePool) SendPreUploadedMediaReplyMessage(ctx context.Context, deviceID uuid.UUID, to, caption string, media *PreUploadedMedia, quotedID, quotedBody, quotedSender string, quotedIsFromMe bool) (*domain.Message, error) {
+	return p.sendPreUploadedMediaMessage(ctx, deviceID, to, caption, media, &outboundMediaQuote{
+		messageID: quotedID,
+		body:      quotedBody,
+		sender:    quotedSender,
+		isFromMe:  quotedIsFromMe,
+	})
+}
+
+func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption string, media *PreUploadedMedia, quote *outboundMediaQuote) (*domain.Message, error) {
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -3158,7 +3742,7 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 				Caption:       proto.String(caption),
 			},
 		}
-	case domain.MessageTypeVideo:
+	case domain.MessageTypeVideo, domain.MessageTypeGIF:
 		msg = &waE2E.Message{
 			VideoMessage: &waE2E.VideoMessage{
 				URL:           proto.String(media.URL),
@@ -3169,6 +3753,7 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 				FileSHA256:    media.FileSHA256,
 				FileLength:    proto.Uint64(media.FileLength),
 				Caption:       proto.String(caption),
+				GifPlayback:   proto.Bool(media.MediaType == domain.MessageTypeGIF),
 			},
 		}
 	case domain.MessageTypeAudio:
@@ -3211,6 +3796,32 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 			},
 		}
 	}
+	if msg == nil {
+		return nil, fmt.Errorf("unsupported media type: %s", media.MediaType)
+	}
+	if quote != nil {
+		quotedParticipant := (*string)(nil)
+		if strings.TrimSpace(quote.sender) != "" {
+			quotedParticipant = proto.String(quote.sender)
+		}
+		contextInfo := &waE2E.ContextInfo{
+			StanzaID:      proto.String(quote.messageID),
+			Participant:   quotedParticipant,
+			QuotedMessage: &waE2E.Message{Conversation: proto.String(quote.body)},
+		}
+		switch {
+		case msg.ImageMessage != nil:
+			msg.ImageMessage.ContextInfo = contextInfo
+		case msg.VideoMessage != nil:
+			msg.VideoMessage.ContextInfo = contextInfo
+		case msg.AudioMessage != nil:
+			msg.AudioMessage.ContextInfo = contextInfo
+		case msg.DocumentMessage != nil:
+			msg.DocumentMessage.ContextInfo = contextInfo
+		case msg.StickerMessage != nil:
+			msg.StickerMessage.ContextInfo = contextInfo
+		}
+	}
 
 	// Send message
 	sendResp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPreUploadedMedia")
@@ -3244,7 +3855,7 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 		Body:          strPtr(caption),
 		MessageType:   strPtr(media.MediaType),
 		MediaURL:      strPtr(proxyMediaURL),
-		MediaMimetype: strPtr(media.Mimetype),
+		MediaMimetype: strPtr(media.OriginalMimetype),
 		MediaSize:     &size,
 		IsFromMe:      true,
 		Status:        strPtr("sent"),
@@ -3252,6 +3863,12 @@ func (p *DevicePool) SendPreUploadedMediaMessage(ctx context.Context, deviceID u
 	}
 	if media.MediaType == domain.MessageTypeDocument {
 		message.MediaFilename = strPtr(documentFilename)
+	}
+	if quote != nil {
+		message.QuotedMessageID = strPtr(quote.messageID)
+		message.QuotedBody = strPtr(quote.body)
+		message.QuotedSender = strPtr(quote.sender)
+		message.QuotedIsFromMe = boolPtr(quote.isFromMe)
 	}
 
 	if err := p.repos.Message.Create(ctx, message); err != nil {
@@ -3289,6 +3906,17 @@ func (p *DevicePool) SendMediaMessageWithFilename(ctx context.Context, deviceID 
 	}
 	media.OriginalFilename = mediaDisplayFilename(mediaFilename, mediaURL)
 	return p.SendPreUploadedMediaMessage(ctx, deviceID, to, caption, media)
+}
+
+// SendMediaReplyMessageWithFilename downloads/uploads the media once and then
+// sends it with an authoritative WhatsApp reply context.
+func (p *DevicePool) SendMediaReplyMessageWithFilename(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType, mediaFilename, quotedID, quotedBody, quotedSender string, quotedIsFromMe bool) (*domain.Message, error) {
+	media, err := p.UploadMedia(ctx, deviceID, mediaURL, mediaType)
+	if err != nil {
+		return nil, err
+	}
+	media.OriginalFilename = mediaDisplayFilename(mediaFilename, mediaURL)
+	return p.SendPreUploadedMediaReplyMessage(ctx, deviceID, to, caption, media, quotedID, quotedBody, quotedSender, quotedIsFromMe)
 }
 
 // SendContactMessage sends a contact vCard message

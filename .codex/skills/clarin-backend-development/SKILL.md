@@ -22,7 +22,18 @@ description: Use when modifying Clarin backend Go/Fiber handlers, services, repo
 - Add indexes for new high-cardinality filters, joins, ordering, or lookup paths.
 - Keep route registration, request/response DTOs, repository methods, and domain structs consistent.
 - Add WebSocket broadcasts only when the frontend needs real-time visibility of the changed data.
+- Scope every WebSocket event to the owning account and, when device-specific, the owning device. Include stable entity IDs so the frontend can patch instead of refetching entire lists.
+- Enforce device capabilities in handlers/services even when the frontend already hides an action. Return an explicit unsupported/disconnected response instead of attempting unsupported WhatsApp behavior.
+- Preserve quoted-message identity and preview data through send, persistence, history/search hydration, and realtime payloads.
+- When a PostgreSQL parameter is reused across assignments, comparisons, CASE branches, arrays, JSON, or nullable expressions, cast it explicitly to one stable type. Validate fragile SQL against PostgreSQL itself; compilation alone does not prove parameter inference.
+- Keep client-facing errors safe and actionable, and log the underlying operational error without secrets or raw personal content.
 - Never log secrets, tokens, cookies, raw WhatsApp session data, or imported personal rows.
+
+## Media And Avatar Mutations
+
+- Normalize and validate media before persistence; keep object keys account-prefixed and inventory rows account-scoped.
+- Treat upload, inventory creation, entity attachment, replacement, and orphan scheduling as one failure-aware workflow. A failed attachment must not leak an untracked object or delete a still-referenced asset.
+- For WhatsApp avatar refresh, require a signed/expiring preview tied to account, Contact, device, and content hash before confirmation. Never interpret a private/missing remote photo as permission to erase the current photo.
 
 ## Verification
 

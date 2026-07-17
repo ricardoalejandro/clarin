@@ -43,6 +43,18 @@ git diff --check
 - WhatsApp changes: verify device state and WebSocket behavior when runtime checks are available.
 - UI state changes: manually reason through fast switching/race cases, especially lead/contact/chat panels.
 
+## Chat And WhatsApp Regression Matrix
+
+- Exercise chat list updates with rapid outgoing messages, incoming messages, duplicate events, active filters, selection mode, and preserved scroll. No populated list may flash skeletons.
+- Exercise Details with no Contact, zero/one/many opportunities, many tags, long commercial fields, integrated/drawer/mobile modes, and ensure the final action remains reachable with one parent scroll.
+- Exercise widths 320, 375, 768, 1024, 1280, and 1440 px plus browser zoom 80–150%, sidebar/Eros open and closed. Decide integrated versus drawer from actual available width.
+- Exercise portaled menus near every viewport edge using mouse, touch, keyboard, Escape, resize, and outside scroll.
+- Exercise replies after immediate send, WebSocket echo, reload, pagination, and search hydration; the quote must remain visible and point to the correct message.
+- Exercise avatar preview/confirm, same-photo refresh, private/missing photo, upload/edit, quota failure, database failure, cross-account denial, cache revision, and orphan cleanup.
+- Exercise statuses on real compatible devices: own publish, remote deletion/revocation, expiration, retry, viewer receipts, unsupported Cloud behavior, and proof that contact statuses are not stored.
+- Exercise stickers with backend favorites as the source of truth, last-use ordering, invalid MIME/size/dimensions, failed sends, and animated capability gates.
+- Inspect PostgreSQL and application logs for SQL type inference, constraint, storage, and provider errors after focused media mutations. A green HTTP preview does not prove confirmation/persistence works.
+
 ## Deployment Claims
 
 - Docker build, `docker compose up`, logs, and health checks are deployment/runtime verification. Do not imply they ran unless they did.

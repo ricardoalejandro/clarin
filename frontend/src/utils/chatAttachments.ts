@@ -1,4 +1,4 @@
-export type ChatMediaType = 'image' | 'video' | 'audio' | 'document'
+export type ChatMediaType = 'image' | 'video' | 'gif' | 'audio' | 'document'
 
 export const MAX_CHAT_FILE_SIZE = 32 * 1024 * 1024
 export const MAX_CHAT_VIDEO_SIZE = 15 * 1024 * 1024
@@ -54,7 +54,8 @@ export function validateChatAttachment(file: File, forceDocument = false): ChatA
   }
 
   let mediaType: ChatMediaType | null = null
-  if (IMAGE_MIME_TYPES.has(mimeType) || (!mimeType && IMAGE_EXTENSIONS.has(extension))) mediaType = 'image'
+  if (mimeType === 'image/gif' || (!mimeType && extension === 'gif')) mediaType = 'gif'
+  else if (IMAGE_MIME_TYPES.has(mimeType) || (!mimeType && IMAGE_EXTENSIONS.has(extension))) mediaType = 'image'
   else if (VIDEO_MIME_TYPES.has(mimeType) || (!mimeType && VIDEO_EXTENSIONS.has(extension))) mediaType = 'video'
   else if (AUDIO_MIME_TYPES.has(mimeType) || (!mimeType && AUDIO_EXTENSIONS.has(extension))) mediaType = 'audio'
   else if (DOCUMENT_MIME_TYPES.has(mimeType) || DOCUMENT_EXTENSIONS.has(extension)) mediaType = 'document'
@@ -62,8 +63,8 @@ export function validateChatAttachment(file: File, forceDocument = false): ChatA
   if (!mediaType) {
     return { ok: false, error: 'Este tipo de archivo no es compatible con el chat.' }
   }
-  if (mediaType === 'video' && file.size > MAX_CHAT_VIDEO_SIZE) {
-    return { ok: false, error: 'El video es demasiado grande. El máximo es 15 MB.' }
+  if ((mediaType === 'video' || mediaType === 'gif') && file.size > MAX_CHAT_VIDEO_SIZE) {
+    return { ok: false, error: `${mediaType === 'gif' ? 'El GIF' : 'El video'} es demasiado grande. El máximo es 15 MB.` }
   }
 
   return { ok: true, mediaType }

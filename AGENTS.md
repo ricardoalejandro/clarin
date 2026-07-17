@@ -10,6 +10,16 @@ These instructions are the source of truth for Codex in this repository. Read th
 - Kommo API communication is dormant. Do not start pollers, outbox jobs, webhooks, API sync, or frontend sync actions unless the user explicitly asks to reactivate Kommo API behavior.
 - Local Kommo Excel import remains valid and may use Kommo compatibility metadata and phone normalization.
 
+## Required Work Method
+
+- Before editing, identify the requested outcome, current repository/runtime state, applicable local skills, affected layers, and non-negotiable product relationships.
+- Inspect user screenshots/files and the current implementation that produced them. Treat reported examples as symptoms to generalize into a complete invariant, not as isolated pixels or one-off patches.
+- Trace cross-layer features vertically from visible UI through state/API/backend/database/provider/storage/WebSocket and back to rendered UI before deciding that a control or flow works.
+- Verify unstable assumptions against current code or runtime evidence. Do not rely on a previous plan, cached understanding, successful preview, or successful build as proof of end-to-end behavior.
+- Distinguish analysis, implementation, and deployment scope. Do not mutate or deploy during a review-only request; do not stop at analysis/tests when the user explicitly asks to implement or deploy.
+- When the user requests an exact historical appearance, find and compare the original implementation/asset before changing it.
+- Preserve unrelated dirty work and state assumptions or remaining provider/session limitations clearly.
+
 ## Mandatory Local Skill Routing
 
 Before changing any area below, read the matching local skill completely:
@@ -21,8 +31,24 @@ Before changing any area below, read the matching local skill completely:
 - MinIO/S3/media/storage cleanup or inventory: `.codex/skills/clarin-storage-management/SKILL.md`
 - Kommo import/status tags/phone normalization/compatibility fields: `.codex/skills/clarin-kommo-integration/SKILL.md`
 - MCP server, MCP admin UI, credentials, sessions, audit, tools, or docs: `.codex/skills/clarin-mcp-security/SKILL.md`
+- Chats, WhatsApp devices/capabilities, messages/replies, chat details, contact avatars, statuses, stickers, or realtime chat UX: `.codex/skills/clarin-chat-whatsapp-experience/SKILL.md` plus every matching layer skill above.
 
 If a task touches multiple areas, read all matching skills before editing.
+
+## Chat And WhatsApp Product Invariants
+
+- Treat `Contact` as the single identity parent. Render identity, phone, avatar, notes, and contact tags once. Opportunities may add commercial data but must not duplicate or contradict Contact data.
+- Ship only controls that work end to end. A visible search, menu item, sync button, status action, sticker action, or delete action must have implemented success, loading, empty, and failure behavior; otherwise remove or explicitly disable it with an explanation.
+- Base responsive chat layout on measured available width after sidebar, Eros, and other chrome—not on browser zoom or screen width alone. Preserve at least 480 px for the conversation whenever three columns are shown.
+- Keep one vertical scroll owner in Details. Menus, pickers, and photo actions that can cross an overflow boundary must render through a viewport-aware portal.
+- Never replace a populated chat list with skeletons because of WebSocket traffic. Patch the affected chat, deduplicate events, preserve stable keys/scroll/selection, and reconcile silently.
+- Keep destructive chat actions visible through a row/menu control. Right-click may remain only as a shortcut, never as the sole discovery path.
+- Treat device capability flags as product truth and enforce them in both UI and backend. Never expose unsupported WhatsApp Web or Cloud API behavior optimistically.
+- Preserve reply/quote context across send, persistence, WebSocket reconciliation, history reload, and rendering. A reply must remain visibly recognizable as a reply.
+- Keep historical branded visual assets, including the WhatsApp-style chat wallpaper, local and single-sourced. Do not replace an explicitly requested exact asset with a visual approximation.
+- Fetch a WhatsApp avatar automatically only when creating the Contact. Later refreshes are explicit user actions with preview and confirmation; an empty/private WhatsApp result must never remove the current avatar automatically.
+- Store only own WhatsApp statuses. Keep contact statuses out of Clarin, scope status events by account and device, reconcile remote deletion/revocation, and show viewer data only when supported by real receipts.
+- Store avatar, status, sticker, and chat media under account-prefixed object keys with `media_assets`/`storage_objects` inventory. Delete physical media only after proving no live reference remains.
 
 ## MCP Rules
 

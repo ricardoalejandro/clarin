@@ -2,11 +2,12 @@
 
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3, Trash2, MapPin, Phone, Eye, Ban, Pencil, Plus, ChevronDown } from 'lucide-react'
+import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3, Trash2, MapPin, Phone, Eye, Ban, Pencil, Plus, ChevronDown, Loader2 } from 'lucide-react'
 import { renderFormattedText } from '@/lib/whatsappFormat'
 import { Message, Reaction, PollOption } from '@/types/chat'
 import { splitEmojiSegments, getAppleEmojiUrl } from '@/utils/appleEmoji'
 import dynamic from 'next/dynamic'
+import { canonicalChatMediaUrl, chatMediaIdentity } from '@/utils/chatMediaUrl'
 import { dedupeReactions } from '@/utils/chatReactions'
 
 /** Reconstruct WhatsApp-formatted text from DOM nodes (preserves *, _, ~, ` markers on copy) */
@@ -14,8 +15,10 @@ function domToWhatsApp(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent || ''
   if (node.nodeType !== Node.ELEMENT_NODE) return ''
   const el = node as HTMLElement
+  if (el.dataset.whatsappIgnore === 'true') return ''
   const tag = el.tagName.toLowerCase()
   const inner = Array.from(el.childNodes).map(domToWhatsApp).join('')
+  if (el.dataset.whatsappPrefix !== undefined) return `${el.dataset.whatsappPrefix}${inner}`
   switch (tag) {
     case 'strong': case 'b': return `*${inner}*`
     case 'em': case 'i': return `_${inner}_`
@@ -43,27 +46,21 @@ interface MessageBubbleProps {
   onMediaClick?: (url: string, type: string) => void
   onRetry?: () => void
   onReply?: (message: Message) => void
+  onQuotedMessageClick?: (quotedMessageId: string) => void
   onForward?: (message: Message) => void
   onDelete?: (message: Message) => void
   onEdit?: (message: Message) => void
-  onSaveSticker?: (mediaUrl: string) => void
+  onToggleStickerFavorite?: (mediaUrl: string) => void | Promise<void>
   onReact?: (message: Message, emoji: string) => void
   savedStickerUrls?: Set<string>
+  savingStickerUrls?: Set<string>
 }
 
 // Convert MinIO public URL to backend proxy URL
 const getProxyUrl = (url: string | undefined): string => {
-  if (!url) return ''
-  if (url.startsWith('/api/media/')) return url
-  if (url.startsWith('blob:')) return url
-
-  const bucketMatch = url.match(/\/clarin-media\/(.+)$/)
-  if (bucketMatch) {
-    return `/api/media/file/${bucketMatch[1]}`
-  }
-
-  console.warn('[getProxyUrl] Unrecognized media URL:', url)
-  return ''
+  const proxyUrl = canonicalChatMediaUrl(url)
+  if (!proxyUrl && url) console.warn('[getProxyUrl] Unrecognized media URL:', url)
+  return proxyUrl
 }
 
 // Format quoted sender name for display
@@ -74,9 +71,10 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
   return sender.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '')
 }
 
-export default function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onForward, onDelete, onEdit, onSaveSticker, onReact, savedStickerUrls }: MessageBubbleProps) {
+export default function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onToggleStickerFavorite, onReact, savedStickerUrls, savingStickerUrls }: MessageBubbleProps) {
   const [imageLoaded, setImageLoaded] = useState(false)
   const [imageError, setImageError] = useState(false)
+  const [stickerLoadError, setStickerLoadError] = useState(false)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [showFullPicker, setShowFullPicker] = useState(false)
   const [showContextMenu, setShowContextMenu] = useState(false)
@@ -146,6 +144,10 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     }
   }, [showContextMenu, menuDropUp])
 
+  useEffect(() => {
+    setStickerLoadError(false)
+  }, [message.media_url])
+
   // Use contactName (resolved by parent via getChatDisplayName) as the sender name for incoming messages
   const senderDisplayName = !message.is_from_me
     ? (contactName || message.from_name)
@@ -170,19 +172,27 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
   }
 
   const renderQuotedMessage = () => {
-    if (!message.quoted_message_id || !message.quoted_body) return null
+    if (!message.quoted_message_id) return null
+    const quotedPreview = message.quoted_body?.trim() || 'Mensaje citado'
 
     return (
-      <div className={`border-l-4 ${message.is_from_me ? 'border-emerald-500 bg-emerald-50/50' : 'border-slate-400 bg-slate-50'} rounded px-2 py-1 mb-1 cursor-pointer`}>
+      <button
+        type="button"
+        onClick={() => onQuotedMessageClick?.(message.quoted_message_id!)}
+        className={`mb-1 block w-full rounded border-l-4 px-2 py-1 text-left transition ${message.is_from_me ? 'border-emerald-600 bg-emerald-50/70 hover:bg-emerald-100/80' : 'border-slate-400 bg-slate-50 hover:bg-slate-100'} ${onQuotedMessageClick ? 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500' : 'cursor-default'}`}
+        aria-label={onQuotedMessageClick ? 'Ir al mensaje respondido' : undefined}
+      >
         {message.quoted_sender && (
           <p className="text-xs font-semibold text-emerald-700 truncate">
-            {formatQuotedSender(message.quoted_sender)}
+            {message.quoted_is_from_me || message.quoted_sender === 'Me'
+              ? 'Tú'
+              : (contactName || formatQuotedSender(message.quoted_sender))}
           </p>
         )}
         <p className="text-xs text-slate-600 truncate max-w-[250px]">
-          {message.quoted_body}
+          {quotedPreview}
         </p>
-      </div>
+      </button>
     )
   }
 
@@ -207,7 +217,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         <div className="flex items-center gap-2 px-2 py-2 bg-slate-50 rounded-lg mb-1">
           <Eye className="w-5 h-5 text-slate-400" />
           <span className="text-sm text-slate-500 italic">
-            {message.message_type === 'video' ? 'Video' : 'Foto'} · Ver una vez
+            {message.message_type === 'video' || message.message_type === 'gif' ? 'Video' : 'Foto'} · Ver una vez
           </span>
         </div>
       )
@@ -268,6 +278,20 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
           </div>
         )
 
+      case 'gif': {
+        const sourceIsOriginalGIF = message.media_mimetype === 'image/gif' || /\.gif(?:$|\?)/i.test(message.media_url)
+        return (
+          <div className="relative overflow-hidden bg-black">
+            {sourceIsOriginalGIF ? (
+              <img src={proxyUrl} alt="GIF" className="w-full block" />
+            ) : (
+              <video src={proxyUrl} className="w-full block" autoPlay loop muted playsInline preload="metadata" />
+            )}
+            <span className="absolute bottom-2 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-bold text-white">GIF</span>
+          </div>
+        )
+      }
+
       case 'audio':
         return (
           <div className="mb-1 max-w-[280px]">
@@ -301,32 +325,51 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
           </div>
         )
 
-      case 'sticker':
+      case 'sticker': {
+        const stickerIdentity = chatMediaIdentity(message.media_url)
+        const stickerIsSaved = savedStickerUrls?.has(stickerIdentity) ?? false
+        const stickerIsSaving = savingStickerUrls?.has(stickerIdentity) ?? false
+        const canSaveSticker = !!onToggleStickerFavorite && !isOptimistic && !message.media_url.startsWith('blob:')
         return (
           <div className="group/sticker relative">
-            <img
-              src={proxyUrl}
-              alt="Sticker"
-              className="w-40 h-40 object-contain"
-              onError={(e) => {
-                (e.target as HTMLImageElement).style.display = 'none'
-              }}
-            />
-            {onSaveSticker && !message.is_from_me && (
+            {stickerLoadError ? (
+              <div className="flex h-40 w-40 flex-col items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 text-slate-500">
+                <AlertCircle className="h-6 w-6" />
+                <span className="text-xs font-medium">Sticker no disponible</span>
+              </div>
+            ) : (
+              <img
+                src={proxyUrl}
+                alt="Sticker"
+                className="h-40 w-40 object-contain"
+                onError={() => setStickerLoadError(true)}
+              />
+            )}
+            {canSaveSticker && (
               <button
-                onClick={() => onSaveSticker(message.media_url!)}
-                className={`absolute top-1 right-1 p-1.5 rounded-full shadow-md transition-all ${
-                  savedStickerUrls?.has(message.media_url!)
-                    ? 'bg-yellow-400 text-white'
-                    : 'bg-white/90 text-gray-500 hover:text-yellow-500 opacity-0 group-hover/sticker:opacity-100'
+                type="button"
+                onClick={event => {
+                  event.stopPropagation()
+                  void onToggleStickerFavorite(message.media_url!)
+                }}
+                disabled={stickerIsSaving}
+                aria-pressed={stickerIsSaved}
+                aria-label={stickerIsSaved ? 'Quitar sticker de favoritos' : 'Guardar sticker en favoritos'}
+                className={`absolute right-1 top-1 flex h-9 w-9 items-center justify-center rounded-full border shadow-md transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-wait ${
+                  stickerIsSaved
+                    ? 'border-amber-300 bg-amber-400 text-white'
+                    : 'border-slate-200 bg-white/95 text-slate-500 opacity-100 hover:text-amber-500 sm:opacity-0 sm:group-hover/sticker:opacity-100 sm:group-focus-within/sticker:opacity-100'
                 }`}
-                title={savedStickerUrls?.has(message.media_url!) ? 'Guardado' : 'Guardar sticker'}
+                title={stickerIsSaved ? 'Quitar de favoritos' : 'Guardar en favoritos'}
               >
-                <Star className={`w-3.5 h-3.5 ${savedStickerUrls?.has(message.media_url!) ? 'fill-current' : ''}`} />
+                {stickerIsSaving
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : <Star className={`h-4 w-4 ${stickerIsSaved ? 'fill-current' : ''}`} />}
               </button>
             )}
           </div>
         )
+      }
 
       default:
         return null
@@ -499,7 +542,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
     }
   }
 
-  const hasVisualMedia = !!message.media_url && ['image', 'video'].includes(message.message_type || '') && !message.is_view_once
+  const hasVisualMedia = !!message.media_url && ['image', 'video', 'gif'].includes(message.message_type || '') && !message.is_view_once
   const isOptimistic = (message.id || '').startsWith('optimistic-')
 
   // Detect single-emoji messages (exactly 1 emoji, no text)
@@ -573,7 +616,7 @@ export default function MessageBubble({ message, contactName, onMediaClick, onRe
         )}
 
         {/* Quoted message */}
-        {message.quoted_message_id && message.quoted_body && (
+        {message.quoted_message_id && (
           <div className={hasVisualMedia ? 'px-2 pt-1' : ''}>
             {renderQuotedMessage()}
           </div>

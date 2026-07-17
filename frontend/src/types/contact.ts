@@ -41,6 +41,10 @@ export interface Observation {
   notes: string | null
   created_by_name: string | null
   created_at: string
+  program_id?: string | null
+  program_session_id?: string | null
+  program_participant_id?: string | null
+  source_label?: string | null
 }
 
 /** Lead = CRM data + personal data (populated from Contact via backend COALESCE) */
@@ -64,11 +68,13 @@ export interface Lead {
   ocupacion: string | null
   status: 'open' | 'won' | 'lost' | string
   pipeline_id: string | null
+  pipeline_name?: string | null
   stage_id: string | null
   stage_name: string | null
   stage_color: string | null
   stage_position: number | null
   lead_pipeline_id?: string | null
+  lead_pipeline_name?: string | null
   lead_stage_id?: string | null
   lead_stage_name?: string | null
   lead_stage_color?: string | null
@@ -108,6 +114,10 @@ export interface Contact {
   custom_name?: string | null
   push_name?: string | null
   avatar_url?: string | null
+  avatar_media_asset_id?: string | null
+  avatar_source?: 'legacy' | 'whatsapp' | 'manual' | null
+  avatar_updated_at?: string | null
+  avatar_revision?: number
   email?: string | null
   company?: string | null
   age?: number | null

@@ -415,6 +415,7 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS quoted_message_id VARCHAR(255)`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS quoted_body TEXT`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS quoted_sender VARCHAR(255)`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS quoted_is_from_me BOOLEAN`,
 
 		`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS event_id UUID REFERENCES events(id) ON DELETE SET NULL`,
 		`ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS source VARCHAR(50)`,
@@ -486,7 +487,7 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE TABLE IF NOT EXISTS program_sessions (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			program_id UUID NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
-			date TIMESTAMPTZ NOT NULL,
+			date DATE NOT NULL,
 			topic VARCHAR(255),
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -1602,12 +1603,26 @@ func Migrate(db *pgxpool.Pool) error {
 			status VARCHAR(50) NOT NULL DEFAULT 'active',
 			deleted_at TIMESTAMPTZ,
 			deleted_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			delete_token UUID,
+			delete_attempts INT NOT NULL DEFAULT 0,
+			delete_error TEXT NOT NULL DEFAULT '',
+			next_delete_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			UNIQUE(account_id, object_key)
 		)`,
+		`ALTER TABLE storage_objects ADD COLUMN IF NOT EXISTS delete_token UUID`,
+		`ALTER TABLE storage_objects ADD COLUMN IF NOT EXISTS delete_attempts INT NOT NULL DEFAULT 0`,
+		`ALTER TABLE storage_objects ADD COLUMN IF NOT EXISTS delete_error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE storage_objects ADD COLUMN IF NOT EXISTS next_delete_at TIMESTAMPTZ`,
 		`CREATE INDEX IF NOT EXISTS idx_storage_objects_account_status ON storage_objects(account_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_storage_objects_account_type ON storage_objects(account_id, media_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_storage_objects_status_gc
+			ON storage_objects(status, next_delete_at, updated_at)
+			WHERE source='whatsapp_status' AND status IN ('status_gc_pending','status_gc_deleting')`,
+		`CREATE INDEX IF NOT EXISTS idx_storage_objects_status_gc_due
+			ON storage_objects((COALESCE(next_delete_at,updated_at)), id)
+			WHERE source='whatsapp_status' AND status IN ('status_gc_pending','status_gc_deleting')`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_account_media_url ON messages(account_id, media_url) WHERE media_url IS NOT NULL AND media_url <> ''`,
 		`CREATE TABLE IF NOT EXISTS media_assets (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1628,6 +1643,292 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_media_assets_object_key ON media_assets(object_key)`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_asset_id UUID REFERENCES media_assets(id) ON DELETE SET NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_media_asset ON messages(media_asset_id) WHERE media_asset_id IS NOT NULL`,
+
+		// Contact owns the single canonical person photo. Legacy avatar_url stays
+		// readable while each photo is lazily migrated on refresh or upload.
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_media_asset_id UUID`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_source VARCHAR(20)`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_updated_at TIMESTAMPTZ`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_revision BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_auto_fetched_at TIMESTAMPTZ`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_whatsapp_checked_at TIMESTAMPTZ`,
+		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_whatsapp_check_error TEXT`,
+		`UPDATE contacts SET avatar_source='legacy', avatar_updated_at=COALESCE(avatar_updated_at,updated_at)
+		 WHERE avatar_url IS NOT NULL AND BTRIM(avatar_url)<>'' AND avatar_source IS NULL`,
+		`UPDATE contacts SET avatar_auto_fetched_at=COALESCE(avatar_checked_at,NOW())
+		 WHERE avatar_auto_fetched_at IS NULL AND created_at < NOW()-INTERVAL '5 minutes'`,
+		`CREATE INDEX IF NOT EXISTS idx_contacts_account_avatar_asset ON contacts(account_id,avatar_media_asset_id)
+		 WHERE avatar_media_asset_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_storage_objects_avatar_gc
+		 ON storage_objects(status,next_delete_at,updated_at)
+		 WHERE source='contact_avatar' AND status IN ('avatar_gc_pending','avatar_gc_deleting')`,
+
+		// Own WhatsApp statuses. This is intentionally separate from chats and
+		// messages so status broadcasts never create CRM conversations.
+		`CREATE TABLE IF NOT EXISTS whatsapp_statuses (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+			whatsapp_message_id VARCHAR(255),
+			source VARCHAR(30) NOT NULL DEFAULT 'clarin',
+			kind VARCHAR(20) NOT NULL,
+			text TEXT,
+			caption TEXT,
+			background_argb BIGINT,
+			font_style INT,
+			media_url TEXT,
+			media_mimetype VARCHAR(100),
+			media_size BIGINT,
+			media_asset_id UUID REFERENCES media_assets(id) ON DELETE SET NULL,
+			status VARCHAR(30) NOT NULL DEFAULT 'pending',
+			error_message TEXT,
+			privacy VARCHAR(50),
+			sent_at TIMESTAMPTZ,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CHECK (source IN ('clarin', 'device')),
+			CHECK (kind IN ('text', 'image', 'video')),
+			CHECK (status IN ('pending', 'sent', 'failed', 'expired'))
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_statuses_message_unique
+			ON whatsapp_statuses(account_id, device_id, whatsapp_message_id)
+			WHERE whatsapp_message_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_statuses_account_device_active
+			ON whatsapp_statuses(account_id, device_id, expires_at DESC)
+			WHERE status <> 'expired'`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_statuses_expiry
+			ON whatsapp_statuses(expires_at) WHERE status <> 'expired'`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_statuses_media_asset
+			ON whatsapp_statuses(media_asset_id) WHERE media_asset_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_statuses_account_device_id
+			ON whatsapp_statuses(account_id,device_id,id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_contacts_account_id ON contacts(account_id,id)`,
+		// WhatsApp reports status viewers as read/played receipts. These records
+		// remain children of an own status and are deleted with it after 24 hours.
+		`CREATE TABLE IF NOT EXISTS whatsapp_status_views (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			device_id UUID NOT NULL,
+			status_id UUID NOT NULL,
+			viewer_jid VARCHAR(255) NOT NULL,
+			contact_id UUID,
+			receipt_type VARCHAR(20) NOT NULL DEFAULT 'read',
+			viewed_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT whatsapp_status_views_status_fkey
+				FOREIGN KEY (account_id,device_id,status_id)
+				REFERENCES whatsapp_statuses(account_id,device_id,id) ON DELETE CASCADE,
+			CONSTRAINT whatsapp_status_views_contact_fkey
+				FOREIGN KEY (account_id,contact_id)
+				REFERENCES contacts(account_id,id) ON DELETE SET NULL (contact_id),
+			CONSTRAINT whatsapp_status_views_receipt_type_check
+				CHECK (receipt_type IN ('read','played')),
+			UNIQUE(account_id,device_id,status_id,viewer_jid)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_status_views_status_time
+			ON whatsapp_status_views(account_id,status_id,viewed_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_status_views_contact
+			ON whatsapp_status_views(account_id,contact_id) WHERE contact_id IS NOT NULL`,
+		// These identity tables also appear in the legacy migration section below.
+		// Create them here as well so tenant-FK repair can resolve a Contact by any
+		// known phone/JID instead of creating a duplicate from the chat snapshot.
+		`CREATE TABLE IF NOT EXISTS contact_phones (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+			phone TEXT NOT NULL,
+			label TEXT DEFAULT 'mobile',
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_phones_contact_id ON contact_phones(contact_id)`,
+		`CREATE TABLE IF NOT EXISTS contact_aliases (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+			alias_type VARCHAR(32) NOT NULL,
+			alias_value TEXT NOT NULL,
+			normalized_value TEXT NOT NULL,
+			source_contact_id UUID,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(account_id, alias_type, normalized_value)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_aliases_lookup ON contact_aliases(account_id, alias_type, normalized_value)`,
+		// Preserve tenant isolation at the database boundary as well as in the
+		// API. The repair statements only remove impossible cross-account links
+		// created before the composite constraints existed.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_account_id ON devices(account_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_contacts_account_id ON contacts(account_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_chats_account_id ON chats(account_id, id)`,
+		`UPDATE contacts c
+		 SET device_id=NULL, updated_at=NOW()
+		 WHERE c.device_id IS NOT NULL
+		   AND NOT EXISTS (
+			SELECT 1 FROM devices d WHERE d.id=c.device_id AND d.account_id=c.account_id
+		   )`,
+		`UPDATE chats c
+		 SET device_id=NULL, updated_at=NOW()
+		 WHERE c.device_id IS NOT NULL
+		   AND NOT EXISTS (
+			SELECT 1 FROM devices d WHERE d.id=c.device_id AND d.account_id=c.account_id
+		   )`,
+		`WITH invalid_chats AS (
+			SELECT ch.id, ch.account_id, ch.jid,
+			       REGEXP_REPLACE(SPLIT_PART(ch.jid,'@',1), '[^0-9]', '', 'g') AS phone
+			FROM chats ch
+			WHERE NOT EXISTS (
+				SELECT 1 FROM contacts current_contact
+				WHERE current_contact.id=ch.contact_id AND current_contact.account_id=ch.account_id
+			)
+		), matches AS (
+			SELECT DISTINCT ON (invalid.id) invalid.id AS chat_id, contact.id AS contact_id
+			FROM invalid_chats invalid
+			JOIN contacts contact ON contact.account_id=invalid.account_id
+			 AND invalid.phone<>''
+			 AND (
+				LOWER(BTRIM(contact.jid))=LOWER(BTRIM(invalid.jid))
+				OR REGEXP_REPLACE(COALESCE(NULLIF(contact.phone,''),SPLIT_PART(contact.jid,'@',1)), '[^0-9]', '', 'g')=invalid.phone
+				OR EXISTS (
+					SELECT 1 FROM contact_phones cp
+					WHERE cp.contact_id=contact.id
+					  AND REGEXP_REPLACE(COALESCE(cp.phone,''), '[^0-9]', '', 'g')=invalid.phone
+				)
+				OR EXISTS (
+					SELECT 1 FROM contact_aliases ca
+					WHERE ca.account_id=invalid.account_id AND ca.contact_id=contact.id
+					  AND (
+						(LOWER(ca.alias_type)='phone' AND ca.normalized_value=invalid.phone)
+						OR (LOWER(ca.alias_type)='jid' AND LOWER(BTRIM(ca.alias_value))=LOWER(BTRIM(invalid.jid)))
+					  )
+				)
+			 )
+			ORDER BY invalid.id,
+				CASE
+					WHEN LOWER(BTRIM(contact.jid))=LOWER(BTRIM(invalid.jid)) THEN 0
+					WHEN REGEXP_REPLACE(COALESCE(NULLIF(contact.phone,''),SPLIT_PART(contact.jid,'@',1)), '[^0-9]', '', 'g')=invalid.phone THEN 1
+					ELSE 2
+				END,
+				contact.updated_at DESC, contact.id
+		)
+		UPDATE chats ch
+		SET contact_id=matches.contact_id, updated_at=NOW()
+		FROM matches
+		WHERE ch.id=matches.chat_id`,
+		`INSERT INTO contacts (account_id,device_id,jid,phone,name,push_name,is_group)
+		 SELECT ch.account_id, ch.device_id, ch.jid,
+		        NULLIF(REGEXP_REPLACE(SPLIT_PART(ch.jid,'@',1), '[^0-9]', '', 'g'),''),
+		        ch.name, ch.name, ch.jid LIKE '%@g.us'
+		 FROM chats ch
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM contacts current_contact
+			WHERE current_contact.id=ch.contact_id AND current_contact.account_id=ch.account_id
+		 )
+		 ON CONFLICT (account_id,jid) DO UPDATE SET
+			device_id=COALESCE(contacts.device_id,EXCLUDED.device_id),
+			phone=COALESCE(NULLIF(contacts.phone,''),EXCLUDED.phone),
+			name=COALESCE(NULLIF(contacts.name,''),EXCLUDED.name),
+			push_name=COALESCE(NULLIF(contacts.push_name,''),EXCLUDED.push_name),
+			updated_at=NOW()`,
+		`UPDATE chats ch
+		 SET contact_id=contact.id, updated_at=NOW()
+		 FROM contacts contact
+		 WHERE contact.account_id=ch.account_id AND contact.jid=ch.jid
+		   AND NOT EXISTS (
+			SELECT 1 FROM contacts current_contact
+			WHERE current_contact.id=ch.contact_id AND current_contact.account_id=ch.account_id
+		   )`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='contacts_account_device_fkey' AND conrelid='contacts'::regclass) THEN
+				ALTER TABLE contacts
+				ADD CONSTRAINT contacts_account_device_fkey
+				FOREIGN KEY (account_id, device_id) REFERENCES devices(account_id, id) NOT VALID;
+			END IF;
+		END $$`,
+		`ALTER TABLE contacts VALIDATE CONSTRAINT contacts_account_device_fkey`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='chats_account_device_fkey' AND conrelid='chats'::regclass) THEN
+				ALTER TABLE chats
+				ADD CONSTRAINT chats_account_device_fkey
+				FOREIGN KEY (account_id, device_id) REFERENCES devices(account_id, id) NOT VALID;
+			END IF;
+		END $$`,
+		`ALTER TABLE chats VALIDATE CONSTRAINT chats_account_device_fkey`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='chats_account_contact_fkey' AND conrelid='chats'::regclass) THEN
+				ALTER TABLE chats
+				ADD CONSTRAINT chats_account_contact_fkey
+				FOREIGN KEY (account_id, contact_id) REFERENCES contacts(account_id, id) NOT VALID;
+			END IF;
+		END $$`,
+		`ALTER TABLE chats VALIDATE CONSTRAINT chats_account_contact_fkey`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_media_assets_account_id ON media_assets(account_id, id)`,
+		`UPDATE contacts c SET avatar_media_asset_id=NULL
+		 WHERE avatar_media_asset_id IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM media_assets ma WHERE ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id
+		 )`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='contacts_account_avatar_asset_fkey' AND conrelid='contacts'::regclass) THEN
+				ALTER TABLE contacts ADD CONSTRAINT contacts_account_avatar_asset_fkey
+				FOREIGN KEY (account_id,avatar_media_asset_id) REFERENCES media_assets(account_id,id) NOT VALID;
+			END IF;
+		END $$`,
+		`ALTER TABLE contacts VALIDATE CONSTRAINT contacts_account_avatar_asset_fkey`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='contacts_avatar_source_check' AND conrelid='contacts'::regclass) THEN
+				ALTER TABLE contacts ADD CONSTRAINT contacts_avatar_source_check
+				CHECK (avatar_source IS NULL OR avatar_source IN ('legacy','whatsapp','manual')) NOT VALID;
+			END IF;
+		END $$`,
+		`ALTER TABLE contacts VALIDATE CONSTRAINT contacts_avatar_source_check`,
+		`CREATE OR REPLACE FUNCTION schedule_deleted_contact_avatar_gc() RETURNS TRIGGER AS $$
+		BEGIN
+			IF OLD.avatar_media_asset_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM contacts c
+				WHERE c.account_id=OLD.account_id AND c.avatar_media_asset_id=OLD.avatar_media_asset_id
+			) THEN
+				UPDATE media_assets SET status='avatar_gc_pending',updated_at=NOW()
+				WHERE id=OLD.avatar_media_asset_id AND account_id=OLD.account_id
+				  AND content_hash LIKE 'contact_avatar:%';
+				UPDATE storage_objects so SET status='avatar_gc_pending',next_delete_at=NOW(),delete_error='',updated_at=NOW()
+				WHERE so.account_id=OLD.account_id AND EXISTS (
+					SELECT 1 FROM media_assets ma WHERE ma.id=OLD.avatar_media_asset_id
+					  AND ma.account_id=OLD.account_id AND ma.object_key=so.object_key
+					  AND ma.status='avatar_gc_pending'
+				);
+			END IF;
+			RETURN OLD;
+		END;
+		$$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS trg_schedule_deleted_contact_avatar_gc ON contacts`,
+		`CREATE TRIGGER trg_schedule_deleted_contact_avatar_gc AFTER DELETE ON contacts
+		 FOR EACH ROW EXECUTE FUNCTION schedule_deleted_contact_avatar_gc()`,
+		`DELETE FROM whatsapp_statuses ws
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM devices d WHERE d.id=ws.device_id AND d.account_id=ws.account_id
+		 )`,
+		`UPDATE whatsapp_statuses ws
+		 SET media_asset_id=NULL, media_url=NULL, media_mimetype=NULL, media_size=NULL, updated_at=NOW()
+		 WHERE ws.media_asset_id IS NOT NULL
+		   AND NOT EXISTS (
+			SELECT 1 FROM media_assets ma WHERE ma.id=ws.media_asset_id AND ma.account_id=ws.account_id
+		   )`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='whatsapp_statuses_account_device_fkey' AND conrelid='whatsapp_statuses'::regclass) THEN
+				ALTER TABLE whatsapp_statuses
+				ADD CONSTRAINT whatsapp_statuses_account_device_fkey
+				FOREIGN KEY (account_id, device_id) REFERENCES devices(account_id, id) ON DELETE CASCADE NOT VALID;
+			END IF;
+		END $$`,
+		`ALTER TABLE whatsapp_statuses VALIDATE CONSTRAINT whatsapp_statuses_account_device_fkey`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='whatsapp_statuses_account_media_asset_fkey' AND conrelid='whatsapp_statuses'::regclass) THEN
+				ALTER TABLE whatsapp_statuses
+				ADD CONSTRAINT whatsapp_statuses_account_media_asset_fkey
+				FOREIGN KEY (account_id, media_asset_id) REFERENCES media_assets(account_id, id) NOT VALID;
+			END IF;
+		END $$`,
+		`ALTER TABLE whatsapp_statuses VALIDATE CONSTRAINT whatsapp_statuses_account_media_asset_fkey`,
 		`CREATE TABLE IF NOT EXISTS storage_dedupe_jobs (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -2429,7 +2730,14 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE program_attendance ADD COLUMN IF NOT EXISTS instructor_status TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE program_attendance ADD COLUMN IF NOT EXISTS instructor_notes TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_program_attendance_status ON program_attendance(session_id, status)`,
-		`CREATE INDEX IF NOT EXISTS idx_program_attendance_instructor_status ON program_attendance(session_id, instructor_status) WHERE instructor_status <> ''`,
+		`DROP INDEX IF EXISTS idx_program_attendance_instructor_status`,
+		// Session dates represent calendar days. Existing values were written at
+		// UTC midnight, so preserve their UTC day while removing timezone math.
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'program_sessions' AND column_name = 'date' AND data_type <> 'date') THEN
+				ALTER TABLE program_sessions ALTER COLUMN date TYPE DATE USING (date AT TIME ZONE 'UTC')::date;
+			END IF;
+		END $$`,
 		`CREATE TABLE IF NOT EXISTS program_goals (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -2461,6 +2769,26 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_program_notes_program_created ON program_participant_notes(program_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_program_notes_participant_created ON program_participant_notes(participant_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_program_notes_session ON program_participant_notes(session_id) WHERE session_id IS NOT NULL`,
+
+		// Attendance observations are contact interactions with a structured,
+		// account-scoped source. The source IDs allow idempotent upserts while
+		// source_label preserves the origin if a program is later removed.
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS program_id UUID REFERENCES programs(id) ON DELETE SET NULL`,
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS program_session_id UUID REFERENCES program_sessions(id) ON DELETE SET NULL`,
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS program_participant_id UUID REFERENCES program_participants(id) ON DELETE SET NULL`,
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS source_label TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_interactions_program_source ON interactions(account_id, program_id, program_session_id, program_participant_id) WHERE type = 'attendance'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_interactions_program_attendance ON interactions(program_session_id, program_participant_id) WHERE type = 'attendance' AND program_session_id IS NOT NULL AND program_participant_id IS NOT NULL`,
+		`INSERT INTO interactions (account_id, contact_id, type, notes, program_id, program_session_id, program_participant_id, source_label, created_at)
+		 SELECT p.account_id, pp.contact_id, 'attendance', BTRIM(pa.notes), p.id, ps.id, pp.id,
+		        CONCAT(p.name, ' · ', COALESCE(NULLIF(ps.topic, ''), 'Sesión'), ' · ', TO_CHAR(ps.date, 'DD/MM/YYYY')),
+		        COALESCE(pa.updated_at, pa.created_at, NOW())
+		 FROM program_attendance pa
+		 JOIN program_sessions ps ON ps.id = pa.session_id
+		 JOIN programs p ON p.id = ps.program_id
+		 JOIN program_participants pp ON pp.id = pa.participant_id AND pp.program_id = p.id
+		 WHERE BTRIM(COALESCE(pa.notes, '')) <> ''
+		 ON CONFLICT DO NOTHING`,
 
 		// ─── Kommo Push Outbox: batched, coalesced push worker ─────────────
 		// Enables bulk PATCH to Kommo (up to 250 items/req) with coalescing

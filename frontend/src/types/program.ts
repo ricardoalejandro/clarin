@@ -47,7 +47,6 @@ export interface ProgramParticipant {
   id: string;
   program_id: string;
   contact_id: string;
-  lead_id?: string;
   status: 'active' | 'dropped' | 'completed';
   enrolled_at: string;
   dropped_at?: string;
@@ -58,6 +57,8 @@ export interface ProgramParticipant {
   transferred_at?: string;
   contact_name?: string;
   contact_phone?: string;
+  avatar_url?: string | null;
+  avatar_revision?: number;
   stage_id?: string;
   stage_name?: string;
   stage_color?: string;
@@ -82,10 +83,8 @@ export interface ProgramAttendance {
   id: string;
   session_id: string;
   participant_id: string;
-  status: 'present' | 'absent' | 'late' | 'excused';
+  status: 'present' | 'absent' | 'late' | 'excused' | '';
   notes: string;
-  instructor_status?: 'good' | 'watch' | 'risk' | '';
-  instructor_notes?: string;
   created_at: string;
   updated_at: string;
   participant_name?: string;
@@ -125,6 +124,8 @@ export interface ProgramHealthParticipant {
   contact_id: string;
   name: string;
   phone?: string;
+  avatar_url?: string | null;
+  avatar_revision?: number;
   status: 'active' | 'dropped' | 'completed';
   health: 'healthy' | 'watch' | 'critical';
   attendance_rate: number;
@@ -133,11 +134,38 @@ export interface ProgramHealthParticipant {
   absent: number;
   excused: number;
   recovery_sessions: number;
-  instructor_risk_count: number;
   notes_count: number;
   last_note_at?: string;
   transferred_to_level?: string;
   reasons: string[];
+}
+
+export interface ProgramSessionAttendanceStat {
+  session_id: string;
+  topic: string;
+  date: string;
+  present: number;
+  absent: number;
+  late: number;
+  excused: number;
+}
+
+export interface ProgramParticipantAttendanceStat {
+  participant_id: string;
+  name: string;
+  present: number;
+  absent: number;
+  late: number;
+  excused: number;
+  total_sessions: number;
+  rate: number;
+}
+
+export interface ProgramAttendanceStatsResponse {
+  success: boolean;
+  session_stats: ProgramSessionAttendanceStat[];
+  participant_stats: ProgramParticipantAttendanceStat[];
+  error?: string;
 }
 
 export interface ProgramHealthSummary {

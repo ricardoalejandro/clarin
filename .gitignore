@@ -68,3 +68,6 @@ backups/*.sql
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# graphify-axet
+.graphify/

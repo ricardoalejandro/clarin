@@ -3,6 +3,16 @@ export interface Device {
   name: string
   phone?: string
   status: string
+  provider?: 'whatsapp_web' | 'whatsapp_cloud_api'
+  runtime_capabilities?: {
+    can_start_chat: boolean
+    can_check_whatsapp: boolean
+    can_send_sticker: boolean
+    can_send_animated_sticker: boolean
+    can_publish_status: boolean
+    can_publish_status_link?: boolean
+    can_sync_own_status: boolean
+  }
 }
 
 export interface Reaction {
@@ -49,6 +59,7 @@ export interface Message {
   quoted_message_id?: string
   quoted_body?: string
   quoted_sender?: string
+  quoted_is_from_me?: boolean
   reactions?: Reaction[]
   poll_question?: string
   poll_options?: PollOption[]

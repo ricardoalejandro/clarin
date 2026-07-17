@@ -2096,6 +2096,11 @@ export default function EventDetailPage() {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
 	  const msg = data as { event?: string; action?: string; event_id?: string; data?: { action?: string; event_id?: string } }
 	  const payload = msg.data || msg
+	  if (msg.event === 'contact_update') {
+		fetchParticipantsPaginated()
+		if (viewMode === 'list') fetchListParticipants(true)
+		return
+	  }
 	  if (msg.event === 'event_participant_update' && payload.event_id === eventId) {
         // Skip refetch if we just changed a stage ourselves (prevents reverting optimistic update)
 		if (payload.action === 'stage_changed' && ownStageChangeRef.current) return

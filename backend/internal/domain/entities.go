@@ -261,32 +261,49 @@ type IntegrationInstanceAccount struct {
 
 // Device represents a WhatsApp connection
 type Device struct {
-	ID                  uuid.UUID       `json:"id"`
-	AccountID           uuid.UUID       `json:"account_id"`
-	Name                *string         `json:"name,omitempty"`
-	Phone               *string         `json:"phone,omitempty"`
-	JID                 *string         `json:"jid,omitempty"`
-	Status              *string         `json:"status,omitempty"` // disconnected, connecting, connected, logged_out
-	QRCode              *string         `json:"qr_code,omitempty"`
-	ReceiveMessages     bool            `json:"receive_messages"`
-	Provider            *string         `json:"provider,omitempty"`
-	WABAID              *string         `json:"waba_id,omitempty"`
-	PhoneNumberID       *string         `json:"phone_number_id,omitempty"`
-	APIDisplayPhone     *string         `json:"api_display_phone,omitempty"`
-	APIWebhookStatus    *string         `json:"api_webhook_status,omitempty"`
-	APIBillingStatus    *string         `json:"api_billing_status,omitempty"`
-	APISendingEnabled   bool            `json:"api_sending_enabled"`
-	APITemplatesEnabled bool            `json:"api_templates_enabled"`
-	Capabilities        json.RawMessage `json:"capabilities,omitempty"`
-	LastSeenAt          *time.Time      `json:"last_seen_at,omitempty"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	ID                  uuid.UUID                  `json:"id"`
+	AccountID           uuid.UUID                  `json:"account_id"`
+	Name                *string                    `json:"name,omitempty"`
+	Phone               *string                    `json:"phone,omitempty"`
+	JID                 *string                    `json:"jid,omitempty"`
+	Status              *string                    `json:"status,omitempty"` // disconnected, connecting, connected, logged_out
+	QRCode              *string                    `json:"qr_code,omitempty"`
+	ReceiveMessages     bool                       `json:"receive_messages"`
+	Provider            *string                    `json:"provider,omitempty"`
+	WABAID              *string                    `json:"waba_id,omitempty"`
+	PhoneNumberID       *string                    `json:"phone_number_id,omitempty"`
+	APIDisplayPhone     *string                    `json:"api_display_phone,omitempty"`
+	APIWebhookStatus    *string                    `json:"api_webhook_status,omitempty"`
+	APIBillingStatus    *string                    `json:"api_billing_status,omitempty"`
+	APISendingEnabled   bool                       `json:"api_sending_enabled"`
+	APITemplatesEnabled bool                       `json:"api_templates_enabled"`
+	Capabilities        json.RawMessage            `json:"capabilities,omitempty"`
+	RuntimeCapabilities *DeviceRuntimeCapabilities `json:"runtime_capabilities,omitempty"`
+	LastSeenAt          *time.Time                 `json:"last_seen_at,omitempty"`
+	CreatedAt           time.Time                  `json:"created_at"`
+	UpdatedAt           time.Time                  `json:"updated_at"`
+}
+
+// DeviceRuntimeCapabilities exposes actions that are actually available for
+// the device's provider and current connection state. It intentionally lives
+// alongside the legacy provider capabilities JSON to keep older API clients
+// compatible.
+type DeviceRuntimeCapabilities struct {
+	CanStartChat           bool `json:"can_start_chat"`
+	CanCheckWhatsApp       bool `json:"can_check_whatsapp"`
+	CanSendSticker         bool `json:"can_send_sticker"`
+	CanSendAnimatedSticker bool `json:"can_send_animated_sticker"`
+	CanPublishStatus       bool `json:"can_publish_status"`
+	CanPublishStatusLink   bool `json:"can_publish_status_link"`
+	CanSyncOwnStatus       bool `json:"can_sync_own_status"`
 }
 
 // Device provider constants
 const (
-	DeviceProviderWhatsAppWeb      = "whatsapp_web"
-	DeviceProviderWhatsAppCloudAPI = "whatsapp_cloud_api"
+	DeviceProviderWhatsAppWeb          = "whatsapp_web"
+	DeviceProviderWhatsAppCloudAPI     = "whatsapp_cloud_api"
+	MediaAssetHashWhatsAppStatusPrefix = "whatsapp_status:"
+	MediaAssetHashNonStatusFallback    = "media:"
 )
 
 // DeviceStatus constants
@@ -311,6 +328,10 @@ type Contact struct {
 	PushName           *string    `json:"push_name,omitempty"`
 	AvatarURL          *string    `json:"avatar_url,omitempty"`
 	AvatarCheckedAt    *time.Time `json:"avatar_checked_at,omitempty"`
+	AvatarMediaAssetID *uuid.UUID `json:"avatar_media_asset_id,omitempty"`
+	AvatarSource       *string    `json:"avatar_source,omitempty"`
+	AvatarUpdatedAt    *time.Time `json:"avatar_updated_at,omitempty"`
+	AvatarRevision     int64      `json:"avatar_revision"`
 	Email              *string    `json:"email,omitempty"`
 	Company            *string    `json:"company,omitempty"`
 	Age                *int       `json:"age,omitempty"`
@@ -477,6 +498,7 @@ type Chat struct {
 	AccountID                      uuid.UUID  `json:"account_id"`
 	DeviceID                       *uuid.UUID `json:"device_id,omitempty"`
 	ContactID                      *uuid.UUID `json:"contact_id,omitempty"`
+	ContactCreated                 bool       `json:"-"`
 	JID                            string     `json:"jid"`
 	Name                           *string    `json:"name,omitempty"`
 	LastMessage                    *string    `json:"last_message,omitempty"`
@@ -530,9 +552,28 @@ type ChatFilter struct {
 
 // ChatDetails contains full chat information with related data
 type ChatDetails struct {
-	Chat    *Chat    `json:"chat"`
-	Contact *Contact `json:"contact,omitempty"`
-	Lead    *Lead    `json:"lead,omitempty"`
+	Chat                *Chat                 `json:"chat"`
+	Contact             *Contact              `json:"contact,omitempty"`
+	Lead                *Lead                 `json:"lead,omitempty"`
+	Opportunities       []*OpportunitySummary `json:"opportunities"`
+	ActiveOpportunityID *uuid.UUID            `json:"active_opportunity_id,omitempty"`
+	Device              *Device               `json:"device,omitempty"`
+}
+
+type OpportunitySummary struct {
+	ID           uuid.UUID  `json:"id"`
+	ContactID    *uuid.UUID `json:"contact_id,omitempty"`
+	Title        string     `json:"title"`
+	Status       string     `json:"status"`
+	PipelineID   *uuid.UUID `json:"pipeline_id,omitempty"`
+	PipelineName *string    `json:"pipeline_name,omitempty"`
+	StageID      *uuid.UUID `json:"stage_id,omitempty"`
+	StageName    *string    `json:"stage_name,omitempty"`
+	StageColor   *string    `json:"stage_color,omitempty"`
+	StageType    *string    `json:"stage_type,omitempty"`
+	IsArchived   bool       `json:"is_archived"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // Message represents a WhatsApp message
@@ -545,7 +586,7 @@ type Message struct {
 	FromJID       *string    `json:"from_jid,omitempty"`
 	FromName      *string    `json:"from_name,omitempty"`
 	Body          *string    `json:"body,omitempty"`
-	MessageType   *string    `json:"message_type,omitempty"` // text, image, video, audio, document, sticker, location, contact
+	MessageType   *string    `json:"message_type,omitempty"` // text, image, video, gif, audio, document, sticker, location, contact
 	MediaURL      *string    `json:"media_url,omitempty"`
 	MediaMimetype *string    `json:"media_mimetype,omitempty"`
 	MediaFilename *string    `json:"media_filename,omitempty"`
@@ -567,6 +608,7 @@ type Message struct {
 	QuotedMessageID *string `json:"quoted_message_id,omitempty"`
 	QuotedBody      *string `json:"quoted_body,omitempty"`
 	QuotedSender    *string `json:"quoted_sender,omitempty"`
+	QuotedIsFromMe  *bool   `json:"quoted_is_from_me,omitempty"`
 
 	// Location data (when message_type = location)
 	Latitude  *float64 `json:"latitude,omitempty"`
@@ -607,6 +649,7 @@ const (
 	MessageTypeText     = "text"
 	MessageTypeImage    = "image"
 	MessageTypeVideo    = "video"
+	MessageTypeGIF      = "gif"
 	MessageTypeAudio    = "audio"
 	MessageTypeDocument = "document"
 	MessageTypeSticker  = "sticker"
@@ -1201,21 +1244,25 @@ const (
 
 // Interaction represents a communication log entry with a contact
 type Interaction struct {
-	ID             uuid.UUID  `json:"id"`
-	AccountID      uuid.UUID  `json:"account_id"`
-	ContactID      *uuid.UUID `json:"contact_id,omitempty"`
-	LeadID         *uuid.UUID `json:"lead_id,omitempty"`
-	EventID        *uuid.UUID `json:"event_id,omitempty"`
-	ParticipantID  *uuid.UUID `json:"participant_id,omitempty"`
-	Type           string     `json:"type"`                // call, whatsapp, note, email, meeting
-	Direction      *string    `json:"direction,omitempty"` // inbound, outbound
-	Outcome        *string    `json:"outcome,omitempty"`   // answered, no_answer, voicemail, busy, confirmed, declined, rescheduled, callback
-	Notes          *string    `json:"notes,omitempty"`
-	NextAction     *string    `json:"next_action,omitempty"`
-	NextActionDate *time.Time `json:"next_action_date,omitempty"`
-	CreatedBy      *uuid.UUID `json:"created_by,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	KommoCallSlot  *int       `json:"kommo_call_slot,omitempty"`
+	ID                   uuid.UUID  `json:"id"`
+	AccountID            uuid.UUID  `json:"account_id"`
+	ContactID            *uuid.UUID `json:"contact_id,omitempty"`
+	LeadID               *uuid.UUID `json:"lead_id,omitempty"`
+	EventID              *uuid.UUID `json:"event_id,omitempty"`
+	ParticipantID        *uuid.UUID `json:"participant_id,omitempty"`
+	ProgramID            *uuid.UUID `json:"program_id,omitempty"`
+	ProgramSessionID     *uuid.UUID `json:"program_session_id,omitempty"`
+	ProgramParticipantID *uuid.UUID `json:"program_participant_id,omitempty"`
+	SourceLabel          string     `json:"source_label,omitempty"`
+	Type                 string     `json:"type"`                // call, whatsapp, note, email, meeting
+	Direction            *string    `json:"direction,omitempty"` // inbound, outbound
+	Outcome              *string    `json:"outcome,omitempty"`   // answered, no_answer, voicemail, busy, confirmed, declined, rescheduled, callback
+	Notes                *string    `json:"notes,omitempty"`
+	NextAction           *string    `json:"next_action,omitempty"`
+	NextActionDate       *time.Time `json:"next_action_date,omitempty"`
+	CreatedBy            *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	KommoCallSlot        *int       `json:"kommo_call_slot,omitempty"`
 
 	// Populated on demand
 	CreatedByName *string `json:"created_by_name,omitempty"`
@@ -1224,11 +1271,12 @@ type Interaction struct {
 
 // Interaction type constants
 const (
-	InteractionTypeCall     = "call"
-	InteractionTypeWhatsApp = "whatsapp"
-	InteractionTypeNote     = "note"
-	InteractionTypeEmail    = "email"
-	InteractionTypeMeeting  = "meeting"
+	InteractionTypeCall       = "call"
+	InteractionTypeWhatsApp   = "whatsapp"
+	InteractionTypeNote       = "note"
+	InteractionTypeEmail      = "email"
+	InteractionTypeMeeting    = "meeting"
+	InteractionTypeAttendance = "attendance"
 )
 
 // Interaction outcome constants
@@ -1466,10 +1514,12 @@ type Program struct {
 
 // ProgramParticipant represents a contact enrolled in a program
 type ProgramParticipant struct {
-	ID                 uuid.UUID  `json:"id"`
-	ProgramID          uuid.UUID  `json:"program_id"`
-	ContactID          uuid.UUID  `json:"contact_id"`
-	LeadID             *uuid.UUID `json:"lead_id,omitempty"`
+	ID        uuid.UUID `json:"id"`
+	ProgramID uuid.UUID `json:"program_id"`
+	ContactID uuid.UUID `json:"contact_id"`
+	// LeadID is retained for legacy database rows but is intentionally not part
+	// of the participant API: a program participant is always a Contact.
+	LeadID             *uuid.UUID `json:"-"`
 	StageID            *uuid.UUID `json:"stage_id,omitempty"`
 	Status             string     `json:"status"` // active, dropped, completed
 	EnrolledAt         time.Time  `json:"enrolled_at"`
@@ -1482,10 +1532,12 @@ type ProgramParticipant struct {
 	AutoTagSync        bool       `json:"auto_tag_sync"`
 
 	// Populated on demand
-	ContactName  string  `json:"contact_name,omitempty"`
-	ContactPhone *string `json:"contact_phone,omitempty"`
-	StageName    *string `json:"stage_name,omitempty"`
-	StageColor   *string `json:"stage_color,omitempty"`
+	ContactName    string  `json:"contact_name,omitempty"`
+	ContactPhone   *string `json:"contact_phone,omitempty"`
+	AvatarURL      *string `json:"avatar_url,omitempty"`
+	AvatarRevision int64   `json:"avatar_revision"`
+	StageName      *string `json:"stage_name,omitempty"`
+	StageColor     *string `json:"stage_color,omitempty"`
 }
 
 // ProgramSession represents a single class or session within a program
@@ -1507,15 +1559,13 @@ type ProgramSession struct {
 
 // ProgramAttendance represents a participant's attendance record for a session
 type ProgramAttendance struct {
-	ID               uuid.UUID `json:"id"`
-	SessionID        uuid.UUID `json:"session_id"`
-	ParticipantID    uuid.UUID `json:"participant_id"`
-	Status           string    `json:"status"` // present, absent, late, excused
-	Notes            *string   `json:"notes,omitempty"`
-	InstructorStatus string    `json:"instructor_status,omitempty"` // good | watch | risk
-	InstructorNotes  string    `json:"instructor_notes,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID            uuid.UUID `json:"id"`
+	SessionID     uuid.UUID `json:"session_id"`
+	ParticipantID uuid.UUID `json:"participant_id"`
+	Status        string    `json:"status"` // present, absent, late, excused
+	Notes         *string   `json:"notes,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 
 	// Populated on demand
 	ParticipantName  string  `json:"participant_name,omitempty"`
@@ -1562,23 +1612,45 @@ type ProgramParticipantNote struct {
 }
 
 type ProgramHealthParticipant struct {
-	ParticipantID       uuid.UUID  `json:"participant_id"`
-	ContactID           uuid.UUID  `json:"contact_id"`
-	Name                string     `json:"name"`
-	Phone               *string    `json:"phone,omitempty"`
-	Status              string     `json:"status"`
-	Health              string     `json:"health"`
-	AttendanceRate      float64    `json:"attendance_rate"`
-	Present             int        `json:"present"`
-	Late                int        `json:"late"`
-	Absent              int        `json:"absent"`
-	Excused             int        `json:"excused"`
-	RecoverySessions    int        `json:"recovery_sessions"`
-	InstructorRiskCount int        `json:"instructor_risk_count"`
-	NotesCount          int        `json:"notes_count"`
-	LastNoteAt          *time.Time `json:"last_note_at,omitempty"`
-	TransferredToLevel  string     `json:"transferred_to_level,omitempty"`
-	Reasons             []string   `json:"reasons"`
+	ParticipantID      uuid.UUID  `json:"participant_id"`
+	ContactID          uuid.UUID  `json:"contact_id"`
+	Name               string     `json:"name"`
+	Phone              *string    `json:"phone,omitempty"`
+	AvatarURL          *string    `json:"avatar_url,omitempty"`
+	AvatarRevision     int64      `json:"avatar_revision"`
+	Status             string     `json:"status"`
+	Health             string     `json:"health"`
+	AttendanceRate     float64    `json:"attendance_rate"`
+	Present            int        `json:"present"`
+	Late               int        `json:"late"`
+	Absent             int        `json:"absent"`
+	Excused            int        `json:"excused"`
+	RecoverySessions   int        `json:"recovery_sessions"`
+	NotesCount         int        `json:"notes_count"`
+	LastNoteAt         *time.Time `json:"last_note_at,omitempty"`
+	TransferredToLevel string     `json:"transferred_to_level,omitempty"`
+	Reasons            []string   `json:"reasons"`
+}
+
+type ProgramSessionAttendanceStat struct {
+	SessionID uuid.UUID `json:"session_id"`
+	Topic     string    `json:"topic"`
+	Date      string    `json:"date"`
+	Present   int       `json:"present"`
+	Absent    int       `json:"absent"`
+	Late      int       `json:"late"`
+	Excused   int       `json:"excused"`
+}
+
+type ProgramParticipantAttendanceStat struct {
+	ParticipantID uuid.UUID `json:"participant_id"`
+	Name          string    `json:"name"`
+	Present       int       `json:"present"`
+	Absent        int       `json:"absent"`
+	Late          int       `json:"late"`
+	Excused       int       `json:"excused"`
+	TotalSessions int       `json:"total_sessions"`
+	Rate          float64   `json:"rate"`
 }
 
 type ProgramHealthSummary struct {
@@ -1641,6 +1713,53 @@ type WhatsAppCheckResult struct {
 	Phone        string `json:"phone"`
 	IsOnWhatsApp bool   `json:"is_on_whatsapp"`
 	JID          string `json:"jid,omitempty"`
+	VerifiedName string `json:"verified_name,omitempty"`
+}
+
+// WhatsAppStatus is an account-scoped record of a status published by the
+// selected device. Contact statuses are deliberately not persisted.
+type WhatsAppStatus struct {
+	ID                uuid.UUID  `json:"id"`
+	AccountID         uuid.UUID  `json:"account_id"`
+	DeviceID          uuid.UUID  `json:"device_id"`
+	WhatsAppMessageID *string    `json:"whatsapp_message_id,omitempty"`
+	Source            string     `json:"source"`
+	Kind              string     `json:"kind"`
+	Text              *string    `json:"text,omitempty"`
+	Caption           *string    `json:"caption,omitempty"`
+	BackgroundARGB    *int64     `json:"background_argb,omitempty"`
+	FontStyle         *int       `json:"font_style,omitempty"`
+	MediaURL          *string    `json:"media_url,omitempty"`
+	MediaMimetype     *string    `json:"media_mimetype,omitempty"`
+	MediaSize         *int64     `json:"media_size,omitempty"`
+	MediaAssetID      *uuid.UUID `json:"media_asset_id,omitempty"`
+	Status            string     `json:"status"`
+	ErrorMessage      *string    `json:"error_message,omitempty"`
+	Privacy           *string    `json:"privacy,omitempty"`
+	SentAt            *time.Time `json:"sent_at,omitempty"`
+	ExpiresAt         time.Time  `json:"expires_at"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	ViewCount         int        `json:"view_count"`
+}
+
+// WhatsAppStatusView is an account/device-scoped read or played receipt for
+// one of the device owner's statuses. Viewer identity is linked to an existing
+// Contact when possible, but receipt processing never creates CRM entities.
+type WhatsAppStatusView struct {
+	ID           uuid.UUID  `json:"id"`
+	AccountID    uuid.UUID  `json:"account_id"`
+	DeviceID     uuid.UUID  `json:"device_id"`
+	StatusID     uuid.UUID  `json:"status_id"`
+	ViewerJID    string     `json:"viewer_jid"`
+	ContactID    *uuid.UUID `json:"contact_id,omitempty"`
+	ViewerName   *string    `json:"viewer_name,omitempty"`
+	ViewerPhone  *string    `json:"viewer_phone,omitempty"`
+	ViewerAvatar *string    `json:"viewer_avatar,omitempty"`
+	ReceiptType  string     `json:"receipt_type"`
+	ViewedAt     time.Time  `json:"viewed_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // ── Event Logbooks (Bitácora) ──────────────────────────────────────────

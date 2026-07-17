@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback, useId } from 'react'
+import { createPortal } from 'react-dom'
 import { AlertCircle, CheckCircle2 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -124,9 +125,18 @@ function matchesPattern(tagName: string, pattern: string): boolean {
 export default function FormulaEditor({ value, onChange, tags, placeholder, rows = 4, compact = false, onValidChange }: FormulaEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
+  const suggestionsRef = useRef<HTMLDivElement>(null)
+  const suggestionRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const listboxId = useId()
   const [cursorPos, setCursorPos] = useState(0)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [suggestionIndex, setSuggestionIndex] = useState(0)
+  const [suggestionPosition, setSuggestionPosition] = useState<{
+    left: number
+    top: number
+    width: number
+    maxHeight: number
+  } | null>(null)
   const pendingCursorRef = useRef<number | null>(null)
 
   // ─── Tokenization & Analysis ───────────────────────────────────────────────
@@ -204,6 +214,57 @@ export default function FormulaEditor({ value, onChange, tags, placeholder, rows
     }
   }, [cursorCtx.inQuotes, suggestions.length, cursorCtx.partial])
 
+  useEffect(() => {
+    if (!showSuggestions) {
+      setSuggestionPosition(null)
+      return
+    }
+
+    const updatePosition = () => {
+      const anchor = wrapperRef.current
+      if (!anchor) return
+      const rect = anchor.getBoundingClientRect()
+      const viewport = window.visualViewport
+      const viewportLeft = viewport?.offsetLeft || 0
+      const viewportTop = viewport?.offsetTop || 0
+      const viewportWidth = viewport?.width || window.innerWidth
+      const viewportHeight = viewport?.height || window.innerHeight
+      const margin = 8
+      const gap = 5
+      const desiredHeight = 224
+      const availableBelow = viewportTop + viewportHeight - rect.bottom - gap - margin
+      const availableAbove = rect.top - viewportTop - gap - margin
+      const placeBelow = availableBelow >= 150 || availableBelow >= availableAbove
+      const maxHeight = Math.max(112, Math.min(desiredHeight, placeBelow ? availableBelow : availableAbove))
+      const width = Math.min(Math.max(rect.width, 280), viewportWidth - margin * 2)
+      const left = Math.min(
+        Math.max(rect.left, viewportLeft + margin),
+        viewportLeft + viewportWidth - width - margin,
+      )
+      const top = placeBelow
+        ? rect.bottom + gap
+        : Math.max(viewportTop + margin, rect.top - gap - maxHeight)
+      setSuggestionPosition({ left, top, width, maxHeight })
+    }
+
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    window.visualViewport?.addEventListener('resize', updatePosition)
+    window.visualViewport?.addEventListener('scroll', updatePosition)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+      window.visualViewport?.removeEventListener('resize', updatePosition)
+      window.visualViewport?.removeEventListener('scroll', updatePosition)
+    }
+  }, [showSuggestions, suggestions.length])
+
+  useEffect(() => {
+    if (!showSuggestions) return
+    suggestionRefs.current[suggestionIndex]?.scrollIntoView({ block: 'nearest' })
+  }, [showSuggestions, suggestionIndex])
+
   // Set cursor position after inserting tag
   useEffect(() => {
     if (pendingCursorRef.current !== null && textareaRef.current) {
@@ -257,6 +318,8 @@ export default function FormulaEditor({ value, onChange, tags, placeholder, rows
       insertTag(suggestions[suggestionIndex])
     } else if (e.key === 'Escape') {
       e.preventDefault()
+      e.stopPropagation()
+      e.nativeEvent.stopImmediatePropagation()
       setShowSuggestions(false)
     }
   }, [showSuggestions, suggestions, suggestionIndex, insertTag])
@@ -278,9 +341,9 @@ export default function FormulaEditor({ value, onChange, tags, placeholder, rows
         : 'border-amber-400 focus:ring-amber-500/20 bg-amber-50/20'
 
   return (
-    <div className="space-y-2" ref={wrapperRef}>
+    <div className="space-y-2">
       {/* Textarea with autocomplete */}
-      <div className="relative">
+      <div className="relative" ref={wrapperRef}>
         <textarea
           ref={textareaRef}
           value={value}
@@ -288,6 +351,10 @@ export default function FormulaEditor({ value, onChange, tags, placeholder, rows
           onSelect={handleSelect}
           onClick={handleSelect}
           onKeyDown={handleKeyDown}
+          aria-autocomplete="list"
+          aria-expanded={showSuggestions && suggestions.length > 0}
+          aria-controls={showSuggestions && suggestions.length > 0 ? listboxId : undefined}
+          aria-activedescendant={showSuggestions && suggestions.length > 0 ? `${listboxId}-option-${suggestionIndex}` : undefined}
           rows={rows}
           spellCheck={false}
           className={`w-full px-3 py-2.5 border rounded-lg font-mono transition-colors text-slate-900 placeholder-slate-400 focus:ring-2 focus:outline-none ${sz} ${borderClass}`}
@@ -307,32 +374,63 @@ export default function FormulaEditor({ value, onChange, tags, placeholder, rows
           </div>
         )}
 
-        {/* Autocomplete dropdown */}
-        {showSuggestions && suggestions.length > 0 && (
-          <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-[60] overflow-hidden">
-            <div className={`px-2.5 py-1.5 bg-slate-50 border-b border-slate-100 ${szSmall} text-slate-500 font-medium flex items-center justify-between`}>
-              <span>Etiquetas disponibles</span>
-              <span className="text-slate-400">↑↓ navegar · Tab insertar · Esc cerrar</span>
-            </div>
-            <div className="max-h-40 overflow-y-auto">
-              {suggestions.map((tag, idx) => (
-                <button
-                  key={tag.name}
-                  type="button"
-                  onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); insertTag(tag) }}
-                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 ${sz} transition-colors text-left ${
-                    idx === suggestionIndex ? 'bg-emerald-50 text-emerald-800' : 'hover:bg-slate-50 text-slate-700'
-                  }`}
-                >
-                  <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: tag.color }} />
-                  <span className="flex-1 truncate">{tag.name}</span>
-                  <span className={`${szTiny} text-slate-400 font-mono`}>&quot;{tag.name.toLowerCase()}&quot;</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
+
+      {showSuggestions && suggestions.length > 0 && suggestionPosition && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={suggestionsRef}
+          id={listboxId}
+          role="listbox"
+          aria-label="Etiquetas disponibles"
+          data-formula-suggestions="true"
+          className="fixed z-[120] flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15"
+          style={{
+            left: suggestionPosition.left,
+            top: suggestionPosition.top,
+            width: suggestionPosition.width,
+            maxHeight: suggestionPosition.maxHeight,
+          }}
+          onPointerDown={(event) => {
+            event.stopPropagation()
+            event.nativeEvent.stopImmediatePropagation()
+          }}
+          onMouseDown={(event) => {
+            event.stopPropagation()
+            event.nativeEvent.stopImmediatePropagation()
+          }}
+        >
+          <div className={`flex shrink-0 items-center justify-between border-b border-slate-100 bg-slate-50 px-2.5 py-1.5 ${szSmall} font-medium text-slate-500`}>
+            <span>Etiquetas disponibles</span>
+            <span className="hidden text-slate-400 sm:inline">↑↓ navegar · Tab insertar · Esc cerrar</span>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {suggestions.map((tag, idx) => (
+              <button
+                ref={element => { suggestionRefs.current[idx] = element }}
+                id={`${listboxId}-option-${idx}`}
+                key={tag.name}
+                type="button"
+                role="option"
+                aria-selected={idx === suggestionIndex}
+                onPointerDown={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  event.nativeEvent.stopImmediatePropagation()
+                  insertTag(tag)
+                }}
+                className={`flex min-h-10 w-full items-center gap-2 px-2.5 py-1.5 text-left ${sz} transition-colors ${
+                  idx === suggestionIndex ? 'bg-emerald-50 text-emerald-800' : 'text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <div className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: tag.color }} />
+                <span className="min-w-0 flex-1 truncate">{tag.name}</span>
+                <span className={`${szTiny} hidden max-w-[45%] truncate font-mono text-slate-400 sm:block`}>&quot;{tag.name.toLowerCase()}&quot;</span>
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )}
 
       {/* Token analysis strip */}
       {value.trim() && analyzed.length > 0 && (

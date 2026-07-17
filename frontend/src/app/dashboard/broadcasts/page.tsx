@@ -152,6 +152,27 @@ const MEDIA_ICONS: Record<string, any> = {
   document: File,
 }
 
+const isCampaignEditable = (campaign: Campaign) => campaign.status === 'draft' || campaign.status === 'scheduled'
+
+function CampaignEditButton({ campaign, compact, onEdit }: {
+  campaign: Campaign
+  compact?: boolean
+  onEdit: (campaign: Campaign) => void
+}) {
+  if (!isCampaignEditable(campaign)) return null
+  return (
+    <button
+      onClick={() => onEdit(campaign)}
+      className={compact
+        ? 'p-1 text-amber-600 hover:bg-amber-50 rounded transition'
+        : 'p-2 text-amber-600 hover:bg-amber-50 rounded-lg transition'}
+      title="Editar campaña"
+    >
+      <Edit className={compact ? 'w-4 h-4' : 'w-5 h-5'} />
+    </button>
+  )
+}
+
 export default function BroadcastsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([])
   const [devices, setDevices] = useState<Device[]>([])
@@ -170,6 +191,7 @@ export default function BroadcastsPage() {
   const [showDuplicateModal, setShowDuplicateModal] = useState(false)
   const [duplicateMessage, setDuplicateMessage] = useState('')
   const [duplicateCampaign, setDuplicateCampaign] = useState<Campaign | null>(null)
+  const [duplicatingCampaignId, setDuplicatingCampaignId] = useState<string | null>(null)
   const [showEditModal, setShowEditModal] = useState(false)
   const [editCampaign, setEditCampaign] = useState<Campaign | null>(null)
   const [recipientTab, setRecipientTab] = useState<'contacts' | 'manual' | 'csv'>('contacts')
@@ -728,25 +750,36 @@ export default function BroadcastsPage() {
   }
 
   const handleDuplicate = async () => {
-    if (!duplicateCampaign) return
+    if (!duplicateCampaign || duplicatingCampaignId) return
+    const campaignId = duplicateCampaign.id
+    setDuplicatingCampaignId(campaignId)
     try {
-      const res = await fetch(`/api/campaigns/${duplicateCampaign.id}/duplicate`, {
+      const res = await fetch(`/api/campaigns/${campaignId}/duplicate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ message_template: duplicateMessage || null }),
       })
       const data = await res.json()
-      if (data.success) {
+      if (res.ok && data.success && data.campaign) {
+        setCampaigns(prev => [data.campaign, ...prev.filter(campaign => campaign.id !== data.campaign.id)])
         setShowDuplicateModal(false)
         setDuplicateMessage('')
         setDuplicateCampaign(null)
-        fetchCampaigns()
+        void fetchCampaigns()
       } else {
         alert(data.error || 'Error al duplicar')
       }
     } catch (err) {
       alert('Error al duplicar campaña')
+    } finally {
+      setDuplicatingCampaignId(null)
     }
+  }
+
+  const openEditCampaign = (campaign: Campaign) => {
+    if (!isCampaignEditable(campaign)) return
+    setEditCampaign(campaign)
+    setShowEditModal(true)
   }
 
   const handleEditCampaign = async (formResult: CampaignFormResult) => {
@@ -766,14 +799,19 @@ export default function BroadcastsPage() {
         }),
       })
       const data = await res.json()
-      if (!data.success) { alert(data.error || 'Error al actualizar'); return }
+      if (!res.ok || !data.success) { alert(data.error || 'Error al actualizar'); return }
 
       // Update attachments
-      await fetch(`/api/campaigns/${editCampaign.id}/attachments`, {
+      const attachmentsRes = await fetch(`/api/campaigns/${editCampaign.id}/attachments`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ attachments: formResult.attachments }),
       })
+      const attachmentsData = await attachmentsRes.json()
+      if (!attachmentsRes.ok || !attachmentsData.success) {
+        alert(attachmentsData.error || 'La campaña se actualizó, pero no se pudieron guardar los adjuntos')
+        return
+      }
 
       setShowEditModal(false)
       setEditCampaign(null)
@@ -983,6 +1021,7 @@ export default function BroadcastsPage() {
                         )}
                         <button onClick={() => handleViewRecipients(campaign)} className="p-1 text-gray-500 hover:bg-gray-100 rounded transition" title="Ver detalles"><Eye className="w-4 h-4" /></button>
                         <button onClick={() => { setSummaryCampaign(campaign); setShowSummaryModal(true) }} className="p-1 text-emerald-600 hover:bg-emerald-50 rounded transition" title="Resumen"><BarChart3 className="w-4 h-4" /></button>
+                        <CampaignEditButton campaign={campaign} compact onEdit={openEditCampaign} />
                         {campaign.status !== 'running' && (
                           <button onClick={() => handleDeleteCampaign(campaign.id)} className="p-1 text-red-500 hover:bg-red-50 rounded transition" title="Eliminar"><Trash2 className="w-4 h-4" /></button>
                         )}
@@ -1128,18 +1167,7 @@ export default function BroadcastsPage() {
                         <Users className="w-5 h-5" />
                       </button>
                     )}
-                    {(campaign.status === 'draft' || campaign.status === 'scheduled') && (
-                      <button
-                        onClick={() => {
-                          setEditCampaign(campaign)
-                          setShowEditModal(true)
-                        }}
-                        className="p-2 text-amber-600 hover:bg-amber-50 rounded-lg transition"
-                        title="Editar campaña"
-                      >
-                        <Edit className="w-5 h-5" />
-                      </button>
-                    )}
+                    <CampaignEditButton campaign={campaign} onEdit={openEditCampaign} />
                     <button
                       onClick={() => handleViewRecipients(campaign)}
                       className="p-2 text-gray-600 hover:bg-gray-50 rounded-lg transition"
@@ -1881,10 +1909,11 @@ export default function BroadcastsPage() {
               </button>
               <button
                 onClick={handleDuplicate}
-                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
+                disabled={duplicatingCampaignId !== null}
+                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Copy className="w-4 h-4 inline mr-2" />
-                Duplicar
+                {duplicatingCampaignId ? <Loader2 className="w-4 h-4 inline mr-2 animate-spin" /> : <Copy className="w-4 h-4 inline mr-2" />}
+                {duplicatingCampaignId ? 'Duplicando...' : 'Duplicar'}
               </button>
             </div>
           </div>

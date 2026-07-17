@@ -8,6 +8,7 @@ import (
 
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/domain"
 )
 
 const (
@@ -27,49 +28,72 @@ const (
 
 // Event types for WebSocket communication
 const (
-	EventNewMessage       = "new_message"
-	EventMessageSent      = "message_sent"
-	EventMessageStatus    = "message_status"
-	EventDeviceStatus     = "device_status"
-	EventQRCode           = "qr_code"
-	EventChatUpdate       = "chat_update"
-	EventPresence         = "presence"
-	EventTyping           = "typing"
-	EventLeadUpdate          = "lead_update"
-	EventNotification        = "notification"
-	EventMessageReaction     = "message_reaction"
-	EventPollUpdate          = "poll_update"
-	EventInteractionUpdate       = "interaction_update"
-	EventMessageRevoked          = "message_revoked"
-	EventMessageEdited           = "message_edited"
-	EventEventParticipantUpdate  = "event_participant_update"
-	EventHistorySyncComplete     = "history_sync_complete"
-	EventLogbookUpdate           = "logbook_update"
-	EventDynamicRegistration     = "dynamic_registration"
-	EventContactUpdate           = "contact_update"
-	EventVersionUpdate           = "version_update"
-	EventTaskUpdate              = "task_update"
-	EventTaskReminder            = "task_reminder"
-	EventTaskOverdue             = "task_overdue"
-	EventCustomFieldDefUpdate    = "custom_field_def_update"
+	EventNewMessage             = "new_message"
+	EventMessageSent            = "message_sent"
+	EventMessageStatus          = "message_status"
+	EventDeviceStatus           = "device_status"
+	EventQRCode                 = "qr_code"
+	EventChatUpdate             = "chat_update"
+	EventPresence               = "presence"
+	EventTyping                 = "typing"
+	EventLeadUpdate             = "lead_update"
+	EventNotification           = "notification"
+	EventMessageReaction        = "message_reaction"
+	EventPollUpdate             = "poll_update"
+	EventInteractionUpdate      = "interaction_update"
+	EventMessageRevoked         = "message_revoked"
+	EventMessageEdited          = "message_edited"
+	EventEventParticipantUpdate = "event_participant_update"
+	EventHistorySyncComplete    = "history_sync_complete"
+	EventLogbookUpdate          = "logbook_update"
+	EventDynamicRegistration    = "dynamic_registration"
+	EventContactUpdate          = "contact_update"
+	EventVersionUpdate          = "version_update"
+	EventTaskUpdate             = "task_update"
+	EventTaskReminder           = "task_reminder"
+	EventTaskOverdue            = "task_overdue"
+	EventCustomFieldDefUpdate   = "custom_field_def_update"
+	EventWhatsAppStatus         = "whatsapp_status"
 )
 
 // Message represents a WebSocket message
 type Message struct {
-	Event     string      `json:"event"`
-	AccountID string      `json:"account_id,omitempty"`
-	DeviceID  string      `json:"device_id,omitempty"`
-	Data      interface{} `json:"data"`
+	Event              string      `json:"event"`
+	AccountID          string      `json:"account_id,omitempty"`
+	DeviceID           string      `json:"device_id,omitempty"`
+	Data               interface{} `json:"data"`
+	RequiredPermission string      `json:"-"`
 }
 
 // Client represents a connected WebSocket client
 type Client struct {
-	ID        string
-	AccountID uuid.UUID
-	UserID    uuid.UUID
-	Conn      *websocket.Conn
-	Send      chan []byte
-	Hub       *Hub
+	ID          string
+	AccountID   uuid.UUID
+	UserID      uuid.UUID
+	Conn        *websocket.Conn
+	Send        chan []byte
+	Hub         *Hub
+	Permissions map[string]bool
+}
+
+func (c *Client) HasPermission(permission string) bool {
+	if c == nil || permission == "" {
+		return permission == ""
+	}
+	return c.Permissions[domain.PermAll] || c.Permissions[permission]
+}
+
+func clientCanReceive(client *Client, msg *Message) bool {
+	if client == nil || msg == nil {
+		return false
+	}
+	required := msg.RequiredPermission
+	// WhatsApp status payloads contain message text/caption and are always part
+	// of Chats, even if a future emitter forgets to annotate the event.
+	if msg.Event == EventWhatsAppStatus {
+		required = domain.PermChats
+	}
+	return client.HasPermission(required)
 }
 
 // Hub maintains the set of active clients and broadcasts messages
@@ -167,6 +191,9 @@ func (h *Hub) broadcastMessage(msg *Message) {
 		if err == nil {
 			if clients, ok := h.accountClients[accountID]; ok {
 				for client := range clients {
+					if !clientCanReceive(client, msg) {
+						continue
+					}
 					select {
 					case client.Send <- data:
 					default:
@@ -183,6 +210,9 @@ func (h *Hub) broadcastMessage(msg *Message) {
 
 	// Broadcast to all clients
 	for client := range h.clients {
+		if !clientCanReceive(client, msg) {
+			continue
+		}
 		select {
 		case client.Send <- data:
 		default:
@@ -214,6 +244,17 @@ func (h *Hub) BroadcastToAccount(accountID uuid.UUID, event string, data interfa
 		Event:     event,
 		AccountID: accountID.String(),
 		Data:      data,
+	}
+}
+
+// BroadcastToAccountWithPermission sends sensitive module payloads only to
+// sockets whose effective account role includes the required permission.
+func (h *Hub) BroadcastToAccountWithPermission(accountID uuid.UUID, permission, event string, data interface{}) {
+	h.broadcast <- &Message{
+		Event:              event,
+		AccountID:          accountID.String(),
+		Data:               data,
+		RequiredPermission: permission,
 	}
 }
 

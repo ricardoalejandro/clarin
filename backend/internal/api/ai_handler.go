@@ -1346,7 +1346,7 @@ campaign_recipients(id uuid PK, campaign_id uuid, name text, phone text, status 
 interactions(id uuid PK, account_id uuid, contact_id uuid, event_id uuid, participant_id uuid, type text, direction text, outcome text, notes text, lead_id uuid, created_at timestamptz)
 
 programs(id uuid PK, account_id uuid, name text, status text)
-program_sessions(id uuid PK, program_id uuid, date timestamptz, topic text, location text)
+program_sessions(id uuid PK, program_id uuid, date date, topic text, location text)
 program_participants(id uuid PK, program_id uuid, contact_id uuid, status text, lead_id uuid)
 program_attendance(id uuid PK, session_id uuid, participant_id uuid, status text, notes text)
 

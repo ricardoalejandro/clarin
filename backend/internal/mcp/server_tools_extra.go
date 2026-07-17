@@ -21,7 +21,7 @@ func (s *MCPServer) toolListPrograms(ctx context.Context, req mcp.CallToolReques
 
 	status := stringArg(req, "status")
 
-	programs, err := s.repos.Program.List(ctx, accountID)
+	programs, err := s.repos.Program.List(ctx, accountID, status)
 	if err != nil {
 		return errResult("error al obtener programas: " + err.Error()), nil
 	}
@@ -113,7 +113,7 @@ func (s *MCPServer) toolGetProgramDetail(ctx context.Context, req mcp.CallToolRe
 	}
 
 	// Participants
-	participants, err := s.repos.Program.ListParticipants(ctx, programID)
+	participants, err := s.repos.Program.ListParticipants(ctx, accountID, programID)
 	if err == nil {
 		type partResult struct {
 			ID          string `json:"id"`

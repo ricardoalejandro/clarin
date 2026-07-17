@@ -104,6 +104,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
     const type = message.message_type || 'text'
     if (type === 'image') return { icon: <ImageIcon className="w-4 h-4" />, text: message.body || '📷 Imagen' }
     if (type === 'video') return { icon: <Video className="w-4 h-4" />, text: message.body || '🎥 Video' }
+    if (type === 'gif') return { icon: <Video className="w-4 h-4" />, text: message.body || 'GIF' }
     if (type === 'audio') return { icon: <Mic className="w-4 h-4" />, text: '🎵 Audio' }
     if (type === 'document') return { icon: <FileText className="w-4 h-4" />, text: message.media_filename || '📄 Documento' }
     if (type === 'sticker') return { icon: <ImageIcon className="w-4 h-4" />, text: '🏷️ Sticker' }

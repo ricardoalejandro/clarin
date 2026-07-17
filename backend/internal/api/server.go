@@ -41,6 +41,7 @@ import (
 	"github.com/naperu/clarin/pkg/cache"
 	"github.com/naperu/clarin/pkg/config"
 	"github.com/naperu/clarin/pkg/database"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // strPtr returns a pointer to a string
@@ -71,7 +72,7 @@ type Server struct {
 func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, kommoManager *kommo.Manager, c *cache.Cache, gc *googleclient.Client, version string) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:               "Clarin CRM",
-		BodyLimit:             32 * 1024 * 1024, // 32MB max upload
+		BodyLimit:             48 * 1024 * 1024, // video status (30 MB) + optional editor overlay
 		DisableStartupMessage: false,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
@@ -179,6 +180,30 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	})
 
 	server.setupRoutes()
+	// Retention is an invariant of persisted status data, not a publishing
+	// capability. Keep cleanup running even if publication is disabled after a
+	// real-device trial, otherwise old rows and media would outlive 24 hours.
+	if repos != nil && repos.WhatsAppStatus != nil {
+		go func() {
+			// Run shortly after startup and frequently enough that the ten-minute
+			// upload grace does not become an hour-long retention delay. Each pass
+			// drains the durable queue within a bounded runtime.
+			runCleanup := func() {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), statusCleanupRunTimeout)
+				defer cancel()
+				server.runWhatsAppStatusCleanup(cleanupCtx)
+			}
+			timer := time.NewTimer(statusCleanupStartDelay)
+			defer timer.Stop()
+			<-timer.C
+			runCleanup()
+			ticker := time.NewTicker(statusCleanupInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				runCleanup()
+			}
+		}()
+	}
 
 	// Broadcast version update to all connected clients after a short delay
 	// This covers the case where users are connected when a new version is deployed
@@ -347,9 +372,16 @@ func (s *Server) setupRoutes() {
 	chats.Get("/", s.handleGetChats)
 	chats.Get("/resolve-whatsapp/:phone", s.handleResolveWhatsAppChat)
 	chats.Get("/find-by-phone/:phone", s.handleFindChatByPhone)
+	// Chat operators need a phone-only contact lookup even when their role does
+	// not grant access to the full Contacts module.
+	chats.Get("/contacts/search", s.handleSearchChatContacts)
 	chats.Post("/new", s.handleCreateNewChat)
 	chats.Delete("/batch", s.handleDeleteChatsBatch)
+	chats.Post("/:id/contact", s.handleLinkChatContact)
+	chats.Get("/:id/opportunities/:opportunityId", s.handleGetChatOpportunity)
 	chats.Get("/:id", s.handleGetChatDetails)
+	chats.Get("/:id/messages/search", s.handleSearchMessages)
+	chats.Get("/:id/messages/:messageId/context", s.handleGetMessageContext)
 	chats.Get("/:id/messages", s.handleGetMessages)
 	chats.Post("/:id/read", s.handleMarkAsRead)
 	chats.Post("/:id/sync-history", s.handleRequestHistorySync)
@@ -372,10 +404,20 @@ func (s *Server) setupRoutes() {
 	protected.Post("/contacts/check-whatsapp", s.requirePermission(domain.PermChats), s.handleCheckWhatsApp)
 
 	// Sticker routes
-	protected.Get("/stickers/recent", s.handleGetRecentStickers)
-	protected.Get("/stickers/saved", s.handleGetSavedStickers)
-	protected.Post("/stickers/saved", s.handleSaveSticker)
-	protected.Delete("/stickers/saved", s.handleDeleteSavedSticker)
+	stickers := protected.Group("/stickers", s.requirePermission(domain.PermChats))
+	stickers.Get("/recent", s.handleGetRecentStickers)
+	stickers.Get("/saved", s.handleGetSavedStickers)
+	stickers.Post("/saved", s.handleSaveSticker)
+	stickers.Delete("/saved", s.handleDeleteSavedSticker)
+
+	// Own WhatsApp statuses. Contact statuses are never exposed by these routes.
+	statuses := protected.Group("/whatsapp/statuses", s.requirePermission(domain.PermChats))
+	statuses.Get("/", s.handleListOwnWhatsAppStatuses)
+	statuses.Post("/", s.handlePublishOwnWhatsAppStatus)
+	statuses.Get("/:id/media", s.handleGetOwnWhatsAppStatusMedia)
+	statuses.Get("/:id/viewers", s.handleListOwnWhatsAppStatusViewers)
+	statuses.Post("/:id/retry", s.handleRetryOwnWhatsAppStatus)
+	statuses.Delete("/:id", s.handleDeleteOwnWhatsAppStatus)
 
 	// Media routes (upload requires auth)
 	media := protected.Group("/media")
@@ -462,6 +504,7 @@ func (s *Server) setupRoutes() {
 
 	programs.Get("/:id/participants", s.handleListParticipants)
 	programs.Post("/:id/participants", s.handleAddParticipant)
+	programs.Post("/:id/participants/bulk", s.handleAddProgramParticipantsBulk)
 	programs.Delete("/:id/participants/:participantId", s.handleRemoveParticipant)
 	programs.Patch("/:id/participants/:participantId/outcome", s.handleUpdateProgramParticipantOutcome)
 	programs.Get("/:id/participants/:participantId/notes", s.handleListProgramParticipantNotes)
@@ -483,6 +526,7 @@ func (s *Server) setupRoutes() {
 	campaigns.Delete("/:id", s.handleDeleteCampaign)
 	campaigns.Post("/batch-delete", s.handleBatchDeleteCampaigns)
 	campaigns.Post("/:id/recipients", s.handleAddCampaignRecipients)
+	campaigns.Post("/:id/recipients/from-contacts", s.handleAddCampaignRecipientsFromContacts)
 	campaigns.Post("/:id/recipients/from-leads", s.handleAddCampaignRecipientsFromLeads)
 	campaigns.Get("/:id/recipients", s.handleGetCampaignRecipients)
 	campaigns.Delete("/:id/recipients/:rid", s.handleDeleteCampaignRecipient)
@@ -517,6 +561,10 @@ func (s *Server) setupRoutes() {
 		contacts.Post("/:id/sync-kommo", s.requirePlanFeature("kommo_sync"), s.handleSyncContactFromKommo)
 	}
 	contacts.Delete("/:id", s.handleDeleteContact)
+
+	// Contact is the sole owner of a person's photo. Authorization is resolved
+	// per Contact/Lead/Chat/Event/Program context inside these shared routes.
+	s.registerContactAvatarRoutes(protected)
 
 	// Custom field value routes (under contacts, all authenticated users)
 	contacts.Get("/:id/custom-fields", s.handleGetCustomFieldValues)
@@ -1025,7 +1073,18 @@ func (s *Server) wsUpgrade(c *fiber.Ctx) error {
 			}
 		}
 
+		permissions := claims.Permissions
+		isAdmin := claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin
+		if isAdmin {
+			permissions = []string{domain.PermAll}
+		} else {
+			// Resolve the effective role on each socket connection so a stale JWT
+			// cannot retain a revoked module permission for real-time payloads.
+			permissions, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), claims.UserID, claims.AccountID)
+		}
+
 		c.Locals("claims", claims)
+		c.Locals("ws_permissions", permissions)
 		return c.Next()
 	}
 	return fiber.ErrUpgradeRequired
@@ -1577,11 +1636,36 @@ func isCloudAPIDevice(device *domain.Device) bool {
 	return getDeviceProvider(device) == domain.DeviceProviderWhatsAppCloudAPI
 }
 
+func (s *Server) applyDeviceRuntimePolicy(device *domain.Device) {
+	if device == nil {
+		return
+	}
+	if device.RuntimeCapabilities == nil {
+		device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{}
+	}
+	connected := device.Status != nil && *device.Status == domain.DeviceStatusConnected
+	manualWeb := connected && getDeviceProvider(device) == domain.DeviceProviderWhatsAppWeb
+	device.RuntimeCapabilities.CanStartChat = manualWeb
+	device.RuntimeCapabilities.CanCheckWhatsApp = manualWeb
+	device.RuntimeCapabilities.CanSendSticker = manualWeb
+	device.RuntimeCapabilities.CanSendAnimatedSticker = false
+	statusEnabled := s.cfg != nil && s.cfg.WhatsAppStatusEnabled && manualWeb
+	device.RuntimeCapabilities.CanPublishStatus = statusEnabled
+	// HTTPS links are currently published safely as caption/text. The native
+	// interactive status annotation remains disabled until real-device tests
+	// confirm identical behavior across Android, iOS and WhatsApp Web.
+	device.RuntimeCapabilities.CanPublishStatusLink = false
+	device.RuntimeCapabilities.CanSyncOwnStatus = statusEnabled && s.cfg.WhatsAppStatusSyncEnabled
+}
+
 func (s *Server) handleGetDevices(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	devices, err := s.services.Device.GetByAccountID(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	for _, device := range devices {
+		s.applyDeviceRuntimePolicy(device)
 	}
 	return c.JSON(fiber.Map{"success": true, "devices": devices})
 }
@@ -1669,6 +1753,7 @@ func (s *Server) handleGetDevice(c *fiber.Ctx) error {
 	if device == nil || device.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
+	s.applyDeviceRuntimePolicy(device)
 
 	return c.JSON(fiber.Map{"success": true, "device": device})
 }
@@ -2002,23 +2087,74 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 	if details == nil || !chatBelongsToAccount(details.Chat, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
+	if details.Chat.DeviceID != nil {
+		device, deviceErr := s.services.Device.GetByID(c.Context(), *details.Chat.DeviceID)
+		if deviceErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": deviceErr.Error()})
+		}
+		if device != nil && device.AccountID == accountID {
+			s.applyDeviceRuntimePolicy(device)
+			details.Device = device
+		}
+	}
 
 	// Load structured tags for contact
 	if details.Contact != nil {
-		tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", details.Contact.ID)
+		tags, tagErr := s.services.Tag.GetByEntity(c.Context(), "contact", details.Contact.ID)
+		if tagErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": tagErr.Error()})
+		}
 		details.Contact.StructuredTags = tags
 	}
 	if details.Lead != nil {
-		tags, _ := s.services.Tag.GetByEntity(c.Context(), "lead", details.Lead.ID)
+		tags, tagErr := s.services.Tag.GetByEntity(c.Context(), "lead", details.Lead.ID)
+		if tagErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": tagErr.Error()})
+		}
 		details.Lead.StructuredTags = tags
 	}
 
 	return c.JSON(fiber.Map{
-		"success": true,
-		"chat":    details.Chat,
-		"contact": details.Contact,
-		"lead":    details.Lead,
+		"success":               true,
+		"chat":                  details.Chat,
+		"contact":               details.Contact,
+		"lead":                  details.Lead,
+		"opportunities":         details.Opportunities,
+		"active_opportunity_id": details.ActiveOpportunityID,
+		"device":                details.Device,
 	})
+}
+
+func (s *Server) handleGetChatOpportunity(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	chatID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
+	}
+	opportunityID, err := uuid.Parse(c.Params("opportunityId"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid opportunity ID"})
+	}
+	details, err := s.services.Chat.GetChatDetails(c.Context(), chatID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if details == nil || !chatBelongsToAccount(details.Chat, accountID) || details.Contact == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Opportunity not found"})
+	}
+	opportunity, err := s.services.Lead.GetByID(c.Context(), opportunityID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if opportunity == nil || opportunity.AccountID != accountID || opportunity.ContactID == nil || *opportunity.ContactID != details.Contact.ID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Opportunity not found"})
+	}
+	tags, tagErr := s.services.Tag.GetByEntity(c.Context(), "lead", opportunity.ID)
+	if tagErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": tagErr.Error()})
+	}
+	opportunity.StructuredTags = tags
+	return c.JSON(fiber.Map{"success": true, "lead": opportunity})
 }
 
 func (s *Server) handleFindChatByPhone(c *fiber.Ctx) error {
@@ -2044,8 +2180,288 @@ func (s *Server) handleFindChatByPhone(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "chat": chat})
 }
 
+// handleSearchChatContacts is deliberately narrower than the Contacts module:
+// chat operators receive only the identity fields needed to choose a phone.
+// Tags, custom fields, notes and advanced filters are never exposed here.
+func (s *Server) handleSearchChatContacts(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	search := strings.TrimSpace(c.Query("search"))
+	if len([]rune(search)) < 2 {
+		return c.JSON(fiber.Map{"success": true, "contacts": []interface{}{}, "total": 0, "limit": 20, "offset": 0, "has_more": false})
+	}
+	limit := c.QueryInt("limit", 20)
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	offset := c.QueryInt("offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	textPattern := "%" + search + "%"
+	normalized := normalizeWhatsAppPhone(search)
+	phonePattern := "%" + normalized + "%"
+
+	const predicate = `
+		FROM contacts c
+		WHERE c.account_id=$1 AND c.is_group=FALSE
+		  AND (
+			REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g') <> ''
+			OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND REGEXP_REPLACE(COALESCE(cp.phone,''), '[^0-9]', '', 'g') <> '')
+			OR EXISTS (SELECT 1 FROM contact_aliases ca WHERE ca.account_id=c.account_id AND ca.contact_id=c.id AND ca.alias_type='phone' AND ca.normalized_value <> '')
+		  )
+		  AND (
+			COALESCE(c.custom_name,'') ILIKE $2 OR COALESCE(c.name,'') ILIKE $2
+			OR COALESCE(c.last_name,'') ILIKE $2 OR COALESCE(c.short_name,'') ILIKE $2
+			OR COALESCE(c.push_name,'') ILIKE $2 OR COALESCE(c.company,'') ILIKE $2
+			OR ($3 <> '' AND REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g') LIKE $4)
+			OR ($3 <> '' AND EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND REGEXP_REPLACE(COALESCE(cp.phone,''), '[^0-9]', '', 'g') LIKE $4))
+			OR ($3 <> '' AND EXISTS (SELECT 1 FROM contact_aliases ca WHERE ca.account_id=c.account_id AND ca.contact_id=c.id AND ca.alias_type='phone' AND ca.normalized_value LIKE $4))
+		  )`
+
+	var total int
+	if err := s.repos.DB().QueryRow(c.Context(), "SELECT COUNT(*) "+predicate, accountID, textPattern, normalized, phonePattern).Scan(&total); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	rows, err := s.repos.DB().Query(c.Context(), `
+		SELECT c.id, c.jid,
+		       (
+		         SELECT candidate.phone
+		         FROM (
+		           SELECT c.phone AS phone,
+		                  REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g') AS normalized_value,
+		                  0 AS source_rank
+		           WHERE REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g') <> ''
+		           UNION ALL
+		           SELECT cp.phone,
+		                  REGEXP_REPLACE(COALESCE(cp.phone,''), '[^0-9]', '', 'g'),
+		                  1
+		           FROM contact_phones cp
+		           WHERE cp.contact_id=c.id
+		             AND REGEXP_REPLACE(COALESCE(cp.phone,''), '[^0-9]', '', 'g') <> ''
+		           UNION ALL
+		           SELECT ca.alias_value, ca.normalized_value, 2
+		           FROM contact_aliases ca
+		           WHERE ca.account_id=c.account_id AND ca.contact_id=c.id
+		             AND ca.alias_type='phone' AND ca.normalized_value <> ''
+		         ) candidate
+		         ORDER BY
+		           CASE
+		             WHEN $3 <> '' AND candidate.normalized_value=$3 THEN 0
+		             WHEN $3 <> '' AND candidate.normalized_value LIKE $3 || '%' THEN 1
+		             WHEN $3 <> '' AND candidate.normalized_value LIKE $4 THEN 2
+		             ELSE 3
+		           END,
+		           candidate.source_rank, candidate.phone
+		         LIMIT 1
+		       ) AS phone,
+		       c.name, c.last_name, c.short_name, c.custom_name, c.push_name, c.company, c.avatar_url
+	`+predicate+`
+		ORDER BY
+		  CASE
+		    WHEN $3 <> '' AND (
+		      REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g')=$3
+		      OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND REGEXP_REPLACE(cp.phone, '[^0-9]', '', 'g')=$3)
+		      OR EXISTS (SELECT 1 FROM contact_aliases ca WHERE ca.account_id=c.account_id AND ca.contact_id=c.id AND ca.alias_type='phone' AND ca.normalized_value=$3)
+		    ) THEN 0
+		    WHEN $3 <> '' AND (
+		      REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g') LIKE $3 || '%'
+		      OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND REGEXP_REPLACE(cp.phone, '[^0-9]', '', 'g') LIKE $3 || '%')
+		      OR EXISTS (SELECT 1 FROM contact_aliases ca WHERE ca.account_id=c.account_id AND ca.contact_id=c.id AND ca.alias_type='phone' AND ca.normalized_value LIKE $3 || '%')
+		    ) THEN 1
+		    WHEN $3 <> '' THEN 2 ELSE 3
+		  END,
+		  CASE WHEN LOWER(COALESCE(c.custom_name, c.name, ''))=LOWER($5) THEN 0 ELSE 1 END,
+		  LOWER(COALESCE(c.custom_name, c.name, c.push_name, c.phone, c.jid)), c.id
+		LIMIT $6 OFFSET $7
+	`, accountID, textPattern, normalized, phonePattern, search, limit, offset)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	defer rows.Close()
+
+	contacts := make([]fiber.Map, 0, limit)
+	for rows.Next() {
+		var id uuid.UUID
+		var jid string
+		var phone, name, lastName, shortName, customName, pushName, company, avatarURL *string
+		if err := rows.Scan(&id, &jid, &phone, &name, &lastName, &shortName, &customName, &pushName, &company, &avatarURL); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		contacts = append(contacts, fiber.Map{
+			"id": id, "jid": jid, "phone": phone, "name": name, "last_name": lastName,
+			"short_name": shortName, "custom_name": customName, "push_name": pushName,
+			"company": company, "avatar_url": avatarURL,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	return c.JSON(fiber.Map{
+		"success": true, "contacts": contacts, "total": total, "limit": limit,
+		"offset": offset, "has_more": offset+len(contacts) < total,
+	})
+}
+
+// handleLinkChatContact completes the empty-state action in Chat details. It
+// can link an existing account Contact or create the canonical Contact from the
+// chat identity, without ever creating a Lead implicitly.
+func (s *Server) handleLinkChatContact(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	chatID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Chat inválido"})
+	}
+	var req struct {
+		ContactID string `json:"contact_id,omitempty"`
+		Name      string `json:"name,omitempty"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if !chatBelongsToAccount(chat, accountID) || strings.HasSuffix(chat.JID, "@g.us") {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat no encontrado"})
+	}
+
+	var contact *domain.Contact
+	if strings.TrimSpace(req.ContactID) != "" {
+		contactID, parseErr := uuid.Parse(strings.TrimSpace(req.ContactID))
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Contacto inválido"})
+		}
+		contact, err = s.services.Contact.GetByID(c.Context(), contactID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		if contact == nil || contact.AccountID != accountID || contact.IsGroup {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Contacto no encontrado"})
+		}
+	} else {
+		name := strings.TrimSpace(req.Name)
+		if name == "" || len([]rune(name)) > 160 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Escribe un nombre de hasta 160 caracteres"})
+		}
+		contactID, createErr := s.services.Chat.CreateAndLinkContact(c.Context(), accountID, chatID, name)
+		err = createErr
+		if err != nil {
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat no encontrado"})
+			case errors.Is(err, repository.ErrContactIdentityConflict):
+				return c.Status(409).JSON(fiber.Map{"success": false, "error": "Hay más de un contacto con este número. Selecciona la ficha correcta.", "code": "contact_identity_conflict"})
+			default:
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo crear el contacto"})
+			}
+		}
+		contact, err = s.services.Contact.GetByID(c.Context(), contactID)
+		if err != nil || contact == nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "El contacto se creó, pero no pudo recargarse"})
+		}
+	}
+
+	if strings.TrimSpace(req.ContactID) != "" {
+		err = s.services.Chat.LinkContact(c.Context(), accountID, chatID, contact.ID)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat o contacto no encontrado"})
+		case errors.Is(err, repository.ErrChatContactConflict):
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este chat ya está vinculado a otro contacto", "code": "chat_contact_conflict"})
+		case errors.Is(err, repository.ErrContactIdentityConflict):
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este número pertenece a otro contacto. Selecciónalo en los resultados.", "code": "contact_identity_conflict"})
+		default:
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo vincular el contacto"})
+		}
+	}
+	contact, err = s.services.Contact.GetByID(c.Context(), contact.ID)
+	if err != nil || contact == nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "El contacto se vinculó, pero no pudo recargarse"})
+	}
+	s.invalidateContactTreeCaches(accountID)
+	s.invalidateChatCaches(accountID, &chatID)
+	return c.JSON(fiber.Map{"success": true, "contact": contact})
+}
+
 func normalizeWhatsAppPhone(value string) string {
 	return kommo.NormalizePhone(value)
+}
+
+func validWhatsAppPhone(value string) bool {
+	normalized := normalizeWhatsAppPhone(value)
+	if len(normalized) < 7 || len(normalized) > 15 {
+		return false
+	}
+	for _, char := range normalized {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalWhatsAppUserJID(value string) (string, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return "", fmt.Errorf("WhatsApp did not return a canonical JID")
+	}
+	jid, err := types.ParseJID(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid canonical WhatsApp JID: %w", err)
+	}
+	jid = jid.ToNonAD()
+	if jid.IsEmpty() || jid.Server != types.DefaultUserServer || !validWhatsAppPhone(jid.User) {
+		return "", fmt.Errorf("invalid canonical WhatsApp user JID")
+	}
+	return jid.String(), nil
+}
+
+func (s *Server) contactMatchesWhatsAppIdentity(ctx context.Context, accountID, contactID uuid.UUID, phones []string, jid string) (bool, error) {
+	normalizedPhones := make([]string, 0, len(phones))
+	seen := make(map[string]struct{}, len(phones))
+	for _, phone := range phones {
+		normalized := normalizeWhatsAppPhone(phone)
+		if !validWhatsAppPhone(normalized) {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		normalizedPhones = append(normalizedPhones, normalized)
+	}
+	if len(normalizedPhones) == 0 {
+		return false, nil
+	}
+	var matches bool
+	err := s.repos.DB().QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM contacts c
+			WHERE c.id=$1 AND c.account_id=$2 AND c.is_group=FALSE
+			  AND (
+				REGEXP_REPLACE(COALESCE(c.phone,''), '[^0-9]', '', 'g')=ANY($3)
+				OR LOWER(BTRIM(c.jid))=LOWER(BTRIM($4))
+				OR EXISTS (
+					SELECT 1 FROM contact_phones cp
+					WHERE cp.contact_id=c.id
+					  AND REGEXP_REPLACE(COALESCE(cp.phone,''), '[^0-9]', '', 'g')=ANY($3)
+				)
+				OR EXISTS (
+					SELECT 1 FROM contact_aliases ca
+					WHERE ca.contact_id=c.id AND ca.account_id=c.account_id
+					  AND (ca.normalized_value=ANY($3) OR LOWER(BTRIM(ca.alias_value))=LOWER(BTRIM($4)))
+				)
+			  )
+		)
+	`, contactID, accountID, normalizedPhones, jid).Scan(&matches)
+	return matches, err
 }
 
 func normalizeDevicePhone(device *domain.Device) string {
@@ -2212,10 +2628,15 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 	var req struct {
 		DeviceID       string `json:"device_id"`
 		Phone          string `json:"phone"`
+		ContactID      string `json:"contact_id,omitempty"`
 		InitialMessage string `json:"initial_message,omitempty"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	req.InitialMessage = strings.TrimSpace(req.InitialMessage)
+	if len([]rune(req.InitialMessage)) > 4096 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El mensaje inicial es demasiado largo"})
 	}
 
 	deviceID, err := uuid.Parse(req.DeviceID)
@@ -2229,12 +2650,64 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	if req.Phone == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Phone number is required"})
+	normalizedPhone := normalizeWhatsAppPhone(req.Phone)
+	if !validWhatsAppPhone(normalizedPhone) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El número debe incluir código de país y tener entre 7 y 15 dígitos"})
+	}
+	validationResults, err := s.services.Chat.IsOnWhatsApp(c.Context(), deviceID, []string{"+" + normalizedPhone})
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"error":   "No se pudo validar el número con WhatsApp. Intenta nuevamente.",
+			"code":    "whatsapp_validation_unavailable",
+		})
+	}
+	if len(validationResults) == 0 || !validationResults[0].IsOnWhatsApp {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"success": false,
+			"error":   "El número no está registrado en WhatsApp",
+			"code":    "not_on_whatsapp",
+			"phone":   normalizedPhone,
+		})
+	}
+	canonicalJID, err := canonicalWhatsAppUserJID(validationResults[0].JID)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"success": false,
+			"error":   "WhatsApp confirmó el número, pero no devolvió una identidad canónica válida. Intenta nuevamente.",
+			"code":    "invalid_whatsapp_identity",
+		})
+	}
+	canonicalPhone := normalizeWhatsAppPhone(strings.Split(canonicalJID, "@")[0])
+
+	var selectedContact *domain.Contact
+	if strings.TrimSpace(req.ContactID) != "" {
+		contactID, parseErr := uuid.Parse(strings.TrimSpace(req.ContactID))
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid contact ID"})
+		}
+		contact, contactErr := s.services.Contact.GetByID(c.Context(), contactID)
+		if contactErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": contactErr.Error()})
+		}
+		if contact == nil || contact.AccountID != accountID || contact.IsGroup {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Contact not found"})
+		}
+		matches, matchErr := s.contactMatchesWhatsAppIdentity(c.Context(), accountID, contactID, []string{normalizedPhone, canonicalPhone}, canonicalJID)
+		if matchErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": matchErr.Error()})
+		}
+		if !matches {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"success": false,
+				"error":   "El número verificado ya no pertenece al contacto seleccionado. Vuelve a seleccionarlo.",
+				"code":    "contact_phone_mismatch",
+			})
+		}
+		selectedContact = contact
 	}
 	if req.InitialMessage != "" {
-		destination := kommo.NormalizePhone(req.Phone) + "@s.whatsapp.net"
-		if err := s.ensureOutboundContactAllowed(c.Context(), accountID, destination); err != nil {
+		if err := s.ensureOutboundContactAllowed(c.Context(), accountID, canonicalJID); err != nil {
 			if apiErr, ok := err.(*fiber.Error); ok {
 				return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "do_not_contact"})
 			}
@@ -2242,8 +2715,27 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 		}
 	}
 
-	// Create chat
-	chat, err := s.services.Chat.CreateNewChat(c.Context(), accountID, deviceID, req.Phone)
+	existingChat, err := s.services.Chat.FindByJID(c.Context(), accountID, canonicalJID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	created := existingChat == nil
+	if existingChat != nil && selectedContact != nil && (existingChat.ContactID == nil || *existingChat.ContactID != selectedContact.ID) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"error":   "La conversación existente está vinculada a otro contacto. Ábrela para revisar el vínculo.",
+			"code":    "chat_contact_conflict",
+			"chat":    existingChat,
+		})
+	}
+
+	// Create or reuse the canonical WhatsApp chat.
+	var chat *domain.Chat
+	if selectedContact != nil {
+		chat, err = s.services.Chat.CreateNewChatForContact(c.Context(), accountID, deviceID, selectedContact.ID, canonicalJID, canonicalPhone, selectedContact.DisplayName())
+	} else {
+		chat, err = s.services.Chat.CreateNewChat(c.Context(), accountID, deviceID, canonicalJID)
+	}
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -2255,15 +2747,30 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 			// Chat created but message failed - still return chat
 			s.invalidateChatsCache(accountID)
 			return c.Status(201).JSON(fiber.Map{
-				"success": true,
-				"chat":    chat,
-				"warning": "Chat created but initial message failed to send",
+				"success":       true,
+				"chat":          chat,
+				"created":       created,
+				"phone":         normalizedPhone,
+				"jid":           canonicalJID,
+				"verified_name": validationResults[0].VerifiedName,
+				"warning":       "La conversación está lista, pero el mensaje inicial no pudo enviarse",
 			})
 		}
 	}
 
 	s.invalidateChatsCache(accountID)
-	return c.Status(201).JSON(fiber.Map{"success": true, "chat": chat})
+	statusCode := fiber.StatusCreated
+	if !created {
+		statusCode = fiber.StatusOK
+	}
+	return c.Status(statusCode).JSON(fiber.Map{
+		"success":       true,
+		"chat":          chat,
+		"created":       created,
+		"phone":         normalizedPhone,
+		"jid":           canonicalJID,
+		"verified_name": validationResults[0].VerifiedName,
+	})
 }
 
 func (s *Server) handleGetMessages(c *fiber.Ctx) error {
@@ -2327,6 +2834,47 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 	return c.JSON(result)
 }
 
+func (s *Server) handleSearchMessages(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	chatID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
+	}
+	query := strings.TrimSpace(c.Query("q"))
+	if len([]rune(query)) < 2 || len([]rune(query)) > 100 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "La búsqueda debe tener entre 2 y 100 caracteres"})
+	}
+	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if !chatBelongsToAccount(chat, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
+	}
+	limit := c.QueryInt("limit", 20)
+	offset := c.QueryInt("offset", 0)
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	messages, total, err := s.services.Chat.SearchMessages(c.Context(), accountID, chatID, query, limit, offset)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	historyOffset := -1
+	if len(messages) == 1 {
+		if value, offsetErr := s.services.Chat.GetMessageHistoryOffset(c.Context(), accountID, chatID, messages[0].ID); offsetErr == nil {
+			historyOffset = value
+		}
+	}
+	return c.JSON(fiber.Map{
+		"success": true, "messages": messages, "total": total,
+		"limit": limit, "offset": offset, "next_offset": offset + len(messages), "history_offset": historyOffset,
+	})
+}
+
 func (s *Server) handleMarkAsRead(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	chatID, err := uuid.Parse(c.Params("id"))
@@ -2386,10 +2934,16 @@ func (s *Server) handleRequestHistorySync(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Chat.RequestHistorySync(c.Context(), accountID, *chat.DeviceID, chatID, chat.JID); err != nil {
+		if errors.Is(err, whatsapp.ErrHistorySyncInProgress) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Ya hay una recuperación en curso para este dispositivo"})
+		}
+		if errors.Is(err, whatsapp.ErrHistorySyncReceiveDisabled) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Activa la recepción de mensajes del dispositivo para recuperar el historial"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	return c.JSON(fiber.Map{"success": true, "message": "History sync requested"})
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"success": true, "message": "WhatsApp está recuperando los mensajes anteriores"})
 }
 
 func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
@@ -2415,11 +2969,18 @@ func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No IDs provided"})
 	}
 
-	var uuids []uuid.UUID
+	uuids := make([]uuid.UUID, 0, len(req.IDs))
+	seen := make(map[uuid.UUID]struct{}, len(req.IDs))
 	for _, id := range req.IDs {
-		if uid, err := uuid.Parse(id); err == nil {
-			uuids = append(uuids, uid)
+		uid, parseErr := uuid.Parse(id)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "La selección contiene un chat inválido"})
 		}
+		if _, duplicate := seen[uid]; duplicate {
+			continue
+		}
+		seen[uid] = struct{}{}
+		uuids = append(uuids, uid)
 	}
 
 	if len(uuids) == 0 {
@@ -2427,6 +2988,9 @@ func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Chat.DeleteBatch(c.Context(), accountID, uuids); err != nil {
+		if err == pgx.ErrNoRows {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Uno o más chats no existen o no pertenecen a esta cuenta"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -2441,8 +3005,9 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 		To              string `json:"to"`
 		Body            string `json:"body"`
 		MediaURL        string `json:"media_url,omitempty"`
-		MediaType       string `json:"media_type,omitempty"` // image, video, audio, document
+		MediaType       string `json:"media_type,omitempty"` // image, video, gif, audio, document, sticker
 		MediaFilename   string `json:"media_filename,omitempty"`
+		ChatID          string `json:"chat_id,omitempty"`
 		QuotedMessageID string `json:"quoted_message_id,omitempty"`
 		QuotedBody      string `json:"quoted_body,omitempty"`
 		QuotedSender    string `json:"quoted_sender,omitempty"`
@@ -2468,15 +3033,55 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	if req.MediaType == domain.MessageTypeSticker {
+		canonicalURL, validationErr := s.validateAccountStickerMedia(c.Context(), accountID, req.MediaURL)
+		if validationErr != nil {
+			if apiErr, ok := validationErr.(*fiber.Error); ok {
+				return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message})
+			}
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el sticker"})
+		}
+		// Always upload the validated account object, never a caller-controlled
+		// remote URL that merely contains a familiar-looking object key.
+		req.MediaURL = canonicalURL
+	}
 
 	var message *domain.Message
 
 	if req.MediaURL != "" && req.MediaType != "" {
-		// Send media message
-		message, err = s.services.Chat.SendMediaMessageWithFilename(c.Context(), deviceID, req.To, req.Body, req.MediaURL, req.MediaType, req.MediaFilename)
+		if req.QuotedMessageID != "" {
+			// Media replies need the same server-authoritative quote resolution as
+			// text replies; otherwise WhatsApp renders them as ordinary messages.
+			quotedID, quotedBody, quotedSender, quotedIsFromMe, quoteErr := s.resolveOutboundQuote(
+				c.Context(), accountID, deviceID, req.ChatID, req.QuotedMessageID, req.To,
+			)
+			if quoteErr != nil {
+				if apiErr, ok := quoteErr.(*fiber.Error); ok {
+					return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message})
+				}
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo validar el mensaje original"})
+			}
+			message, err = s.services.Chat.SendMediaReplyMessageWithFilename(
+				c.Context(), deviceID, req.To, req.Body, req.MediaURL, req.MediaType, req.MediaFilename,
+				quotedID, quotedBody, quotedSender, quotedIsFromMe,
+			)
+		} else {
+			message, err = s.services.Chat.SendMediaMessageWithFilename(c.Context(), deviceID, req.To, req.Body, req.MediaURL, req.MediaType, req.MediaFilename)
+		}
 	} else if req.QuotedMessageID != "" {
-		// Send reply message
-		message, err = s.services.Chat.SendReplyMessage(c.Context(), deviceID, req.To, req.Body, req.QuotedMessageID, req.QuotedBody, req.QuotedSender, req.QuotedIsFromMe)
+		// Resolve the quoted message authoritatively inside this account/chat.
+		// Client-supplied preview fields remain accepted for compatibility but
+		// never define the WhatsApp context or the persisted quote.
+		quotedID, quotedBody, quotedSender, quotedIsFromMe, quoteErr := s.resolveOutboundQuote(
+			c.Context(), accountID, deviceID, req.ChatID, req.QuotedMessageID, req.To,
+		)
+		if quoteErr != nil {
+			if apiErr, ok := quoteErr.(*fiber.Error); ok {
+				return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message})
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo validar el mensaje original"})
+		}
+		message, err = s.services.Chat.SendReplyMessage(c.Context(), deviceID, req.To, req.Body, quotedID, quotedBody, quotedSender, quotedIsFromMe)
 	} else {
 		// Send text message
 		message, err = s.services.Chat.SendMessage(c.Context(), deviceID, req.To, req.Body)
@@ -2502,6 +3107,125 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": message})
+}
+
+func (s *Server) validateAccountStickerMedia(ctx context.Context, accountID uuid.UUID, mediaURL string) (string, error) {
+	objectKey := objectKeyFromMediaURL(mediaURL)
+	if objectKey == "" || !strings.HasPrefix(objectKey, accountID.String()+"/") {
+		return "", fiber.NewError(fiber.StatusBadRequest, "El sticker no pertenece a esta cuenta")
+	}
+	var contentType string
+	var sizeBytes int64
+	err := s.repos.DB().QueryRow(ctx, `
+		SELECT content_type, size_bytes FROM media_assets
+		WHERE account_id=$1 AND object_key=$2 AND status='active'
+	`, accountID, objectKey).Scan(&contentType, &sizeBytes)
+	if err == pgx.ErrNoRows {
+		return "", fiber.NewError(fiber.StatusBadRequest, "Sticker no encontrado")
+	}
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(contentType, "image/webp") {
+		return "", fiber.NewError(fiber.StatusUnsupportedMediaType, "El sticker debe ser WebP estático")
+	}
+	if sizeBytes <= 0 || sizeBytes > 512*1024 {
+		return "", fiber.NewError(fiber.StatusBadRequest, "El sticker supera el límite de 512 KB")
+	}
+	if s.storage == nil {
+		return "", fiber.NewError(fiber.StatusServiceUnavailable, "Almacenamiento no configurado")
+	}
+	data, err := s.storage.GetFile(ctx, objectKey)
+	if err != nil {
+		return "", fiber.NewError(fiber.StatusBadRequest, "No se pudo leer el sticker")
+	}
+	if len(data) == 0 || len(data) > 512*1024 {
+		return "", fiber.NewError(fiber.StatusBadRequest, "El sticker supera el límite de 512 KB")
+	}
+	width, height, animated, err := inspectWebP(data)
+	if err != nil {
+		return "", fiber.NewError(fiber.StatusUnsupportedMediaType, "El archivo no es un WebP válido")
+	}
+	if animated {
+		return "", fiber.NewError(fiber.StatusUnsupportedMediaType, "Los stickers animados aún no están habilitados")
+	}
+	if width <= 0 || height <= 0 || width > 512 || height > 512 {
+		return "", fiber.NewError(fiber.StatusBadRequest, "El sticker debe medir como máximo 512 × 512 px")
+	}
+	return mediaProxyURLFromObjectKey(objectKey), nil
+}
+
+// filterSendableStickerURLs keeps the picker honest: historical animated,
+// oversized, deleted or legacy stickers may still exist in message history,
+// but must not be offered as sendable while animated sending is disabled.
+// Metadata is loaded in one account-scoped query; object bytes are then
+// inspected because animation and dimensions cannot be trusted from a URL.
+func (s *Server) filterSendableStickerURLs(ctx context.Context, accountID uuid.UUID, urls []string) ([]string, error) {
+	if len(urls) == 0 || s.storage == nil {
+		return []string{}, nil
+	}
+	keys := make([]string, 0, len(urls))
+	for _, mediaURL := range urls {
+		key := objectKeyFromMediaURL(mediaURL)
+		if key != "" && strings.HasPrefix(key, accountID.String()+"/") {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return []string{}, nil
+	}
+
+	rows, err := s.repos.DB().Query(ctx, `
+		SELECT object_key
+		FROM media_assets
+		WHERE account_id=$1
+		  AND object_key=ANY($2::text[])
+		  AND status='active'
+		  AND lower(content_type)='image/webp'
+		  AND size_bytes BETWEEN 1 AND 524288
+	`, accountID, keys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	eligible := make(map[string]struct{}, len(keys))
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		eligible[key] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := make([]string, 0, len(urls))
+	seen := make(map[string]struct{}, len(urls))
+	for _, mediaURL := range urls {
+		key := objectKeyFromMediaURL(mediaURL)
+		if _, ok := eligible[key]; !ok {
+			continue
+		}
+		data, err := s.storage.GetFile(ctx, key)
+		if err != nil || len(data) == 0 || len(data) > 512*1024 {
+			continue
+		}
+		width, height, animated, err := inspectWebP(data)
+		if err != nil || animated || width <= 0 || height <= 0 || width > 512 || height > 512 {
+			continue
+		}
+		canonical := mediaProxyURLFromObjectKey(key)
+		if _, duplicate := seen[canonical]; duplicate {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		result = append(result, canonical)
+	}
+	if skipped := len(urls) - len(result); skipped > 0 {
+		log.Printf("[Stickers] filtered %d incompatible historical sticker(s) account=%s", skipped, accountID)
+	}
+	return result, nil
 }
 
 func (s *Server) handleSendContact(c *fiber.Ctx) error {
@@ -2773,7 +3497,7 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if _, err := s.requireDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
 		if e, ok := err.(*fiber.Error); ok {
 			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
 		}
@@ -2822,7 +3546,7 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if _, err := s.requireDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
 		if e, ok := err.(*fiber.Error); ok {
 			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
 		}
@@ -2870,7 +3594,7 @@ func (s *Server) handleCheckWhatsApp(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
 	}
-	if _, err := s.requireDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
 		if e, ok := err.(*fiber.Error); ok {
 			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
 		}
@@ -2880,10 +3604,43 @@ func (s *Server) handleCheckWhatsApp(c *fiber.Ctx) error {
 	if len(req.Phones) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "phones is required"})
 	}
+	if len(req.Phones) > 20 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "maximum 20 phones per request"})
+	}
+	normalizedPhones := make([]string, 0, len(req.Phones))
+	for _, phone := range req.Phones {
+		normalized := normalizeWhatsAppPhone(phone)
+		if !validWhatsAppPhone(normalized) {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Cada número debe incluir código de país y tener entre 7 y 15 dígitos"})
+		}
+		normalizedPhones = append(normalizedPhones, "+"+normalized)
+	}
+	if len(normalizedPhones) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "no valid phones provided"})
+	}
 
-	results, err := s.services.Chat.IsOnWhatsApp(c.Context(), deviceID, req.Phones)
+	results, err := s.services.Chat.IsOnWhatsApp(c.Context(), deviceID, normalizedPhones)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"error":   "No se pudo consultar WhatsApp en este momento",
+			"code":    "whatsapp_validation_unavailable",
+		})
+	}
+	for i := range results {
+		if !results[i].IsOnWhatsApp {
+			results[i].JID = ""
+			continue
+		}
+		canonicalJID, canonicalErr := canonicalWhatsAppUserJID(results[i].JID)
+		if canonicalErr != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+				"success": false,
+				"error":   "WhatsApp no devolvió una identidad canónica válida",
+				"code":    "invalid_whatsapp_identity",
+			})
+		}
+		results[i].JID = canonicalJID
 	}
 
 	return c.JSON(fiber.Map{"success": true, "results": results})
@@ -2928,6 +3685,26 @@ func objectKeyFromMediaURL(mediaURL string) string {
 
 func mediaProxyURLFromObjectKey(objectKey string) string {
 	return "/api/media/file/" + objectKey
+}
+
+// findNonStatusMediaAsset keeps an intermediate raw-hash status asset from
+// being reused by chats or uploads. Clean installations continue using the raw
+// SHA; only a collision with the reserved status namespace uses a domain-safe
+// fallback hash.
+func (s *Server) findNonStatusMediaAsset(ctx context.Context, accountID uuid.UUID, rawContentHash string) (*domain.MediaAsset, string, error) {
+	contentHash := rawContentHash
+	existing, err := s.repos.MediaAsset.GetByHash(ctx, accountID, contentHash)
+	if err != nil {
+		return nil, contentHash, err
+	}
+	if existing != nil && storage.IsAccountStatusObjectKey(accountID, existing.ObjectKey) {
+		contentHash = domain.MediaAssetHashNonStatusFallback + rawContentHash
+		existing, err = s.repos.MediaAsset.GetByHash(ctx, accountID, contentHash)
+		if err != nil {
+			return nil, contentHash, err
+		}
+	}
+	return existing, contentHash, nil
 }
 
 func storageFolderFromObjectKey(accountID uuid.UUID, objectKey string) string {
@@ -3106,7 +3883,49 @@ func (s *Server) storageAssociatedURLs(ctx context.Context, accountID uuid.UUID)
 			result[mediaProxyURLFromObjectKey(objectKey)] = ref
 		}
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	statusRows, err := s.repos.DB().Query(ctx, `
+		SELECT ws.media_url,
+		       ws.kind,
+		       '',
+		       COALESCE(MAX(ws.media_size), 0),
+		       MAX(COALESCE(ws.sent_at, ws.created_at)),
+		       COUNT(*),
+		       (ARRAY_AGG(ws.media_asset_id) FILTER (WHERE ws.media_asset_id IS NOT NULL))[1],
+		       COALESCE(MAX(ma.content_hash), '')
+		FROM whatsapp_statuses ws
+		LEFT JOIN media_assets ma ON ma.id=ws.media_asset_id AND ma.account_id=ws.account_id
+		WHERE ws.account_id=$1 AND ws.expires_at>NOW()
+		  AND ws.media_url IS NOT NULL AND ws.media_url<>'' AND ws.media_url LIKE $2
+		GROUP BY ws.media_url, ws.kind
+	`, accountID, "/api/media/file/"+accountID.String()+"/%")
+	if err != nil {
+		return nil, err
+	}
+	defer statusRows.Close()
+	for statusRows.Next() {
+		var mediaURL string
+		ref := storageMessageRef{}
+		if err := statusRows.Scan(&mediaURL, &ref.mediaType, &ref.filename, &ref.dbSize, &ref.lastUsed, &ref.references, &ref.mediaAssetID, &ref.contentHash); err != nil {
+			return nil, err
+		}
+		if current, ok := result[mediaURL]; ok {
+			current.references += ref.references
+			if ref.lastUsed.After(current.lastUsed) {
+				current.lastUsed = ref.lastUsed
+			}
+			result[mediaURL] = current
+		} else {
+			result[mediaURL] = ref
+		}
+		if objectKey := objectKeyFromMediaURL(mediaURL); objectKey != "" {
+			result[mediaProxyURLFromObjectKey(objectKey)] = result[mediaURL]
+		}
+	}
+	return result, statusRows.Err()
 }
 
 func (s *Server) handleListStorageFiles(c *fiber.Ctx) error {
@@ -3155,6 +3974,13 @@ func (s *Server) handleListStorageFiles(c *fiber.Ctx) error {
 
 	allFiles := make([]storageFileRow, 0, len(objects))
 	for _, object := range objects {
+		// Own WhatsApp status media is intentionally managed only through the
+		// authenticated status center and its retention worker. It still counts
+		// toward quota and remains visible to the orphan scanner, but its private
+		// object key must not be enumerated by the general storage UI.
+		if storage.IsProtectedStatusObjectKey(object.Key) {
+			continue
+		}
 		mediaURL := mediaProxyURLFromObjectKey(object.Key)
 		ref, isAssociated := associated[mediaURL]
 		fileStatus := "orphan"
@@ -3310,6 +4136,26 @@ func (s *Server) handleDeleteStorageFiles(c *fiber.Ctx) error {
 			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "Archivo fuera del alcance permitido"})
 			continue
 		}
+		if storage.IsAccountPrivateAvatarObjectKey(accountID, objectKey) {
+			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "La foto pertenece a un Contacto; reemplázala o quítala desde su ficha"})
+			continue
+		}
+		if storage.IsProtectedStatusObjectKey(objectKey) {
+			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "La media privada de estados se elimina únicamente mediante su retención"})
+			continue
+		}
+		var statusRefs int
+		if err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT COUNT(*) FROM whatsapp_statuses
+			WHERE account_id=$1 AND media_asset_id=$2
+		`, accountID, assetID).Scan(&statusRefs); err != nil {
+			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "No se pudieron validar las referencias de estados"})
+			continue
+		}
+		if statusRefs > 0 {
+			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "El archivo pertenece a un estado de WhatsApp y se eliminará con su retención"})
+			continue
+		}
 		if info, statErr := s.storage.GetFileInfo(c.Context(), objectKey); statErr == nil {
 			sizeBytes = info.Size
 		}
@@ -3347,10 +4193,33 @@ func (s *Server) handleDeleteStorageFiles(c *fiber.Ctx) error {
 			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "Archivo fuera del alcance permitido"})
 			continue
 		}
+		if storage.IsAccountPrivateAvatarObjectKey(accountID, objectKey) {
+			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "La foto pertenece a un Contacto; reemplázala o quítala desde su ficha"})
+			continue
+		}
+		if storage.IsProtectedStatusObjectKey(objectKey) {
+			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "La media privada de estados se elimina únicamente mediante su retención"})
+			continue
+		}
 		proxyURL := mediaProxyURLFromObjectKey(objectKey)
 		publicURL := ""
 		if s.storage != nil {
 			publicURL = s.storage.GetPublicURL(objectKey)
+		}
+		var statusRefs int
+		if err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT COUNT(*)
+			FROM whatsapp_statuses ws
+			LEFT JOIN media_assets ma ON ma.id=ws.media_asset_id AND ma.account_id=ws.account_id
+			WHERE ws.account_id=$1
+			  AND (ws.media_url=$2 OR ws.media_url=$3 OR ma.object_key=$4)
+		`, accountID, proxyURL, publicURL, objectKey).Scan(&statusRefs); err != nil {
+			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "No se pudieron validar las referencias de estados"})
+			continue
+		}
+		if statusRefs > 0 {
+			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "El archivo pertenece a un estado de WhatsApp y se eliminará con su retención"})
+			continue
 		}
 		var activeMessageRefs int
 		if err := s.repos.DB().QueryRow(c.Context(), `
@@ -3522,7 +4391,8 @@ func (s *Server) runStorageDedupeJob(ctx context.Context, accountID, jobID uuid.
 			continue
 		}
 		hash := sha256.Sum256(data)
-		contentHash := fmt.Sprintf("%x", hash[:])
+		rawContentHash := fmt.Sprintf("%x", hash[:])
+		contentHash := rawContentHash
 		mediaType := classifyStorageMediaType(object.Key, "")
 		if mediaType == "other" {
 			mediaType = strings.TrimPrefix(strings.ToLower(filepath.Ext(object.Key)), ".")
@@ -3536,11 +4406,20 @@ func (s *Server) runStorageDedupeJob(ctx context.Context, accountID, jobID uuid.
 		}
 		can, ok := seen[contentHash]
 		if !ok {
-			if existing, err := s.repos.MediaAsset.GetByHash(ctx, accountID, contentHash); err == nil && existing != nil {
+			existing, resolvedHash, lookupErr := s.findNonStatusMediaAsset(ctx, accountID, rawContentHash)
+			contentHash = resolvedHash
+			if lookupErr != nil {
+				_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET processed_objects = $3, error = $4, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, processed, lookupErr.Error())
+				continue
+			}
+			if existing != nil {
 				can = canonical{assetID: existing.ID, objectKey: existing.ObjectKey, sizeBytes: existing.SizeBytes, mediaURL: mediaProxyURLFromObjectKey(existing.ObjectKey)}
 			} else {
-				canonicalObjectKey := fmt.Sprintf("%s/media/%s/%s%s", accountID.String(), mediaType, contentHash, ext)
-				if canonicalObjectKey != object.Key {
+				// The candidate is always unique. If another request wins the hash
+				// upsert, deleting this candidate can never remove the winner's object.
+				canonicalObjectKey := fmt.Sprintf("%s/media/%s/%s-%s%s", accountID.String(), mediaType, contentHash, uuid.NewString(), ext)
+				uploadedCanonical := canonicalObjectKey != object.Key
+				if uploadedCanonical {
 					if _, err := s.storage.UploadObject(ctx, canonicalObjectKey, data, ""); err != nil {
 						_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET processed_objects = $3, error = $4, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, processed, err.Error())
 						continue
@@ -3556,12 +4435,21 @@ func (s *Server) runStorageDedupeJob(ctx context.Context, accountID, jobID uuid.
 					SizeBytes:   int64(len(data)),
 				})
 				if err != nil {
+					if uploadedCanonical {
+						_ = s.storage.DeleteFile(ctx, canonicalObjectKey)
+					}
 					_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET processed_objects = $3, error = $4, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, processed, err.Error())
 					continue
+				}
+				if uploadedCanonical && asset.ObjectKey != canonicalObjectKey {
+					if deleteErr := s.storage.DeleteFile(ctx, canonicalObjectKey); deleteErr != nil {
+						_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET error = $3, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, deleteErr.Error())
+					}
 				}
 				can = canonical{assetID: asset.ID, objectKey: asset.ObjectKey, sizeBytes: asset.SizeBytes, mediaURL: mediaProxyURLFromObjectKey(asset.ObjectKey)}
 			}
 			seen[contentHash] = can
+			seen[rawContentHash] = can
 		}
 
 		oldURL := mediaProxyURLFromObjectKey(object.Key)
@@ -3618,35 +4506,14 @@ func (s *Server) handleGetUploadURL(c *fiber.Ctx) error {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
 	}
 
-	accountID := c.Locals("account_id").(uuid.UUID)
-
-	filename := c.Query("filename", "")
-	folder := c.Query("folder", "uploads")
-	size := c.QueryInt("size", 0)
-
-	if filename == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Filename is required"})
-	}
-	if err := s.ensureStorageQuota(c.Context(), accountID, int64(size)); err != nil {
-		return c.Status(fiber.StatusInsufficientStorage).JSON(fiber.Map{"success": false, "error": "Límite de almacenamiento alcanzado", "code": "storage_limit_reached"})
-	}
-
-	// Generate unique filename to avoid collisions
-	uniqueFilename := uuid.New().String() + "_" + filename
-
-	uploadURL, err := s.storage.GetPresignedUploadURL(c.Context(), accountID, folder, uniqueFilename)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	// Generate the public URL for the file after upload
-	publicURL := s.storage.GetPublicURL(accountID.String() + "/" + folder + "/" + uniqueFilename)
-
-	return c.JSON(fiber.Map{
-		"success":    true,
-		"upload_url": uploadURL,
-		"public_url": publicURL,
-		"filename":   uniqueFilename,
+	// A presigned PUT cannot enforce the declared query-string size, finalize
+	// inventory, or reserve quota atomically. Keep the legacy route explicit but
+	// fail closed; /api/media/upload validates the actual multipart bytes before
+	// persisting and registering them.
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"success": false,
+		"error":   "La carga directa por URL fue retirada; usa /api/media/upload",
+		"code":    "presigned_upload_disabled",
 	})
 }
 
@@ -3664,7 +4531,10 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No file provided"})
 	}
 
-	folder := c.FormValue("folder", "uploads")
+	folder, folderErr := sanitizeUploadFolder(c.FormValue("folder", "uploads"), "uploads")
+	if folderErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": folderErr.Error()})
+	}
 
 	// Validate file size (max 50MB)
 	if file.Size > 50*1024*1024 {
@@ -3691,13 +4561,21 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to read file"})
 	}
 	hashBytes := sha256.Sum256(data)
-	contentHash := fmt.Sprintf("%x", hashBytes[:])
+	rawContentHash := fmt.Sprintf("%x", hashBytes[:])
+	existing, contentHash, lookupErr := s.findNonStatusMediaAsset(c.Context(), accountID, rawContentHash)
+	if lookupErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el inventario de media"})
+	}
 	ext := strings.ToLower(filepath.Ext(cleanFilename))
 	if ext == "" {
 		ext = ".bin"
 	}
 	mediaType := classifyStorageMediaType(cleanFilename, contentType)
-	if existing, err := s.repos.MediaAsset.GetByHash(c.Context(), accountID, contentHash); err == nil && existing != nil {
+	if existing != nil {
+		_, _ = s.repos.DB().Exec(c.Context(), `UPDATE storage_objects
+			SET source=CASE WHEN source='whatsapp_status' THEN $3 ELSE source END,
+			    status='active',deleted_at=NULL,updated_at=NOW()
+			WHERE account_id=$1 AND object_key=$2`, accountID, existing.ObjectKey, folder)
 		proxyURL := mediaProxyURLFromObjectKey(existing.ObjectKey)
 		return c.JSON(fiber.Map{
 			"success":        true,
@@ -3713,13 +4591,17 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInsufficientStorage).JSON(fiber.Map{"success": false, "error": "Límite de almacenamiento alcanzado", "code": "storage_limit_reached"})
 	}
 
-	uniqueFilename := contentHash + ext
+	// Keep the candidate key unique. media_assets deduplication selects the
+	// canonical object and removes this candidate when another request wins.
+	// A unique key also prevents overwriting an object pending retention cleanup.
+	uniqueFilename := contentHash + "-" + uuid.NewString() + ext
 	objectKey := accountID.String() + "/" + strings.Trim(folder, "/") + "/" + uniqueFilename
 	publicURL, err := s.storage.UploadObject(c.Context(), objectKey, data, contentType)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to upload: " + err.Error()})
 	}
 	proxyURL := fmt.Sprintf("/api/media/file/%s", objectKey)
+	deduped := false
 	asset, assetErr := s.repos.MediaAsset.Upsert(c.Context(), repository.MediaAssetUpsert{
 		AccountID:   accountID,
 		ContentHash: contentHash,
@@ -3731,13 +4613,26 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 	})
 	if assetErr != nil {
 		log.Printf("[Storage] Failed to upsert media asset: %v", assetErr)
+	} else if asset != nil {
+		if asset.ObjectKey != objectKey {
+			deduped = true
+			if deleteErr := s.storage.DeleteFile(c.Context(), objectKey); deleteErr != nil {
+				log.Printf("[Storage] Failed to remove concurrent duplicate %s: %v", objectKey, deleteErr)
+			}
+		}
+		objectKey = asset.ObjectKey
+		publicURL = s.storage.GetPublicURL(asset.ObjectKey)
+		proxyURL = mediaProxyURLFromObjectKey(asset.ObjectKey)
+		uniqueFilename = asset.Filename
+		mediaType = asset.MediaType
+		contentType = asset.ContentType
 	}
 	_, _ = s.repos.DB().Exec(c.Context(), `
 		INSERT INTO storage_objects (account_id, object_key, media_type, content_type, filename, size_bytes, source, status, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW())
 		ON CONFLICT (account_id, object_key) DO UPDATE
 		SET size_bytes = EXCLUDED.size_bytes, content_type = EXCLUDED.content_type, media_type = EXCLUDED.media_type, status = 'active', updated_at = NOW()
-	`, accountID, objectKey, mediaType, contentType, cleanFilename, int64(len(data)), folder)
+	`, accountID, objectKey, mediaType, contentType, uniqueFilename, int64(len(data)), folder)
 	var mediaAssetID interface{}
 	if asset != nil {
 		mediaAssetID = asset.ID
@@ -3750,16 +4645,46 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 		"filename":       uniqueFilename,
 		"media_asset_id": mediaAssetID,
 		"content_hash":   contentHash,
-		"deduped":        false,
+		"deduped":        deduped,
 	})
+}
+
+func sanitizeUploadFolder(raw, fallback string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = fallback
+	}
+	if strings.HasPrefix(raw, "/") || strings.HasSuffix(raw, "/") || strings.Contains(raw, "\\") {
+		return "", fmt.Errorf("Invalid upload folder")
+	}
+	parts := strings.Split(raw, "/")
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." || part == ".." || part == "_private" || part == "statuses" {
+			return "", fmt.Errorf("Invalid upload folder")
+		}
+		clean = append(clean, part)
+	}
+	if len(clean) == 0 {
+		return "", fmt.Errorf("Invalid upload folder")
+	}
+	return strings.Join(clean, "/"), nil
+}
+
+func sanitizeUploadFilename(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "." || raw == ".." || strings.ContainsAny(raw, "/\\") || strings.ContainsRune(raw, '\x00') {
+		return "", fmt.Errorf("Invalid filename")
+	}
+	if filepath.Base(raw) != raw {
+		return "", fmt.Errorf("Invalid filename")
+	}
+	return raw, nil
 }
 
 // handleMediaProxy serves files from MinIO through the backend
 func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
-	if s.storage == nil {
-		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
-	}
-
 	// Get the path after /file/ and URL-decode it
 	objectKey := c.Params("*")
 	if objectKey == "" {
@@ -3768,6 +4693,18 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 	// Fiber returns URL-encoded path for wildcard params, decode for MinIO lookup
 	if decoded, err := url.PathUnescape(objectKey); err == nil {
 		objectKey = decoded
+	}
+	if storage.IsProtectedStatusObjectKey(objectKey) {
+		c.Set("Cache-Control", "private, no-store, max-age=0")
+		c.Set("Vary", "Cookie, Authorization")
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "File not found"})
+	}
+	return s.serveStorageObject(c, objectKey, "public, max-age=31536000")
+}
+
+func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl string) error {
+	if s.storage == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
 	}
 
 	// Detect content type from extension
@@ -3821,12 +4758,15 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 	setMediaCacheHeaders := func() {
 		c.Set("ETag", etag)
 		c.Set("Last-Modified", lastModified)
-		c.Set("Cache-Control", "public, max-age=31536000")
+		c.Set("Cache-Control", cacheControl)
+		if strings.Contains(cacheControl, "private") {
+			c.Set("Vary", "Cookie, Authorization")
+		}
 		c.Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filepath.Base(objectKey)))
 	}
 
 	ifNoneMatch := c.Get("If-None-Match")
-	if c.Get("Range") == "" && (ifNoneMatch == etag || strings.Contains(ifNoneMatch, etag)) {
+	if !strings.Contains(cacheControl, "no-store") && c.Get("Range") == "" && (ifNoneMatch == etag || strings.Contains(ifNoneMatch, etag)) {
 		setMediaCacheHeaders()
 		return c.SendStatus(fiber.StatusNotModified)
 	}
@@ -8083,10 +9023,7 @@ func safeCol(row []string, idx int) string {
 
 // --- Contact Handlers ---
 
-func (s *Server) handleGetContacts(c *fiber.Ctx) error {
-	accountID := c.Locals("account_id").(uuid.UUID)
-
-	// Parse filters
+func (s *Server) parseContactFilter(c *fiber.Ctx, accountID uuid.UUID) (domain.ContactFilter, bool, error) {
 	filter := domain.ContactFilter{
 		Search:            c.Query("search"),
 		Limit:             c.QueryInt("limit", 50),
@@ -8121,27 +9058,30 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 	tagFormulaRaw := c.Query("tag_formula")
 	if tagFormulaRaw != "" {
 		ast, err := formula.Parse(tagFormulaRaw)
-		if err == nil && ast != nil {
-			innerSQL, innerArgs, err := formula.BuildSQLForContacts(ast, accountID)
-			if err == nil {
-				rows, err := s.repos.DB().Query(c.Context(), innerSQL, innerArgs...)
-				if err == nil {
-					defer rows.Close()
-					for rows.Next() {
-						var cid uuid.UUID
-						if rows.Scan(&cid) == nil {
-							filter.MatchingContactIDs = append(filter.MatchingContactIDs, cid)
-						}
-					}
-				}
-				if len(filter.MatchingContactIDs) == 0 {
-					// Formula matched nothing — force empty result
-					return c.JSON(fiber.Map{
-						"success": true, "contacts": []interface{}{},
-						"total": 0, "limit": filter.Limit, "offset": filter.Offset,
-					})
-				}
+		if err != nil || ast == nil {
+			return filter, false, fiber.NewError(fiber.StatusBadRequest, "La fórmula de etiquetas no es válida")
+		}
+		innerSQL, innerArgs, err := formula.BuildSQLForContacts(ast, accountID)
+		if err != nil {
+			return filter, false, fiber.NewError(fiber.StatusBadRequest, "La fórmula de etiquetas no es válida")
+		}
+		rows, err := s.repos.DB().Query(c.Context(), innerSQL, innerArgs...)
+		if err != nil {
+			return filter, false, fmt.Errorf("resolve contact tag formula: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var cid uuid.UUID
+			if err := rows.Scan(&cid); err != nil {
+				return filter, false, fmt.Errorf("scan contact tag formula result: %w", err)
 			}
+			filter.MatchingContactIDs = append(filter.MatchingContactIDs, cid)
+		}
+		if err := rows.Err(); err != nil {
+			return filter, false, fmt.Errorf("iterate contact tag formula results: %w", err)
+		}
+		if len(filter.MatchingContactIDs) == 0 {
+			return filter, true, nil
 		}
 	} else {
 		if tagNamesRaw := c.Query("tag_names"); tagNamesRaw != "" {
@@ -8161,7 +9101,7 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 	// Sort
 	if sortBy := c.Query("sort_by"); sortBy != "" {
 		switch sortBy {
-		case "name", "lead_count", "created_at":
+		case "name", "lead_count", "created_at", "relevance":
 			filter.SortBy = sortBy
 		}
 	}
@@ -8172,18 +9112,59 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 	// Custom field filters
 	if cfFilterRaw := c.Query("cf_filter"); cfFilterRaw != "" {
 		var cfFilters []repository.CustomFieldFilterParam
-		if err := json.Unmarshal([]byte(cfFilterRaw), &cfFilters); err == nil && len(cfFilters) > 0 {
-			matchIDs, err := s.repos.CustomField.FindContactIDsByFilters(c.Context(), accountID, cfFilters)
-			if err == nil {
-				if len(matchIDs) == 0 {
-					return c.JSON(fiber.Map{
-						"success": true, "contacts": []interface{}{},
-						"total": 0, "limit": filter.Limit, "offset": filter.Offset,
-					})
-				}
-				filter.CfFilterContactIDs = matchIDs
-			}
+		if err := json.Unmarshal([]byte(cfFilterRaw), &cfFilters); err != nil {
+			return filter, false, fiber.NewError(fiber.StatusBadRequest, "El filtro de campos personalizados no es válido")
 		}
+		if len(cfFilters) > 0 {
+			matchIDs, err := s.repos.CustomField.FindContactIDsByFilters(c.Context(), accountID, cfFilters)
+			if err != nil {
+				return filter, false, fmt.Errorf("resolve contact custom field filters: %w", err)
+			}
+			if len(matchIDs) == 0 {
+				return filter, true, nil
+			}
+			filter.CfFilterContactIDs = matchIDs
+		}
+	}
+
+	return filter, false, nil
+}
+
+func writeContactFilterError(c *fiber.Ctx, err error) error {
+	status := fiber.StatusInternalServerError
+	message := "No se pudieron aplicar los filtros de contactos"
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		status = fiberErr.Code
+		message = fiberErr.Message
+	}
+	return c.Status(status).JSON(fiber.Map{"success": false, "error": message})
+}
+
+// parseCampaignContactFilter deliberately removes pagination and phone
+// eligibility from the Contacts screen filter. This lets the repository count
+// every matching Contact first and report ineligible rows instead of silently
+// limiting a campaign to the currently loaded page.
+func (s *Server) parseCampaignContactFilter(c *fiber.Ctx, accountID uuid.UUID) (domain.ContactFilter, bool, error) {
+	filter, noMatches, err := s.parseContactFilter(c, accountID)
+	filter.Limit = 0
+	filter.Offset = 0
+	filter.IsGroup = false
+	filter.HasPhone = false
+	return filter, noMatches, err
+}
+
+func (s *Server) handleGetContacts(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	filter, noMatches, filterErr := s.parseContactFilter(c, accountID)
+	if filterErr != nil {
+		return writeContactFilterError(c, filterErr)
+	}
+	if noMatches {
+		return c.JSON(fiber.Map{
+			"success": true, "contacts": []interface{}{},
+			"total": 0, "limit": filter.Limit, "offset": filter.Offset,
+		})
 	}
 
 	// Redis cache for default load (no complex filters) — 30s TTL
@@ -8199,7 +9180,8 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 
 	contacts, total, err := s.services.Contact.GetByAccountIDWithFilters(c.Context(), accountID, filter)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		log.Printf("[contacts] list failed for account %s: %v", accountID, err)
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar los contactos"})
 	}
 
 	// Load structured tags for all contacts in one batch query
@@ -8639,7 +9621,8 @@ func (s *Server) handleGetContactDuplicates(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	groups, err := s.services.Contact.FindDuplicateGroups(c.Context(), accountID)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		log.Printf("[contacts] duplicate scan failed for account %s: %v", accountID, err)
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar los duplicados"})
 	}
 	return c.JSON(fiber.Map{"success": true, "groups": groups, "duplicates": groups})
 }
@@ -8667,7 +9650,8 @@ func (s *Server) handlePreviewMergeContacts(c *fiber.Ctx) error {
 	}
 	preview, err := s.services.Contact.PreviewMergeContacts(c.Context(), accountID, body.KeepID, body.MergeIDs)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+		log.Printf("[contacts] merge preview failed for account %s: %v", accountID, err)
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se pudo preparar la combinación de contactos"})
 	}
 	return c.JSON(fiber.Map{"success": true, "preview": preview})
 }
@@ -8688,7 +9672,8 @@ func (s *Server) handleMergeContacts(c *fiber.Ctx) error {
 
 	result, err := s.services.Contact.MergeContacts(c.Context(), accountID, body.KeepID, body.MergeIDs, &userID)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+		log.Printf("[contacts] merge failed for account %s: %v", accountID, err)
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se pudieron combinar los contactos"})
 	}
 	s.invalidateContactTreeCaches(accountID)
 	s.invalidateTasksCache(accountID)
@@ -9428,6 +10413,13 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 		campaign.ScheduledAt = req.ScheduledAt
 	}
 	if req.Status != nil && (*req.Status == domain.CampaignStatusScheduled || *req.Status == domain.CampaignStatusDraft) {
+		if *req.Status == domain.CampaignStatusScheduled && campaign.TotalRecipients == 0 {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+				"success": false,
+				"code":    "no_eligible_contacts",
+				"error":   "No se puede programar una campaña sin destinatarios",
+			})
+		}
 		campaign.Status = *req.Status
 	}
 	if req.Settings != nil {
@@ -9573,7 +10565,80 @@ func (s *Server) handleAddCampaignRecipients(c *fiber.Ctx) error {
 	if err := s.services.Campaign.AddRecipients(c.Context(), recipients); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateCampaignsCache(acctUUID)
 	return c.JSON(fiber.Map{"success": true, "count": len(recipients)})
+}
+
+// handleAddCampaignRecipientsFromContacts resolves all contacts that match the
+// same filters used by the Contacts screen. It intentionally ignores client
+// pagination and persists only current, eligible Contacts from this account.
+func (s *Server) handleAddCampaignRecipientsFromContacts(c *fiber.Ctx) error {
+	campaignID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Invalid campaign ID"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	campaign, err := s.services.Campaign.GetByID(c.Context(), campaignID)
+	if err != nil || campaign == nil || campaign.AccountID != accountID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
+	}
+	if campaign.Status != domain.CampaignStatusDraft && campaign.Status != domain.CampaignStatusScheduled {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"code":    "campaign_not_editable",
+			"error":   "La campaña ya no admite cambios de destinatarios",
+		})
+	}
+
+	filter, noMatches, filterErr := s.parseCampaignContactFilter(c, accountID)
+	if filterErr != nil {
+		return writeContactFilterError(c, filterErr)
+	}
+
+	if noMatches {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"success": false, "code": "no_eligible_contacts",
+			"error":         "Ningún contacto coincide con los filtros aplicados",
+			"matched_count": 0, "eligible_count": 0, "added_count": 0,
+			"excluded_count": 0, "total_recipients": campaign.TotalRecipients,
+		})
+	}
+
+	contacts, _, err := s.services.Contact.GetByAccountIDWithFilters(c.Context(), accountID, filter)
+	if err != nil {
+		log.Printf("[Campaign] Failed to resolve filtered contacts for account %s: %v", accountID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron resolver los contactos filtrados"})
+	}
+	contactIDs := make([]uuid.UUID, 0, len(contacts))
+	for _, contact := range contacts {
+		if contact != nil {
+			contactIDs = append(contactIDs, contact.ID)
+		}
+	}
+
+	result, err := s.repos.Campaign.AddRecipientsFromContactIDs(c.Context(), campaignID, accountID, contactIDs)
+	if err != nil {
+		log.Printf("[Campaign] Failed to add filtered contacts to campaign %s: %v", campaignID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron agregar los contactos a la campaña"})
+	}
+	s.invalidateCampaignsCache(accountID)
+
+	response := fiber.Map{
+		"matched_count":         result.MatchedCount,
+		"eligible_count":        result.EligibleCount,
+		"added_count":           result.AddedCount,
+		"excluded_count":        result.ExcludedCount,
+		"already_present_count": result.AlreadyPresentCount,
+		"total_recipients":      result.TotalRecipients,
+	}
+	if result.EligibleCount == 0 {
+		response["success"] = false
+		response["code"] = "no_eligible_contacts"
+		response["error"] = "Los contactos filtrados no tienen un teléfono válido o están marcados como No contactar"
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(response)
+	}
+	response["success"] = true
+	return c.JSON(response)
 }
 
 // handleAddCampaignRecipientsFromLeads adds all leads matching filter criteria
@@ -9749,6 +10814,7 @@ func (s *Server) handleAddCampaignRecipientsFromLeads(c *fiber.Ctx) error {
 	}
 
 	log.Printf("[API] Added %d recipients from leads to campaign %s", len(recipients), campaignID)
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "count": len(recipients)})
 }
 
@@ -9879,6 +10945,7 @@ func (s *Server) handleDeleteCampaignRecipient(c *fiber.Ctx) error {
 	if err := s.services.Campaign.DeleteRecipient(c.Context(), campaignID, recipientID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -9908,6 +10975,7 @@ func (s *Server) handleUpdateCampaignRecipient(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateCampaignsCache(accountID)
 
 	// Enrich with lead_id (contact_id first, then JID fallback)
 	type enrichedRecipient struct {
@@ -9957,6 +11025,7 @@ func (s *Server) handleStartCampaign(c *fiber.Ctx) error {
 	if err := s.services.Campaign.Start(c.Context(), id, startedBy); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "message": "Campaign started"})
 }
 
@@ -9976,6 +11045,7 @@ func (s *Server) handlePauseCampaign(c *fiber.Ctx) error {
 	if err := s.services.Campaign.Pause(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "message": "Campaign paused"})
 }
 
@@ -9995,6 +11065,7 @@ func (s *Server) handleCancelCampaign(c *fiber.Ctx) error {
 	if err := s.services.Campaign.Cancel(c.Context(), id); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "message": "Campaign cancelled"})
 }
 
@@ -10024,6 +11095,7 @@ func (s *Server) handleRetryCampaignRecipient(c *fiber.Ctx) error {
 	if err := s.services.Campaign.RetryRecipient(c.Context(), campaignID, recipientID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "message": "Mensaje reenviado exitosamente"})
 }
 
@@ -10048,6 +11120,9 @@ func (s *Server) handleDuplicateCampaign(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), newCampaign.ID)
+	newCampaign.Attachments = attachments
+	s.invalidateCampaignsCache(accountID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "campaign": newCampaign})
 }
 
@@ -10075,7 +11150,11 @@ func (s *Server) handleUpdateCampaignAttachments(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 	// Delete existing and re-create
-	s.repos.CampaignAttachment.DeleteByCampaignID(c.Context(), id)
+	if err := s.repos.CampaignAttachment.DeleteByCampaignID(c.Context(), id); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	// Deletion is already a visible mutation even if a later insert fails.
+	s.invalidateCampaignsCache(accountID)
 	if len(req.Attachments) > 0 {
 		var attachments []*domain.CampaignAttachment
 		for _, a := range req.Attachments {
@@ -10093,6 +11172,7 @@ func (s *Server) handleUpdateCampaignAttachments(c *fiber.Ctx) error {
 		}
 	}
 	result, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), id)
+	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "attachments": result})
 }
 
@@ -12705,6 +13785,7 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
 	}
+	s.invalidateCampaignsCache(accountID)
 
 	return c.Status(201).JSON(fiber.Map{
 		"success":          true,
@@ -13602,22 +14683,33 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID := c.Locals("user_id").(uuid.UUID)
 	var req struct {
-		ContactID      *string    `json:"contact_id"`
-		LeadID         *string    `json:"lead_id"`
-		EventID        *string    `json:"event_id"`
-		ParticipantID  *string    `json:"participant_id"`
-		Type           string     `json:"type"`
-		Direction      *string    `json:"direction"`
-		Outcome        *string    `json:"outcome"`
-		Notes          *string    `json:"notes"`
-		NextAction     *string    `json:"next_action"`
-		NextActionDate *time.Time `json:"next_action_date"`
+		ContactID            *string    `json:"contact_id"`
+		LeadID               *string    `json:"lead_id"`
+		EventID              *string    `json:"event_id"`
+		ParticipantID        *string    `json:"participant_id"`
+		ProgramID            *string    `json:"program_id"`
+		ProgramParticipantID *string    `json:"program_participant_id"`
+		Type                 string     `json:"type"`
+		Direction            *string    `json:"direction"`
+		Outcome              *string    `json:"outcome"`
+		Notes                *string    `json:"notes"`
+		NextAction           *string    `json:"next_action"`
+		NextActionDate       *time.Time `json:"next_action_date"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 	if req.Type == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Type is required"})
+	}
+	if req.Type == domain.InteractionTypeAttendance {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Attendance observations must be managed from the attendance window"})
+	}
+	if (req.ProgramID == nil) != (req.ProgramParticipantID == nil) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Program and program participant must be provided together"})
+	}
+	if req.ProgramID != nil && (req.EventID != nil || req.ParticipantID != nil) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "An interaction cannot mix event and program participant contexts"})
 	}
 	interaction := &domain.Interaction{
 		AccountID:      accountID,
@@ -13686,6 +14778,34 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 		if interaction.ContactID == nil {
 			interaction.ContactID = participantContactID
 		}
+	}
+	if req.ProgramID != nil && req.ProgramParticipantID != nil {
+		programID, parseErr := uuid.Parse(*req.ProgramID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+		}
+		programParticipantID, parseErr := uuid.Parse(*req.ProgramParticipantID)
+		if parseErr != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program participant ID"})
+		}
+		var participantContactID uuid.UUID
+		var programName string
+		if err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT pp.contact_id, p.name
+			FROM program_participants pp
+			JOIN programs p ON p.id = pp.program_id AND p.account_id = $1
+			JOIN contacts ct ON ct.id = pp.contact_id AND ct.account_id = p.account_id
+			WHERE p.id = $2 AND pp.id = $3
+		`, accountID, programID, programParticipantID).Scan(&participantContactID, &programName); err != nil {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Program participant does not belong to this account"})
+		}
+		if interaction.ContactID != nil && *interaction.ContactID != participantContactID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Program participant and contact do not represent the same person"})
+		}
+		interaction.ContactID = &participantContactID
+		interaction.ProgramID = &programID
+		interaction.ProgramParticipantID = &programParticipantID
+		interaction.SourceLabel = "Programa · " + programName
 	}
 
 	if err := s.services.Interaction.LogInteraction(c.Context(), interaction); err != nil {
@@ -13847,6 +14967,9 @@ func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 	var interactionType string
 	if err := s.repos.DB().QueryRow(c.Context(), `SELECT lead_id, type FROM interactions WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&interactionLeadID, &interactionType); err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Interaction not found"})
+	}
+	if interactionType == domain.InteractionTypeAttendance {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Edit or clear this observation from the attendance window"})
 	}
 
 	if err := s.services.Interaction.Delete(c.Context(), id); err != nil {
@@ -14041,14 +15164,21 @@ func (s *Server) handleGetStats(c *fiber.Ctx) error {
 
 func (s *Server) handleWebSocket(c *websocket.Conn) {
 	claims := c.Locals("claims").(*service.JWTClaims)
+	permissions := make(map[string]bool)
+	if values, ok := c.Locals("ws_permissions").([]string); ok {
+		for _, permission := range values {
+			permissions[permission] = true
+		}
+	}
 
 	client := &ws.Client{
-		ID:        uuid.New().String(),
-		AccountID: claims.AccountID,
-		UserID:    claims.UserID,
-		Conn:      c,
-		Send:      make(chan []byte, 256),
-		Hub:       s.hub,
+		ID:          uuid.New().String(),
+		AccountID:   claims.AccountID,
+		UserID:      claims.UserID,
+		Conn:        c,
+		Send:        make(chan []byte, 256),
+		Hub:         s.hub,
+		Permissions: permissions,
 	}
 
 	s.hub.Register(client)
@@ -14162,6 +15292,10 @@ func (s *Server) handleGetRecentStickers(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	urls, err = s.filterSendableStickerURLs(c.Context(), accountID, urls)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron validar los stickers recientes"})
+	}
 
 	if urls == nil {
 		urls = []string{}
@@ -14176,6 +15310,10 @@ func (s *Server) handleGetSavedStickers(c *fiber.Ctx) error {
 	urls, err := s.services.Chat.GetSavedStickers(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	urls, err = s.filterSendableStickerURLs(c.Context(), accountID, urls)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron validar los stickers favoritos"})
 	}
 	if urls == nil {
 		urls = []string{}
@@ -14192,11 +15330,18 @@ func (s *Server) handleSaveSticker(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || req.MediaURL == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "media_url is required"})
 	}
+	canonicalURL, validationErr := s.validateAccountStickerMedia(c.Context(), accountID, req.MediaURL)
+	if validationErr != nil {
+		if apiErr, ok := validationErr.(*fiber.Error); ok {
+			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el sticker"})
+	}
 
-	if err := s.services.Chat.SaveSticker(c.Context(), accountID, req.MediaURL); err != nil {
+	if err := s.services.Chat.SaveSticker(c.Context(), accountID, canonicalURL); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "media_url": canonicalURL})
 }
 
 func (s *Server) handleDeleteSavedSticker(c *fiber.Ctx) error {
@@ -14209,10 +15354,17 @@ func (s *Server) handleDeleteSavedSticker(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "media_url is required"})
 	}
 
-	if err := s.services.Chat.DeleteSavedSticker(c.Context(), accountID, req.MediaURL); err != nil {
+	canonicalURL, validationErr := s.validateAccountStickerMedia(c.Context(), accountID, req.MediaURL)
+	if validationErr != nil {
+		if apiErr, ok := validationErr.(*fiber.Error); ok {
+			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el sticker"})
+	}
+	if err := s.services.Chat.DeleteSavedSticker(c.Context(), accountID, canonicalURL); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "media_url": canonicalURL})
 }
 
 // --- Super Admin Handlers ---
@@ -14479,6 +15631,14 @@ func storageObjectKeyFromValue(value string) []string {
 }
 
 func (s *Server) storageReferencedObjectKeys(ctx context.Context) (map[string]struct{}, error) {
+	return s.storageReferencedObjectKeysWithInventory(ctx, true)
+}
+
+func (s *Server) storageBusinessReferencedObjectKeys(ctx context.Context) (map[string]struct{}, error) {
+	return s.storageReferencedObjectKeysWithInventory(ctx, false)
+}
+
+func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, includeInventory bool) (map[string]struct{}, error) {
 	type refColumn struct {
 		table  string
 		column string
@@ -14500,7 +15660,10 @@ func (s *Server) storageReferencedObjectKeys(ctx context.Context) (map[string]st
 		{"quick_reply_attachments", "media_url", "", false},
 		{"saved_stickers", "media_url", "", false},
 		{"survey_answers", "file_url", "", false},
-		{"media_assets", "object_key", "status = 'active'", true},
+		{"whatsapp_statuses", "media_url", "expires_at > NOW()", false},
+	}
+	if includeInventory {
+		columns = append(columns, refColumn{"media_assets", "object_key", "status = 'active'", true})
 	}
 	refs := make(map[string]struct{})
 	for _, col := range columns {
@@ -14516,8 +15679,7 @@ func (s *Server) storageReferencedObjectKeys(ctx context.Context) (map[string]st
 		query := fmt.Sprintf(`SELECT %s::text FROM %s WHERE %s`, col.column, col.table, filter)
 		rows, err := s.repos.DB().Query(ctx, query)
 		if err != nil {
-			log.Printf("[StorageOrphans] skipping reference source %s.%s: %v", col.table, col.column, err)
-			continue
+			return nil, fmt.Errorf("scan storage reference %s.%s: %w", col.table, col.column, err)
 		}
 		for rows.Next() {
 			var value string
@@ -14535,6 +15697,33 @@ func (s *Server) storageReferencedObjectKeys(ctx context.Context) (map[string]st
 		}
 		rows.Close()
 	}
+	// avatar_url points to the authenticated content endpoint rather than to an
+	// object key. Resolve its canonical media_asset reference explicitly so
+	// business-reference scans and orphan detection both protect live photos.
+	avatarRows, err := s.repos.DB().Query(ctx, `
+		SELECT ma.object_key
+		FROM contacts c JOIN media_assets ma
+		  ON ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id
+		WHERE ma.status='active' AND ma.object_key<>''
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("scan contact avatar references: %w", err)
+	}
+	for avatarRows.Next() {
+		var objectKey string
+		if err := avatarRows.Scan(&objectKey); err != nil {
+			avatarRows.Close()
+			return refs, err
+		}
+		for _, key := range storageObjectKeyFromValue(objectKey) {
+			refs[key] = struct{}{}
+		}
+	}
+	if err := avatarRows.Err(); err != nil {
+		avatarRows.Close()
+		return refs, err
+	}
+	avatarRows.Close()
 	return refs, nil
 }
 
