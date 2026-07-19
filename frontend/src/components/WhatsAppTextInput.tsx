@@ -1,6 +1,7 @@
 'use client'
 
-import { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { useRef, useEffect, useLayoutEffect, useState, useCallback, forwardRef, useImperativeHandle } from 'react'
+import { createPortal } from 'react-dom'
 import { Bold, Braces, Code, Italic, List, ListOrdered, Quote, Strikethrough } from 'lucide-react'
 import { formatToHtmlPreview, getCaretOffset, setCaretOffset } from '@/lib/whatsappFormat'
 import { applyWhatsAppFormat, insertTextAtSelection } from '@/lib/whatsappEditor'
@@ -8,7 +9,8 @@ import type { TextSelection, WhatsAppFormatCommand } from '@/lib/whatsappEditor'
 
 export interface WhatsAppTextInputHandle {
   focus: () => void
-  insertAtCaret: (text: string) => void
+  blur: () => void
+  insertAtCaret: (text: string, options?: { restoreFocus?: boolean }) => void
   clear: () => void
 }
 
@@ -23,6 +25,26 @@ interface WhatsAppTextInputProps {
   disabled?: boolean
   /** Treat as single-line (Enter sends) */
   singleLine?: boolean
+  /** Marks the main mobile chat composer so the dashboard can yield chrome to the virtual keyboard. */
+  keyboardChromeTarget?: boolean
+  /** Keeps the format toolbar inline by default; chat surfaces can render it outside the editor. */
+  formatToolbarPlacement?: 'inline' | 'outside'
+}
+
+interface FormatToolbarState {
+  x: number
+  y: number
+  anchorCenterX: number
+  selStart: number
+  selEnd: number
+}
+
+interface OutsideToolbarPosition {
+  top: number
+  left: number
+  width: number
+  maxHeight: number
+  visible: boolean
 }
 
 const FORMAT_ACTIONS: Array<{ icon: typeof Bold; label: string; command: WhatsAppFormatCommand; shortcut?: string }> = [
@@ -46,33 +68,43 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   onPasteFiles,
   disabled = false,
   singleLine = false,
+  keyboardChromeTarget = false,
+  formatToolbarPlacement = 'inline',
 }, ref) {
   const editorRef = useRef<HTMLDivElement>(null)
-  const [toolbar, setToolbar] = useState<{ x: number; y: number; selStart: number; selEnd: number } | null>(null)
+  const [toolbar, setToolbar] = useState<FormatToolbarState | null>(null)
+  const [outsideToolbarPosition, setOutsideToolbarPosition] = useState<OutsideToolbarPosition | null>(null)
   const toolbarRef = useRef<HTMLDivElement>(null)
   const valueRef = useRef(value)
   const selectionRef = useRef<TextSelection>({ start: value.length, end: value.length })
   valueRef.current = value
 
-  const commitEdit = useCallback((nextValue: string, selection: TextSelection) => {
+  const commitEdit = useCallback((nextValue: string, selection: TextSelection, restoreFocus = true) => {
     selectionRef.current = selection
     onChange(nextValue)
     requestAnimationFrame(() => {
       if (!editorRef.current) return
       editorRef.current.innerHTML = formatToHtmlPreview(nextValue) || ''
-      editorRef.current.focus()
-      setCaretOffset(editorRef.current, selection.end)
+      if (restoreFocus) {
+        editorRef.current.focus()
+        setCaretOffset(editorRef.current, selection.end)
+      }
     })
   }, [onChange])
 
   useImperativeHandle(ref, () => ({
     focus() {
-      editorRef.current?.focus()
+      if (!editorRef.current) return
+      editorRef.current.focus()
+      setCaretOffset(editorRef.current, selectionRef.current.end)
     },
-    insertAtCaret(text: string) {
+    blur() {
+      editorRef.current?.blur()
+    },
+    insertAtCaret(text: string, options) {
       if (!editorRef.current) return
       const edit = insertTextAtSelection(valueRef.current, selectionRef.current, text)
-      commitEdit(edit.value, edit.selection)
+      commitEdit(edit.value, edit.selection, options?.restoreFocus !== false)
     },
     clear() {
       if (editorRef.current) {
@@ -180,9 +212,15 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
       return
     }
     selectionRef.current = { start: selStart, end: selEnd }
+    const toolbarHalfWidth = 74
+    const rawX = rect.left + rect.width / 2 - editorRect.left
+    const x = editorRect.width <= toolbarHalfWidth * 2
+      ? editorRect.width / 2
+      : Math.max(toolbarHalfWidth, Math.min(rawX, editorRect.width - toolbarHalfWidth))
     setToolbar({
-      x: rect.left + rect.width / 2 - editorRect.left,
-      y: rect.top - editorRect.top - 8,
+      x,
+      y: Math.max(58, rect.top - editorRect.top - 8),
+      anchorCenterX: rect.left + rect.width / 2,
       selStart,
       selEnd,
     })
@@ -193,16 +231,97 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
     return () => document.removeEventListener('selectionchange', checkSelection)
   }, [checkSelection])
 
-  // Close toolbar on click outside
-  useEffect(() => {
-    const handleMouseDown = (e: MouseEvent) => {
-      if (toolbarRef.current && !toolbarRef.current.contains(e.target as Node)) {
-        // Will close via selectionchange naturally
+  const positionOutsideToolbar = useCallback(() => {
+    if (formatToolbarPlacement !== 'outside' || !toolbar || !editorRef.current || !toolbarRef.current) return
+
+    const viewport = window.visualViewport
+    const viewportLeft = viewport?.offsetLeft || 0
+    const viewportTop = viewport?.offsetTop || 0
+    const viewportWidth = viewport?.width || window.innerWidth
+    const viewportHeight = viewport?.height || window.innerHeight
+    const viewportRight = viewportLeft + viewportWidth
+    const viewportBottom = viewportTop + viewportHeight
+    const margin = 8
+    const gap = 8
+    const editorRect = editorRef.current.getBoundingClientRect()
+    const toolbarWidth = Math.min(toolbarRef.current.scrollWidth || 148, Math.max(1, viewportWidth - margin * 2))
+    const toolbarHeight = toolbarRef.current.scrollHeight || toolbarRef.current.offsetHeight || 56
+
+    let anchorCenterX = toolbar.anchorCenterX
+    const selection = window.getSelection()
+    if (selection?.rangeCount) {
+      const range = selection.getRangeAt(0)
+      if (editorRef.current.contains(range.commonAncestorContainer)) {
+        const rangeRect = range.getBoundingClientRect()
+        if (rangeRect.width || rangeRect.height) anchorCenterX = rangeRect.left + rangeRect.width / 2
       }
     }
-    document.addEventListener('mousedown', handleMouseDown)
-    return () => document.removeEventListener('mousedown', handleMouseDown)
-  }, [])
+
+    const availableAbove = Math.max(0, editorRect.top - gap - (viewportTop + margin))
+    const availableBelow = Math.max(0, viewportBottom - margin - gap - editorRect.bottom)
+    const placeAbove = availableAbove >= toolbarHeight || (
+      availableBelow < toolbarHeight && availableAbove >= availableBelow
+    )
+    const availableHeight = placeAbove ? availableAbove : availableBelow
+    const maxHeight = Math.min(toolbarHeight, availableHeight)
+    const top = placeAbove
+      ? editorRect.top - gap - maxHeight
+      : editorRect.bottom + gap
+    const minLeft = viewportLeft + margin
+    const maxLeft = Math.max(minLeft, viewportRight - margin - toolbarWidth)
+    const left = Math.max(minLeft, Math.min(anchorCenterX - toolbarWidth / 2, maxLeft))
+
+    setOutsideToolbarPosition({
+      top,
+      left,
+      width: toolbarWidth,
+      maxHeight,
+      visible: maxHeight >= 28,
+    })
+  }, [formatToolbarPlacement, toolbar])
+
+  useLayoutEffect(() => {
+    if (!toolbar || formatToolbarPlacement !== 'outside') return
+    positionOutsideToolbar()
+  }, [formatToolbarPlacement, positionOutsideToolbar, toolbar])
+
+  useEffect(() => {
+    if (!toolbar) {
+      setOutsideToolbarPosition(null)
+      return
+    }
+    if (formatToolbarPlacement !== 'outside') return
+    const reposition = () => positionOutsideToolbar()
+    window.addEventListener('resize', reposition)
+    window.addEventListener('scroll', reposition, true)
+    window.visualViewport?.addEventListener('resize', reposition)
+    window.visualViewport?.addEventListener('scroll', reposition)
+    return () => {
+      window.removeEventListener('resize', reposition)
+      window.removeEventListener('scroll', reposition, true)
+      window.visualViewport?.removeEventListener('resize', reposition)
+      window.visualViewport?.removeEventListener('scroll', reposition)
+    }
+  }, [formatToolbarPlacement, positionOutsideToolbar, toolbar])
+
+  // Close toolbar on click outside or Escape.
+  useEffect(() => {
+    if (!toolbar) return
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as Node
+      if (toolbarRef.current?.contains(target) || editorRef.current?.contains(target)) return
+      setToolbar(null)
+    }
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setToolbar(null)
+    }
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [toolbar])
 
   const applyFormat = useCallback((command: WhatsAppFormatCommand, selection = selectionRef.current) => {
     if (!editorRef.current) return
@@ -236,6 +355,37 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   const minH = singleLine ? 'min-h-[42px]' : `min-h-[${Math.max(rows * 24, 64)}px]`
   const maxH = singleLine ? 'max-h-32' : 'max-h-60'
 
+  const formatToolbar = toolbar ? (
+    <div
+      ref={toolbarRef}
+      role="toolbar"
+      aria-label="Formato de texto"
+      className={`${formatToolbarPlacement === 'outside' ? 'fixed z-[120] overflow-y-auto' : 'absolute z-50 -translate-x-1/2 -translate-y-full'} grid w-[148px] grid-cols-4 gap-0.5 rounded-lg bg-gray-800 px-1 py-0.5 shadow-xl`}
+      style={formatToolbarPlacement === 'outside' ? {
+        top: outsideToolbarPosition?.top || 0,
+        left: outsideToolbarPosition?.left || 0,
+        width: outsideToolbarPosition?.width || 148,
+        maxHeight: outsideToolbarPosition?.maxHeight || undefined,
+        visibility: outsideToolbarPosition?.visible ? 'visible' : 'hidden',
+      } : { left: toolbar.x, top: toolbar.y }}
+      onPointerDown={e => e.preventDefault()}
+      onMouseDown={e => e.preventDefault()}
+    >
+      {FORMAT_ACTIONS.map(action => (
+        <button
+          key={action.label}
+          type="button"
+          onClick={() => applyFormat(action.command, { start: toolbar.selStart, end: toolbar.selEnd })}
+          className="p-1.5 text-white hover:bg-gray-700 rounded transition-colors"
+          title={action.shortcut ? `${action.label} (${action.shortcut})` : action.label}
+          aria-label={action.shortcut ? `${action.label}, ${action.shortcut}` : action.label}
+        >
+          <action.icon className="w-3.5 h-3.5" />
+        </button>
+      ))}
+    </div>
+  ) : null
+
   return (
     <div className="relative">
       {!value && (
@@ -248,6 +398,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
         role="textbox"
         aria-multiline={!singleLine}
         aria-label={placeholder}
+        data-chat-keyboard-target={keyboardChromeTarget ? 'true' : undefined}
         contentEditable={!disabled}
         onInput={handleInput}
         onKeyDown={handleEditorKeyDown}
@@ -255,27 +406,8 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
         className={`w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 ${minH} ${maxH} overflow-y-auto whitespace-pre-wrap break-words outline-none text-sm ${className}`}
       />
       {/* Formatting toolbar */}
-      {toolbar && (
-        <div
-          ref={toolbarRef}
-          className="absolute z-50 grid w-[148px] grid-cols-4 gap-0.5 rounded-lg bg-gray-800 px-1 py-0.5 shadow-xl -translate-x-1/2 -translate-y-full"
-          style={{ left: toolbar.x, top: toolbar.y }}
-          onMouseDown={e => e.preventDefault()}
-        >
-          {FORMAT_ACTIONS.map(action => (
-            <button
-              key={action.label}
-              type="button"
-              onClick={() => applyFormat(action.command, { start: toolbar.selStart, end: toolbar.selEnd })}
-              className="p-1.5 text-white hover:bg-gray-700 rounded transition-colors"
-              title={action.shortcut ? `${action.label} (${action.shortcut})` : action.label}
-              aria-label={action.shortcut ? `${action.label}, ${action.shortcut}` : action.label}
-            >
-              <action.icon className="w-3.5 h-3.5" />
-            </button>
-          ))}
-        </div>
-      )}
+      {formatToolbarPlacement === 'inline' && formatToolbar}
+      {formatToolbarPlacement === 'outside' && formatToolbar && typeof document !== 'undefined' && createPortal(formatToolbar, document.body)}
     </div>
   )
 })

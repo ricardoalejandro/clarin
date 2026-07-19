@@ -82,14 +82,14 @@ export default function QuickReplyPicker({
   if (!isOpen) return null
 
   return (
-    <div className="absolute bottom-full left-0 right-0 mb-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-64 flex flex-col">
+    <div role="dialog" aria-label="Respuestas rápidas" className="absolute inset-x-0 bottom-full z-[95] mb-1 flex max-h-[min(calc(var(--app-height,100dvh)-8rem),24rem)] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl sm:z-50 sm:max-h-64 sm:rounded-lg sm:shadow-lg">
       {/* Header */}
       <div className="px-3 py-2 border-b border-gray-200 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Zap className="w-4 h-4 text-green-600" />
           <span className="text-sm font-semibold text-gray-700">Respuestas rápidas</span>
         </div>
-        <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600">
+        <button type="button" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-gray-400 hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar respuestas rápidas">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -111,11 +111,12 @@ export default function QuickReplyPicker({
           </div>
         ) : (
           filtered.map((reply, idx) => (
-            <div
+            <button
+              type="button"
               key={reply.id}
               onClick={() => onSelect(reply)}
               onMouseEnter={() => setSelectedIndex(idx)}
-              className={`px-3 py-2.5 cursor-pointer flex items-start gap-3 border-b border-gray-50 last:border-0 ${
+              className={`flex min-h-11 w-full cursor-pointer items-start gap-3 border-b border-gray-50 px-3 py-2.5 text-left last:border-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 ${
                 idx === selectedIndex ? 'bg-green-50' : 'hover:bg-gray-50'
               }`}
             >
@@ -141,14 +142,14 @@ export default function QuickReplyPicker({
                 ) : null}
                 {reply.body && <p className="text-xs text-gray-500 line-clamp-2">{reply.body}</p>}
               </div>
-            </div>
+            </button>
           ))
         )}
       </div>
 
       {/* Footer hint */}
       {filtered.length > 0 && (
-        <div className="px-3 py-1.5 border-t border-gray-200 bg-gray-50">
+        <div className="hidden border-t border-gray-200 bg-gray-50 px-3 py-1.5 sm:block">
           <span className="text-xs text-gray-400">↑↓ navegar · Enter seleccionar · Esc cerrar</span>
         </div>
       )}

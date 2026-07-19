@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe, Hash, Calendar, ToggleLeft, Mail, Phone, Link, DollarSign, Type, Tag, List, AlertCircle, HardDrive } from 'lucide-react'
 import { logoutFromBrowser, subscribeWebSocket } from '@/lib/api'
@@ -732,7 +733,7 @@ function CustomFieldsPanel() {
 
       {/* Create/Edit Modal */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => { setShowModal(false); resetForm() }}>
+        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" onClick={() => { setShowModal(false); resetForm() }}>
           <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             {/* Modal Header */}
             <div className="flex items-center justify-between p-5 border-b border-slate-100">
@@ -1006,7 +1007,7 @@ function CustomFieldsPanel() {
 
       {/* Delete Confirmation */}
       {deleteConfirm && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={() => setDeleteConfirm(null)}>
+        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" onClick={() => setDeleteConfirm(null)}>
           <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
             <div className="p-5 text-center">
               <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-3">
@@ -1083,6 +1084,7 @@ export default function SettingsPage() {
   }
   const [devDevices, setDevDevices] = useState<DeviceItem[]>([])
   const [devLoading, setDevLoading] = useState(true)
+  const [devError, setDevError] = useState('')
   const [devShowCreate, setDevShowCreate] = useState(false)
   const [devCreateProvider, setDevCreateProvider] = useState<DeviceProvider>('whatsapp_web')
   const [devNewName, setDevNewName] = useState('')
@@ -1097,6 +1099,14 @@ export default function SettingsPage() {
   const [devEditApiPhoneNumberID, setDevEditApiPhoneNumberID] = useState('')
   const [devEditApiWabaID, setDevEditApiWabaID] = useState('')
   const [devSaving, setDevSaving] = useState(false)
+  const [devActionDevice, setDevActionDevice] = useState<DeviceItem | null>(null)
+  const [devShowMobileLinkNotice, setDevShowMobileLinkNotice] = useState(false)
+  // Keep layout density width-based and separate from the capability decision,
+  // so a wide touch laptop keeps the desktop QR workflow.
+  const [isCompactDeviceView, setIsCompactDeviceView] = useState(true)
+  // Default conservatively so QR/re-link controls never flash on a phone before
+  // the media query resolves. Device rows load after this effect on desktop.
+  const [isPhoneDeviceView, setIsPhoneDeviceView] = useState(true)
 
   // Google Contacts state
   const [googleStatus, setGoogleStatus] = useState<{
@@ -1676,9 +1686,14 @@ export default function SettingsPage() {
     const token = localStorage.getItem('token')
     try {
       const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${token}` } })
-      const data = await res.json()
-      if (data.success) setDevDevices(data.devices || [])
-    } catch (err) { console.error('Failed to fetch devices:', err) }
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los dispositivos')
+      setDevDevices(data.devices || [])
+      setDevError('')
+    } catch (err) {
+      console.error('Failed to fetch devices:', err)
+      setDevError(err instanceof Error ? err.message : 'No se pudieron cargar los dispositivos')
+    }
     finally { setDevLoading(false) }
   }, [])
 
@@ -1689,6 +1704,33 @@ export default function SettingsPage() {
       return () => clearInterval(interval)
     }
   }, [activeTab, fetchDevicesForSettings])
+
+  useEffect(() => {
+    const compactMedia = window.matchMedia('(max-width: 767px)')
+    const phoneMedia = window.matchMedia('(max-width: 767px) and (hover: none) and (pointer: coarse)')
+    const update = () => {
+      setIsCompactDeviceView(compactMedia.matches)
+      setIsPhoneDeviceView(phoneMedia.matches)
+    }
+    update()
+    compactMedia.addEventListener('change', update)
+    phoneMedia.addEventListener('change', update)
+    return () => {
+      compactMedia.removeEventListener('change', update)
+      phoneMedia.removeEventListener('change', update)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isPhoneDeviceView) {
+      setDevShowMobileLinkNotice(false)
+      return
+    }
+    if (devSelected) {
+      setDevSelected(null)
+      setDevShowMobileLinkNotice(true)
+    }
+  }, [isPhoneDeviceView, devSelected])
 
   useEffect(() => {
     if (activeTab !== 'devices') return
@@ -1713,13 +1755,26 @@ export default function SettingsPage() {
   const getDeviceProvider = (device?: DeviceItem | null): DeviceProvider => device?.provider || 'whatsapp_web'
   const isApiDevice = (device?: DeviceItem | null) => getDeviceProvider(device) === 'whatsapp_cloud_api'
 
-  const resetDevCreateForm = () => {
+  const resetDevCreateForm = useCallback(() => {
     setDevCreateProvider('whatsapp_web')
     setDevNewName('')
     setDevNewApiDisplayPhone('')
     setDevNewApiPhoneNumberID('')
     setDevNewApiWabaID('')
-  }
+  }, [])
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (devShowMobileLinkNotice) { setDevShowMobileLinkNotice(false); return }
+      if (devActionDevice) { setDevActionDevice(null); return }
+      if (devEditing) { setDevEditing(null); return }
+      if (devSelected) { setDevSelected(null); return }
+      if (devShowCreate) { setDevShowCreate(false); resetDevCreateForm() }
+    }
+    document.addEventListener('keydown', handleEscape)
+    return () => document.removeEventListener('keydown', handleEscape)
+  }, [devActionDevice, devEditing, devSelected, devShowCreate, devShowMobileLinkNotice, resetDevCreateForm])
 
   const openDevEdit = (device: DeviceItem) => {
     setDevEditing(device)
@@ -1760,8 +1815,20 @@ export default function SettingsPage() {
 
   const handleDevConnect = async (deviceId: string) => {
     const token = localStorage.getItem('token')
-    try { await fetch(`/api/devices/${deviceId}/connect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); fetchDevicesForSettings() }
-    catch (err) { console.error('Failed to connect device:', err) }
+    try {
+      const res = await fetch(`/api/devices/${deviceId}/connect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.success) {
+        showMessage('error', data.error || 'No se pudo iniciar la reconexión')
+        return false
+      }
+      await fetchDevicesForSettings()
+      return true
+    } catch (err) {
+      console.error('Failed to connect device:', err)
+      showMessage('error', 'No se pudo iniciar la reconexión')
+      return false
+    }
   }
 
   const handleDevDisconnect = async (deviceId: string) => {
@@ -1913,7 +1980,7 @@ export default function SettingsPage() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-1.5 px-3 py-2.5 sm:px-5 sm:py-3 font-medium transition whitespace-nowrap text-xs sm:text-sm ${
+                className={`flex min-h-11 items-center gap-1.5 px-3 py-2.5 sm:px-5 sm:py-3 font-medium transition whitespace-nowrap text-xs sm:text-sm ${
                   activeTab === tab.id
                     ? 'text-emerald-600 border-b-2 border-emerald-600 bg-emerald-50/50'
                     : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
@@ -1926,7 +1993,7 @@ export default function SettingsPage() {
           })}
         </div>
 
-        <div className="p-6 flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto p-3 sm:p-6">
           {/* Profile Tab */}
           {activeTab === 'profile' && (
             <div className="space-y-6">
@@ -2597,98 +2664,222 @@ export default function SettingsPage() {
           {/* Devices Tab */}
           {activeTab === 'devices' && (
             <div className="space-y-5">
-              <div className="flex items-center justify-between">
-                <div>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
                   <h3 className="text-sm font-medium text-slate-900">Dispositivos WhatsApp</h3>
                   <p className="text-xs text-slate-500 mt-0.5">Gestiona tus conexiones de WhatsApp</p>
                 </div>
-                <button onClick={() => setDevShowCreate(true)} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-xl transition text-xs font-medium shadow-sm">
+                <button onClick={() => setDevShowCreate(true)} className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700">
                   <Plus className="w-3.5 h-3.5" /> Agregar
                 </button>
               </div>
 
+              {devError && (
+                <div className="mb-3 flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between" role="alert">
+                  <span>{devError}. Conservamos la última lista disponible.</span>
+                  <button type="button" onClick={() => { setDevLoading(devDevices.length === 0); void fetchDevicesForSettings() }} className="min-h-11 shrink-0 rounded-lg border border-red-300 bg-white px-4 font-semibold text-red-700 hover:bg-red-100">Reintentar</button>
+                </div>
+              )}
+
               {devLoading ? (
                 <div className="flex items-center justify-center py-12"><div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" /></div>
-              ) : devDevices.length === 0 ? (
+              ) : devDevices.length === 0 && !devError ? (
                 <div className="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center">
                   <Smartphone className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                   <p className="text-sm font-medium text-slate-700 mb-1">No hay dispositivos</p>
                   <p className="text-xs text-slate-500 mb-3">Agrega tu primer dispositivo WhatsApp</p>
-                  <button onClick={() => setDevShowCreate(true)} className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-xl transition text-xs font-medium shadow-sm">
+                  <button onClick={() => setDevShowCreate(true)} className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700">
                     <Plus className="w-3.5 h-3.5" /> Agregar Dispositivo
                   </button>
                 </div>
-              ) : (
-                <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
+              ) : devDevices.length > 0 ? (
+                <div className="grid gap-3 md:block md:divide-y md:divide-slate-100 md:rounded-xl md:border md:border-slate-200">
                   {devDevices.map((device) => (
-                    <div key={device.id} className="p-3.5 flex items-center justify-between hover:bg-slate-50/50 transition">
-                      <div className="flex items-center gap-3">
-                        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${isApiDevice(device) ? 'bg-sky-50' : 'bg-slate-100'}`}>
+                    <article key={device.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition md:flex md:items-center md:justify-between md:rounded-none md:border-0 md:p-3.5 md:shadow-none md:hover:bg-slate-50/50">
+                      <div className="flex min-w-0 items-start gap-3 md:items-center">
+                        <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl md:h-9 md:w-9 md:rounded-lg ${isApiDevice(device) ? 'bg-sky-50' : 'bg-slate-100'}`}>
                           {isApiDevice(device) ? <Globe className="w-4.5 h-4.5 text-sky-600" /> : <Smartphone className="w-4.5 h-4.5 text-slate-500" />}
                         </div>
-                        <div className="min-w-0">
+                        <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="text-sm font-medium text-slate-900 truncate">{device.name || 'Dispositivo'}</p>
                             {getDevProviderBadge(device)}
                           </div>
-                          <p className="text-xs text-slate-500 truncate">{device.api_display_phone || device.phone || device.phone_number_id || device.jid || 'Sin numero'}</p>
+                          <p className="mt-1 break-all text-xs text-slate-500 md:mt-0 md:truncate">{device.api_display_phone || device.phone || device.phone_number_id || device.jid || 'Sin número'}</p>
                           {getApiGuardBadges(device)}
+                          {!isApiDevice(device) && isCompactDeviceView && <div className="mt-2">{getDevStatusBadge(device.status)}</div>}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      {!isCompactDeviceView && <div className="flex items-center gap-2">
                         {!isApiDevice(device) && getDevStatusBadge(device.status)}
                         <div className="flex items-center gap-1.5">
                           <span className="text-[10px] text-slate-400 hidden sm:inline">{device.receive_messages ? 'Recibe' : 'No recibe'}</span>
                           <button
                             onClick={() => handleToggleReceiveMessages(device)}
-                            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${device.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                            className="inline-flex h-11 w-11 items-center justify-center rounded-xl transition hover:bg-slate-100"
                             title={device.receive_messages ? 'Recepción activa — clic para desactivar' : 'Recepción desactivada — clic para activar'}
+                            aria-pressed={device.receive_messages}
                           >
-                            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${device.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} />
+                            <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${device.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}><span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${device.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} /></span>
                           </button>
                         </div>
-                        <button onClick={() => openDevEdit(device)} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition" title="Editar"><Edit className="w-3.5 h-3.5" /></button>
+                        <button onClick={() => openDevEdit(device)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-blue-50 hover:text-blue-600" title="Editar"><Edit className="w-3.5 h-3.5" /></button>
                         {isApiDevice(device) ? null : device.status === 'connected' ? (
                           <>
-                            <button onClick={() => handleDevReset(device.id)} className="p-1.5 text-slate-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition" title="Re-vincular (sincronizar historial completo)"><RefreshCw className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => handleDevDisconnect(device.id)} className="p-1.5 text-slate-400 hover:text-orange-600 hover:bg-orange-50 rounded-lg transition" title="Desconectar"><Power className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => handleDevReset(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-purple-50 hover:text-purple-600" title="Re-vincular (sincronizar historial completo)"><RefreshCw className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => handleDevDisconnect(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-orange-50 hover:text-orange-600" title="Desconectar"><Power className="w-3.5 h-3.5" /></button>
                           </>
                         ) : device.status === 'connecting' ? (
-                          <button onClick={() => setDevSelected(device)} className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Ver QR"><QrCode className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setDevSelected(device)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-emerald-600 transition hover:bg-emerald-50" title="Ver QR"><QrCode className="w-3.5 h-3.5" /></button>
                         ) : (
-                          <button onClick={() => { handleDevConnect(device.id); setDevSelected(device) }} className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Conectar"><Power className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => { handleDevConnect(device.id); setDevSelected(device) }} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600" title="Conectar"><Power className="w-3.5 h-3.5" /></button>
                         )}
-                        <button onClick={() => handleDevDelete(device.id)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition" title="Eliminar"><Trash2 className="w-3.5 h-3.5" /></button>
-                      </div>
-                    </div>
+                        <button onClick={() => handleDevDelete(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600" title="Eliminar"><Trash2 className="w-3.5 h-3.5" /></button>
+                      </div>}
+                      {isCompactDeviceView && <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleReceiveMessages(device)}
+                            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-slate-100"
+                            aria-pressed={device.receive_messages}
+                            aria-label={device.receive_messages ? 'Desactivar recepción de mensajes' : 'Activar recepción de mensajes'}
+                          >
+                            <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${device.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}><span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${device.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} /></span>
+                          </button>
+                          <span className="truncate text-xs text-slate-500">{device.receive_messages ? 'Recibe mensajes' : 'Recepción desactivada'}</span>
+                        </div>
+                        <button type="button" onClick={() => setDevActionDevice(device)} className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700" aria-label={`Acciones de ${device.name || 'dispositivo'}`}>
+                          <Settings className="h-4 w-4" /> Acciones
+                        </button>
+                      </div>}
+                    </article>
                   ))}
                 </div>
+              ) : null}
+
+              {typeof document !== 'undefined' && devActionDevice && createPortal(
+                <div className="app-viewport fixed inset-0 z-[90] flex items-end bg-slate-950/40" onMouseDown={() => setDevActionDevice(null)}>
+                  <div role="dialog" aria-modal="true" aria-label={`Acciones de ${devActionDevice.name || 'dispositivo'}`} className="w-full rounded-t-3xl bg-white px-3 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+                    <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" />
+                    <div className="px-2 pb-2">
+                      <p className="truncate text-sm font-semibold text-slate-900">{devActionDevice.name || 'Dispositivo'}</p>
+                      <p className="mt-0.5 truncate text-xs text-slate-500">{devActionDevice.api_display_phone || devActionDevice.phone || devActionDevice.jid || 'Sin número'}</p>
+                    </div>
+                    <button type="button" onClick={() => { const device = devActionDevice; setDevActionDevice(null); openDevEdit(device) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit className="h-5 w-5 text-blue-500" />Editar canal</button>
+                    {!isApiDevice(devActionDevice) && devActionDevice.status === 'connected' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const device = devActionDevice
+                            setDevActionDevice(null)
+                            if (isPhoneDeviceView) setDevShowMobileLinkNotice(true)
+                            else void handleDevReset(device.id)
+                          }}
+                          className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"
+                        >
+                          <RefreshCw className="h-5 w-5 text-purple-500" />{isPhoneDeviceView ? 'Re-vincular desde una computadora' : 'Re-vincular y mostrar QR'}
+                        </button>
+                        <button type="button" onClick={() => { const id = devActionDevice.id; setDevActionDevice(null); handleDevDisconnect(id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Power className="h-5 w-5 text-orange-500" />Desconectar</button>
+                      </>
+                    )}
+                    {!isApiDevice(devActionDevice) && isPhoneDeviceView && devActionDevice.status !== 'connected' && devActionDevice.status !== 'connecting' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const id = devActionDevice.id
+                          setDevActionDevice(null)
+                          void handleDevConnect(id).then(started => {
+                            if (started) showMessage('success', 'Reconexión solicitada. Si la sesión expiró, completa la vinculación desde una computadora.')
+                          })
+                        }}
+                        className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"
+                      >
+                        <Power className="h-5 w-5 text-emerald-600" />Intentar reconectar
+                      </button>
+                    )}
+                    {!isApiDevice(devActionDevice) && devActionDevice.status !== 'connected' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const device = devActionDevice
+                          setDevActionDevice(null)
+                          if (isPhoneDeviceView) {
+                            setDevShowMobileLinkNotice(true)
+                            return
+                          }
+                          setDevSelected(device)
+                          if (device.status !== 'connecting') {
+                            void handleDevConnect(device.id)
+                          }
+                        }}
+                        className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"
+                      >
+                        <QrCode className="h-5 w-5 text-amber-600" />
+                        {isPhoneDeviceView
+                          ? (devActionDevice.status === 'connecting' ? 'Completar vinculación en computadora' : 'Información de vinculación por QR')
+                          : (devActionDevice.status === 'connecting' ? 'Ver código QR' : 'Conectar y mostrar QR')}
+                      </button>
+                    )}
+                    <button type="button" onClick={() => { const id = devActionDevice.id; setDevActionDevice(null); handleDevDelete(id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-red-600 hover:bg-red-50"><Trash2 className="h-5 w-5" />Eliminar</button>
+                    <button type="button" onClick={() => setDevActionDevice(null)} className="mt-2 min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar</button>
+                  </div>
+                </div>,
+                document.body,
+              )}
+
+              {typeof document !== 'undefined' && devShowMobileLinkNotice && createPortal(
+                <div className="app-viewport fixed inset-0 z-[95] flex items-end bg-slate-950/45" onMouseDown={() => setDevShowMobileLinkNotice(false)}>
+                  <div role="alertdialog" aria-modal="true" aria-labelledby="mobile-device-link-title" className="w-full rounded-t-3xl bg-white px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-5 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+                    <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-600"><QrCode className="h-6 w-6" /></div>
+                    <h2 id="mobile-device-link-title" className="text-center text-lg font-bold text-slate-900">Vincula este dispositivo desde una computadora</h2>
+                    <p className="mx-auto mt-2 max-w-sm text-center text-sm leading-relaxed text-slate-600">La vinculación de un dispositivo nuevo requiere abrir Clarin en una computadora. WhatsApp Web exige escanear con el teléfono un código QR mostrado en otra pantalla; desde el celular sí puedes administrar los dispositivos existentes.</p>
+                    <button type="button" onClick={() => setDevShowMobileLinkNotice(false)} className="mt-5 min-h-12 w-full rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700">Entendido</button>
+                  </div>
+                </div>,
+                document.body,
               )}
 
               {/* Create device modal */}
               {devShowCreate && (
-                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
-                  <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-lg mx-4 border border-slate-100">
-                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Nuevo Canal WhatsApp</h2>
-                    <div className="grid grid-cols-2 gap-2 mb-4">
+                <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/40 backdrop-blur-sm sm:items-center sm:p-4">
+                  <div className="flex h-full w-full max-w-lg flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[min(90dvh,760px)] sm:rounded-2xl sm:border sm:border-slate-100">
+                    <header className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3 sm:border-0 sm:px-6 sm:pb-0 sm:pt-6">
+                      <h2 className="text-lg font-semibold text-slate-900">Nuevo Canal WhatsApp</h2>
+                      <button type="button" onClick={() => { setDevShowCreate(false); resetDevCreateForm() }} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 sm:h-9 sm:w-9" aria-label="Cerrar"><X className="h-5 w-5" /></button>
+                    </header>
+                    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+                    <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
                       <button
                         type="button"
                         onClick={() => setDevCreateProvider('whatsapp_web')}
-                        className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition ${devCreateProvider === 'whatsapp_web' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                        className={`flex min-h-11 items-center gap-2 rounded-xl border px-3 text-sm transition ${devCreateProvider === 'whatsapp_web' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
                       >
                         <QrCode className="w-4 h-4" /> QR WhatsApp Web
                       </button>
                       <button
                         type="button"
                         onClick={() => setDevCreateProvider('whatsapp_cloud_api')}
-                        className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition ${devCreateProvider === 'whatsapp_cloud_api' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                        className={`flex min-h-11 items-center gap-2 rounded-xl border px-3 text-sm transition ${devCreateProvider === 'whatsapp_cloud_api' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
                       >
                         <Globe className="w-4 h-4" /> API Oficial
                       </button>
                     </div>
 
                     <div className="space-y-3">
-                      <div>
+                      {devCreateProvider === 'whatsapp_web' && isPhoneDeviceView && (
+                        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                          <div className="flex items-start gap-3">
+                            <Smartphone className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                            <div>
+                              <p className="text-sm font-semibold text-amber-900">La vinculación requiere una computadora</p>
+                              <p className="mt-1 text-xs leading-relaxed text-amber-800">La vinculación de un dispositivo nuevo requiere abrir Clarin en una computadora. Allí podrás mostrar el código QR y escanearlo con tu teléfono.</p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      <div className={devCreateProvider === 'whatsapp_web' && isPhoneDeviceView ? 'hidden' : ''}>
                         <label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label>
                         <input type="text" value={devNewName} onChange={(e) => setDevNewName(e.target.value)} placeholder="Nombre del canal" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" autoFocus onKeyDown={(e) => { if (e.key === 'Enter' && devCreateProvider === 'whatsapp_web') handleDevCreate() }} />
                       </div>
@@ -2716,18 +2907,27 @@ export default function SettingsPage() {
                         </>
                       )}
                     </div>
+                    </div>
 
-                    <div className="flex gap-3 mt-5">
-                      <button onClick={() => { setDevShowCreate(false); resetDevCreateForm() }} className="flex-1 px-4 py-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
-                      <button onClick={handleDevCreate} disabled={devCreating || !devNewName.trim()} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devCreating ? 'Creando...' : devCreateProvider === 'whatsapp_web' ? 'Crear y Conectar' : 'Crear Canal'}</button>
+                    <div className="flex shrink-0 gap-3 border-t border-slate-100 bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:px-6 sm:pb-6">
+                      <button onClick={() => { setDevShowCreate(false); resetDevCreateForm() }} className="min-h-11 flex-1 px-4 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
+                      {devCreateProvider === 'whatsapp_web' ? (
+                        <>
+                          {isPhoneDeviceView
+                            ? <button type="button" disabled className="min-h-11 flex-1 rounded-xl bg-slate-200 px-3 text-sm font-medium text-slate-500">Requiere computadora</button>
+                            : <button onClick={handleDevCreate} disabled={devCreating || !devNewName.trim()} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50">{devCreating ? 'Creando...' : 'Crear y Conectar'}</button>}
+                        </>
+                      ) : (
+                        <button onClick={handleDevCreate} disabled={devCreating || !devNewName.trim()} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50">{devCreating ? 'Creando...' : 'Crear Canal'}</button>
+                      )}
                     </div>
                   </div>
                 </div>
               )}
 
               {/* QR modal */}
-              {devSelected && devSelected.status === 'connecting' && devSelected.qr_code && (
-                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
+              {!isPhoneDeviceView && devSelected && devSelected.status === 'connecting' && devSelected.qr_code && (
+                <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm">
                   <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4 text-center border border-slate-100">
                     <div className="flex items-center justify-center gap-2 mb-3"><QrCode className="w-5 h-5 text-emerald-600" /><h2 className="text-lg font-semibold text-slate-900">Escanea el código QR</h2></div>
                     <p className="text-sm text-slate-500 mb-4">Abre WhatsApp en tu teléfono y escanea este código</p>
@@ -2740,13 +2940,13 @@ export default function SettingsPage() {
 
               {/* Edit device modal */}
               {devEditing && (
-                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
-                  <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4 border border-slate-100">
-                    <div className="flex items-center justify-between mb-4">
-                      <h2 className="text-lg font-semibold text-slate-900">Editar Canal</h2>
-                      {getDevProviderBadge(devEditing)}
-                    </div>
-                    <div className="space-y-4">
+                <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/40 backdrop-blur-sm sm:items-center sm:p-4">
+                  <div className="flex h-full w-full max-w-md flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[min(90dvh,760px)] sm:rounded-2xl sm:border sm:border-slate-100">
+                    <header className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 sm:px-6 sm:pt-5">
+                      <div className="flex min-w-0 items-center gap-2"><h2 className="truncate text-lg font-semibold text-slate-900">Editar Canal</h2>{getDevProviderBadge(devEditing)}</div>
+                      <button type="button" onClick={() => setDevEditing(null)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 sm:h-9 sm:w-9" aria-label="Cerrar"><X className="h-5 w-5" /></button>
+                    </header>
+                    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6">
                       <div><label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label><input type="text" value={devEditName} onChange={(e) => setDevEditName(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') handleDevUpdate() }} /></div>
                       {isApiDevice(devEditing) ? (
                         <>
@@ -2773,22 +2973,23 @@ export default function SettingsPage() {
                           <div><label className="block text-xs font-medium text-slate-600 mb-1">Estado</label><div className="px-3 py-2">{getDevStatusBadge(devEditing.status)}</div></div>
                         </>
                       )}
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-3">
                         <div>
                           <label className="block text-xs font-medium text-slate-600">Recibir mensajes</label>
                           <p className="text-[10px] text-slate-400 mt-0.5">Si se desactiva, los mensajes entrantes se ignoran silenciosamente</p>
                         </div>
                         <button
                           onClick={() => { handleToggleReceiveMessages(devEditing); setDevEditing({ ...devEditing, receive_messages: !devEditing.receive_messages }) }}
-                          className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${devEditing.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-slate-100"
+                          aria-pressed={devEditing.receive_messages}
                         >
-                          <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${devEditing.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} />
+                          <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${devEditing.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}><span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${devEditing.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} /></span>
                         </button>
                       </div>
                     </div>
-                    <div className="flex gap-3 mt-5">
-                      <button onClick={() => setDevEditing(null)} className="flex-1 px-4 py-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
-                      <button onClick={handleDevUpdate} disabled={devSaving || !devEditName.trim()} className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devSaving ? 'Guardando...' : 'Guardar'}</button>
+                    <div className="flex shrink-0 gap-3 border-t border-slate-100 bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:px-6 sm:pb-6">
+                      <button onClick={() => setDevEditing(null)} className="min-h-11 flex-1 px-4 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
+                      <button onClick={handleDevUpdate} disabled={devSaving || !devEditName.trim()} className="min-h-11 flex-1 px-4 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devSaving ? 'Guardando...' : 'Guardar'}</button>
                     </div>
                   </div>
                 </div>

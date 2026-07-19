@@ -16,6 +16,7 @@ declare global {
         options: {
           sitekey: string
           theme?: 'light' | 'dark' | 'auto'
+          size?: 'normal' | 'compact' | 'flexible'
           callback?: (token: string) => void
           'expired-callback'?: () => void
           'error-callback'?: () => void
@@ -48,6 +49,7 @@ export default function LoginScreen() {
     widgetIdRef.current = turnstile.render(turnstileRef.current, {
       sitekey: turnstileSiteKey,
       theme: 'light',
+      size: 'flexible',
       callback: (token: string) => {
         setTurnstileToken(token)
         setError('')
@@ -139,7 +141,7 @@ export default function LoginScreen() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-50 flex items-center justify-center px-4 py-10">
+    <main className="app-viewport overflow-y-auto bg-slate-50">
       {turnstileSiteKey && (
         <Script
           src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
@@ -147,8 +149,8 @@ export default function LoginScreen() {
           onLoad={() => setTurnstileReady(true)}
         />
       )}
-      <section className="w-full max-w-sm">
-        <div className="mb-8 flex flex-col items-center text-center">
+      <section className="mx-auto flex min-h-full w-full max-w-sm flex-col justify-center px-4 py-[max(2rem,env(safe-area-inset-top))] pb-[max(2rem,env(safe-area-inset-bottom))]">
+        <div className="mb-6 flex flex-col items-center text-center sm:mb-8">
           <div className="w-12 h-12 bg-emerald-600 rounded-xl flex items-center justify-center shadow-sm">
             <MessageSquare className="w-6 h-6 text-white" />
           </div>
@@ -156,7 +158,7 @@ export default function LoginScreen() {
           <p className="mt-1 text-sm text-slate-500">Ingresa a tu dashboard</p>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm mb-5">
               {error}
@@ -175,7 +177,7 @@ export default function LoginScreen() {
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="usuario o correo"
-                  className="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 rounded-lg focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition-all text-sm"
+                  className="w-full pl-11 pr-4 py-3 bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 rounded-lg focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition-all text-base sm:text-sm"
                   required
                   disabled={loading}
                 />
@@ -193,14 +195,14 @@ export default function LoginScreen() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="tu contraseña"
-                  className="w-full pl-11 pr-11 py-3 bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 rounded-lg focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition-all text-sm"
+                  className="w-full pl-11 pr-12 py-3 bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 rounded-lg focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition-all text-base sm:text-sm"
                   required
                   disabled={loading}
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword((v) => !v)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                  className="absolute right-1 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-50 hover:text-slate-600"
                   aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
                   disabled={loading}
                 >
@@ -210,9 +212,9 @@ export default function LoginScreen() {
             </div>
 
             {turnstileRequired && (
-              <div className="min-h-[70px] flex items-center justify-center">
+              <div className="min-h-[70px] min-w-0 overflow-hidden flex items-center justify-center">
                 {turnstileSiteKey && loginEnabled ? (
-                  <div ref={turnstileRef} />
+                  <div ref={turnstileRef} className="w-full min-w-0" />
                 ) : (
                   <div className="w-full rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                     Estamos activando el inicio de sesión seguro.

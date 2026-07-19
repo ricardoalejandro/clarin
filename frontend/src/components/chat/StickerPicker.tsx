@@ -34,6 +34,8 @@ interface StickerPickerProps {
   savedError?: string | null
   onToggleSavedSticker: (stickerUrl: string) => void | Promise<void>
   onRefreshSavedStickers: () => void | Promise<void>
+  triggerClassName?: string
+  embedded?: boolean
 }
 
 type StickerListResponse = {
@@ -107,6 +109,8 @@ export default function StickerPicker({
   savedError,
   onToggleSavedSticker,
   onRefreshSavedStickers,
+  triggerClassName = '',
+  embedded = false,
 }: StickerPickerProps) {
   const [internalOpen, setInternalOpen] = useState(false)
   const [tab, setTab] = useState<StickerTab>('recent')
@@ -185,7 +189,7 @@ export default function StickerPicker({
   }, [draft])
 
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || embedded) return
 
     const handlePointerDown = (event: PointerEvent) => {
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) close()
@@ -219,9 +223,10 @@ export default function StickerPicker({
       document.removeEventListener('pointerdown', handlePointerDown)
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [close, isOpen])
+  }, [close, embedded, isOpen])
 
   useEffect(() => {
+    if (embedded) return
     if (isOpen) {
       wasOpenRef.current = true
       requestAnimationFrame(() => dialogCloseRef.current?.focus())
@@ -231,7 +236,7 @@ export default function StickerPicker({
       wasOpenRef.current = false
       requestAnimationFrame(() => triggerRef.current?.focus())
     }
-  }, [isOpen])
+  }, [embedded, isOpen])
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -402,7 +407,7 @@ export default function StickerPicker({
   }
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className={embedded ? 'h-full min-h-0' : 'relative'}>
       <input
         type="file"
         ref={fileInputRef}
@@ -411,32 +416,35 @@ export default function StickerPicker({
         className="hidden"
       />
 
-      <button
+      {!embedded && <button
         ref={triggerRef}
         type="button"
         onClick={isOpen ? close : open}
-        className={`flex h-10 w-10 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${isOpen ? 'bg-emerald-50 text-emerald-600' : 'text-slate-500 hover:bg-slate-100 hover:text-emerald-600'}`}
+        className={`h-11 w-11 items-center justify-center rounded-xl transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${triggerClassName || 'flex'} ${isOpen ? 'bg-emerald-50 text-emerald-600' : 'text-slate-500 hover:bg-slate-100 hover:text-emerald-600'}`}
         aria-label="Abrir stickers"
         aria-haspopup="dialog"
         aria-expanded={isOpen}
       >
         <Sticker className="h-5 w-5" />
-      </button>
+      </button>}
 
       {isOpen && (
         <>
-          <button
+          {!embedded && <button
             type="button"
             aria-label="Cerrar stickers"
             onClick={close}
-            className="fixed inset-0 z-[80] bg-slate-950/30 sm:hidden"
-          />
+            className="app-viewport fixed inset-0 z-[80] bg-slate-950/30 sm:hidden"
+          />}
           <section
             ref={dialogRef}
-            role="dialog"
+            role={embedded ? 'region' : 'dialog'}
             aria-label="Selector de stickers"
-            className="fixed inset-x-0 bottom-0 z-[90] flex max-h-[85dvh] flex-col overflow-hidden rounded-t-2xl border border-slate-200 bg-white shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-full sm:left-0 sm:z-50 sm:mb-2 sm:h-[410px] sm:max-h-[min(560px,calc(100dvh-7rem))] sm:w-[360px] sm:rounded-2xl"
+            className={embedded
+              ? 'flex h-full min-h-0 flex-col overflow-hidden bg-white'
+              : 'visual-viewport-bottom-sheet fixed inset-x-0 bottom-0 z-[90] flex max-h-[85dvh] flex-col overflow-hidden rounded-t-2xl border border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-full sm:left-0 sm:z-50 sm:mb-2 sm:h-[410px] sm:max-h-[min(560px,calc(100dvh-7rem))] sm:w-[360px] sm:rounded-2xl sm:pb-0'}
           >
+            {!embedded && <>
             <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-slate-300 sm:hidden" />
             <header className="flex min-h-12 items-center justify-between border-b border-slate-100 px-3">
               <div className="flex items-center gap-2">
@@ -452,12 +460,13 @@ export default function StickerPicker({
                 ref={dialogCloseRef}
                 type="button"
                 onClick={close}
-                className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                 aria-label="Cerrar selector de stickers"
               >
                 <X className="h-4 w-4" />
               </button>
             </header>
+            </>}
 
             <div role="tablist" aria-label="Colecciones de stickers" className="grid grid-cols-3 border-b border-slate-100 px-2">
               {([

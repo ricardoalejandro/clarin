@@ -932,6 +932,8 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Message editing support
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ`,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ`,
 
 		// DNI and BirthDate on leads (mirrors contacts)
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS dni VARCHAR(50)`,

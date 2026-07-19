@@ -1664,7 +1664,7 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
+		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
@@ -1686,6 +1686,7 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 			&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
 			&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
 			&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
+			&msg.DeliveredAt, &msg.ReadAt, &msg.IsEdited,
 			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
 			&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
@@ -1723,7 +1724,7 @@ func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID 
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
+		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked,false), COALESCE(is_view_once,false), COALESCE(media_deleted,false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
@@ -1743,6 +1744,7 @@ func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID 
 			&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
 			&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
 			&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
+			&msg.DeliveredAt, &msg.ReadAt, &msg.IsEdited,
 			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
 			&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
@@ -1761,7 +1763,7 @@ func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
+		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
@@ -1771,6 +1773,7 @@ func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID
 		&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
 		&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
 		&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
+		&msg.DeliveredAt, &msg.ReadAt, &msg.IsEdited,
 		&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 		&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
 		&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
@@ -1815,19 +1818,30 @@ func (r *MessageRepository) UpdateStatus(ctx context.Context, accountID uuid.UUI
 	return err
 }
 
-// UpdateStatusUpgrade updates message status only if it's an upgrade (sent→delivered→read)
-// This prevents race conditions where a late "delivered" receipt overwrites "read"
-func (r *MessageRepository) UpdateStatusUpgrade(ctx context.Context, accountID uuid.UUID, chatJID string, messageID string, status string) error {
+// UpdateStatusUpgrade persists receipt timestamps while keeping status monotonic.
+// A delayed delivered receipt may still fill delivered_at after read_at was seen,
+// but it can never downgrade the visible state from read to delivered.
+func (r *MessageRepository) UpdateStatusUpgrade(ctx context.Context, accountID uuid.UUID, chatJID string, messageID string, status string, receiptAt time.Time) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE messages SET status = $1
+		UPDATE messages
+		SET status = CASE
+				WHEN $1::text = 'read' THEN 'read'
+				WHEN $1::text = 'delivered' AND status IN ('sending', 'sent') THEN 'delivered'
+				WHEN $1::text = 'sent' AND status = 'sending' THEN 'sent'
+				ELSE status
+			END,
+			delivered_at = CASE
+				WHEN $1::text = 'delivered' THEN COALESCE(delivered_at, $5::timestamptz)
+				ELSE delivered_at
+			END,
+			read_at = CASE
+				WHEN $1::text = 'read' THEN COALESCE(read_at, $5::timestamptz)
+				ELSE read_at
+			END
 		WHERE account_id = $2 AND message_id = $3 AND is_from_me = true
 		AND chat_id IN (SELECT id FROM chats WHERE account_id = $2 AND jid = $4)
-		AND (
-			($1 = 'read') OR
-			($1 = 'delivered' AND status IN ('sent', 'sending')) OR
-			($1 = 'sent' AND status = 'sending')
-		)
-	`, status, accountID, messageID, chatJID)
+		AND $1::text IN ('sent', 'delivered', 'read')
+	`, status, accountID, messageID, chatJID, receiptAt)
 	return err
 }
 

@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Radio, Plus, Play, Pause, Trash2, Edit, Users, Send, Clock,
   CheckCircle2, XCircle, AlertTriangle, ChevronDown, Search,
@@ -20,6 +21,7 @@ import type { Lead, Contact as FullContact } from '@/types/contact'
 import { renderFormattedText } from '@/lib/whatsappFormat'
 import * as XLSX from 'xlsx'
 import { api } from '@/lib/api'
+import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 
 interface Device {
   id: string
@@ -174,15 +176,25 @@ function CampaignEditButton({ campaign, compact, onEdit }: {
 }
 
 export default function BroadcastsPage() {
+  const { ref: pageRef, width: pageWidth } = useContainerWidth<HTMLDivElement>()
+  const compactWorkspace = pageWidth > 0 && pageWidth < 768
   const [campaigns, setCampaigns] = useState<Campaign[]>([])
   const [devices, setDevices] = useState<Device[]>([])
   const [contacts, setContacts] = useState<Contact[]>([])
   const [loading, setLoading] = useState(true)
+  const [campaignsRefreshing, setCampaignsRefreshing] = useState(false)
+  const [campaignsError, setCampaignsError] = useState<string | null>(null)
+  const campaignsRequestIdRef = useRef(0)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [createCampaignSubmitting, setCreateCampaignSubmitting] = useState(false)
+  const [createCampaignError, setCreateCampaignError] = useState<string | null>(null)
   const [showDetailModal, setShowDetailModal] = useState(false)
   const [showRecipientsModal, setShowRecipientsModal] = useState(false)
   const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null)
   const [recipients, setRecipients] = useState<Recipient[]>([])
+  const [recipientsLoading, setRecipientsLoading] = useState(false)
+  const [recipientsError, setRecipientsError] = useState<string | null>(null)
+  const recipientsRequestRef = useRef({ requestId: 0, campaignId: '' })
   const [retryingId, setRetryingId] = useState<string | null>(null)
   const [searchContacts, setSearchContacts] = useState('')
   const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set())
@@ -207,6 +219,7 @@ export default function BroadcastsPage() {
   const [selectedCampaignIds, setSelectedCampaignIds] = useState<Set<string>>(new Set())
   const [allTags, setAllTags] = useState<BroadcastTag[]>([])
   const [filterTagIds, setFilterTagIds] = useState<Set<string>>(new Set())
+  const [openCampaignMenuID, setOpenCampaignMenuID] = useState<string | null>(null)
 
   // View mode
   const [viewMode, setViewMode] = useState<'compact' | 'cards'>('compact')
@@ -226,10 +239,26 @@ export default function BroadcastsPage() {
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
 
-  const fetchCampaigns = useCallback(async () => {
-    const result = await api<{ campaigns?: any[] }>('/api/campaigns')
-    if (result.success && result.data) setCampaigns(result.data.campaigns || [])
+  const fetchCampaigns = useCallback(async (initialLoad = false) => {
+    const requestId = ++campaignsRequestIdRef.current
+    if (initialLoad) setLoading(true)
+    else setCampaignsRefreshing(true)
+
+    const result = await api<{ success?: boolean; campaigns?: Campaign[]; error?: string }>('/api/campaigns')
+    if (requestId !== campaignsRequestIdRef.current) return false
+
+    if (!result.success || !result.data || result.data.success !== true || !Array.isArray(result.data.campaigns)) {
+      setCampaignsError(result.error || result.data?.error || 'No se pudieron cargar las campañas')
+      setLoading(false)
+      setCampaignsRefreshing(false)
+      return false
+    }
+
+    setCampaigns(result.data.campaigns)
+    setCampaignsError(null)
     setLoading(false)
+    setCampaignsRefreshing(false)
+    return true
   }, [])
 
   const fetchDevices = useCallback(async () => {
@@ -252,32 +281,63 @@ export default function BroadcastsPage() {
   }, [])
 
   useEffect(() => {
-    fetchCampaigns()
-    fetchDevices()
-    fetchContacts()
-    fetchTags()
+    let cancelled = false
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+    const scheduleRefresh = () => {
+      if (cancelled) return
+      refreshTimer = setTimeout(async () => {
+        await fetchCampaigns()
+        scheduleRefresh()
+      }, 15000)
+    }
 
-    // Auto-refresh running campaigns
-    const interval = setInterval(() => {
-      fetchCampaigns()
-    }, 15000)
-    return () => clearInterval(interval)
+    void fetchCampaigns(true).finally(scheduleRefresh)
+    void fetchDevices()
+    void fetchContacts()
+    void fetchTags()
+
+    return () => {
+      cancelled = true
+      if (refreshTimer) clearTimeout(refreshTimer)
+    }
   }, [fetchCampaigns, fetchDevices, fetchContacts, fetchTags])
+
+  useEffect(() => {
+    if (!compactWorkspace || (openCampaignMenuID && !campaigns.some(campaign => campaign.id === openCampaignMenuID))) {
+      setOpenCampaignMenuID(null)
+    }
+  }, [campaigns, compactWorkspace, openCampaignMenuID])
 
   // Close modals on Escape (topmost first)
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (openCampaignMenuID) { setOpenCampaignMenuID(null); return }
       if (editingRecipient) { setEditingRecipient(null); return }
       if (showDuplicateModal) { setShowDuplicateModal(false); setDuplicateMessage(''); setDuplicateCampaign(null); return }
       if (showRecipientsModal) { setShowRecipientsModal(false); return }
-      if (showDetailModal) { setShowDetailModal(false); setRecipients([]); return }
+      if (showDetailModal) {
+        recipientsRequestRef.current = {
+          requestId: recipientsRequestRef.current.requestId + 1,
+          campaignId: '',
+        }
+        setShowDetailModal(false)
+        setRecipients([])
+        setRecipientsLoading(false)
+        setRecipientsError(null)
+        return
+      }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [editingRecipient, showDuplicateModal, showRecipientsModal, showDetailModal])
+  }, [editingRecipient, openCampaignMenuID, showDuplicateModal, showRecipientsModal, showDetailModal])
 
   const handleCreateCampaign = async (formResult: CampaignFormResult) => {
+    if (createCampaignSubmitting) return
+    setCreateCampaignSubmitting(true)
+    setCreateCampaignError(null)
+    let createdCampaign: Campaign | null = null
+
     try {
       const res = await fetch('/api/campaigns', {
         method: 'POST',
@@ -291,42 +351,123 @@ export default function BroadcastsPage() {
           settings: formResult.settings,
         }),
       })
-      const data = await res.json()
-      if (data.success) {
-        if (formResult.scheduled_at && data.campaign) {
-          await fetch(`/api/campaigns/${data.campaign.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
-          })
-        }
-        // Add spreadsheet recipients if any
-        if (formResult.recipients && formResult.recipients.length > 0 && data.campaign) {
-          const sheetRecipients = formResult.recipients.map(r => ({
-            jid: r.phone + '@s.whatsapp.net',
-            name: r.name || '',
-            phone: r.phone,
-            metadata: r.metadata || {},
-          }))
-          await fetch(`/api/campaigns/${data.campaign.id}/recipients`, {
+      const data = await res.json().catch(() => null) as {
+        success?: boolean
+        campaign?: Campaign
+        error?: string
+      } | null
+
+      if (!res.ok || !data?.success || !data.campaign?.id) {
+        const message = data?.error || (res.ok
+          ? 'El servidor no devolvió una campaña válida'
+          : `No se pudo crear la campaña (HTTP ${res.status})`)
+        setCreateCampaignError(message)
+        return
+      }
+
+      createdCampaign = data.campaign
+      const pendingConfiguration: string[] = []
+
+      // Add direct recipients before scheduling. The backend intentionally
+      // rejects scheduling a campaign that still has zero recipients.
+      if (formResult.recipients && formResult.recipients.length > 0) {
+        const sheetRecipients = formResult.recipients.map(recipient => ({
+          jid: recipient.phone + '@s.whatsapp.net',
+          name: recipient.name || '',
+          phone: recipient.phone,
+          metadata: recipient.metadata || {},
+        }))
+        try {
+          const recipientsResponse = await fetch(`/api/campaigns/${createdCampaign.id}/recipients`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({ recipients: sheetRecipients, save_as_contacts: true }),
           })
-        }
-        setShowCreateModal(false)
-        fetchCampaigns()
-        if (data.campaign) {
-          setSelectedCampaign(data.campaign)
-          if (!formResult.recipients || formResult.recipients.length === 0) {
-            setShowRecipientsModal(true)
+          const recipientsData = await recipientsResponse.json().catch(() => null) as {
+            success?: boolean
+            error?: string
+          } | null
+          if (!recipientsData) {
+            pendingConfiguration.push(
+              `confirmar la carga de ${formResult.recipients.length} destinatario${formResult.recipients.length === 1 ? '' : 's'} (respuesta no válida)`,
+            )
+          } else if (!recipientsResponse.ok || !recipientsData.success) {
+            pendingConfiguration.push(
+              `cargar ${formResult.recipients.length} destinatario${formResult.recipients.length === 1 ? '' : 's'}${recipientsData?.error ? ` (${recipientsData.error})` : ''}`,
+            )
           }
+        } catch {
+          pendingConfiguration.push(
+            `verificar la carga de ${formResult.recipients.length} destinatario${formResult.recipients.length === 1 ? '' : 's'} (se perdió la conexión)`,
+          )
         }
-      } else {
-        alert(data.error || 'Error al crear campaña')
+      }
+
+      if (formResult.scheduled_at) {
+        try {
+          const scheduleResponse = await fetch(`/api/campaigns/${createdCampaign.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
+          })
+          const scheduleData = await scheduleResponse.json().catch(() => null) as {
+            success?: boolean
+            campaign?: Campaign
+            error?: string
+          } | null
+          if (!scheduleData) {
+            pendingConfiguration.push('confirmar la programación (respuesta no válida)')
+          } else if (!scheduleResponse.ok || !scheduleData.success) {
+            pendingConfiguration.push(
+              `activar la programación${scheduleData?.error ? ` (${scheduleData.error})` : ''}`,
+            )
+          } else if (scheduleData.campaign) {
+            createdCampaign = scheduleData.campaign
+          }
+        } catch {
+          pendingConfiguration.push('verificar la programación (se perdió la conexión)')
+        }
+      }
+
+      // Once POST succeeds, always leave the wizard. Retrying it would create a
+      // duplicate even when a later configuration request failed.
+      setShowCreateModal(false)
+      setCreateCampaignError(null)
+      setCampaigns(previous => [
+        createdCampaign as Campaign,
+        ...previous.filter(campaign => campaign.id !== createdCampaign?.id),
+      ])
+      setSelectedCampaign(createdCampaign)
+      await fetchCampaigns()
+
+      if (pendingConfiguration.length > 0) {
+        alert(
+          `La campaña "${createdCampaign.name}" se creó, pero quedó pendiente: ${pendingConfiguration.join('; ')}. El asistente se cerró para evitar crear una campaña duplicada.`,
+        )
+        return
+      }
+
+      if (!formResult.recipients || formResult.recipients.length === 0) {
+        setShowRecipientsModal(true)
       }
     } catch (err) {
-      alert('Error al crear campaña')
+      if (createdCampaign) {
+        const cause = err instanceof Error ? err.message : 'error inesperado'
+        setShowCreateModal(false)
+        setCampaigns(previous => [
+          createdCampaign as Campaign,
+          ...previous.filter(campaign => campaign.id !== createdCampaign?.id),
+        ])
+        await fetchCampaigns()
+        alert(
+          `La campaña "${createdCampaign.name}" se creó, pero quedó pendiente revisar su configuración (${cause}). El asistente se cerró para evitar duplicados.`,
+        )
+      } else {
+        const message = err instanceof Error ? err.message : 'Error de conexión al crear la campaña'
+        setCreateCampaignError(message)
+      }
+    } finally {
+      setCreateCampaignSubmitting(false)
     }
   }
 
@@ -693,19 +834,70 @@ export default function BroadcastsPage() {
     }
   }
 
-  const handleViewRecipients = async (campaign: Campaign) => {
+  const loadCampaignRecipients = async (campaign: Campaign) => {
+    const request = {
+      requestId: recipientsRequestRef.current.requestId + 1,
+      campaignId: campaign.id,
+    }
+    recipientsRequestRef.current = request
     setSelectedCampaign(campaign)
-    setDetailTab('message')
+    setRecipients([])
+    setRecipientsError(null)
+    setRecipientsLoading(true)
+
     try {
       const res = await fetch(`/api/campaigns/${campaign.id}/recipients`, {
         headers: { Authorization: `Bearer ${token}` },
       })
-      const data = await res.json()
-      if (data.success) setRecipients(data.recipients || [])
-    } catch (err) {
-      console.error('Failed to fetch recipients:', err)
+      const data = await res.json().catch(() => null) as {
+        success?: boolean
+        recipients?: Recipient[]
+        error?: string
+      } | null
+      if (
+        recipientsRequestRef.current.requestId !== request.requestId ||
+        recipientsRequestRef.current.campaignId !== campaign.id
+      ) return
+
+      if (!res.ok || !data?.success || !Array.isArray(data.recipients)) {
+        setRecipientsError(data?.error || (res.ok
+          ? 'El servidor no devolvió destinatarios válidos'
+          : `No se pudieron cargar los destinatarios (HTTP ${res.status})`))
+        return
+      }
+      setRecipients(data.recipients)
+    } catch {
+      if (
+        recipientsRequestRef.current.requestId === request.requestId &&
+        recipientsRequestRef.current.campaignId === campaign.id
+      ) {
+        setRecipientsError('Error de conexión al cargar los destinatarios')
+      }
+    } finally {
+      if (
+        recipientsRequestRef.current.requestId === request.requestId &&
+        recipientsRequestRef.current.campaignId === campaign.id
+      ) {
+        setRecipientsLoading(false)
+      }
     }
+  }
+
+  const handleViewRecipients = (campaign: Campaign) => {
+    setDetailTab('message')
     setShowDetailModal(true)
+    void loadCampaignRecipients(campaign)
+  }
+
+  const closeCampaignDetail = () => {
+    recipientsRequestRef.current = {
+      requestId: recipientsRequestRef.current.requestId + 1,
+      campaignId: '',
+    }
+    setShowDetailModal(false)
+    setRecipients([])
+    setRecipientsLoading(false)
+    setRecipientsError(null)
   }
 
   const handleDownloadRecipients = () => {
@@ -831,20 +1023,32 @@ export default function BroadcastsPage() {
   useEffect(() => {
     if (!showDetailModal || !selectedCampaign) return
     if (selectedCampaign.status !== 'running') return
+    if (recipientsLoading) return
+    let refreshInFlight = false
     const interval = setInterval(async () => {
+      if (refreshInFlight) return
+      refreshInFlight = true
       try {
         const [campRes, recRes] = await Promise.all([
           fetch(`/api/campaigns/${selectedCampaign.id}`, { headers: { Authorization: `Bearer ${token}` } }),
           fetch(`/api/campaigns/${selectedCampaign.id}/recipients`, { headers: { Authorization: `Bearer ${token}` } }),
         ])
-        const campData = await campRes.json()
-        const recData = await recRes.json()
-        if (campData.success) setSelectedCampaign(campData.campaign)
-        if (recData.success) setRecipients(recData.recipients || [])
-      } catch {}
+        const campData = await campRes.json().catch(() => null)
+        const recData = await recRes.json().catch(() => null)
+        if (recipientsRequestRef.current.campaignId !== selectedCampaign.id) return
+        if (campRes.ok && campData?.success) setSelectedCampaign(campData.campaign)
+        if (recRes.ok && recData?.success && Array.isArray(recData.recipients)) {
+          setRecipients(recData.recipients)
+          setRecipientsError(null)
+        }
+      } catch {
+        // Keep the mounted snapshot; the next poll will reconcile silently.
+      } finally {
+        refreshInFlight = false
+      }
     }, 5000)
     return () => clearInterval(interval)
-  }, [showDetailModal, selectedCampaign?.id, selectedCampaign?.status, token])
+  }, [recipientsLoading, showDetailModal, selectedCampaign?.id, selectedCampaign?.status, token])
 
   const toggleContactSelection = (contactId: string) => {
     const newSet = new Set(selectedContactIds)
@@ -861,27 +1065,35 @@ export default function BroadcastsPage() {
       c.jid.toLowerCase().includes(term)
   })
 
+  const effectiveViewMode = compactWorkspace ? 'cards' : viewMode
+  const openCampaignMenu = openCampaignMenuID
+    ? campaigns.find(campaign => campaign.id === openCampaignMenuID) || null
+    : null
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
+      <div ref={pageRef} className="flex h-64 min-w-0 flex-1 items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600" />
       </div>
     )
   }
 
   return (
-    <div className="space-y-6 overflow-y-auto flex-1 min-h-0">
+    <div ref={pageRef} className="min-h-0 min-w-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto pb-[env(safe-area-inset-bottom)] sm:space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Envíos Masivos</h1>
-          <p className="text-gray-600 mt-1">{campaigns.length} campañas</p>
+          <p className="mt-1 flex items-center gap-2 text-gray-600">
+            {campaigns.length} campañas
+            {campaignsRefreshing && <Loader2 className="h-4 w-4 animate-spin text-gray-400" aria-label="Actualizando campañas" />}
+          </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
           {campaigns.length > 0 && (
             <button
               onClick={() => { setSelectionMode(!selectionMode); setSelectedCampaignIds(new Set()) }}
-              className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg transition text-sm ${
+              className={`inline-flex min-h-11 items-center gap-2 px-3 py-2 rounded-lg transition text-sm ${
                 selectionMode ? 'bg-blue-100 text-blue-700' : 'border border-gray-300 text-gray-600 hover:bg-gray-50'
               }`}
             >
@@ -892,21 +1104,21 @@ export default function BroadcastsPage() {
           {selectionMode && selectedCampaignIds.size > 0 && (
             <button
               onClick={handleBatchDelete}
-              className="inline-flex items-center gap-2 bg-red-600 text-white px-3 py-2 rounded-lg hover:bg-red-700 transition text-sm"
+              className="inline-flex min-h-11 items-center gap-2 bg-red-600 text-white px-3 py-2 rounded-lg hover:bg-red-700 transition text-sm"
             >
               <Trash2 className="w-4 h-4" />
               Eliminar ({selectedCampaignIds.size})
             </button>
           )}
           <button
-            onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition"
+            onClick={() => { setCreateCampaignError(null); setShowCreateModal(true) }}
+            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition sm:flex-none"
           >
             <Plus className="w-5 h-5" />
             Nueva Campaña
           </button>
           {/* View mode toggle */}
-          <div className="flex items-center bg-slate-100 rounded-lg p-0.5">
+          <div className={compactWorkspace ? 'hidden' : 'flex items-center rounded-lg bg-slate-100 p-0.5'}>
             <button
               onClick={() => setViewMode('compact')}
               className={`p-1.5 rounded-md transition ${viewMode === 'compact' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
@@ -925,6 +1137,28 @@ export default function BroadcastsPage() {
         </div>
       </div>
 
+      {campaignsError && (
+        <div role="alert" className="flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2">
+            <XCircle className="mt-0.5 h-5 w-5 shrink-0" />
+            <div className="min-w-0">
+              <p className="font-semibold">No se pudieron actualizar las campañas</p>
+              <p className="mt-0.5 break-words text-red-700">{campaignsError}</p>
+              {campaigns.length > 0 && <p className="mt-1 text-xs text-red-600">Se conserva la última información cargada.</p>}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchCampaigns(campaigns.length === 0)}
+            disabled={campaignsRefreshing}
+            className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-4 font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+          >
+            {campaignsRefreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+            Reintentar
+          </button>
+        </div>
+      )}
+
       {/* Anti-ban info banner */}
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3">
         <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
@@ -936,14 +1170,16 @@ export default function BroadcastsPage() {
 
       {/* Campaigns list */}
       {campaigns.length === 0 ? (
-        <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
-          <Radio className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900">Sin campañas</h3>
-          <p className="text-gray-500 mt-1">Crea tu primera campaña de envío masivo</p>
-        </div>
-      ) : viewMode === 'compact' ? (
+        campaignsError ? null : (
+          <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+            <Radio className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-gray-900">Sin campañas</h3>
+            <p className="text-gray-500 mt-1">Crea tu primera campaña de envío masivo</p>
+          </div>
+        )
+      ) : effectiveViewMode === 'compact' ? (
         /* ═══ Compact Table View ═══ */
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
           {selectionMode && (
             <div className="flex items-center gap-3 text-sm text-gray-600 px-4 py-2 border-b border-gray-100 bg-gray-50">
               <button onClick={() => setSelectedCampaignIds(new Set(campaigns.map(c => c.id)))} className="text-blue-600 hover:underline text-xs">Seleccionar todos</button>
@@ -1009,7 +1245,7 @@ export default function BroadcastsPage() {
                     <td className="px-3 py-2.5 text-xs text-gray-500 truncate max-w-[120px]">{campaign.device_name || '—'}</td>
                     <td className="px-3 py-2.5 text-xs text-gray-400 whitespace-nowrap">{format(new Date(campaign.created_at), "d MMM yy", { locale: es })}</td>
                     <td className="px-3 py-2.5 text-right">
-                      <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition">
+                      <div className="flex items-center justify-end gap-0.5 opacity-100 xl:opacity-0 xl:group-hover:opacity-100 transition">
                         {(campaign.status === 'draft' || campaign.status === 'scheduled' || campaign.status === 'paused') && campaign.total_recipients > 0 && (
                           <button onClick={() => handleStartCampaign(campaign.id)} className="p-1 text-green-600 hover:bg-green-50 rounded transition" title="Iniciar"><Play className="w-4 h-4" /></button>
                         )}
@@ -1036,17 +1272,17 @@ export default function BroadcastsPage() {
       ) : (
         <div className="grid gap-4">
           {selectionMode && (
-            <div className="flex items-center gap-3 text-sm text-gray-600">
+            <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600">
               <button
                 onClick={() => setSelectedCampaignIds(new Set(campaigns.map(c => c.id)))}
-                className="text-blue-600 hover:underline text-xs"
+                className="min-h-11 rounded-lg px-2 text-xs text-blue-600 hover:bg-blue-50 hover:underline"
               >
                 Seleccionar todos
               </button>
               {selectedCampaignIds.size > 0 && (
                 <button
                   onClick={() => setSelectedCampaignIds(new Set())}
-                  className="text-gray-500 hover:underline text-xs"
+                  className="min-h-11 rounded-lg px-2 text-xs text-gray-500 hover:bg-gray-50 hover:underline"
                 >
                   Deseleccionar
                 </button>
@@ -1062,13 +1298,16 @@ export default function BroadcastsPage() {
             const attachCount = campaign.attachments?.length || 0
 
             return (
-              <div key={campaign.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition">
-                <div className="flex items-start justify-between">
+              <div key={campaign.id} className="relative bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition sm:p-5">
+                <div className="flex min-w-0 items-start justify-between gap-2">
                   <div className="flex-1 min-w-0 flex items-start gap-3">
                     {selectionMode && (
                       <button
                         onClick={() => toggleCampaignSelection(campaign.id)}
-                        className="mt-0.5 shrink-0"
+                        className={compactWorkspace
+                          ? 'flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-slate-100'
+                          : 'mt-0.5 shrink-0 rounded hover:bg-slate-100'}
+                        aria-label={`${selectedCampaignIds.has(campaign.id) ? 'Deseleccionar' : 'Seleccionar'} ${campaign.name}`}
                       >
                         {selectedCampaignIds.has(campaign.id) ? (
                           <CheckSquare className="w-5 h-5 text-blue-600" />
@@ -1078,7 +1317,7 @@ export default function BroadcastsPage() {
                       </button>
                     )}
                     <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
                       <h3 className="font-semibold text-gray-900 truncate">{campaign.name}</h3>
                       <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[campaign.status] || STATUS_COLORS.draft}`}>
                         {STATUS_LABELS[campaign.status] || campaign.status}
@@ -1093,7 +1332,7 @@ export default function BroadcastsPage() {
                     <p className="text-sm text-gray-500 mt-1 line-clamp-1">
                       {campaign.message_template}
                     </p>
-                    <div className="flex items-center gap-4 mt-2 text-xs text-gray-400">
+                    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-400">
                       {campaign.device_name && (
                         <span className="flex items-center gap-1">
                           <Send className="w-3 h-3" />
@@ -1118,7 +1357,20 @@ export default function BroadcastsPage() {
                   </div>
                   </div>
 
-                  <div className="flex items-center gap-1 ml-4">
+                  {compactWorkspace && (
+                    <button
+                      type="button"
+                      onClick={() => setOpenCampaignMenuID(current => current === campaign.id ? null : campaign.id)}
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100"
+                      aria-label={`Acciones de ${campaign.name}`}
+                      aria-expanded={openCampaignMenuID === campaign.id}
+                      aria-controls="broadcast-campaign-action-sheet"
+                    >
+                      <Settings2 className="h-5 w-5" />
+                    </button>
+                  )}
+
+                  {!compactWorkspace && <div className="ml-4 flex items-center gap-1">
                     {(campaign.status === 'draft' || campaign.status === 'scheduled') && campaign.total_recipients > 0 && (
                       <button
                         onClick={() => handleStartCampaign(campaign.id)}
@@ -1195,7 +1447,7 @@ export default function BroadcastsPage() {
                         <Trash2 className="w-5 h-5" />
                       </button>
                     )}
-                  </div>
+                  </div>}
                 </div>
 
                 {/* Progress bar */}
@@ -1225,24 +1477,90 @@ export default function BroadcastsPage() {
         </div>
       )}
 
+      {compactWorkspace && openCampaignMenu && typeof document !== 'undefined' && createPortal((
+        <div className="app-viewport fixed inset-0 z-[70] flex items-end justify-center" role="presentation">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setOpenCampaignMenuID(null)}
+            aria-label="Cerrar acciones de campaña"
+          />
+          <section
+            id="broadcast-campaign-action-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="broadcast-campaign-action-title"
+            className="relative z-10 max-h-[min(78vh,calc(var(--app-height)-1rem))] w-full overflow-y-auto rounded-t-2xl border border-slate-200 bg-white px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl"
+          >
+            <div className="mb-2 flex items-center justify-between gap-3 border-b border-slate-100 pb-2">
+              <div className="min-w-0">
+                <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Acciones</p>
+                <h2 id="broadcast-campaign-action-title" className="truncate text-base font-semibold text-slate-900">{openCampaignMenu.name}</h2>
+              </div>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setOpenCampaignMenuID(null)}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"
+                aria-label="Cerrar acciones"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {(openCampaignMenu.status === 'draft' || openCampaignMenu.status === 'scheduled' || openCampaignMenu.status === 'paused') && openCampaignMenu.total_recipients > 0 && (
+              <button type="button" onClick={() => { setOpenCampaignMenuID(null); void handleStartCampaign(openCampaignMenu.id) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-emerald-700 hover:bg-emerald-50"><Play className="h-4 w-4" />{openCampaignMenu.status === 'paused' ? 'Reanudar envío' : 'Iniciar envío'}</button>
+            )}
+            {openCampaignMenu.status === 'running' && (
+              <button type="button" onClick={() => { setOpenCampaignMenuID(null); void handlePauseCampaign(openCampaignMenu.id) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-orange-700 hover:bg-orange-50"><Pause className="h-4 w-4" />Pausar envío</button>
+            )}
+            {(openCampaignMenu.status === 'running' || openCampaignMenu.status === 'paused' || openCampaignMenu.status === 'scheduled') && (
+              <button type="button" onClick={() => { setOpenCampaignMenuID(null); void handleCancelCampaign(openCampaignMenu.id) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-red-700 hover:bg-red-50"><Ban className="h-4 w-4" />Cancelar envío</button>
+            )}
+            {(openCampaignMenu.status === 'draft' || openCampaignMenu.status === 'scheduled') && (
+              <button type="button" onClick={() => { setOpenCampaignMenuID(null); setSelectedCampaign(openCampaignMenu); setShowRecipientsModal(true) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-blue-700 hover:bg-blue-50"><Users className="h-4 w-4" />Agregar destinatarios</button>
+            )}
+            {isCampaignEditable(openCampaignMenu) && (
+              <button type="button" onClick={() => { setOpenCampaignMenuID(null); openEditCampaign(openCampaignMenu) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-amber-700 hover:bg-amber-50"><Edit className="h-4 w-4" />Editar campaña</button>
+            )}
+            <button type="button" onClick={() => { setOpenCampaignMenuID(null); handleViewRecipients(openCampaignMenu) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-4 w-4" />Ver detalles</button>
+            <button type="button" onClick={() => { setOpenCampaignMenuID(null); setSummaryCampaign(openCampaignMenu); setShowSummaryModal(true) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-emerald-700 hover:bg-emerald-50"><BarChart3 className="h-4 w-4" />Ver resumen</button>
+            <button type="button" onClick={() => { setOpenCampaignMenuID(null); setDuplicateCampaign(openCampaignMenu); setDuplicateMessage(openCampaignMenu.message_template); setShowDuplicateModal(true) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-purple-700 hover:bg-purple-50"><Copy className="h-4 w-4" />Duplicar campaña</button>
+            {openCampaignMenu.status !== 'running' && (
+              <button type="button" onClick={() => { setOpenCampaignMenuID(null); void handleDeleteCampaign(openCampaignMenu.id) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-red-700 hover:bg-red-50"><Trash2 className="h-4 w-4" />Eliminar</button>
+            )}
+          </section>
+        </div>
+      ), document.body)}
+
       {/* Create Campaign Modal */}
       <CreateCampaignModal
         open={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
+        onClose={() => { setShowCreateModal(false); setCreateCampaignError(null) }}
         onSubmit={handleCreateCampaign}
         devices={devices}
         initialName={generateCampaignName()}
+        submitting={createCampaignSubmitting}
+        infoPanel={createCampaignError ? (
+          <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0">
+              <p className="font-semibold">No se pudo crear la campaña</p>
+              <p className="mt-0.5 break-words text-xs text-red-700">{createCampaignError}</p>
+            </div>
+          </div>
+        ) : undefined}
       />
 
       {/* Add Recipients Modal */}
       {showRecipientsModal && selectedCampaign && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[90vh] flex flex-col">
+        <div className="responsive-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="responsive-dialog-panel flex w-full max-w-lg flex-col overflow-y-auto rounded-xl bg-white p-4 sm:max-h-[90vh] sm:p-6">
             <h2 className="text-xl font-bold text-gray-900 mb-1">Agregar Destinatarios</h2>
             <p className="text-sm text-gray-500 mb-4">Campaña: {selectedCampaign.name}</p>
 
             {/* Tabs */}
-            <div className="flex gap-1 bg-gray-100 p-1 rounded-lg mb-4">
+            <div className="mb-4 flex shrink-0 gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1">
               <button
                 onClick={() => setRecipientTab('contacts')}
                 className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
@@ -1297,7 +1615,7 @@ export default function BroadcastsPage() {
             {recipientTab === 'manual' && (
               <>
                 <div className="space-y-3 mb-3">
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     <input
                       type="text"
                       value={manualPhone}
@@ -1314,7 +1632,7 @@ export default function BroadcastsPage() {
                     />
                   </div>
                   {manualMeta.map((m, i) => (
-                    <div key={i} className="flex items-center gap-2">
+                    <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_44px] items-center gap-2">
                       <input
                         type="text"
                         value={m.key}
@@ -1339,13 +1657,13 @@ export default function BroadcastsPage() {
                       />
                       <button
                         onClick={() => setManualMeta(prev => prev.filter((_, j) => j !== i))}
-                        className="p-1 text-red-500 hover:bg-red-50 rounded"
+                        className="flex h-11 w-11 items-center justify-center text-red-500 hover:bg-red-50 rounded"
                       >
                         <X className="w-4 h-4" />
                       </button>
                     </div>
                   ))}
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
                     <button
                       onClick={() => setManualMeta(prev => [...prev, { key: '', value: '' }])}
                       className="text-xs text-blue-600 hover:underline"
@@ -1363,7 +1681,7 @@ export default function BroadcastsPage() {
                         setManualMeta([])
                       }}
                       disabled={!manualPhone.replace(/[^0-9]/g, '')}
-                      className="ml-auto px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50"
+                      className="min-h-11 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50 sm:ml-auto"
                     >
                       Añadir a la lista
                     </button>
@@ -1371,7 +1689,7 @@ export default function BroadcastsPage() {
                 </div>
 
                 {manualEntries.length > 0 && (
-                  <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100 min-h-0 mb-3">
+                  <div className="mb-3 min-h-0 divide-y divide-gray-100 rounded-lg border border-gray-200 sm:flex-1 sm:overflow-y-auto">
                     {manualEntries.map((entry, i) => (
                       <div key={i} className="flex items-center justify-between p-2.5 text-sm">
                         <div className="min-w-0">
@@ -1386,7 +1704,7 @@ export default function BroadcastsPage() {
                         </div>
                         <button
                           onClick={() => setManualEntries(prev => prev.filter((_, j) => j !== i))}
-                          className="p-1 text-red-500 hover:bg-red-50 rounded"
+                          className="flex h-11 w-11 shrink-0 items-center justify-center text-red-500 hover:bg-red-50 rounded"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -1395,17 +1713,17 @@ export default function BroadcastsPage() {
                   </div>
                 )}
 
-                <div className="flex gap-3 mt-auto">
+                <div className="sticky bottom-0 z-10 -mx-4 mt-auto flex gap-3 border-t border-slate-100 bg-white px-4 pb-[max(0.25rem,env(safe-area-inset-bottom))] pt-3 sm:static sm:mx-0 sm:border-0 sm:p-0">
                   <button
                     onClick={() => { setShowRecipientsModal(false); setManualEntries([]); setManualPhone(''); setManualName(''); setManualMeta([]) }}
-                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                    className="min-h-11 flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
                   >
                     Cancelar
                   </button>
                   <button
                     onClick={handleAddManualRecipients}
                     disabled={manualEntries.length === 0}
-                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                    className="min-h-11 flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
                   >
                     Agregar {manualEntries.length}
                   </button>
@@ -1421,7 +1739,7 @@ export default function BroadcastsPage() {
                     <Upload className="w-8 h-8 text-gray-400 mb-3" />
                     <p className="text-sm text-gray-600 mb-2">Selecciona un archivo Excel (.xlsx)</p>
                     <p className="text-xs text-gray-400 mb-4">Columnas sugeridas: telefono, nombre, empresa, ciudad...</p>
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
                       <label className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm cursor-pointer hover:bg-blue-700">
                         Seleccionar archivo
                         <input type="file" accept=".xlsx,.xls,.csv" onChange={handleExcelFileUpload} className="hidden" />
@@ -1437,7 +1755,7 @@ export default function BroadcastsPage() {
                   </div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-2 gap-3 mb-3">
+                    <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div>
                         <label className="block text-xs font-medium text-gray-700 mb-1">Columna teléfono *</label>
                         <select
@@ -1501,7 +1819,7 @@ export default function BroadcastsPage() {
                   </>
                 )}
 
-                <div className="flex gap-3 mt-auto">
+                <div className="sticky bottom-0 z-10 -mx-4 mt-auto flex gap-3 border-t border-slate-100 bg-white px-4 pb-[max(0.25rem,env(safe-area-inset-bottom))] pt-3 sm:static sm:mx-0 sm:border-0 sm:p-0">
                   <button
                     onClick={() => {
                       if (csvData.length > 0) {
@@ -1510,14 +1828,14 @@ export default function BroadcastsPage() {
                         setShowRecipientsModal(false)
                       }
                     }}
-                    className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                    className="min-h-11 flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
                   >
                     {csvData.length > 0 ? 'Limpiar' : 'Cancelar'}
                   </button>
                   <button
                     onClick={handleAddCsvRecipients}
                     disabled={csvData.length === 0 || !csvPhoneCol}
-                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                    className="min-h-11 flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
                   >
                     Agregar {csvData.filter(r => (r[csvPhoneCol] || '').replace(/[^0-9]/g, '').length >= 7).length}
                   </button>
@@ -1530,10 +1848,10 @@ export default function BroadcastsPage() {
 
       {/* Campaign Detail Modal */}
       {showDetailModal && selectedCampaign && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-2xl max-h-[90vh] flex flex-col">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-gray-900">{selectedCampaign.name}</h2>
+        <div className="responsive-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="responsive-dialog-panel flex w-full max-w-2xl flex-col overflow-y-auto rounded-xl bg-white p-4 sm:max-h-[90vh] sm:p-6">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+              <h2 className="min-w-0 break-words text-xl font-bold text-gray-900">{selectedCampaign.name}</h2>
               <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[selectedCampaign.status]}`}>
                 {STATUS_LABELS[selectedCampaign.status]}
               </span>
@@ -1566,10 +1884,10 @@ export default function BroadcastsPage() {
             </div>
 
             {/* Tabs */}
-            <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit mb-3">
+            <div className="mb-3 flex max-w-full shrink-0 gap-1 overflow-x-auto rounded-lg bg-gray-100 p-1 sm:w-fit">
               <button
                 onClick={() => setDetailTab('message')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                className={`flex min-h-11 items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors sm:min-h-0 ${
                   detailTab === 'message' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
@@ -1577,15 +1895,16 @@ export default function BroadcastsPage() {
               </button>
               <button
                 onClick={() => setDetailTab('recipients')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                className={`flex min-h-11 items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors sm:min-h-0 ${
                   detailTab === 'recipients' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                <Users className="w-3.5 h-3.5" /> Destinatarios ({recipients.length})
+                <Users className="w-3.5 h-3.5" /> Destinatarios ({recipientsLoading ? '…' : recipients.length})
               </button>
               <button
                 onClick={() => setDetailTab('chart')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                disabled={recipientsLoading || !!recipientsError}
+                className={`flex min-h-11 items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 ${
                   detailTab === 'chart' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
@@ -1593,8 +1912,27 @@ export default function BroadcastsPage() {
               </button>
             </div>
 
+            {detailTab !== 'recipients' && recipientsLoading && (
+              <div role="status" className="mb-3 flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />
+                Cargando destinatarios…
+              </div>
+            )}
+            {detailTab !== 'recipients' && recipientsError && (
+              <div role="alert" className="mb-3 flex flex-col gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800 sm:flex-row sm:items-center sm:justify-between">
+                <span className="min-w-0 break-words">No se pudieron cargar los destinatarios: {recipientsError}</span>
+                <button
+                  type="button"
+                  onClick={() => void loadCampaignRecipients(selectedCampaign)}
+                  className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-3 font-medium text-red-700 hover:bg-red-100 sm:min-h-0"
+                >
+                  <RotateCcw className="h-4 w-4" /> Reintentar
+                </button>
+              </div>
+            )}
+
             {detailTab === 'message' ? (
-              <div className="flex-1 overflow-y-auto min-h-0 max-h-72">
+              <div className="min-h-0 flex-1 sm:max-h-72 sm:overflow-y-auto">
                 <div className="p-4 bg-[#e5ddd5] rounded-lg flex flex-col items-center">
                   {selectedCampaign.attachments && selectedCampaign.attachments.length > 0 ? (
                     <div className="space-y-1">
@@ -1640,10 +1978,32 @@ export default function BroadcastsPage() {
                 </div>
               </div>
             ) : detailTab === 'recipients' ? (
-              <div className="flex-1 flex flex-col min-h-0 max-h-72">
+              <div className="flex min-h-0 flex-1 flex-col sm:max-h-72">
+                {recipientsLoading ? (
+                  <div className="flex min-h-48 flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-gray-200 bg-gray-50 p-6 text-sm text-gray-600" role="status">
+                    <Loader2 className="h-6 w-6 animate-spin text-emerald-600" />
+                    Cargando destinatarios…
+                  </div>
+                ) : recipientsError ? (
+                  <div role="alert" className="flex min-h-48 flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-red-200 bg-red-50 p-5 text-center text-sm text-red-800">
+                    <XCircle className="h-7 w-7 text-red-500" />
+                    <div>
+                      <p className="font-semibold">No se pudieron cargar los destinatarios</p>
+                      <p className="mt-1 break-words text-xs text-red-700">{recipientsError}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void loadCampaignRecipients(selectedCampaign)}
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-red-300 bg-white px-4 font-medium text-red-700 hover:bg-red-100"
+                    >
+                      <RotateCcw className="h-4 w-4" /> Reintentar
+                    </button>
+                  </div>
+                ) : (
+                  <>
                 {/* Header con botón de descarga */}
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-3 text-xs text-gray-500">
+                <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
                     <span className="flex items-center gap-1"><CheckCircle2 className="w-3 h-3 text-green-500" />{recipients.filter(r => r.status === 'sent').length} enviados</span>
                     <span className="flex items-center gap-1"><XCircle className="w-3 h-3 text-red-500" />{recipients.filter(r => r.status === 'failed').length} fallidos</span>
                     <span className="flex items-center gap-1"><Ban className="w-3 h-3 text-amber-600" />{recipients.filter(r => r.status === 'skipped').length} omitidos</span>
@@ -1651,15 +2011,19 @@ export default function BroadcastsPage() {
                   </div>
                   <button
                     onClick={handleDownloadRecipients}
-                    className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md transition"
+                    className="flex min-h-11 items-center justify-center gap-1.5 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md transition sm:min-h-0"
                     title="Descargar detalle de destinatarios"
                   >
                     <Download className="w-3.5 h-3.5" /> Exportar
                   </button>
                 </div>
-                <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
-                  {recipients.map((rec, idx) => (
-                    <div key={rec.id} className="flex items-center justify-between p-2.5 text-sm">
+                <div className="flex-1 divide-y divide-gray-100 rounded-lg border border-gray-200 sm:overflow-y-auto">
+                  {recipients.length === 0 ? (
+                    <div className="flex min-h-32 items-center justify-center p-5 text-center text-sm text-gray-500">
+                      Esta campaña todavía no tiene destinatarios.
+                    </div>
+                  ) : recipients.map((rec, idx) => (
+                    <div key={rec.id} className="flex flex-col items-stretch gap-2 p-2.5 text-sm sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <span className="text-xs text-gray-300 w-5 text-right shrink-0">{idx + 1}</span>
@@ -1691,7 +2055,7 @@ export default function BroadcastsPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                      <div className="flex flex-wrap items-center gap-1.5 sm:ml-2 sm:shrink-0">
                         {rec.status === 'sent' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
                         {rec.status === 'failed' && <XCircle className="w-4 h-4 text-red-500" />}
                         {rec.status === 'skipped' && <Ban className="w-4 h-4 text-amber-600" />}
@@ -1737,9 +2101,11 @@ export default function BroadcastsPage() {
                     </div>
                   ))}
                 </div>
+                  </>
+                )}
               </div>
             ) : (
-              <div className="flex-1 min-h-0 overflow-y-auto max-h-72">
+              <div className="min-h-0 flex-1 sm:max-h-72 sm:overflow-y-auto">
                 {(() => {
                   const sentRecipients = recipients.filter(r => r.wait_time_ms != null && r.wait_time_ms > 0)
                   if (sentRecipients.length < 2) {
@@ -1868,10 +2234,10 @@ export default function BroadcastsPage() {
               </div>
             )}
 
-            <div className="shrink-0 pt-4">
+            <div className="sticky bottom-0 z-10 -mx-4 mt-2 shrink-0 border-t border-slate-100 bg-white px-4 pb-[max(0.25rem,env(safe-area-inset-bottom))] pt-3 sm:static sm:mx-0 sm:border-0 sm:p-0 sm:pt-4">
               <button
-                onClick={() => { setShowDetailModal(false); setRecipients([]) }}
-                className="w-full px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                onClick={closeCampaignDetail}
+                className="min-h-11 w-full px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
               >
                 Cerrar
               </button>
@@ -1882,8 +2248,8 @@ export default function BroadcastsPage() {
 
       {/* Duplicate Campaign Modal */}
       {showDuplicateModal && duplicateCampaign && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-lg">
+        <div className="responsive-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="responsive-dialog-panel w-full max-w-lg overflow-y-auto rounded-xl bg-white p-4 sm:p-6">
             <h2 className="text-xl font-bold text-gray-900 mb-1">Duplicar Campaña</h2>
             <p className="text-sm text-gray-500 mb-4">
               Se creará una copia de &quot;{duplicateCampaign.name}&quot; con los mismos destinatarios y configuración.
@@ -1900,7 +2266,7 @@ export default function BroadcastsPage() {
                 Variables: {'{{nombre}}'}, {'{{nombre_completo}}'}, {'{{nombre_corto}}'}, {'{{celular}}'}
               </p>
             </div>
-            <div className="flex gap-3 mt-4">
+            <div className="sticky bottom-0 -mx-4 mt-4 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[max(0.25rem,env(safe-area-inset-bottom))] pt-3 sm:static sm:mx-0 sm:border-0 sm:p-0">
               <button
                 onClick={() => { setShowDuplicateModal(false); setDuplicateMessage(''); setDuplicateCampaign(null) }}
                 className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
@@ -1922,14 +2288,14 @@ export default function BroadcastsPage() {
 
       {/* Edit Recipient Panel (Slide-over) */}
       {editingRecipient && selectedCampaign && (
-        <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+        <div className="app-viewport fixed inset-0 z-[70] flex justify-end overflow-hidden">
           <div className="absolute inset-0 bg-black/30 backdrop-blur-[2px]" onClick={() => { setEditingRecipient(null); setEditRecField(null); setRecipientLead(null) }} />
-          <div className="relative w-full max-w-md bg-white shadow-2xl overflow-y-auto overscroll-contain border-l border-slate-200 flex flex-col">
+          <div className="relative flex h-full w-full max-w-md flex-col overflow-y-auto overscroll-contain border-l border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] shadow-2xl">
             {/* Campaign status header */}
-            <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 px-4 py-3 z-10">
+            <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/95 px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-top))] backdrop-blur-sm">
               <div className="flex items-center justify-between mb-2">
                 <h2 className="text-sm font-semibold text-slate-900">Destinatario</h2>
-                <button onClick={() => { setEditingRecipient(null); setEditRecField(null); setRecipientLead(null) }} className="p-1.5 hover:bg-slate-100 rounded-lg">
+                <button onClick={() => { setEditingRecipient(null); setEditRecField(null); setRecipientLead(null) }} className="flex h-11 w-11 items-center justify-center hover:bg-slate-100 rounded-lg" aria-label="Cerrar destinatario">
                   <X className="w-4 h-4 text-slate-400" />
                 </button>
               </div>
@@ -1952,7 +2318,7 @@ export default function BroadcastsPage() {
               {editingRecipient.status === 'pending' && (
                 <button
                   onClick={() => { handleDeleteRecipient(editingRecipient.id); setEditingRecipient(null); setRecipientLead(null) }}
-                  className="mt-2 flex items-center gap-1.5 px-3 py-1.5 border border-red-200 text-red-500 rounded-lg hover:bg-red-50 text-xs"
+                  className="mt-2 flex min-h-11 items-center gap-1.5 px-3 py-1.5 border border-red-200 text-red-500 rounded-lg hover:bg-red-50 text-xs"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   Eliminar destinatario
@@ -1976,7 +2342,7 @@ export default function BroadcastsPage() {
                 />
               </div>
             ) : (
-              <div className="p-6 space-y-6">
+              <div className="space-y-6 p-4 sm:p-6">
                 {/* Fallback: basic recipient panel for recipients without a linked lead */}
                 <div className="text-center">
                   <div className="w-12 h-12 bg-emerald-50 rounded-full flex items-center justify-center mx-auto mb-2">
@@ -2091,23 +2457,23 @@ export default function BroadcastsPage() {
             })()
           : null
         return (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowSummaryModal(false)}>
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+          <div className="responsive-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowSummaryModal(false)}>
+            <div className="responsive-dialog-panel flex w-full max-w-lg flex-col overflow-y-auto rounded-2xl bg-white shadow-2xl" onClick={e => e.stopPropagation()}>
               {/* Header */}
-              <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-900">{c.name}</h2>
+              <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))] sm:px-6">
+                <div className="min-w-0">
+                  <h2 className="break-words text-lg font-bold text-slate-900">{c.name}</h2>
                   <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium mt-1 ${STATUS_COLORS[c.status] || STATUS_COLORS.draft}`}>
                     {STATUS_LABELS[c.status] || c.status}
                   </span>
                 </div>
-                <button onClick={() => setShowSummaryModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
+                <button onClick={() => setShowSummaryModal(false)} className="flex h-11 w-11 shrink-0 items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition" aria-label="Cerrar resumen">
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
               {/* Stats Grid */}
-              <div className="px-6 py-4 grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-3 gap-2 px-4 py-4 sm:gap-3 sm:px-6">
                 <div className="text-center p-3 bg-slate-50 rounded-xl">
                   <div className="text-xl font-bold text-slate-800">{c.total_recipients}</div>
                   <div className="text-[11px] text-slate-500 mt-0.5">Total</div>
@@ -2139,7 +2505,7 @@ export default function BroadcastsPage() {
               )}
 
               {/* Details */}
-              <div className="px-6 py-4 border-t border-slate-100 space-y-2.5">
+              <div className="space-y-2.5 border-t border-slate-100 px-4 py-4 sm:px-6">
                 <div className="flex items-center gap-3 text-sm">
                   <Send className="w-4 h-4 text-slate-400 shrink-0" />
                   <span className="text-slate-500 w-28 shrink-0">Dispositivo</span>
@@ -2193,7 +2559,7 @@ export default function BroadcastsPage() {
               </div>
 
               {/* Message preview */}
-              <div className="px-6 py-4 border-t border-slate-100">
+              <div className="border-t border-slate-100 px-4 py-4 sm:px-6">
                 <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Mensaje</h4>
                 <div className="bg-slate-50 rounded-xl p-3 text-sm text-slate-700 whitespace-pre-wrap line-clamp-4">
                   {c.message_template}
@@ -2201,16 +2567,16 @@ export default function BroadcastsPage() {
               </div>
 
               {/* Actions */}
-              <div className="px-6 py-3 border-t border-slate-100 flex justify-end gap-2">
+              <div className="sticky bottom-0 flex shrink-0 flex-col-reverse gap-2 border-t border-slate-100 bg-white px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 sm:flex-row sm:justify-end sm:px-6 sm:pb-3">
                 <button
                   onClick={() => { setShowSummaryModal(false); handleViewRecipients(c) }}
-                  className="px-4 py-2 text-sm text-emerald-700 hover:bg-emerald-50 rounded-lg transition font-medium"
+                  className="min-h-11 px-4 py-2 text-sm text-emerald-700 hover:bg-emerald-50 rounded-lg transition font-medium"
                 >
                   Ver Destinatarios
                 </button>
                 <button
                   onClick={() => setShowSummaryModal(false)}
-                  className="px-4 py-2 text-sm bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-lg transition"
+                  className="min-h-11 px-4 py-2 text-sm bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-lg transition"
                 >
                   Cerrar
                 </button>

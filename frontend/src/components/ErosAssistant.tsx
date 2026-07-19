@@ -1457,7 +1457,17 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
               ? 'rounded-2xl border border-slate-200 shadow-2xl'
               : 'rounded-2xl border border-slate-200/80 shadow-[0_18px_60px_rgba(15,23,42,0.22)] ring-1 ring-black/5'
         }`}
-        style={{ ...erosWindow.panelStyle, ...(isFullscreen && mobileVH ? { height: `${mobileVH}px` } : {}) }}
+        style={{
+          ...erosWindow.panelStyle,
+          ...(isFullscreen ? {
+            top: 'var(--visual-viewport-offset-top)',
+            left: 'var(--visual-viewport-offset-left)',
+            right: 'auto',
+            bottom: 'auto',
+            width: 'var(--app-width)',
+            height: mobileVH ? `${mobileVH}px` : 'var(--app-height)',
+          } : {}),
+        }}
         aria-label="Asistente Eros"
       >
         {isDocked && (

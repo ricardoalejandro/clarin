@@ -27,6 +27,7 @@ import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/
 import { subscribeWebSocket } from '@/lib/api'
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import { useKanbanPan } from '@/lib/useKanbanPan'
+import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 
 const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
 
@@ -230,6 +231,9 @@ interface ParticipantCardProps {
   onDelete: (id: string) => void
   onDragStart: (e: React.DragEvent, id: string) => void
   onDragEnd: (e: React.DragEvent) => void
+  stageOptions: Array<{ id: string; name: string }>
+  onStageChange: (id: string, stageId: string) => void
+  compactLayout: boolean
 }
 
 const ParticipantCard = memo(function ParticipantCard({
@@ -237,6 +241,7 @@ const ParticipantCard = memo(function ParticipantCard({
   canDrag = true,
   canDelete = true,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd,
+  stageOptions, onStageChange, compactLayout,
 }: ParticipantCardProps) {
   return (
     <div
@@ -250,10 +255,10 @@ const ParticipantCard = memo(function ParticipantCard({
       } ${isDragged ? 'opacity-50' : ''} ${!selectionMode && canDrag ? 'cursor-grab active:cursor-grabbing' : ''}`}
       onClick={() => selectionMode ? onToggleSelection(p.id) : onOpenDetail(p)}
     >
-      <div className="flex items-start justify-between group">
+      <div className="flex items-start justify-between gap-2 group">
         <div className="flex items-center gap-2">
           {selectionMode ? (
-            <button onClick={(e) => { e.stopPropagation(); onToggleSelection(p.id) }} className="p-0.5">
+            <button onClick={(e) => { e.stopPropagation(); onToggleSelection(p.id) }} className={`p-0.5 ${compactLayout ? 'min-h-11 min-w-11 flex items-center justify-center' : ''}`} aria-label={isSelected ? 'Quitar participante de la selección' : 'Seleccionar participante'}>
               {isSelected ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <div className="w-4 h-4 rounded border-2 border-slate-300" />}
             </button>
           ) : (
@@ -261,7 +266,7 @@ const ParticipantCard = memo(function ParticipantCard({
               <span className="text-emerald-700 text-xs font-semibold">{(p.name || '?').charAt(0).toUpperCase()}</span>
             </div>
           )}
-          <p className="text-[13px] font-medium text-slate-900 truncate max-w-[150px]">
+          <p className={`text-[13px] font-medium text-slate-900 truncate ${compactLayout ? 'max-w-[calc(100vw-10rem)]' : 'max-w-[150px]'}`}>
             {p.name || 'Sin nombre'} {p.last_name || ''}
           </p>
           {p.duplicate_contact && (
@@ -273,7 +278,8 @@ const ParticipantCard = memo(function ParticipantCard({
         {!selectionMode && canDelete && (
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(p.id) }}
-            className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+            className={`p-1 text-slate-300 hover:text-red-500 transition-opacity ${compactLayout ? 'opacity-100 min-h-11 min-w-11 flex items-center justify-center' : 'opacity-0 group-hover:opacity-100'}`}
+            aria-label="Sacar participante del evento"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
@@ -298,6 +304,27 @@ const ParticipantCard = memo(function ParticipantCard({
         <div className="flex items-center gap-1 mt-2 text-[11px] text-amber-600">
           <Clock className="w-3 h-3" /><span className="truncate">{p.next_action}</span>
         </div>
+      )}
+      {compactLayout && !selectionMode && canDrag && stageOptions.length > 0 && (
+        <label
+          className="mt-3 block text-[11px] font-medium text-slate-500"
+          onClick={(event) => event.stopPropagation()}
+        >
+          Mover a etapa
+          <select
+            value={p.stage_id || ''}
+            onChange={(event) => {
+              event.stopPropagation()
+              if (event.target.value && event.target.value !== p.stage_id) onStageChange(p.id, event.target.value)
+            }}
+            onClick={(event) => event.stopPropagation()}
+            className="mt-1 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-base text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+            aria-label={`Mover a etapa a ${p.name || 'participante'}`}
+          >
+            {!p.stage_id && <option value="">Sin etapa</option>}
+            {stageOptions.map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+          </select>
+        </label>
       )}
     </div>
   )
@@ -324,6 +351,9 @@ interface VirtualColumnProps {
   onStageDragStart?: (stageId: string) => void
   onStageDrop?: (stageId: string) => void
   isStageDragging?: boolean
+  stageOptions: Array<{ id: string; name: string }>
+  onParticipantStageChange: (id: string, stageId: string) => void
+  compactLayout: boolean
 }
 
 const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
@@ -332,6 +362,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
   onRenameStage, onColorStage, onDeleteStage, canManageStage = true, canDragParticipants = true,
   stageEditMode = false, onStageDragStart, onStageDrop, isStageDragging = false,
+  stageOptions, onParticipantStageChange, compactLayout,
 }: VirtualColumnProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const [editingName, setEditingName] = useState(false)
@@ -467,6 +498,9 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
                     onDragEnd={onDragEnd}
                     canDrag={canDragParticipants}
                     canDelete={canDragParticipants}
+                    stageOptions={stageOptions}
+                    onStageChange={onParticipantStageChange}
+                    compactLayout={compactLayout}
                   />
                 </div>
               </div>
@@ -491,6 +525,7 @@ export default function EventDetailPage() {
   const params = useParams()
   const router = useRouter()
   const searchParams = useSearchParams()
+  const { ref: pageRef, width: pageWidth } = useContainerWidth<HTMLDivElement>()
   const eventId = params.id as string
   const folderParam = searchParams.get('folder')
 
@@ -990,6 +1025,9 @@ export default function EventDetailPage() {
   const eventHasMembershipRules = event?.has_membership_rules ?? Boolean(event?.tag_formula?.trim())
   const eventIsReadOnly = event?.status === 'completed' || event?.status === 'cancelled'
   const detailPanelOpen = showDetailPanel || showInlineChat
+  const isCompactLayout = pageWidth > 0 && pageWidth < 768
+  // The split reserves the 360 px detail panel and at least 480 px for ChatPanel.
+  const isSingleSurfaceLayout = pageWidth > 0 && pageWidth < 960
 
   const activeDraftStages = useMemo(() => (
     draftStages
@@ -1123,8 +1161,16 @@ export default function EventDetailPage() {
         body: JSON.stringify({ stage_id: targetStageId }),
       })
       const data = await res.json()
-      if (!data.success) { ownStageChangeRef.current = false; fetchParticipantsPaginated() }
-    } catch { ownStageChangeRef.current = false; fetchParticipantsPaginated() }
+      if (!res.ok || !data.success) {
+        ownStageChangeRef.current = false
+        alert(data.error || 'No se pudo mover al participante. Se restaurará la etapa anterior.')
+        fetchParticipantsPaginated()
+      }
+    } catch {
+      ownStageChangeRef.current = false
+      alert('No se pudo conectar para mover al participante. Se restaurará la etapa anterior.')
+      fetchParticipantsPaginated()
+    }
   }, [eventId, pipelineStages, stageData, detailParticipant, fetchParticipantsPaginated])
 
   const handleDrop = useCallback((e: React.DragEvent, targetStageId: string) => {
@@ -1157,14 +1203,22 @@ export default function EventDetailPage() {
       }))
     })
     setSelectedIds(new Set())
+    setSelectionMode(false)
     try {
-      await fetch(`/api/events/${eventId}/participants/bulk-stage`, {
+      const response = await fetch(`/api/events/${eventId}/participants/bulk-stage`, {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ participant_ids: ids, stage_id: targetStageId }),
       })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || !data.success) {
+        alert(data.error || 'No se pudieron mover los participantes seleccionados.')
+      }
       fetchParticipantsPaginated()
-    } catch { fetchParticipantsPaginated() }
+    } catch {
+      alert('No se pudo conectar para mover los participantes seleccionados.')
+      fetchParticipantsPaginated()
+    }
     finally { setBulkMoving(false) }
   }, [selectedIds, eventId, pipelineStages, stageData, updateParticipantInStages, fetchParticipantsPaginated])
 
@@ -1724,6 +1778,7 @@ export default function EventDetailPage() {
   // ─── Campaign ──────────────────────────────────────────────────────────────
   const handleCreateCampaign = async (formResult: CampaignFormResult) => {
     setCreatingCampaign(true)
+    let createdCampaignId: string | null = null
     try {
       const res = await fetch(`/api/events/${eventId}/campaign`, {
         method: 'POST',
@@ -1731,7 +1786,7 @@ export default function EventDetailPage() {
         body: JSON.stringify({
           name: formResult.name, device_id: formResult.device_id,
           message_template: formResult.message_template, attachments: formResult.attachments,
-          scheduled_at: formResult.scheduled_at || undefined, settings: formResult.settings,
+          settings: formResult.settings,
           stage_ids: filterStageIds.size > 0 ? Array.from(filterStageIds).join(',') : undefined,
           tag_names: filterTagNames.size > 0 ? Array.from(filterTagNames) : undefined,
           tag_mode: tagFilterMode || 'OR',
@@ -1740,35 +1795,91 @@ export default function EventDetailPage() {
           has_phone: true,
         }),
       })
-      const data = await res.json()
-      if (data.success) {
-        if (formResult.scheduled_at && data.campaign) {
-          await fetch(`/api/campaigns/${data.campaign.id}`, {
-            method: 'PUT',
-            headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
-          })
+      const data = await res.json().catch(() => null) as {
+        success?: boolean
+        campaign?: { id?: string }
+        error?: string
+      } | null
+      if (!res.ok || !data?.success || !data.campaign?.id) {
+        throw new Error(data?.error || 'No se pudo crear la campaña')
+      }
+
+      createdCampaignId = data.campaign.id
+
+      // Persistir primero los teléfonos pegados evita que una campaña
+      // programada comience sin este lote de destinatarios.
+      if (formResult.recipients && formResult.recipients.length > 0) {
+        const sheetRecipients = formResult.recipients.map(r => ({
+          jid: r.phone + '@s.whatsapp.net',
+          name: r.name || '',
+          phone: r.phone,
+          metadata: r.metadata || {},
+        }))
+        const recipientsResponse = await fetch(`/api/campaigns/${createdCampaignId}/recipients`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ recipients: sheetRecipients, save_as_contacts: true }),
+        })
+        const recipientsData = await recipientsResponse.json().catch(() => null) as {
+          success?: boolean
+          count?: number
+          error?: string
+        } | null
+        if (!recipientsResponse.ok || !recipientsData?.success || typeof recipientsData.count !== 'number') {
+          throw new Error(recipientsData?.error || 'No se pudieron confirmar los destinatarios pegados')
         }
-        // Add spreadsheet recipients if any
-        if (formResult.recipients && formResult.recipients.length > 0 && data.campaign) {
-          const sheetRecipients = formResult.recipients.map(r => ({
-            jid: r.phone + '@s.whatsapp.net',
-            name: r.name || '',
-            phone: r.phone,
-            metadata: r.metadata || {},
-          }))
-          await fetch(`/api/campaigns/${data.campaign.id}/recipients`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ recipients: sheetRecipients }),
-          })
+      }
+
+      if (formResult.scheduled_at) {
+        const scheduleResponse = await fetch(`/api/campaigns/${createdCampaignId}`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'scheduled', scheduled_at: formResult.scheduled_at }),
+        })
+        const scheduleData = await scheduleResponse.json().catch(() => null) as {
+          success?: boolean
+          error?: string
+        } | null
+        if (!scheduleResponse.ok || !scheduleData?.success) {
+          throw new Error(scheduleData?.error || 'Los destinatarios se guardaron, pero no se pudo programar la campaña')
         }
-        const extraCount = formResult.recipients?.length || 0
-        alert(`Campaña creada con ${(data.recipients_count || 0) + extraCount} destinatarios.`)
+      }
+
+      // El alta devuelve el tamaño solicitado, no el total insertado tras
+      // deduplicar. Solo anunciamos el total canónico de la campaña.
+      let canonicalRecipientCount: number | null = null
+      try {
+        const campaignResponse = await fetch(`/api/campaigns/${createdCampaignId}`, {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        })
+        const campaignData = await campaignResponse.json().catch(() => null) as {
+          success?: boolean
+          campaign?: { total_recipients?: number }
+        } | null
+        const reportedTotal = campaignData?.campaign?.total_recipients
+        if (campaignResponse.ok && campaignData?.success && typeof reportedTotal === 'number' && Number.isFinite(reportedTotal)) {
+          canonicalRecipientCount = reportedTotal
+        }
+      } catch (error) {
+        console.warn('No se pudo confirmar el total de destinatarios de la campaña', error)
+      }
+
+      alert(canonicalRecipientCount === null
+        ? 'Campaña creada correctamente. Puedes verla en Envíos Masivos.'
+        : `Campaña creada con ${canonicalRecipientCount} destinatarios. Puedes verla en Envíos Masivos.`)
+      setShowCampaignModal(false)
+    } catch (e) {
+      console.error(e)
+      const message = e instanceof Error ? e.message : 'Error de conexión'
+      if (createdCampaignId) {
+        alert(`La campaña quedó creada, pero no se pudo completar: ${message}. Revísala en Envíos Masivos antes de iniciarla.`)
         setShowCampaignModal(false)
-      } else { alert(data.error || 'Error al crear campaña') }
-    } catch (e) { console.error(e); alert('Error de conexión') }
-    setCreatingCampaign(false)
+      } else {
+        alert(message)
+      }
+    } finally {
+      setCreatingCampaign(false)
+    }
   }
 
   // ─── Export ────────────────────────────────────────────────────────────────
@@ -2334,7 +2445,7 @@ export default function EventDetailPage() {
   // ─── Loading ───────────────────────────────────────────────────────────────
   if (loading || !event) {
     return (
-      <div className="flex flex-col h-full min-h-0 animate-pulse p-6">
+      <div ref={pageRef} className="flex flex-col h-full min-h-0 animate-pulse p-3 sm:p-6">
         <div className="flex items-center gap-3 mb-6">
           <div className="h-8 w-8 bg-slate-200 rounded-lg" />
           <div>
@@ -2367,16 +2478,16 @@ export default function EventDetailPage() {
 
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div ref={pageRef} className="flex flex-col h-full min-h-0 min-w-0 pb-[env(safe-area-inset-bottom)]">
       {/* Event Header — single compact row */}
-      <div className="flex items-center gap-3 py-2 shrink-0">
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3 py-2 shrink-0">
         <button onClick={() => {
           if (viewMode === 'logbook') { setViewMode('kanban'); setSelectedLogbook(null) }
           else router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : ''))
-        }} className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition">
+        }} className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label={viewMode === 'logbook' ? 'Volver al evento' : 'Volver a eventos'}>
           <ArrowLeft className="w-5 h-5" />
         </button>
-        <div className="flex items-center gap-2 min-w-0 group/name">
+        <div className={`${isCompactLayout ? 'flex-1 min-w-[10rem]' : 'min-w-0'} flex items-center gap-2 group/name`}>
           <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: event.color }} />
           {editingEventName ? (
             <input
@@ -2398,13 +2509,13 @@ export default function EventDetailPage() {
                 setEditingEventName(false)
               }}
               onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') { setEditingEventName(false) } }}
-              className="font-bold text-lg text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0 py-0 min-w-[120px] max-w-[500px] w-auto"
+              className="font-bold text-lg text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0 py-0 min-w-[120px] max-w-full w-auto max-sm:text-base"
               size={Math.max(10, editNameValue.length)}
               autoFocus
             />
           ) : (
             <h1
-              className={`font-bold text-lg text-slate-900 truncate max-w-[280px] ${eventIsReadOnly ? 'cursor-default' : 'cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded'}`}
+              className={`font-bold text-lg text-slate-900 truncate max-w-[280px] max-sm:max-w-[calc(100vw-10.5rem)] max-sm:text-base ${eventIsReadOnly ? 'cursor-default' : 'cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded'}`}
               onClick={() => { if (!eventIsReadOnly) { setEditNameValue(event.name); setEditingEventName(true) } }}
               title={event.name}
             >{event.name}</h1>
@@ -2412,7 +2523,7 @@ export default function EventDetailPage() {
           {!editingEventName && !eventIsReadOnly && (
             <button
               onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
-              className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition flex-shrink-0"
+              className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition flex-shrink-0 max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center"
               title="Editar nombre"
             >
               <Edit3 className="w-3.5 h-3.5" />
@@ -2421,7 +2532,7 @@ export default function EventDetailPage() {
           <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full flex-shrink-0">{totalParticipantCount}</span>
         </div>
 
-		<button onClick={openMembershipHistory} className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-emerald-300 hover:text-emerald-700 transition" title="Ver altas, salidas y reactivaciones">
+		<button onClick={openMembershipHistory} className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-emerald-300 hover:text-emerald-700 transition max-sm:min-h-11" title="Ver altas, salidas y reactivaciones">
 		  <BookOpen className="w-3.5 h-3.5" />
 		  Historial
 		</button>
@@ -2429,17 +2540,18 @@ export default function EventDetailPage() {
         {viewMode !== 'logbook' && (
           <>
             {/* Search + Filter dropdown container */}
-            <div className="relative flex-1 max-w-sm">
+            <div className={`${isCompactLayout ? 'order-last basis-full max-w-none' : 'flex-1 max-w-sm'} relative min-w-[14rem]`}>
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 z-10" />
               <input
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
                 placeholder="Buscar participante..."
-                className={`w-full pl-8 pr-3 py-1.5 bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 text-sm ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
+                className={`w-full pl-8 pr-12 py-1.5 bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 ${isCompactLayout ? 'min-h-11 text-base' : 'text-sm'} ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
               />
               <button
                 onClick={() => setShowFilterDropdown(!showFilterDropdown)}
-                className={`absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md transition ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'}`}
+                className={`absolute top-1/2 -translate-y-1/2 flex items-center justify-center rounded-md transition ${isCompactLayout ? 'right-0 min-h-11 min-w-11' : 'right-2 p-1'} ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'}`}
+                aria-label="Abrir filtros"
               >
                 <Filter className="w-3.5 h-3.5" />
                 {activeFilterCount > 0 && (
@@ -2449,9 +2561,9 @@ export default function EventDetailPage() {
 
               {/* ─── Two-Column Filter Dropdown ─── */}
               {showFilterDropdown && (
-                <div className="absolute left-0 top-full mt-1 w-[min(620px,90vw)] bg-white border border-slate-200/80 rounded-2xl shadow-2xl shadow-slate-200/50 z-50 flex flex-col max-h-[70vh]" onClick={e => e.stopPropagation()}>
+                <div className={`${isCompactLayout ? 'fixed inset-0 h-[var(--app-height)] w-full max-h-none rounded-none [&_button]:min-h-11 [&_input]:text-base [&_select]:text-base [&_textarea]:text-base' : 'absolute left-0 top-full mt-1 w-[min(620px,90vw)] max-h-[70vh] rounded-2xl'} bg-white border border-slate-200/80 shadow-2xl shadow-slate-200/50 z-[70] flex flex-col`} onClick={e => e.stopPropagation()}>
                   {/* Header */}
-                  <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
+                  <div className="px-4 pt-[max(.75rem,env(safe-area-inset-top))] pb-3 border-b border-slate-100 flex items-center justify-between shrink-0">
                     <div className="flex items-center gap-2.5">
                       <div className="w-1.5 h-4 bg-emerald-500 rounded-full" />
                       <span className="text-sm font-semibold text-slate-800">Filtros</span>
@@ -2468,17 +2580,17 @@ export default function EventDetailPage() {
                           Limpiar todo
                         </button>
                       )}
-                      <button onClick={() => setShowFilterDropdown(false)} className="p-1 hover:bg-slate-100 rounded-lg transition-colors">
+                      <button onClick={() => setShowFilterDropdown(false)} className="p-1 hover:bg-slate-100 rounded-lg transition-colors min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar filtros">
                         <X className="w-4 h-4 text-slate-400" />
                       </button>
                     </div>
                   </div>
 
                 {/* Two-Column Body */}
-                <div className="flex flex-1 min-h-0 overflow-hidden">
+                <div className={`${isCompactLayout ? 'block overflow-y-auto overscroll-contain' : 'flex overflow-hidden'} flex-1 min-h-0`}>
 
                   {/* ══ Left Column — Selections ══ */}
-                  <div className="w-[240px] shrink-0 border-r border-slate-100 overflow-y-auto p-3 space-y-4 bg-slate-50/30">
+                  <div className={`${isCompactLayout ? 'w-full border-b' : 'w-[240px] border-r overflow-y-auto'} shrink-0 border-slate-100 p-3 space-y-4 bg-slate-50/30`}>
 
                     {/* Stage pills */}
                     {displayStages.length > 0 && (
@@ -2650,7 +2762,7 @@ export default function EventDetailPage() {
                   </div>
 
                   {/* ══ Right Column — Tag Browser ══ */}
-                  <div className="flex-1 flex flex-col min-w-0 min-h-0">
+                  <div className={`${isCompactLayout ? 'min-h-fit' : 'min-h-0'} flex-1 flex flex-col min-w-0`}>
                     {allUniqueTags.length > 0 && (
                       <>
                         {/* Top controls */}
@@ -2688,7 +2800,7 @@ export default function EventDetailPage() {
 
                         {/* Simple mode — tag search + grid */}
                         {pFormulaType === 'simple' ? (
-                          <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                          <div className={`${isCompactLayout ? 'overflow-visible' : 'flex-1 overflow-y-auto'} p-3 space-y-2`}>
                             <div className="relative">
                               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
                               <input
@@ -2735,7 +2847,7 @@ export default function EventDetailPage() {
                           </div>
                         ) : (
                           /* Advanced mode — formula editor */
-                          <div className="flex-1 overflow-y-auto p-3">
+                          <div className={`${isCompactLayout ? 'overflow-visible' : 'flex-1 overflow-y-auto'} p-3`}>
                             <FormulaEditor
                               value={pFormulaText}
                               onChange={setPFormulaText}
@@ -2764,7 +2876,7 @@ export default function EventDetailPage() {
                 </div>
 
                 {/* Footer — Aplicar */}
-                <div className="px-4 py-3 border-t border-slate-100 shrink-0 bg-white rounded-b-2xl">
+                <div className="px-4 pt-3 pb-[max(.75rem,env(safe-area-inset-bottom))] border-t border-slate-100 shrink-0 bg-white sm:rounded-b-2xl">
                   <button
                     onClick={() => {
                       setAppliedFormulaType(pFormulaType)
@@ -2785,10 +2897,10 @@ export default function EventDetailPage() {
 
         {/* View toggle */}
         <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden flex-shrink-0">
-          <button onClick={() => setViewMode('kanban')} className={`inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium transition ${viewMode === 'kanban' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
+          <button onClick={() => { setViewMode('kanban'); setSelectionMode(false); setSelectedIds(new Set()) }} aria-label="Vista Kanban" className={`inline-flex min-h-11 min-w-11 items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium transition sm:min-h-0 sm:min-w-0 ${viewMode === 'kanban' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
             <LayoutGrid className="w-3.5 h-3.5" />
           </button>
-          <button onClick={() => setViewMode('list')} className={`inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium transition ${viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
+          <button onClick={() => { setViewMode('list'); setSelectionMode(false); setSelectedIds(new Set()) }} aria-label="Vista de lista" className={`inline-flex min-h-11 min-w-11 items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium transition sm:min-h-0 sm:min-w-0 ${viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
             <List className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -2797,7 +2909,7 @@ export default function EventDetailPage() {
           <button
             onClick={beginStageEditMode}
             disabled={eventIsReadOnly}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition-colors flex-shrink-0 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-slate-300 rounded-lg text-sm text-slate-600 hover:bg-slate-50 transition-colors flex-shrink-0 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 max-sm:min-h-11"
             title={eventIsReadOnly ? 'El evento está cerrado' : 'Editar etapas'}
           >
             <PenLine className="w-4 h-4" />
@@ -2809,7 +2921,7 @@ export default function EventDetailPage() {
         <div ref={moreMenuRef} className="relative flex-shrink-0">
           <button
             onClick={() => setShowMoreMenu(v => !v)}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm transition-colors max-sm:min-h-11 ${
               showMoreMenu ? 'border-slate-400 bg-slate-100 text-slate-700'
                 : 'border-slate-300 hover:bg-slate-50 text-slate-600'
             }`}
@@ -2821,13 +2933,13 @@ export default function EventDetailPage() {
           </button>
 
           {showMoreMenu && (
-            <div className="absolute right-0 top-full mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+            <div className={`${isCompactLayout ? 'fixed inset-x-3 bottom-[max(.75rem,env(safe-area-inset-bottom))] max-h-[calc(var(--app-height)-5rem)] overflow-y-auto rounded-2xl' : 'absolute right-0 top-full mt-1.5 w-56 rounded-xl overflow-hidden'} bg-white border border-slate-200 shadow-xl z-[70] py-1`}>
               {/* 1. Agregar contacto */}
               <button
                 onClick={() => { setAddParticipantError(''); setAddTab('search'); setShowAddModal(true); setShowMoreMenu(false) }}
                 disabled={eventIsReadOnly}
                 title={eventIsReadOnly ? 'El evento está cerrado' : 'Buscar contactos para agregar'}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
+                className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
               >
                 <UserPlus className="w-4 h-4 text-emerald-500" />
                 Agregar contacto
@@ -2847,7 +2959,7 @@ export default function EventDetailPage() {
                   } catch { setCampaignInitialName(`Envío - ${event?.name || ''}`) }
                   setShowCampaignModal(true)
                 }}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
               >
                 <Send className="w-4 h-4 text-slate-400" />
                 Envío masivo
@@ -2857,7 +2969,7 @@ export default function EventDetailPage() {
               {googleConnected && (
                 <button
                   onClick={() => { setShowGoogleSyncModal(true); fetchGoogleSyncStatus(); setShowMoreMenu(false) }}
-                  className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                  className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
                 >
                   <RefreshCw className="w-4 h-4 text-slate-400" />
                   Sincronizar Google
@@ -2869,7 +2981,7 @@ export default function EventDetailPage() {
                 onClick={() => { setAddParticipantError(''); setAddTab('manual'); setShowAddModal(true); setShowMoreMenu(false) }}
                 disabled={eventHasMembershipRules || eventIsReadOnly}
                 title={eventIsReadOnly ? 'El evento está cerrado' : eventHasMembershipRules ? 'Disponible solo para eventos sin reglas' : 'Crear y agregar un contacto'}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
+                className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
               >
                 <Plus className="w-4 h-4 text-slate-400" />
                 <span>
@@ -2882,16 +2994,25 @@ export default function EventDetailPage() {
               <button
                 onClick={beginStageEditMode}
                 disabled={eventIsReadOnly}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
+                className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
               >
                 <PenLine className="w-4 h-4 text-slate-400" />
                 Editar etapas
               </button>
 
               <button
+                onClick={() => { setViewMode('kanban'); setSelectedIds(new Set()); setSelectionMode(true); setShowMoreMenu(false) }}
+                disabled={eventIsReadOnly || displayStages.length === 0}
+                className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
+              >
+                <CheckSquare className="w-4 h-4 text-slate-400" />
+                Seleccionar participantes
+              </button>
+
+              <button
                 onClick={handleDuplicateEvent}
                 disabled={duplicatingEvent}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-50"
+                className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-50"
               >
                 {duplicatingEvent ? <Loader2 className="w-4 h-4 text-slate-400 animate-spin" /> : <Copy className="w-4 h-4 text-slate-400" />}
                 Duplicar evento
@@ -2902,7 +3023,7 @@ export default function EventDetailPage() {
               {/* 6. Exportar */}
               <button
                 onClick={() => { setExportScope(activeFilterCount > 0 ? 'filtered' : 'all'); setShowExportModal(true); setShowMoreMenu(false) }}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
               >
                 <Download className="w-4 h-4 text-slate-400" />
                 Exportar
@@ -2910,8 +3031,8 @@ export default function EventDetailPage() {
 
               {/* 7. Bitácora */}
               <button
-                onClick={() => { setViewMode(viewMode === 'logbook' ? 'kanban' : 'logbook'); setShowMoreMenu(false) }}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+                onClick={() => { setViewMode(viewMode === 'logbook' ? 'kanban' : 'logbook'); setSelectionMode(false); setSelectedIds(new Set()); setShowMoreMenu(false) }}
+                className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
               >
                 <BookOpen className="w-4 h-4 text-slate-400" />
                 Bitácora
@@ -2969,6 +3090,9 @@ export default function EventDetailPage() {
                   onStageDragStart={setDraggedStageId}
                   onStageDrop={handleStageColumnDrop}
                   isStageDragging={draggedStageId === stageItem.id}
+                  stageOptions={displayStages}
+                  onParticipantStageChange={handleStageChange}
+                  compactLayout={isCompactLayout}
                 />
               ))}
               {unassignedData.total_count > 0 && (
@@ -2994,6 +3118,9 @@ export default function EventDetailPage() {
                   onDrop={handleDrop}
                   canManageStage={false}
                   canDragParticipants={!stageEditMode && !eventIsReadOnly}
+                  stageOptions={displayStages}
+                  onParticipantStageChange={handleStageChange}
+                  compactLayout={isCompactLayout}
                 />
               )}
             </div>
@@ -3004,7 +3131,7 @@ export default function EventDetailPage() {
       {/* ═══ List View — Virtualized ═══ */}
       {viewMode === 'list' && (
         <div className="flex-1 min-h-0 flex flex-col animate-view-enter">
-          <div className="bg-slate-50 border-b-2 border-slate-200 flex-shrink-0">
+          <div className={`${isCompactLayout ? 'hidden' : 'bg-slate-50 border-b-2 border-slate-200 flex-shrink-0'}`}>
             <div className="flex">
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[220px]">Participante</div>
               <div className="px-3 py-2.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider w-[110px]">Etapa</div>
@@ -3021,15 +3148,16 @@ export default function EventDetailPage() {
                   const obs = listObservations.get(p.id)
                   return (
                     <div key={p.id} ref={listVirtualizer.measureElement} data-index={vr.index}
+                      className={isCompactLayout ? 'px-2 pb-2' : undefined}
                       style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vr.start}px)` }}
                     >
                       <div
-                        className={`flex items-start group border-b border-slate-200/80 hover:bg-emerald-50/40 hover:shadow-sm transition-all duration-150 cursor-pointer ${
+                        className={`${isCompactLayout ? 'flex flex-col rounded-xl border border-slate-200 bg-white p-3 shadow-sm' : 'flex items-start group border-b border-slate-200/80'} hover:bg-emerald-50/40 hover:shadow-sm transition-all duration-150 cursor-pointer ${
                           detailParticipant?.id === p.id ? 'bg-emerald-100 border-l-[3px] border-l-emerald-500 shadow-sm ring-1 ring-emerald-200/60' : 'border-l-[3px] border-l-transparent'
                         }`}
                         onClick={() => openDetailPanel(p)}
                       >
-                        <div className="px-3 py-2.5 w-[220px]">
+                        <div className={isCompactLayout ? 'w-full' : 'px-3 py-2.5 w-[220px]'}>
                           <div className="flex items-center gap-2.5">
                             <div className="w-8 h-8 bg-emerald-50 rounded-full flex items-center justify-center shrink-0">
                               <span className="text-emerald-700 text-xs font-semibold">{(p.name || '?').charAt(0).toUpperCase()}</span>
@@ -3040,14 +3168,29 @@ export default function EventDetailPage() {
                             </div>
                           </div>
                         </div>
-                        <div className="px-3 py-2.5 w-[110px]">
-                          {p.stage_name ? (
+                        <div className={isCompactLayout ? 'mt-3 w-full' : 'px-3 py-2.5 w-[110px]'} onClick={isCompactLayout ? event => event.stopPropagation() : undefined}>
+                          {isCompactLayout && !eventIsReadOnly ? (
+                            <label className="block text-[11px] font-medium text-slate-500">
+                              Mover a etapa
+                              <select
+                                value={p.stage_id || ''}
+                                onChange={event => {
+                                  if (event.target.value && event.target.value !== p.stage_id) handleStageChange(p.id, event.target.value)
+                                }}
+                                className="mt-1 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-base text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                                aria-label={`Mover a etapa a ${p.name || 'participante'}`}
+                              >
+                                {!p.stage_id && <option value="">Sin etapa</option>}
+                                {displayStages.map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+                              </select>
+                            </label>
+                          ) : p.stage_name ? (
                             <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: p.stage_color || '#94a3b8' }}>
                               {p.stage_name}
                             </span>
                           ) : <span className="text-[10px] text-slate-400 italic">Sin etapa</span>}
                         </div>
-                        <div className="px-3 py-2.5 w-[180px]">
+                        <div className={isCompactLayout ? 'mt-3 w-full' : 'px-3 py-2.5 w-[180px]'}>
                           {p.tags && p.tags.length > 0 ? (
                             <div className="flex flex-wrap gap-1">
                               {p.tags.slice(0, 3).map(tag => (
@@ -3057,7 +3200,7 @@ export default function EventDetailPage() {
                             </div>
                           ) : <span className="text-[10px] text-slate-300">—</span>}
                         </div>
-                        <div className="px-3 py-2.5 flex-1 cursor-pointer hover:bg-slate-50 rounded-lg transition-colors"
+                        <div className={`${isCompactLayout ? 'mt-3 w-full border-t border-slate-100 pt-3' : 'px-3 py-2.5 flex-1'} cursor-pointer hover:bg-slate-50 rounded-lg transition-colors`}
                           onClick={(e) => { e.stopPropagation(); if (obs && obs.length > 0) { setListHistoryParticipant(p) } }}
                         >
                           {loadingListObs.has(p.id) ? (
@@ -3082,9 +3225,9 @@ export default function EventDetailPage() {
                             </div>
                           ) : <span className="text-[10px] text-slate-300 italic">Sin observaciones</span>}
                         </div>
-                        <div className="px-3 py-2.5 w-[40px]">
+                        <div className={isCompactLayout ? 'mt-2 flex w-full justify-end' : 'px-3 py-2.5 w-[40px]'}>
                           {!eventIsReadOnly && (
-                            <button onClick={(e) => { e.stopPropagation(); handleDeleteParticipant(p.id) }} className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity" title="Sacar del evento">
+                            <button onClick={(e) => { e.stopPropagation(); handleDeleteParticipant(p.id) }} className={`p-1 text-slate-300 hover:text-red-500 transition-opacity ${isCompactLayout ? 'opacity-100 min-h-11 min-w-11 flex items-center justify-center' : 'opacity-0 group-hover:opacity-100'}`} title="Sacar del evento" aria-label="Sacar participante del evento">
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
@@ -3111,20 +3254,20 @@ export default function EventDetailPage() {
 
       {/* ═══ Logbook (Bitácora) View ═══ */}
       {viewMode === 'logbook' && (
-        <div className="flex-1 min-h-0 flex animate-view-enter">
+        <div className="flex-1 min-h-0 flex min-w-0 animate-view-enter">
           {/* Left Panel — Logbook list */}
-          <div className="w-[280px] border-r border-slate-200 bg-slate-50/50 flex flex-col flex-shrink-0">
+          <div className={`${isCompactLayout && selectedLogbook ? 'hidden' : 'flex'} ${isCompactLayout ? 'w-full border-r-0' : 'w-[280px] border-r'} border-slate-200 bg-slate-50/50 flex-col flex-shrink-0 min-w-0`}>
             <div className="px-3 py-3 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-700">Bitácoras</h3>
               <div className="flex items-center gap-1">
                 {event?.event_date && (
                   <button onClick={handleAutoCreateLogbooks} disabled={autoCreating}
-                    className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition disabled:opacity-50" title="Auto-crear desde rango de fechas">
+                    className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Auto-crear desde rango de fechas">
                     {autoCreating ? <Loader2 className="w-4 h-4 animate-spin" /> : <CalendarDays className="w-4 h-4" />}
                   </button>
                 )}
                 <button onClick={() => setShowNewLogbookModal(true)}
-                  className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition" title="Nueva bitácora">
+                  className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Nueva bitácora">
                   <Plus className="w-4 h-4" />
                 </button>
               </div>
@@ -3150,9 +3293,18 @@ export default function EventDetailPage() {
               ) : (
                 <div className="p-2 space-y-1">
                   {logbooks.map(lb => (
-                    <button key={lb.id}
-                      onClick={() => fetchLogbookDetail(lb.id)}
-                      className={`w-full text-left px-3 py-2.5 rounded-lg transition-all group ${
+                    <div key={lb.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => { if (isCompactLayout) setSelectedLogbook(lb); fetchLogbookDetail(lb.id) }}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          if (isCompactLayout) setSelectedLogbook(lb)
+                          fetchLogbookDetail(lb.id)
+                        }
+                      }}
+                      className={`w-full min-h-11 text-left px-3 py-2.5 rounded-lg transition-all group ${
                         selectedLogbook?.id === lb.id
                           ? 'bg-emerald-50 border border-emerald-200 shadow-sm'
                           : 'hover:bg-white hover:shadow-sm border border-transparent'
@@ -3164,7 +3316,7 @@ export default function EventDetailPage() {
                           <span className="text-sm font-medium text-slate-800 truncate">{lb.title || format(parseLogbookDate(lb.date), 'dd/MM/yyyy')}</span>
                         </div>
                         <button onClick={(e) => { e.stopPropagation(); handleDeleteLogbook(lb.id) }}
-                          className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                          className={`p-1 text-slate-300 hover:text-red-500 transition-opacity ${isCompactLayout ? 'opacity-100 min-h-11 min-w-11 flex items-center justify-center' : 'opacity-0 group-hover:opacity-100'}`} aria-label="Eliminar bitácora">
                           <Trash2 className="w-3 h-3" />
                         </button>
                       </div>
@@ -3177,7 +3329,7 @@ export default function EventDetailPage() {
                           <span className="text-[10px] text-amber-500 font-medium">Pendiente</span>
                         )}
                       </div>
-                    </button>
+                    </div>
                   ))}
                 </div>
               )}
@@ -3185,7 +3337,7 @@ export default function EventDetailPage() {
           </div>
 
           {/* Right Panel — Logbook detail */}
-          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          <div className={`${isCompactLayout && !selectedLogbook ? 'hidden' : 'flex'} flex-1 flex-col min-h-0 min-w-0 overflow-hidden`}>
             {selectedLogbookLoading ? (
               <div className="flex-1 flex items-center justify-center">
                 <Loader2 className="w-8 h-8 animate-spin text-emerald-500" />
@@ -3193,9 +3345,19 @@ export default function EventDetailPage() {
             ) : selectedLogbook ? (
               <>
                 {/* Logbook header */}
-                <div className="px-5 py-2.5 border-b border-slate-200 bg-white flex-shrink-0">
-                  <div className="flex items-center justify-between">
-                    <div>
+                <div className="px-3 sm:px-5 py-2.5 border-b border-slate-200 bg-white flex-shrink-0">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    {isCompactLayout && (
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedLogbook(null); setEditingLogbookTitle(false); setEditingLogbookDate(false); setEditingEntryId(null) }}
+                        className="min-h-11 min-w-11 -ml-2 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100"
+                        aria-label="Volver a la lista de bitácoras"
+                      >
+                        <ArrowLeft className="h-5 w-5" />
+                      </button>
+                    )}
+                    <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 group/lbtitle">
                         {editingLogbookTitle ? (
                           <input
@@ -3222,14 +3384,14 @@ export default function EventDetailPage() {
                           />
                         ) : (
                           <h3
-                            className="text-lg font-semibold text-slate-900 cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded transition"
+                            className="text-lg font-semibold text-slate-900 cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded transition break-words"
                             onClick={() => { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) }}
                             title="Click para editar"
                           >{selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')}</h3>
                         )}
                         {!editingLogbookTitle && (
                           <button onClick={() => { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) }}
-                            className="opacity-0 group-hover/lbtitle:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition">
+                            className="opacity-0 group-hover/lbtitle:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center">
                             <Edit3 className="w-3 h-3" />
                           </button>
                         )}
@@ -3241,7 +3403,7 @@ export default function EventDetailPage() {
                            selectedLogbook.status === 'active' ? 'Activa' : 'Pendiente'}
                         </span>
                       </div>
-                      <div className="flex items-center gap-1 mt-0.5">
+                      <div className="flex flex-wrap items-center gap-1 mt-0.5">
                         {editingLogbookDate ? (
                           <input
                             type="date"
@@ -3277,19 +3439,19 @@ export default function EventDetailPage() {
                         )}
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className={`${isCompactLayout ? 'w-full justify-end' : ''} flex items-center gap-2`}>
                       <button onClick={() => {
                         setLogbookSettingsTitle(selectedLogbook.title)
                         setLogbookSettingsDate(selectedLogbook.date.split('T')[0])
                         setLogbookSettingsStatus(selectedLogbook.status)
                         setShowLogbookSettingsModal(true)
-                      }} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition" title="Configurar bitácora">
+                      }} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Configurar bitácora">
                         <Settings className="w-4 h-4" />
                       </button>
                       <button
                         onClick={() => handleCaptureSnapshot(selectedLogbook.id)}
                         disabled={capturingSnapshot || selectedLogbook.status === 'completed'}
-                        className={`flex items-center gap-1.5 px-3 py-2 text-white rounded-lg text-xs font-medium transition shadow-sm disabled:opacity-50 ${selectedLogbook.status === 'completed' ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+                        className={`flex min-h-11 items-center gap-1.5 px-3 py-2 text-white rounded-lg text-xs font-medium transition shadow-sm disabled:opacity-50 ${selectedLogbook.status === 'completed' ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
                         {capturingSnapshot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> :
                            selectedLogbook.status === 'completed' ? <Lock className="w-3.5 h-3.5" /> : <Camera className="w-3.5 h-3.5" />}
                         {selectedLogbook.status === 'completed' ? 'Completado' : selectedLogbook.status === 'active' ? 'Re-capturar' : 'Capturar Snapshot'}
@@ -3315,21 +3477,21 @@ export default function EventDetailPage() {
                 </div>
 
                 {/* General notes */}
-                <div className="px-5 py-2 border-b border-slate-100 bg-slate-50/50 flex-shrink-0">
+                <div className="px-3 sm:px-5 py-2 border-b border-slate-100 bg-slate-50/50 flex-shrink-0">
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Observaciones generales</span>
                     {!editingLogbookNotes ? (
                       <button onClick={() => { setLogbookNotesText(selectedLogbook.general_notes || ''); setEditingLogbookNotes(true) }}
-                        className="p-1 text-slate-400 hover:text-emerald-600 rounded transition">
+                        className="p-1 text-slate-400 hover:text-emerald-600 rounded transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Editar observaciones generales">
                         <PenLine className="w-3.5 h-3.5" />
                       </button>
                     ) : (
                       <div className="flex items-center gap-1">
-                        <button onClick={() => setEditingLogbookNotes(false)} className="p-1 text-slate-400 hover:text-slate-600 rounded transition">
+                        <button onClick={() => setEditingLogbookNotes(false)} className="p-1 text-slate-400 hover:text-slate-600 rounded transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Cancelar edición">
                           <X className="w-3.5 h-3.5" />
                         </button>
                         <button onClick={handleSaveLogbookNotes} disabled={savingLogbookNotes}
-                          className="p-1 text-emerald-600 hover:text-emerald-700 rounded transition disabled:opacity-50">
+                          className="p-1 text-emerald-600 hover:text-emerald-700 rounded transition disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Guardar observaciones">
                           {savingLogbookNotes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
                         </button>
                       </div>
@@ -3351,7 +3513,7 @@ export default function EventDetailPage() {
 
                 {/* View mode toggle */}
                 {selectedLogbook.status === 'completed' && selectedLogbook.entries && selectedLogbook.entries.length > 0 && (
-                  <div className="px-5 py-2 border-b border-slate-100 bg-white flex-shrink-0 flex items-center justify-between">
+                  <div className={`${isCompactLayout ? 'hidden' : 'flex'} px-5 py-2 border-b border-slate-100 bg-white flex-shrink-0 items-center justify-between`}>
                     <span className="text-xs text-slate-400">{selectedLogbook.entries.length} participantes</span>
                     <div className="inline-flex items-center bg-slate-100 rounded-lg p-0.5">
                       <button
@@ -3377,11 +3539,11 @@ export default function EventDetailPage() {
                 )}
 
                 {/* Entries */}
-                <div className="flex-1 overflow-y-auto">
+                <div className={`flex-1 min-h-0 ${selectedLogbook.status === 'pending' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
                   {selectedLogbook.status === 'pending' ? (
                     <div className="flex flex-col h-full">
                       {/* Preview banner + capture button */}
-                      <div className="px-5 py-3 bg-amber-50 border-b border-amber-200 flex items-center justify-between gap-3 flex-shrink-0">
+                      <div className="px-3 sm:px-5 py-3 bg-amber-50 border-b border-amber-200 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
                         <div className="flex items-center gap-2 min-w-0">
                           <div className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
                           <span className="text-xs text-amber-700 font-medium">
@@ -3392,7 +3554,7 @@ export default function EventDetailPage() {
                           )}
                         </div>
                         <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot}
-                          className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50 flex-shrink-0">
+                          className="flex min-h-11 items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50 flex-shrink-0">
                           {capturingSnapshot ? <Loader2 className="w-3 h-3 animate-spin" /> : <Camera className="w-3 h-3" />}
                           Capturar Snapshot
                         </button>
@@ -3404,22 +3566,22 @@ export default function EventDetailPage() {
                           <Loader2 className="w-6 h-6 animate-spin text-slate-300" />
                         </div>
                       ) : previewParticipants.length > 0 ? (
-                        <div className="flex-1 overflow-y-auto">
-                          <table className="w-full">
-                            <thead className="sticky top-0 bg-white z-10">
+                        <div className="flex-1 overflow-y-auto min-w-0">
+                          <table className={isCompactLayout ? 'block w-full p-3' : 'w-full'}>
+                            <thead className={isCompactLayout ? 'hidden' : 'sticky top-0 bg-white z-10'}>
                               <tr className="border-b border-slate-200">
                                 <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[200px]">Participante</th>
                                 <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4">Etapa</th>
                                 <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[140px]">Teléfono</th>
                               </tr>
                             </thead>
-                            <tbody>
+                            <tbody className={isCompactLayout ? 'block space-y-2' : undefined}>
                               {previewParticipants.map((p, idx) => (
-                                <tr key={p.id} className={`border-b border-slate-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}`}>
-                                  <td className="py-2 px-4">
+                                <tr key={p.id} className={`${isCompactLayout ? 'block rounded-xl border border-slate-200 bg-white p-3 shadow-sm' : 'border-b border-slate-50'} ${!isCompactLayout && idx % 2 !== 0 ? 'bg-slate-50/50' : 'bg-white'}`}>
+                                  <td className={isCompactLayout ? 'block' : 'py-2 px-4'}>
                                     <span className="text-sm text-slate-700 font-medium">{p.name}</span>
                                   </td>
-                                  <td className="py-2 px-4">
+                                  <td className={isCompactLayout ? 'mt-2 block' : 'py-2 px-4'}>
                                     {p.stage_name ? (
                                       <span className="inline-flex items-center gap-1.5 text-xs">
                                         <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: p.stage_color || '#94a3b8' }} />
@@ -3429,7 +3591,7 @@ export default function EventDetailPage() {
                                       <span className="text-xs text-slate-400">Sin etapa</span>
                                     )}
                                   </td>
-                                  <td className="py-2 px-4 text-xs text-slate-500 font-mono">{p.phone || '—'}</td>
+                                  <td className={`${isCompactLayout ? 'mt-2 block' : 'py-2 px-4'} text-xs text-slate-500 font-mono`}>{p.phone || '—'}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -3457,19 +3619,19 @@ export default function EventDetailPage() {
                       )}
                     </div>
                   ) : selectedLogbook.entries && selectedLogbook.entries.length > 0 ? (
-                    logbookViewMode === 'list' ? (
-                    <table className="w-full">
-                      <thead className="sticky top-0 bg-white z-10">
+                    (isCompactLayout || logbookViewMode === 'list') ? (
+                    <table className={isCompactLayout ? 'block w-full p-3' : 'w-full'}>
+                      <thead className={isCompactLayout ? 'hidden' : 'sticky top-0 bg-white z-10'}>
                         <tr className="border-b border-slate-200">
                           <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[200px]">Participante</th>
                           <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[120px]">Etapa</th>
                           <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4">Notas</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-100">
+                      <tbody className={isCompactLayout ? 'block space-y-2' : 'divide-y divide-slate-100'}>
                         {selectedLogbook.entries.map(entry => (
-                          <tr key={entry.id} className="hover:bg-slate-50/50 transition-colors">
-                            <td className="px-4 py-2.5">
+                          <tr key={entry.id} className={`${isCompactLayout ? 'block rounded-xl border border-slate-200 bg-white p-3 shadow-sm' : ''} hover:bg-slate-50/50 transition-colors`}>
+                            <td className={isCompactLayout ? 'block' : 'px-4 py-2.5'}>
                               <div className="flex items-center gap-2">
                                 <div className="w-7 h-7 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0">
                                   <span className="text-emerald-700 text-xs font-semibold">{(entry.participant_name || '?').charAt(0).toUpperCase()}</span>
@@ -3480,14 +3642,14 @@ export default function EventDetailPage() {
                                 </div>
                               </div>
                             </td>
-                            <td className="px-4 py-2.5">
+                            <td className={isCompactLayout ? 'mt-2 block' : 'px-4 py-2.5'}>
                               {entry.stage_name ? (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: entry.stage_color || '#94a3b8' }}>
                                   {entry.stage_name}
                                 </span>
                               ) : <span className="text-[10px] text-slate-400 italic">—</span>}
                             </td>
-                            <td className="px-4 py-2.5">
+                            <td className={isCompactLayout ? 'mt-3 block border-t border-slate-100 pt-3' : 'px-4 py-2.5'}>
                               {editingEntryId === entry.id ? (
                                 <div className="flex items-center gap-2">
                                   <input
@@ -3499,10 +3661,10 @@ export default function EventDetailPage() {
                                     onKeyDown={e => { if (e.key === 'Enter') handleSaveEntryNotes(entry.id); if (e.key === 'Escape') setEditingEntryId(null) }}
                                   />
                                   <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes}
-                                    className="p-1 text-emerald-600 hover:text-emerald-700 disabled:opacity-50">
+                                    className="p-1 text-emerald-600 hover:text-emerald-700 disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Guardar nota">
                                     {savingEntryNotes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
                                   </button>
-                                  <button onClick={() => setEditingEntryId(null)} className="p-1 text-slate-400 hover:text-slate-600">
+                                  <button onClick={() => setEditingEntryId(null)} className="p-1 text-slate-400 hover:text-slate-600 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Cancelar edición de nota">
                                     <X className="w-3.5 h-3.5" />
                                   </button>
                                 </div>
@@ -3514,7 +3676,7 @@ export default function EventDetailPage() {
                                   ) : (
                                     <span className="text-xs text-slate-300 italic">Agregar nota...</span>
                                   )}
-                                  <PenLine className="w-3 h-3 text-slate-300 opacity-0 group-hover/notes:opacity-100 transition-opacity" />
+                                  <PenLine className="w-3 h-3 text-slate-300 opacity-0 group-hover/notes:opacity-100 transition-opacity max-sm:opacity-100" />
                                 </div>
                               )}
                             </td>
@@ -3644,9 +3806,9 @@ export default function EventDetailPage() {
 
       {/* Stage Editor Modal */}
       {showStageEditorModal && (
-        <div className="fixed inset-0 bg-slate-950/45 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[88vh] border border-slate-200 flex flex-col overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between gap-4">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`}>
+          <div className={`bg-white shadow-2xl w-full border border-slate-200 flex flex-col overflow-hidden ${isCompactLayout ? 'h-[var(--app-height)] max-w-none max-h-none rounded-none border-0' : 'max-w-4xl max-h-[88vh] rounded-2xl'}`}>
+            <div className="px-4 sm:px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100 flex items-center justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-slate-950">Configurar etapas</h2>
                 <p className="text-sm text-slate-500 mt-0.5">{event?.name || 'Evento'}</p>
@@ -3654,14 +3816,14 @@ export default function EventDetailPage() {
               <button
                 onClick={cancelStageEditMode}
                 disabled={stageLayoutSaving}
-                className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-50"
+                className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-50 min-h-11 min-w-11 flex items-center justify-center"
                 aria-label="Cerrar"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="px-6 py-5 overflow-y-auto space-y-5">
+            <div className="flex-1 min-h-0 px-4 sm:px-6 py-5 overflow-y-auto overscroll-contain space-y-5">
               <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end rounded-xl border border-slate-200 bg-slate-50 p-4">
                 <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3">
                   <div>
@@ -3676,13 +3838,13 @@ export default function EventDetailPage() {
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Color</label>
-                    <div className="flex flex-wrap gap-1.5 min-w-[200px]">
+                    <div className="flex flex-wrap gap-1.5 sm:min-w-[200px]">
                       {STAGE_COLOR_OPTIONS.map(color => (
                         <button
                           key={color}
                           type="button"
                           onClick={() => setNewStageColor(color)}
-                          className={`w-8 h-8 rounded-full border-2 transition ${newStageColor === color ? 'border-slate-900 scale-105 shadow-sm' : 'border-white hover:scale-105'}`}
+                          className={`w-8 h-8 rounded-full border-2 transition max-sm:min-h-11 max-sm:min-w-11 ${newStageColor === color ? 'border-slate-900 scale-105 shadow-sm' : 'border-white hover:scale-105'}`}
                           style={{ backgroundColor: color }}
                           aria-label={`Color ${color}`}
                         />
@@ -3723,7 +3885,7 @@ export default function EventDetailPage() {
                     onDragEnd={() => setDraggedStageId(null)}
                     className={`rounded-xl border bg-white p-3 transition ${draggedStageId === stage.id ? 'border-emerald-300 opacity-60' : 'border-slate-200'}`}
                   >
-                    <div className="grid grid-cols-[auto_1fr_auto] gap-3 items-center">
+                    <div className={`${isCompactLayout ? 'grid-cols-1' : 'grid-cols-[auto_1fr_auto]'} grid gap-3 items-center`}>
                       <div className="flex items-center gap-2">
                         <GripVertical className="w-4 h-4 text-slate-300 cursor-grab" />
                         <span className="w-7 h-7 rounded-lg bg-slate-100 text-slate-500 text-xs font-semibold flex items-center justify-center tabular-nums">{idx + 1}</span>
@@ -3740,7 +3902,7 @@ export default function EventDetailPage() {
                               key={color}
                               type="button"
                               onClick={() => handleColorStage(stage.id, color)}
-                              className={`w-6 h-6 rounded-full border-2 transition ${stage.color === color ? 'border-slate-900 scale-110' : 'border-white hover:scale-105'}`}
+                              className={`w-6 h-6 rounded-full border-2 transition max-sm:min-h-11 max-sm:min-w-11 ${stage.color === color ? 'border-slate-900 scale-110' : 'border-white hover:scale-105'}`}
                               style={{ backgroundColor: color }}
                               aria-label={`Color ${color}`}
                             />
@@ -3751,12 +3913,12 @@ export default function EventDetailPage() {
                           {stage.isNew && <span className="text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">Nueva</span>}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1">
+                      <div className={`${isCompactLayout ? 'justify-end' : ''} flex items-center gap-1`}>
                         <button
                           type="button"
                           onClick={() => moveDraftStageByOffset(stage.id, -1)}
                           disabled={idx === 0}
-                          className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-30"
+                          className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-30 min-h-11 min-w-11 flex items-center justify-center"
                           aria-label="Subir etapa"
                         >
                           <ArrowUp className="w-4 h-4" />
@@ -3765,7 +3927,7 @@ export default function EventDetailPage() {
                           type="button"
                           onClick={() => moveDraftStageByOffset(stage.id, 1)}
                           disabled={idx === activeDraftStages.length - 1}
-                          className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-30"
+                          className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-30 min-h-11 min-w-11 flex items-center justify-center"
                           aria-label="Bajar etapa"
                         >
                           <ArrowDown className="w-4 h-4" />
@@ -3774,7 +3936,7 @@ export default function EventDetailPage() {
                           type="button"
                           onClick={() => handleDeleteStage(stage.id, stage.name, stage.total_count)}
                           disabled={activeDraftStages.length <= 1}
-                          className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition disabled:opacity-30"
+                          className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition disabled:opacity-30 min-h-11 min-w-11 flex items-center justify-center"
                           aria-label="Eliminar etapa"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -3804,7 +3966,7 @@ export default function EventDetailPage() {
                           <select
                             value={deletion.moveToStageId}
                             onChange={e => setDeletedStageDestination(deletion.stageId, e.target.value)}
-                            className="min-w-[220px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/30"
+                            className="min-h-11 w-full sm:w-auto sm:min-w-[220px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-base sm:text-sm text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/30"
                           >
                             <option value="">Mover a...</option>
                             {destinationStages.map(stage => (
@@ -3813,7 +3975,7 @@ export default function EventDetailPage() {
                           </select>
                           <button
                             onClick={() => undoDeleteStage(deletion.stageId)}
-                            className="px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-white rounded-lg transition"
+                            className="min-h-11 px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-white rounded-lg transition"
                           >
                             Deshacer
                           </button>
@@ -3831,20 +3993,20 @@ export default function EventDetailPage() {
               )}
             </div>
 
-            <div className="px-6 py-4 border-t border-slate-100 flex flex-wrap justify-between gap-3 bg-white">
+            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 flex flex-wrap justify-between gap-3 bg-white">
               <p className="text-xs text-slate-500 self-center">Los cambios se aplican recién al guardar.</p>
-              <div className="flex items-center gap-2">
+              <div className={`${isCompactLayout ? 'grid grid-cols-2 w-full' : 'flex items-center'} gap-2`}>
                 <button
                   onClick={cancelStageEditMode}
                   disabled={stageLayoutSaving}
-                  className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition disabled:opacity-50"
+                  className="min-h-11 px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition disabled:opacity-50"
                 >
                   Cancelar
                 </button>
                 <button
                   onClick={saveStageLayout}
                   disabled={!stageEditDirty || stageSaveBlocked || stageLayoutSaving}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex min-h-11 items-center justify-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {stageLayoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                   Guardar cambios
@@ -3857,22 +4019,22 @@ export default function EventDetailPage() {
 
       {/* Stage Modal */}
       {showStageModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setShowStageModal(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm border border-slate-100" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`} onClick={() => setShowStageModal(false)}>
+          <div className={`bg-white shadow-2xl w-full border border-slate-100 flex flex-col overflow-hidden ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0' : 'max-w-sm rounded-2xl'}`} onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 sm:px-5 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100">
               <h2 className="text-base font-semibold text-slate-900">Nueva etapa</h2>
-              <button onClick={() => setShowStageModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+              <button onClick={() => setShowStageModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="px-5 py-4 space-y-4">
+            <div className="flex-1 overflow-y-auto px-4 sm:px-5 py-4 space-y-4">
               <div>
                 <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Nombre *</label>
                 <input
                   value={newStageName}
                   onChange={e => setNewStageName(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') handleCreateStage(); if (e.key === 'Escape') setShowStageModal(false) }}
-                  className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none"
+                  className="w-full min-h-11 bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-base sm:text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none"
                   placeholder="Ej: Seguimiento"
                   autoFocus
                 />
@@ -3885,7 +4047,7 @@ export default function EventDetailPage() {
                       key={color}
                       type="button"
                       onClick={() => setNewStageColor(color)}
-                      className={`w-8 h-8 rounded-full border-2 transition-all ${newStageColor === color ? 'border-slate-900 scale-110 shadow-sm' : 'border-white hover:scale-105'}`}
+                      className={`w-8 h-8 rounded-full border-2 transition-all max-sm:min-h-11 max-sm:min-w-11 ${newStageColor === color ? 'border-slate-900 scale-110 shadow-sm' : 'border-white hover:scale-105'}`}
                       style={{ backgroundColor: color }}
                       title={color}
                     />
@@ -3893,12 +4055,12 @@ export default function EventDetailPage() {
                 </div>
               </div>
             </div>
-            <div className="px-5 py-4 border-t border-slate-100 flex justify-end gap-3">
-              <button onClick={() => setShowStageModal(false)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
+            <div className="px-4 sm:px-5 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 flex justify-end gap-3">
+              <button onClick={() => setShowStageModal(false)} className="min-h-11 px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
               <button
                 onClick={handleCreateStage}
                 disabled={!newStageName.trim() || stageLayoutSaving}
-                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50"
+                className="flex min-h-11 items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50"
               >
                 {stageLayoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
                 Crear
@@ -3910,36 +4072,36 @@ export default function EventDetailPage() {
 
       {/* New Logbook Modal */}
       {showNewLogbookModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setShowNewLogbookModal(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-100" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`} onClick={() => setShowNewLogbookModal(false)}>
+          <div className={`bg-white shadow-2xl w-full border border-slate-100 flex flex-col overflow-hidden ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0' : 'max-w-md rounded-2xl'}`} onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 sm:px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100">
               <h2 className="text-base font-semibold text-slate-900">Nueva Bitácora</h2>
-              <button onClick={() => setShowNewLogbookModal(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+              <button onClick={() => setShowNewLogbookModal(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="px-6 py-5 space-y-4">
+            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-4">
               <div>
                 <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Fecha *</label>
                 <input type="date" value={newLogbookDate} onChange={e => setNewLogbookDate(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none" />
+                  className="w-full min-h-11 bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-base sm:text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none" />
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Título (opcional)</label>
                 <input type="text" value={newLogbookTitle} onChange={e => setNewLogbookTitle(e.target.value)}
                   placeholder={newLogbookDate ? format(new Date(newLogbookDate + 'T12:00:00'), 'dd/MM/yyyy') : 'Ej: Día 1 - Inauguración'}
-                  className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none placeholder-slate-400" />
+                  className="w-full min-h-11 bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-base sm:text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none placeholder-slate-400" />
               </div>
-              <label className="flex items-center gap-2 cursor-pointer">
+              <label className="flex min-h-11 items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={newLogbookCaptureNow} onChange={e => setNewLogbookCaptureNow(e.target.checked)}
                   className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
                 <span className="text-sm text-slate-700">Capturar snapshot ahora</span>
               </label>
             </div>
-            <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
-              <button onClick={() => setShowNewLogbookModal(false)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
+            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 flex justify-end gap-3">
+              <button onClick={() => setShowNewLogbookModal(false)} className="min-h-11 px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
               <button onClick={handleCreateLogbook} disabled={!newLogbookDate || creatingLogbook}
-                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
+                className="flex min-h-11 items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
                 {creatingLogbook ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
                 Crear
               </button>
@@ -3950,7 +4112,7 @@ export default function EventDetailPage() {
 
       {/* Filter Confirmation Dialog for Logbook Snapshot */}
       {showFilterConfirmDialog && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[70] p-4" onClick={() => setShowFilterConfirmDialog(false)}>
+        <div className="app-viewport fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-sm" onClick={() => setShowFilterConfirmDialog(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm border border-slate-100 animate-in fade-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
             <div className="px-6 pt-6 pb-4 text-center">
               <div className="w-12 h-12 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-3">
@@ -3964,11 +4126,11 @@ export default function EventDetailPage() {
             </div>
             <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
               <button onClick={() => setShowFilterConfirmDialog(false)}
-                className="flex-1 px-4 py-2.5 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">
+                className="flex-1 min-h-11 px-4 py-2.5 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">
                 Cancelar
               </button>
               <button onClick={() => { if (filterConfirmAction) filterConfirmAction() }}
-                className="flex-1 px-4 py-2.5 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm">
+                className="flex-1 min-h-11 px-4 py-2.5 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm">
                 Continuar con filtros
               </button>
             </div>
@@ -3978,25 +4140,25 @@ export default function EventDetailPage() {
 
       {/* Logbook Settings Modal */}
       {showLogbookSettingsModal && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4" onClick={() => setShowLogbookSettingsModal(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-100 overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50/50">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`} onClick={() => setShowLogbookSettingsModal(false)}>
+          <div className={`bg-white shadow-2xl w-full border border-slate-100 overflow-hidden flex flex-col ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0' : 'max-w-md rounded-2xl'}`} onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 sm:px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100 bg-slate-50/50">
               <h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
                 <Settings className="w-5 h-5 text-slate-400" />
                 Configuración de Bitácora
               </h2>
-              <button onClick={() => setShowLogbookSettingsModal(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition">
+              <button onClick={() => setShowLogbookSettingsModal(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-6 space-y-4">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
               <div>
                 <label className="block text-[13px] font-medium text-slate-700 mb-1">Título</label>
                 <input
                   type="text"
                   value={logbookSettingsTitle}
                   onChange={(e) => setLogbookSettingsTitle(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
+                  className="w-full min-h-11 px-3 py-2 bg-white border border-slate-200 rounded-lg text-base sm:text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
                 />
               </div>
               <div>
@@ -4005,7 +4167,7 @@ export default function EventDetailPage() {
                   type="date"
                   value={logbookSettingsDate}
                   onChange={(e) => setLogbookSettingsDate(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
+                  className="w-full min-h-11 px-3 py-2 bg-white border border-slate-200 rounded-lg text-base sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
                 />
               </div>
               <div>
@@ -4013,7 +4175,7 @@ export default function EventDetailPage() {
                 <select
                   value={logbookSettingsStatus}
                   onChange={(e) => setLogbookSettingsStatus(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
+                  className="w-full min-h-11 px-3 py-2 bg-white border border-slate-200 rounded-lg text-base sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
                 >
                   <option value="pending">Pendiente (No capturada)</option>
                   <option value="active">Activa (Capturada, permite Re-capturar)</option>
@@ -4039,7 +4201,7 @@ export default function EventDetailPage() {
                 <button
                   onClick={() => handleUpdateLogbookSettings(true)}
                   disabled={logbookSettingsUpdating}
-                  className="mt-1 flex items-center justify-center gap-1.5 w-full px-3 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium hover:bg-slate-200 transition"
+                  className="mt-1 flex min-h-11 items-center justify-center gap-1.5 w-full px-3 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium hover:bg-slate-200 transition"
                   title="Actualizar el filtro guardado con el filtro aplicado actualmente en la pantalla"
                 >
                   <Filter className="w-3.5 h-3.5" />
@@ -4048,15 +4210,15 @@ export default function EventDetailPage() {
               </div>
 
             </div>
-            <div className="px-6 py-4 bg-slate-50/50 border-t border-slate-100 flex gap-2">
+            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-50/50 border-t border-slate-100 flex gap-2">
               <button onClick={() => setShowLogbookSettingsModal(false)}
-                className="flex-1 px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition">
+                className="flex-1 min-h-11 px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition">
                 Cancelar
               </button>
               <button
                 onClick={() => handleUpdateLogbookSettings(false)}
                 disabled={logbookSettingsUpdating}
-                className="flex-1 flex justify-center items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm disabled:opacity-50">
+                className="flex-1 min-h-11 flex justify-center items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm disabled:opacity-50">
                 {logbookSettingsUpdating && <Loader2 className="w-4 h-4 animate-spin" />}
                 Guardar
               </button>
@@ -4083,9 +4245,9 @@ export default function EventDetailPage() {
 
       {/* ═══ Detail Panel (Slide-over) with Inline Chat ═══ */}
       {(showDetailPanel || showInlineChat) && detailParticipant && (
-        <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+        <div className="app-viewport fixed inset-0 z-[70] flex justify-end overflow-hidden">
           <div
-            className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
+            className="absolute inset-0 bg-black/25"
             onClick={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
           />
           <div
@@ -4094,10 +4256,10 @@ export default function EventDetailPage() {
             aria-modal="true"
             aria-label="Detalle del participante"
             tabIndex={-1}
-            className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 outline-none ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}
+            className={`relative bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 outline-none ${isSingleSurfaceLayout ? 'h-[var(--app-height)] w-full max-w-none border-l-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]' : showInlineChat ? 'h-full w-[85vw] max-w-6xl' : 'h-full w-full max-w-md'}`}
           >
             {showInlineChat && inlineChatId && (
-              <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
+              <div className={`${isSingleSurfaceLayout ? 'w-full border-r-0' : 'flex-1 border-r'} min-w-0 border-slate-200 flex flex-col h-full bg-slate-50/50`}>
                 <ChatPanel
                   chatId={inlineChatId}
                   deviceId={inlineChatDeviceId}
@@ -4108,7 +4270,7 @@ export default function EventDetailPage() {
                 />
               </div>
             )}
-            <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
+            <div className={`${isSingleSurfaceLayout && showInlineChat ? 'hidden' : 'flex'} ${showInlineChat && !isSingleSurfaceLayout ? 'w-[360px] shrink-0' : 'w-full'} flex-col h-full bg-white min-w-0`}>
               <LeadDetailPanel
                 lead={participantToLead(detailParticipant)}
                 eventMode={true}
@@ -4239,27 +4401,27 @@ export default function EventDetailPage() {
       )}
       {/* ═══ Contact communication preference ═══ */}
       {showBlockModal && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
-          <div ref={doNotContactDialogRef} role="dialog" aria-modal="true" aria-labelledby="do-not-contact-title" tabIndex={-1} className="w-full max-w-md overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
-            <div className="px-6 py-4 border-b border-slate-200">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`}>
+          <div ref={doNotContactDialogRef} role="dialog" aria-modal="true" aria-labelledby="do-not-contact-title" tabIndex={-1} className={`w-full overflow-hidden border border-slate-200 bg-white shadow-2xl flex flex-col ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0' : 'max-w-md rounded-3xl'}`}>
+            <div className="px-4 sm:px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-200">
               <h3 id="do-not-contact-title" className="text-lg font-semibold text-slate-900 flex items-center gap-2">
                 <ShieldBan className="w-5 h-5 text-red-500" />
                 Marcar como no contactable
               </h3>
               <p className="text-sm text-slate-500 mt-1">Esta preferencia pertenece al contacto y evita mensajes desde campañas, eventos y automatizaciones.</p>
             </div>
-            <div className="px-6 py-4 space-y-2">
+            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 space-y-2">
               {['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].map((reason, index) => (
                 <button ref={index === 0 ? doNotContactFirstChoiceRef : undefined} key={reason} onClick={() => setBlockReason(reason)} className={`min-h-11 w-full text-left px-4 py-2.5 rounded-xl text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${blockReason === reason ? 'bg-red-50 text-red-700 ring-1 ring-red-200 font-medium' : 'text-slate-700 hover:bg-slate-50'}`}>
                   {reason}
                 </button>
               ))}
               <div className="pt-2">
-                <input type="text" placeholder="Otro motivo..." value={!['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''} onChange={(e) => setBlockReason(e.target.value)} onFocus={() => { if (['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }} className="h-11 w-full px-4 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500" />
+                <input type="text" placeholder="Otro motivo..." value={!['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason) ? blockReason : ''} onChange={(e) => setBlockReason(e.target.value)} onFocus={() => { if (['Solicita no ser contactado', 'Agresivo o abusivo', 'Número equivocado', 'Spam o fraude'].includes(blockReason)) setBlockReason('') }} className="h-11 w-full px-4 border border-slate-200 rounded-xl text-base sm:text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500" />
               </div>
               {blockError && <p className="flex items-center gap-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-medium text-red-700" role="alert"><AlertCircle className="h-4 w-4 shrink-0" />{blockError}</p>}
             </div>
-            <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3">
+            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-200 flex justify-end gap-3">
               <button onClick={() => setShowBlockModal(false)} disabled={savingBlock} className="h-11 px-4 text-sm text-slate-600 hover:bg-slate-100 rounded-xl transition disabled:opacity-50">Cancelar</button>
               <button onClick={confirmBlock} disabled={!blockReason || savingBlock} className="inline-flex h-11 items-center gap-2 px-4 bg-red-600 text-white text-sm font-medium rounded-xl hover:bg-red-700 disabled:opacity-50 transition">{savingBlock && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}{savingBlock ? 'Guardando…' : 'Confirmar'}</button>
             </div>
@@ -4291,15 +4453,15 @@ export default function EventDetailPage() {
 
       {/* ═══ Add Participant — Manual contact ═══ */}
       {showAddModal && addTab === 'manual' && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`}>
           <div
             ref={manualContactDialogRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="new-event-contact-title"
-            className="flex max-h-[92vh] w-full max-w-xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl"
+            className={`flex w-full flex-col overflow-hidden border border-slate-200 bg-white shadow-2xl ${isCompactLayout ? 'h-[var(--app-height)] max-h-none max-w-none rounded-none border-0' : 'max-h-[92vh] max-w-xl rounded-3xl'}`}
           >
-            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-5">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-4 sm:px-6 pt-[max(1.25rem,env(safe-area-inset-top))] pb-5">
               <div>
                 <h2 id="new-event-contact-title" className="text-lg font-semibold text-slate-950">Registrar contacto</h2>
                 <p className="mt-1 text-sm text-slate-500">
@@ -4321,7 +4483,7 @@ export default function EventDetailPage() {
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-6 py-5">
+            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5">
               <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-sm text-emerald-800">
                 Este evento no tiene reglas automáticas. El contacto se creará —o se reutilizará si ya existe— y se añadirá directamente como participante.
               </div>
@@ -4341,7 +4503,7 @@ export default function EventDetailPage() {
                     onChange={event => setManualForm(form => ({ ...form, name: event.target.value }))}
                     ref={manualContactNameRef}
                     autoComplete="name"
-                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                     placeholder="Nombre del contacto"
                   />
                 </label>
@@ -4351,7 +4513,7 @@ export default function EventDetailPage() {
                     value={manualForm.last_name}
                     onChange={event => setManualForm(form => ({ ...form, last_name: event.target.value }))}
                     autoComplete="family-name"
-                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                     placeholder="Apellido"
                   />
                 </label>
@@ -4360,7 +4522,7 @@ export default function EventDetailPage() {
                   <input
                     value={manualForm.short_name}
                     onChange={event => setManualForm(form => ({ ...form, short_name: event.target.value }))}
-                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                     placeholder="Cómo prefieres identificarlo"
                   />
                 </label>
@@ -4372,7 +4534,7 @@ export default function EventDetailPage() {
                     value={manualForm.phone}
                     onChange={event => setManualForm(form => ({ ...form, phone: event.target.value }))}
                     autoComplete="tel"
-                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                     placeholder="944 903 497"
                   />
                 </label>
@@ -4383,7 +4545,7 @@ export default function EventDetailPage() {
                     value={manualForm.email}
                     onChange={event => setManualForm(form => ({ ...form, email: event.target.value }))}
                     autoComplete="email"
-                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                     placeholder="correo@ejemplo.com"
                   />
                 </label>
@@ -4395,7 +4557,7 @@ export default function EventDetailPage() {
                     max="130"
                     value={manualForm.age}
                     onChange={event => setManualForm(form => ({ ...form, age: event.target.value }))}
-                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                     placeholder="Edad"
                   />
                 </label>
@@ -4411,7 +4573,7 @@ export default function EventDetailPage() {
               </button>
             </div>
 
-            <div className="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50/70 px-6 py-4 sm:flex-row sm:justify-end">
+            <div className="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50/70 px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:flex-row sm:justify-end">
               <button
                 type="button"
                 onClick={() => {
@@ -4439,8 +4601,8 @@ export default function EventDetailPage() {
       )}
       {/* ═══ Device Selector ═══ */}
       {showDeviceSelector && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`}>
+          <div className={`bg-white shadow-2xl p-4 sm:p-6 w-full border border-slate-100 overflow-y-auto ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]' : 'max-w-sm rounded-2xl'}`}>
             <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
             <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para el chat con {whatsappPhone}</p>
             {existingChatForWA && (
@@ -4454,7 +4616,7 @@ export default function EventDetailPage() {
               <div className="space-y-2">
                 {devices.map(device => (
                   <button key={device.id} onClick={() => handleDeviceSelectedForChat(device)}
-                    className="w-full flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
+                    className="w-full min-h-11 flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
                   >
                     <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center"><Phone className="w-4 h-4 text-emerald-600" /></div>
                     <div className="min-w-0">
@@ -4468,7 +4630,7 @@ export default function EventDetailPage() {
                 ))}
               </div>
             )}
-            <button onClick={() => setShowDeviceSelector(false)} className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">Cancelar</button>
+            <button onClick={() => setShowDeviceSelector(false)} className="w-full min-h-11 mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">Cancelar</button>
           </div>
         </div>
       )}
@@ -4498,9 +4660,9 @@ export default function EventDetailPage() {
 
       {/* ═══ Export Modal ═══ */}
       {showExportModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4" onClick={() => !exporting && setShowExportModal(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="px-6 py-5 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-slate-50/50">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/50 ${isCompactLayout ? 'p-0' : 'p-4'}`} onClick={() => !exporting && setShowExportModal(false)}>
+          <div className={`bg-white shadow-2xl w-full overflow-hidden flex flex-col ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none' : 'max-w-lg max-h-[92vh] rounded-2xl'}`} onClick={e => e.stopPropagation()}>
+            <div className="px-4 sm:px-6 pt-[max(1.25rem,env(safe-area-inset-top))] pb-5 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-slate-50/50">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-slate-600 flex items-center justify-center"><FileDown className="w-5 h-5 text-white" /></div>
@@ -4509,13 +4671,13 @@ export default function EventDetailPage() {
                     <p className="text-sm text-slate-500">{totalParticipantCount} participantes</p>
                   </div>
                 </div>
-                <button onClick={() => !exporting && setShowExportModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"><X className="w-5 h-5" /></button>
+                <button onClick={() => !exporting && setShowExportModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar"><X className="w-5 h-5" /></button>
               </div>
             </div>
-            <div className="p-6 space-y-6">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
               <div>
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 block">Formato</label>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   {[
                     { key: 'excel' as const, label: 'Excel', desc: 'Hoja de cálculo', icon: FileSpreadsheet, color: 'emerald' },
                     { key: 'csv' as const, label: 'CSV', desc: 'Texto plano', icon: FileText, color: 'blue' },
@@ -4590,7 +4752,7 @@ export default function EventDetailPage() {
                   </div>
                   <div>
                     <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 block">Nivel de Detalle</label>
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       {[
                         { key: 'basico' as DetailLevel, label: 'Básico', desc: 'Resumen y lista' },
                         { key: 'detallado' as DetailLevel, label: 'Detallado', desc: 'Datos completos' },
@@ -4611,10 +4773,10 @@ export default function EventDetailPage() {
                 </div>
               )}
             </div>
-            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
-              <button onClick={() => !exporting && setShowExportModal(false)} disabled={exporting} className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100 disabled:opacity-50">Cancelar</button>
+            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
+              <button onClick={() => !exporting && setShowExportModal(false)} disabled={exporting} className="min-h-11 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100 disabled:opacity-50">Cancelar</button>
               <button onClick={handleExport} disabled={exporting}
-                className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm transition-all ${
+                className={`flex min-h-11 items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white shadow-sm transition-all ${
                   exportFormat === 'excel' ? 'bg-emerald-600 hover:bg-emerald-700' : exportFormat === 'csv' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-indigo-600 hover:bg-indigo-700'
                 } disabled:opacity-50`}
               >
@@ -4627,14 +4789,14 @@ export default function EventDetailPage() {
 
       {/* ═══ Google Sync Modal ═══ */}
       {showMembershipHistory && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4" onClick={() => setShowMembershipHistory(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/50 ${isCompactLayout ? 'p-0' : 'p-4'}`} onClick={() => setShowMembershipHistory(false)}>
+          <div className={`bg-white shadow-2xl w-full flex flex-col overflow-hidden ${isCompactLayout ? 'h-[var(--app-height)] max-w-none max-h-none rounded-none' : 'max-w-3xl max-h-[80vh] rounded-2xl'}`} onClick={e => e.stopPropagation()}>
+            <div className="px-4 sm:px-5 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100 flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-base font-bold text-slate-900">Historial de membresía</h2>
                 <p className="text-xs text-slate-500 mt-0.5">Altas, salidas y reactivaciones sin perder bitácoras ni interacciones.</p>
               </div>
-              <button onClick={() => setShowMembershipHistory(false)} className="p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg"><X className="w-4 h-4" /></button>
+              <button onClick={() => setShowMembershipHistory(false)} className="p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar historial"><X className="w-4 h-4" /></button>
             </div>
             <div className="overflow-y-auto p-4">
               {membershipHistoryLoading ? (
@@ -4648,7 +4810,7 @@ export default function EventDetailPage() {
                     const state = entry.after_state || {}
                     const reason = typeof state.reason === 'string' ? state.reason : ''
                     return (
-                      <div key={entry.id} className="rounded-xl border border-slate-200 px-4 py-3 flex items-start gap-3">
+                    <div key={entry.id} className="rounded-xl border border-slate-200 px-4 py-3 flex flex-wrap items-start gap-3">
                         <div className={`mt-1 w-2.5 h-2.5 rounded-full flex-shrink-0 ${entry.action === 'deactivated' ? 'bg-amber-500' : 'bg-emerald-500'}`} />
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
@@ -4658,7 +4820,7 @@ export default function EventDetailPage() {
                           </div>
                           <p className="text-xs text-slate-500 mt-1 break-all">Contacto: {entry.contact_id || 'histórico'} · {entry.actor_type === 'user' ? 'usuario' : 'sistema'} · {entry.source || 'sin origen'}</p>
                         </div>
-                        <time className="text-[11px] text-slate-400 whitespace-nowrap">{new Date(entry.created_at).toLocaleString('es-PE')}</time>
+                        <time className={`${isCompactLayout ? 'w-full pl-5' : ''} text-[11px] text-slate-400 whitespace-nowrap`}>{new Date(entry.created_at).toLocaleString('es-PE')}</time>
                       </div>
                     )
                   })}
@@ -4671,13 +4833,13 @@ export default function EventDetailPage() {
 
       {showGoogleSyncModal && (
         <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4"
+          className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/50 ${isCompactLayout ? 'p-0' : 'p-4'}`}
           onClick={() => !googleSyncing && setShowGoogleSyncModal(false)}
           onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); if (!googleSyncing) setShowGoogleSyncModal(false) } }}
         >
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden" onClick={e => e.stopPropagation()}>
+          <div className={`bg-white shadow-2xl w-full overflow-hidden flex flex-col ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none' : 'max-w-md rounded-2xl'}`} onClick={e => e.stopPropagation()}>
             {/* Header */}
-            <div className="px-6 py-5 border-b border-slate-100 bg-gradient-to-r from-blue-50 to-indigo-50/50">
+            <div className="px-4 sm:px-6 pt-[max(1.25rem,env(safe-area-inset-top))] pb-5 border-b border-slate-100 bg-gradient-to-r from-blue-50 to-indigo-50/50">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
@@ -4688,14 +4850,14 @@ export default function EventDetailPage() {
                     <p className="text-xs text-slate-500 mt-0.5">Contactos de Google del evento</p>
                   </div>
                 </div>
-                <button onClick={() => !googleSyncing && setShowGoogleSyncModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
+                <button onClick={() => !googleSyncing && setShowGoogleSyncModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar">
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
 
             {/* Body */}
-            <div className="p-6">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6">
               {googleSyncLoading ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="w-6 h-6 animate-spin text-blue-500" />
@@ -4739,18 +4901,18 @@ export default function EventDetailPage() {
             </div>
 
             {/* Footer */}
-            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
+            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
               <button
                 onClick={() => !googleSyncing && setShowGoogleSyncModal(false)}
                 disabled={googleSyncing}
-                className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100 disabled:opacity-50 transition-colors"
+                className="min-h-11 px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 rounded-lg hover:bg-slate-100 disabled:opacity-50 transition-colors"
               >
                 Cerrar
               </button>
               <button
                 onClick={handleGoogleSync}
                 disabled={googleSyncing || !googleSyncStatus || googleSyncStatus.pending === 0}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                className="flex min-h-11 items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 {googleSyncing ? (
                   <><Loader2 className="w-4 h-4 animate-spin" />Sincronizando...</>
@@ -4764,25 +4926,40 @@ export default function EventDetailPage() {
       )}
 
       {/* ═══ Floating Bulk Action Bar ═══ */}
-      {selectedIds.size > 0 && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 bg-white border border-slate-200 px-4 py-2.5 rounded-2xl shadow-2xl shadow-slate-300/40 max-w-[95vw] flex-wrap">
+      {selectionMode && (
+        <div className={`${isCompactLayout ? 'inset-x-3 bottom-[max(.75rem,env(safe-area-inset-bottom))] w-auto translate-x-0' : 'bottom-6 left-1/2 -translate-x-1/2 max-w-[95vw]'} fixed z-50 flex items-center gap-2 bg-white border border-slate-200 px-4 py-2.5 rounded-2xl shadow-2xl shadow-slate-300/40 flex-wrap`}>
           <span className="text-sm font-semibold text-slate-800 tabular-nums whitespace-nowrap">
-            {selectedIds.size} seleccionado{selectedIds.size !== 1 ? 's' : ''}
+            {selectedIds.size > 0 ? `${selectedIds.size} seleccionado${selectedIds.size !== 1 ? 's' : ''}` : 'Toca participantes para seleccionarlos'}
           </span>
-          <div className="w-px h-5 bg-slate-200 mx-1" />
-          <span className="text-xs text-slate-400 whitespace-nowrap">Mover a:</span>
-          {displayStages.map(s => (
-            <button key={s.id} onClick={() => handleBulkMove(s.id)} disabled={bulkMoving}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-50 hover:opacity-80"
-              style={{ backgroundColor: hexBgLight(s.color), color: s.color }}
-            >
-              <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: s.color }} />
-              {s.name}
-              {bulkMoving && <Loader2 className="w-3 h-3 animate-spin ml-1" />}
-            </button>
-          ))}
-          <div className="w-px h-5 bg-slate-200 mx-1" />
-          <button onClick={() => setSelectedIds(new Set())} className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors" title="Deseleccionar">
+          {selectedIds.size > 0 && (
+            <>
+              <div className="w-px h-5 bg-slate-200 mx-1" />
+              <span className="text-xs text-slate-400 whitespace-nowrap">Mover a:</span>
+              {isCompactLayout ? (
+                <select
+                  defaultValue=""
+                  onChange={event => { if (event.target.value) handleBulkMove(event.target.value) }}
+                  disabled={bulkMoving}
+                  className="min-h-11 min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 text-base text-slate-700 disabled:opacity-50"
+                  aria-label="Mover participantes seleccionados a una etapa"
+                >
+                  <option value="" disabled>Elegir etapa</option>
+                  {displayStages.map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+                </select>
+              ) : displayStages.map(s => (
+                <button key={s.id} onClick={() => handleBulkMove(s.id)} disabled={bulkMoving}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-50 hover:opacity-80"
+                  style={{ backgroundColor: hexBgLight(s.color), color: s.color }}
+                >
+                  <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: s.color }} />
+                  {s.name}
+                  {bulkMoving && <Loader2 className="w-3 h-3 animate-spin ml-1" />}
+                </button>
+              ))}
+              <div className="w-px h-5 bg-slate-200 mx-1" />
+            </>
+          )}
+          <button onClick={() => { setSelectedIds(new Set()); setSelectionMode(false) }} className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Salir de selección" aria-label="Salir de selección">
             <X className="w-4 h-4" />
           </button>
         </div>

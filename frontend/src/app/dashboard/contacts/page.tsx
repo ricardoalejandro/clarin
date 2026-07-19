@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
@@ -22,6 +23,7 @@ import ChatPanel from '@/components/chat/ChatPanel'
 import FormulaEditor from '@/components/FormulaEditor'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
+import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { subscribeWebSocket } from '@/lib/api'
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import type { Lead } from '@/types/contact'
@@ -251,10 +253,13 @@ function contactToLead(c: Contact): Lead {
 }
 
 export default function ContactsPage() {
+  const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
+  const isCompactWorkspace = workspaceWidth > 0 && workspaceWidth < 1024
   const kommoEnabled = typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true'
   const [contacts, setContacts] = useState<Contact[]>([])
   const [devices, setDevices] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
+  const [contactsError, setContactsError] = useState('')
   const [total, setTotal] = useState(0)
   const [searchTerm, setSearchTerm] = useState('')
   const [filterDevice, setFilterDevice] = useState('')
@@ -281,6 +286,7 @@ export default function ContactsPage() {
   const [hasMore, setHasMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const offsetRef = useRef(0)
+  const contactsRequestRef = useRef(0)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // Selection
@@ -327,6 +333,7 @@ export default function ContactsPage() {
 
   // Toolbar dropdown
   const [showMoreMenu, setShowMoreMenu] = useState(false)
+  const [showMobileBulkMenu, setShowMobileBulkMenu] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
 
   // Close dropdown on outside click
@@ -378,6 +385,7 @@ export default function ContactsPage() {
   const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
   const whatsappRequestRef = useRef(0)
   const activeContactIdRef = useRef<string | null>(null)
+  const contactDetailRequestRef = useRef(0)
 
   useEffect(() => {
     activeContactIdRef.current = selectedContact?.id || null
@@ -455,6 +463,8 @@ export default function ContactsPage() {
     } else {
       setLoadingMore(true)
     }
+    const requestId = ++contactsRequestRef.current
+    if (reset) setContactsError('')
     try {
       const params = new URLSearchParams()
       if (searchTerm) params.set('search', searchTerm)
@@ -496,7 +506,9 @@ export default function ContactsPage() {
       const res = await fetch(`/api/contacts?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
+      if (requestId !== contactsRequestRef.current) return
+      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los contactos')
       if (data.success) {
         const newContacts: Contact[] = data.contacts || []
         const serverTotal: number = data.total ?? 0
@@ -514,12 +526,17 @@ export default function ContactsPage() {
           offsetRef.current = offset + newContacts.length
         }
         setHasMore((offset + newContacts.length) < serverTotal)
+        setContactsError('')
       }
     } catch (err) {
+      if (requestId !== contactsRequestRef.current) return
       console.error('Failed to fetch contacts:', err)
+      setContactsError(err instanceof Error ? err.message : 'No se pudieron cargar los contactos')
     } finally {
-      setLoading(false)
-      setLoadingMore(false)
+      if (requestId === contactsRequestRef.current) {
+        setLoading(false)
+        setLoadingMore(false)
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, searchTerm, filterDevice, appliedFormulaType, appliedFormulaText, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder, cfVisibleIds, cfFilters])
@@ -734,6 +751,10 @@ export default function ContactsPage() {
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if (showMobileBulkMenu) { setShowMobileBulkMenu(false); return }
+      if (actionsMenuId) { setActionsMenuId(null); return }
+      if (showMoreMenu) { setShowMoreMenu(false); return }
+      if (showFilterDropdown) { setShowFilterDropdown(false); return }
       if (showSendMessage) { resetInlineChatState(); return }
       if (showDuplicates) { setShowDuplicates(false); return }
       if (showEditModal) { setShowEditModal(false); setSelectedContact(null); return }
@@ -742,24 +763,24 @@ export default function ContactsPage() {
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [resetInlineChatState, showSendMessage, showDuplicates, showEditModal, showInlineChat, showDetailPanel])
+  }, [actionsMenuId, resetInlineChatState, showFilterDropdown, showMobileBulkMenu, showMoreMenu, showSendMessage, showDuplicates, showEditModal, showInlineChat, showDetailPanel])
 
   const openDetail = async (contact: Contact) => {
     resetInlineChatState()
+    const requestId = ++contactDetailRequestRef.current
+    activeContactIdRef.current = contact.id
+    setSelectedContact(contact)
+    setShowDetailPanel(true)
     // Fetch full contact with device names
     try {
       const res = await fetch(`/api/contacts/${contact.id}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) {
+      if (requestId === contactDetailRequestRef.current && activeContactIdRef.current === contact.id && data.success) {
         setSelectedContact(data.contact)
-        setShowDetailPanel(true)
       }
-    } catch {
-      setSelectedContact(contact)
-      setShowDetailPanel(true)
-    }
+    } catch { /* Keep the list projection already shown in the panel. */ }
   }
 
   const openEditModal = (contact: Contact) => {
@@ -1025,8 +1046,9 @@ export default function ContactsPage() {
 
 
 
-  const handleSendWhatsApp = async (phone: string) => {
-    const contactId = activeContactIdRef.current
+  const handleSendWhatsApp = async (phone: string, contactOverride?: Contact) => {
+    const contactId = contactOverride?.id || activeContactIdRef.current
+    if (contactOverride) activeContactIdRef.current = contactOverride.id
     resetInlineChatState()
     const requestId = whatsappRequestRef.current
     setWhatsappPhone(phone)
@@ -1101,7 +1123,8 @@ export default function ContactsPage() {
   }
 
   // Active filter count
-  const activeFilterCount = filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + cfFilters.length
+  const activeFilterCount = filterTagNames.size + excludeFilterTagNames.size + (filterDevice ? 1 : 0) + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + cfFilters.length
+  const mobileFilterAdjustmentCount = activeFilterCount + (sortBy ? 1 : 0)
 
   const buildBroadcastContactFilters = () => {
     const params = new URLSearchParams()
@@ -1323,48 +1346,61 @@ export default function ContactsPage() {
   }
 
   const selectedDuplicateGroup = duplicateGroups.find(g => g.group_key === selectedDuplicateKey) || duplicateGroups[0] || null
+  const mobileActionContact = actionsMenuId ? contacts.find(contact => contact.id === actionsMenuId) || null : null
 
   if (loading && contacts.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64">
+      <div ref={workspaceRef} className="flex h-full min-h-0 items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600" />
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div ref={workspaceRef} className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="flex items-center gap-3 py-2 shrink-0">
-        <div className="flex items-center gap-2 min-w-0">
+      <div className="flex flex-wrap items-center gap-2 py-2 sm:gap-3 shrink-0">
+        <div className="order-1 flex flex-1 items-center gap-2 min-w-0 sm:order-none sm:flex-none">
           <h1 className="text-lg font-bold text-slate-900 whitespace-nowrap">Contactos</h1>
           <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full">{total.toLocaleString()}</span>
         </div>
 
-        <div ref={filterDropdownRef} className="flex-1 max-w-sm relative">
+        <div ref={filterDropdownRef} className="relative order-3 basis-full sm:order-none sm:flex-1 sm:basis-auto sm:max-w-sm">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 z-10" />
           <input
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            onFocus={() => setShowFilterDropdown(true)}
+            onFocus={() => {
+              if (!isCompactWorkspace) setShowFilterDropdown(true)
+            }}
             placeholder="Buscar por nombre, teléfono, email..."
-            className={`w-full pl-8 pr-3 py-1.5 bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 text-sm ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
+            className={`${isCompactWorkspace ? 'h-11 rounded-xl pr-12' : 'rounded-lg py-1.5 pr-3'} w-full border bg-white pl-8 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500 ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
           />
-          {activeFilterCount > 0 && !showFilterDropdown && (
-            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 w-5 h-5 bg-emerald-600 text-white text-[10px] font-bold rounded-full flex items-center justify-center">{activeFilterCount}</span>
+          {activeFilterCount > 0 && !showFilterDropdown && !isCompactWorkspace && (
+            <span className="absolute right-2.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full bg-emerald-600 text-[10px] font-bold text-white">{activeFilterCount}</span>
           )}
+          {isCompactWorkspace && <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => setShowFilterDropdown(true)}
+            className="absolute right-0 top-0 inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            aria-label={`Abrir filtros y orden${mobileFilterAdjustmentCount > 0 ? `, ${mobileFilterAdjustmentCount} ajustes activos` : ''}`}
+          >
+            <Filter className="h-5 w-5" />
+            {mobileFilterAdjustmentCount > 0 && <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-600 px-1 text-[9px] font-bold text-white">{mobileFilterAdjustmentCount}</span>}
+          </button>}
 
           {/* Filter dropdown */}
           {showFilterDropdown && (
-            <div className="absolute left-0 top-full mt-1.5 w-[min(560px,90vw)] bg-white border border-slate-200 rounded-xl shadow-2xl z-40 flex flex-col max-h-[70vh] overflow-hidden" onMouseDown={(e) => e.stopPropagation()}>
+            <div className={`${isCompactWorkspace ? 'app-viewport fixed inset-0 z-[70] h-[var(--app-height,100dvh)] w-full' : 'absolute left-0 top-full z-40 mt-1.5 h-auto max-h-[70vh] w-[min(560px,90vw)] rounded-xl border'} flex flex-col overflow-hidden border-slate-200 bg-white shadow-2xl`} onMouseDown={(e) => e.stopPropagation()}>
               {/* Dropdown header */}
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-2.5">
                   <Filter className="w-4 h-4 text-emerald-500" />
-                  <span className="text-sm font-semibold text-slate-800">Filtros</span>
-                  {activeFilterCount > 0 && (
-                    <span className="text-[10px] font-medium bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full">{activeFilterCount} activo{activeFilterCount > 1 ? 's' : ''}</span>
+                  <span className="text-sm font-semibold text-slate-800">Filtros y orden</span>
+                  {mobileFilterAdjustmentCount > 0 && (
+                    <span className="text-[10px] font-medium bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full">{mobileFilterAdjustmentCount} activo{mobileFilterAdjustmentCount > 1 ? 's' : ''}</span>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
@@ -1376,17 +1412,17 @@ export default function ContactsPage() {
                       Limpiar todo
                     </button>
                   )}
-                  <button onClick={() => setShowFilterDropdown(false)} className="p-1 hover:bg-slate-100 rounded-lg transition-colors">
+                  <button onClick={() => setShowFilterDropdown(false)} className={`flex items-center justify-center rounded-xl transition-colors hover:bg-slate-100 ${isCompactWorkspace ? 'h-11 w-11' : 'h-8 w-8'}`} aria-label="Cerrar filtros y orden">
                     <X className="w-4 h-4 text-slate-400" />
                   </button>
                 </div>
               </div>
 
               {/* ─── Responsive Body: 2 cols when space, 1 col when narrow ─── */}
-              <div className="flex flex-col sm:flex-row flex-1 min-h-0 overflow-hidden">
+              <div className={`flex min-h-0 flex-1 ${isCompactWorkspace ? 'flex-col overflow-y-auto' : 'flex-row overflow-hidden'}`}>
 
                 {/* ══ Left Column — Device + Date ══ */}
-                <div className="w-full sm:w-[220px] shrink-0 border-b sm:border-b-0 sm:border-r border-slate-100 overflow-y-auto p-3 space-y-4 bg-slate-50/30 max-h-[30vh] sm:max-h-none">
+                <div className={`${isCompactWorkspace ? 'w-full border-b p-4' : 'w-[220px] overflow-y-auto border-r p-3'} shrink-0 space-y-4 border-slate-100 bg-slate-50/30`}>
                 {/* Device filter */}
                 <div>
                   <div className="flex items-center gap-2 mb-2">
@@ -1471,7 +1507,7 @@ export default function ContactsPage() {
 
                 {/* ══ Center Column — Custom Fields ══ */}
                 {cfDefs.length > 0 && (
-                <div className="w-full sm:w-[220px] shrink-0 border-b sm:border-b-0 sm:border-r border-slate-100 overflow-y-auto p-3 space-y-3 max-h-[30vh] sm:max-h-none">
+                <div className={`${isCompactWorkspace ? 'w-full border-b p-4' : 'w-[220px] overflow-y-auto border-r p-3'} shrink-0 space-y-3 border-slate-100`}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="w-1 h-3.5 bg-violet-400 rounded-full" />
@@ -1596,7 +1632,7 @@ export default function ContactsPage() {
                 )}
 
                 {/* ══ Right Column — Tags ══ */}
-                <div className="flex-1 min-w-0 overflow-y-auto p-3 space-y-4">
+                <div className={`min-w-0 flex-1 space-y-4 ${isCompactWorkspace ? 'p-4' : 'overflow-y-auto p-3'}`}>
 
                 {/* Simple / Advanced tabs */}
                 {allTags.length > 0 && (
@@ -1776,6 +1812,34 @@ export default function ContactsPage() {
                 </div>
               </div>
 
+              {isCompactWorkspace && (
+                <div className="shrink-0 border-t border-slate-100 bg-white px-4 py-3">
+                  <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">Ordenar contactos</p>
+                  <div className="flex gap-2">
+                    <label htmlFor="contacts-mobile-sort" className="sr-only">Criterio de orden</label>
+                    <select
+                      id="contacts-mobile-sort"
+                      value={sortBy}
+                      onChange={(event) => {
+                        const value = event.target.value
+                        setSortBy(value)
+                        setSortOrder(value === 'name' ? 'asc' : 'desc')
+                      }}
+                      className="h-11 min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="">Orden original</option>
+                      <option value="name">Nombre</option>
+                      <option value="lead_count">Oportunidades</option>
+                      <option value="created_at">Creación</option>
+                    </select>
+                    <button type="button" onClick={() => setSortOrder(order => order === 'asc' ? 'desc' : 'asc')} disabled={!sortBy} className="inline-flex h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 disabled:opacity-40" aria-label={sortOrder === 'asc' ? 'Orden ascendente; cambiar a descendente' : 'Orden descendente; cambiar a ascendente'}>
+                      <ChevronUp className={`mr-1 h-4 w-4 transition-transform ${sortOrder === 'desc' ? 'rotate-180' : ''}`} />
+                      {sortOrder === 'asc' ? 'Asc.' : 'Desc.'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Dropdown footer */}
               <div className="px-4 py-3 border-t border-slate-100 shrink-0">
                 <button
@@ -1794,32 +1858,32 @@ export default function ContactsPage() {
           )}
         </div>
 
-        <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="order-2 flex flex-shrink-0 items-center gap-1 sm:order-none sm:gap-2">
           {selectionMode ? (
             /* Selection mode bar */
             <>
-              <span className="px-3 py-2 text-sm text-slate-600 font-medium">
+              <span className="px-1 py-2 text-xs text-slate-600 font-medium sm:px-3 sm:text-sm">
                 {selectedIds.size} seleccionado{selectedIds.size !== 1 ? 's' : ''}
               </span>
               <button
                 onClick={() => setSelectedIds(new Set(contacts.map(c => c.id)))}
-                className="px-3 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+                className="min-h-11 px-2 text-xs border border-slate-300 rounded-xl hover:bg-slate-50 transition-colors sm:min-h-0 sm:px-3 sm:py-2 sm:text-sm sm:rounded-lg"
               >
                 Todos
               </button>
-              <button
+              {!isCompactWorkspace && <button
                 onClick={handleDeleteSelected}
                 disabled={selectedIds.size === 0}
-                className="px-3 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="rounded-lg bg-red-600 px-3 py-2 text-sm text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Eliminar ({selectedIds.size})
-              </button>
-              {googleConnected && (
+              </button>}
+              {googleConnected && !isCompactWorkspace && (
                 <>
                   <button
                     onClick={handleGoogleBatchSync}
                     disabled={selectedIds.size === 0 || selectedIds.size > 30 || googleSyncing}
-                    className="px-3 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-sm text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                     title="Sincronizar con Google Contacts"
                   >
                     {googleSyncing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
@@ -1828,7 +1892,7 @@ export default function ContactsPage() {
                   <button
                     onClick={handleGoogleBatchDesync}
                     disabled={selectedIds.size === 0 || selectedIds.size > 30 || googleSyncing}
-                    className="px-3 py-2 text-sm border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5 text-slate-600"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                     title="Quitar de Google Contacts"
                   >
                     <XCircle className="w-3.5 h-3.5" />
@@ -1836,13 +1900,21 @@ export default function ContactsPage() {
                   </button>
                 </>
               )}
-              <button
+              {!isCompactWorkspace && <button
                 onClick={() => { setSelectionMode(false); setSelectedIds(new Set()) }}
-                className="w-9 h-9 flex items-center justify-center border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-500 hover:text-slate-700 transition-colors"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-300 text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700"
                 title="Cancelar selección"
               >
                 <X className="w-4 h-4" />
-              </button>
+              </button>}
+              {isCompactWorkspace && <button
+                type="button"
+                onClick={() => setShowMobileBulkMenu(true)}
+                className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-300 text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                aria-label="Acciones para contactos seleccionados"
+              >
+                <MoreHorizontal className="h-5 w-5" />
+              </button>}
             </>
           ) : (
             /* Normal mode */
@@ -1851,7 +1923,7 @@ export default function ContactsPage() {
               <div ref={moreMenuRef} className="relative">
                 <button
                   onClick={() => setShowMoreMenu(v => !v)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-2 border rounded-lg text-sm transition-colors ${
+                  className={`inline-flex min-h-11 items-center gap-1.5 rounded-xl border px-3 text-sm transition-colors sm:min-h-0 sm:rounded-lg sm:py-2 ${
                     showMoreMenu
                       ? 'border-slate-400 bg-slate-100 text-slate-700'
                       : 'border-slate-300 hover:bg-slate-50 text-slate-600'
@@ -1863,8 +1935,8 @@ export default function ContactsPage() {
                   <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMoreMenu ? 'rotate-180' : ''}`} />
                 </button>
 
-                {showMoreMenu && (
-                  <div className="absolute right-0 top-full mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+                {showMoreMenu && !isCompactWorkspace && (
+                  <div className="absolute right-0 top-full z-30 mt-1.5 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-xl">
                     <button
                       onClick={() => { setShowCreateContact(true); setShowMoreMenu(false) }}
                       className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors"
@@ -1935,15 +2007,22 @@ export default function ContactsPage() {
         </div>
       </div>
 
+      {contactsError && (
+        <div className="mb-2 flex shrink-0 flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between" role="alert">
+          <span>{contactsError}. Conservamos los contactos que ya estaban cargados.</span>
+          <button type="button" onClick={() => void fetchContacts(true)} className="min-h-11 shrink-0 rounded-lg border border-red-300 bg-white px-4 font-semibold text-red-700 hover:bg-red-100">Reintentar</button>
+        </div>
+      )}
+
       {/* Main content */}
       <div className="flex flex-col flex-1 min-h-0">
           {/* Counter bar */}
-          <div className="flex items-center justify-between px-4 py-2 border-b border-slate-100 bg-slate-50/50 shrink-0">
-            <p className="text-xs text-slate-500">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/50 px-3 py-2 shrink-0 sm:px-4">
+            <p className="text-[11px] text-slate-500 sm:text-xs">
               Mostrando {contacts.length} de {total.toLocaleString()} contactos
             </p>
             {loadingMore && (
-              <div className="flex items-center gap-1.5 text-xs text-emerald-600">
+              <div className="hidden items-center gap-1.5 text-xs text-emerald-600 sm:flex">
                 <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-emerald-600" />
                 Cargando más...
               </div>
@@ -1954,9 +2033,85 @@ export default function ContactsPage() {
           <div
             ref={scrollContainerRef}
             onScroll={handleContactsScroll}
-            className="overflow-y-auto overflow-x-auto flex-1 min-h-0"
+            className={`min-h-0 flex-1 overflow-y-auto ${isCompactWorkspace ? 'overflow-x-hidden' : 'overflow-x-auto'}`}
           >
-            <table className="w-full">
+            {isCompactWorkspace && <div className="divide-y divide-slate-100">
+              {contacts.length === 0 && !loading && !contactsError ? (
+                <div className="px-5 py-14 text-center text-slate-500">
+                  <Users className="mx-auto mb-3 h-11 w-11 text-slate-300" />
+                  <p className="font-medium">No hay contactos</p>
+                  <p className="mt-1 text-xs leading-relaxed">Los contactos se sincronizan automáticamente desde tus dispositivos WhatsApp.</p>
+                </div>
+              ) : contacts.map((contact) => {
+                const tags = contact.structured_tags || []
+                return (
+                  <article
+                    key={`mobile-${contact.id}`}
+                    className={`group relative px-3 py-3 transition ${selectedIds.has(contact.id) ? 'bg-emerald-50' : selectedContact?.id === contact.id ? 'bg-emerald-50/70' : 'bg-white active:bg-slate-50'}`}
+                    onClick={() => selectionMode ? toggleSelection(contact.id) : openDetail(contact)}
+                  >
+                    <div className="flex min-w-0 items-start gap-3">
+                      {selectionMode && (
+                        <button
+                          type="button"
+                          onClick={(event) => { event.stopPropagation(); toggleSelection(contact.id) }}
+                          className="-ml-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                          aria-label={selectedIds.has(contact.id) ? `Quitar selección de ${getDisplayName(contact)}` : `Seleccionar ${getDisplayName(contact)}`}
+                        >
+                          {selectedIds.has(contact.id) ? <CheckSquare className="h-5 w-5 text-emerald-600" /> : <Square className="h-5 w-5" />}
+                        </button>
+                      )}
+                      {contact.avatar_url ? (
+                        <img src={contact.avatar_url} alt="" className="h-11 w-11 shrink-0 rounded-full object-cover" />
+                      ) : (
+                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-emerald-50">
+                          <span className="text-sm font-semibold text-emerald-700">{getInitials(contact)}</span>
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1 pt-0.5">
+                        <div className="flex min-w-0 items-center gap-1.5 pr-10">
+                          <h2 className="truncate text-sm font-semibold text-slate-900">{getDisplayName(contact)}</h2>
+                          {contact.google_sync && <Cloud className="h-3.5 w-3.5 shrink-0 text-blue-500" aria-label="Sincronizado con Google Contacts" />}
+                        </div>
+                        <p className="mt-0.5 truncate text-xs text-slate-500">
+                          {contact.phone || (contact.jid?.includes('@clarin.') || contact.jid?.includes('@internal') ? 'Sin teléfono' : contact.jid)}
+                        </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                            {kommoEnabled ? (contact.source || 'whatsapp') : 'whatsapp'}
+                          </span>
+                          {(contact.lead_count ?? 0) > 0 && (
+                            <button
+                              type="button"
+                              onClick={(event) => { event.stopPropagation(); fetchContactLeads(contact) }}
+                              className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700"
+                            >
+                              {contact.lead_count} oportunidad{contact.lead_count === 1 ? '' : 'es'}
+                            </button>
+                          )}
+                          {tags.slice(0, 2).map(tag => (
+                            <span key={tag.id} className="max-w-[110px] truncate rounded-full px-2 py-0.5 text-[10px] font-medium text-white" style={{ backgroundColor: tag.color || '#6b7280' }}>{tag.name}</span>
+                          ))}
+                          {tags.length > 2 && <span className="text-[10px] text-slate-400">+{tags.length - 2}</span>}
+                        </div>
+                      </div>
+                      {!selectionMode && (
+                        <button
+                          type="button"
+                          onClick={(event) => { event.stopPropagation(); setActionsMenuId(contact.id) }}
+                          className="absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                          aria-label={`Acciones de ${getDisplayName(contact)}`}
+                        >
+                          <MoreVertical className="h-5 w-5" />
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                )
+              })}
+            </div>}
+
+            {!isCompactWorkspace && <table className="w-full">
               <thead className="bg-slate-100 border-b-2 border-slate-200 sticky top-0 z-10" style={{ display: 'table', tableLayout: 'fixed', width: '100%' }}>
                 <tr>
                   {selectionMode && <th className="w-10 px-4 py-3" />}
@@ -2009,7 +2164,7 @@ export default function ContactsPage() {
                 </tr>
               </thead>
               <tbody style={{ height: contacts.length > 0 ? contactsVirtualizer.getTotalSize() : undefined, position: 'relative', display: 'block' }}>
-                {contacts.length === 0 && !loading ? (
+                {contacts.length === 0 && !loading && !contactsError ? (
                   <tr style={{ display: 'table-row' }}>
                     <td colSpan={(selectionMode ? 8 : 7) + cfDefs.filter(d => cfVisibleIds.has(d.id)).length} className="text-center py-12 text-slate-500">
                       <Users className="w-12 h-12 mx-auto mb-3 text-slate-300" />
@@ -2155,7 +2310,7 @@ export default function ContactsPage() {
                                 setSelectedContact(contact)
                                 const phone = contact.phone || contact.jid?.replace(/@.*$/, '') || ''
                                 if (phone) {
-                                  handleSendWhatsApp(phone)
+                                  handleSendWhatsApp(phone, contact)
                                 } else {
                                   alert('Este contacto no tiene número de teléfono')
                                 }
@@ -2193,7 +2348,7 @@ export default function ContactsPage() {
                   )
                 })}
               </tbody>
-            </table>
+            </table>}
 
             {/* Loading sentinel at bottom */}
             {loadingMore && (
@@ -2209,18 +2364,108 @@ export default function ContactsPage() {
           </div>
         </div>
 
+      {typeof document !== 'undefined' && isCompactWorkspace && showMoreMenu && createPortal(
+        <div className="app-viewport fixed inset-0 z-[90] flex flex-col bg-white">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Más acciones de contactos"
+            className="flex h-full min-h-0 w-full flex-col bg-white"
+          >
+            <div className="safe-area-top flex min-h-16 shrink-0 items-center justify-between border-b border-slate-200 px-4">
+              <div><h2 className="font-bold text-slate-900">Acciones de contactos</h2><p className="text-xs text-slate-500">Crear, importar y administrar</p></div>
+              <button type="button" onClick={() => setShowMoreMenu(false)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar acciones"><X className="h-5 w-5" /></button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
+            {[
+              { group: 'Crear y comunicar', label: 'Nuevo contacto', icon: UserPlus, action: () => setShowCreateContact(true), accent: 'text-emerald-700' },
+              { group: 'Crear y comunicar', label: 'Masivo', icon: Radio, action: () => { fetchDevices(); setShowBroadcastModal(true) }, disabled: total === 0 },
+              { group: 'Importar', label: 'Pegar desde Excel', icon: ClipboardPaste, action: () => setShowPasteExcel(true) },
+              { group: 'Importar', label: 'Importar Excel', icon: Upload, action: () => setShowImportModal(true) },
+              { group: 'Herramientas', label: loadingDuplicates ? 'Buscando duplicados…' : 'Buscar duplicados', icon: Merge, action: handleFindDuplicates, disabled: loadingDuplicates },
+              { group: 'Herramientas', label: 'Seleccionar contactos', icon: CheckSquare, action: () => setSelectionMode(true) },
+              { group: 'Herramientas', label: 'Exportar contactos', icon: Download, action: () => setShowExportModal(true) },
+              { group: 'Herramientas', label: 'Generar documentos', icon: FileText, action: () => setShowBulkDocModal(true), disabled: contacts.length === 0 },
+            ].map(({ group, label, icon: Icon, action, disabled, accent }, index, actions) => (
+              <div key={label}>
+                {(index === 0 || actions[index - 1].group !== group) && <p className={`${index === 0 ? '' : 'mt-5'} mb-1 px-3 text-[10px] font-bold uppercase tracking-widest text-slate-400`}>{group}</p>}
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => { setShowMoreMenu(false); action() }}
+                  className={`flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-medium transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 ${accent || 'text-slate-700'}`}
+                >
+                  <Icon className="h-5 w-5 shrink-0 text-slate-400" />
+                  {label}
+                </button>
+              </div>
+            ))}
+            </div>
+            <div className="safe-area-bottom shrink-0 border-t border-slate-200 bg-white p-4"><button type="button" onClick={() => setShowMoreMenu(false)} className="min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cerrar</button></div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {typeof document !== 'undefined' && isCompactWorkspace && showMobileBulkMenu && createPortal(
+        <div className="app-viewport fixed inset-0 z-[90] flex items-end bg-slate-950/40" onMouseDown={() => setShowMobileBulkMenu(false)}>
+          <div role="dialog" aria-modal="true" aria-label="Acciones de selección" className="w-full rounded-t-3xl bg-white px-3 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" />
+            <p className="px-2 pb-2 text-sm font-semibold text-slate-800">{selectedIds.size} contacto{selectedIds.size === 1 ? '' : 's'} seleccionado{selectedIds.size === 1 ? '' : 's'}</p>
+            <button type="button" onClick={() => { setShowMobileBulkMenu(false); handleDeleteSelected() }} disabled={selectedIds.size === 0} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-40"><Trash2 className="h-5 w-5" />Eliminar seleccionados</button>
+            {googleConnected && (
+              <>
+                <button type="button" onClick={() => { setShowMobileBulkMenu(false); handleGoogleBatchSync() }} disabled={selectedIds.size === 0 || selectedIds.size > 30 || googleSyncing} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"><Upload className="h-5 w-5 text-blue-500" />Sincronizar con Google</button>
+                <button type="button" onClick={() => { setShowMobileBulkMenu(false); handleGoogleBatchDesync() }} disabled={selectedIds.size === 0 || selectedIds.size > 30 || googleSyncing} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"><XCircle className="h-5 w-5 text-slate-400" />Quitar de Google</button>
+              </>
+            )}
+            <button type="button" onClick={() => { setShowMobileBulkMenu(false); setSelectionMode(false); setSelectedIds(new Set()) }} className="mt-2 min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar selección</button>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {typeof document !== 'undefined' && isCompactWorkspace && mobileActionContact && createPortal(
+        <div className="app-viewport fixed inset-0 z-[90] flex items-end bg-slate-950/40" onMouseDown={() => setActionsMenuId(null)}>
+          <div role="dialog" aria-modal="true" aria-label={`Acciones de ${getDisplayName(mobileActionContact)}`} className="max-h-[80dvh] w-full overflow-y-auto rounded-t-3xl bg-white px-3 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" />
+            <p className="truncate px-2 pb-2 text-sm font-semibold text-slate-800">{getDisplayName(mobileActionContact)}</p>
+            <button type="button" onClick={() => { setActionsMenuId(null); openDetail(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-5 w-5 text-slate-400" />Ver detalle</button>
+            <button type="button" onClick={() => { setActionsMenuId(null); openEditModal(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-5 w-5 text-slate-400" />Editar</button>
+            <button type="button" onClick={() => { setActionsMenuId(null); fetchContactLeads(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Users className="h-5 w-5 text-slate-400" />Ver oportunidades ({mobileActionContact.lead_count ?? 0})</button>
+            <button
+              type="button"
+              onClick={() => {
+                setActionsMenuId(null)
+                setSelectedContact(mobileActionContact)
+                const phone = mobileActionContact.phone || mobileActionContact.jid?.replace(/@.*$/, '') || ''
+                if (phone) handleSendWhatsApp(phone, mobileActionContact)
+                else alert('Este contacto no tiene número de teléfono')
+              }}
+              className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"
+            >
+              <MessageSquare className="h-5 w-5 text-slate-400" />Enviar mensaje
+            </button>
+            {googleConnected && <button type="button" onClick={() => { setActionsMenuId(null); handleGoogleSyncSingle(mobileActionContact.id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Upload className="h-5 w-5 text-blue-500" />{mobileActionContact.google_sync ? 'Re-sincronizar Google' : 'Sincronizar con Google'}</button>}
+            <button type="button" onClick={() => { setActionsMenuId(null); handleDeleteContact(mobileActionContact.id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-red-600 hover:bg-red-50"><Trash2 className="h-5 w-5" />Eliminar</button>
+            <button type="button" onClick={() => setActionsMenuId(null)} className="mt-2 min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar</button>
+          </div>
+        </div>,
+        document.body,
+      )}
+
       {/* Detail Panel (Slide-over) with Inline Chat */}
       {(showDetailPanel || showInlineChat) && selectedContact && (
-        <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+        <div className="app-viewport fixed inset-0 z-[70] flex justify-end overflow-hidden">
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
             onClick={() => { setShowDetailPanel(false); resetInlineChatState() }}
           />
-          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
+          <div className={`relative flex h-full w-full bg-white shadow-2xl transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'xl:w-[85vw] xl:max-w-6xl' : 'max-w-md'}`}>
 
             {/* Chat Panel - Left Side */}
             {showInlineChat && inlineChatId && (
-              <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
+              <div className="flex h-full min-w-0 flex-1 flex-col bg-slate-50/50 xl:border-r xl:border-slate-200">
                 <ChatPanel
                   key={inlineChatId}
                   chatId={inlineChatId}
@@ -2234,7 +2479,7 @@ export default function ContactsPage() {
             )}
 
             {/* Contact Details - Right Side */}
-            <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
+            <div className={`${showInlineChat ? 'hidden xl:flex xl:w-[360px] xl:shrink-0' : 'flex w-full'} h-full flex-col bg-white`}>
             <LeadDetailPanel
               contactMode
               contactId={selectedContact.id}
@@ -2285,8 +2530,8 @@ export default function ContactsPage() {
 
       {/* Edit Modal */}
       {showEditModal && selectedContact && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto">
+        <div className="responsive-dialog-backdrop fixed inset-0 flex items-center justify-center bg-black/50">
+          <div className="responsive-dialog-panel w-full max-w-md overflow-y-auto rounded-xl bg-white p-4 sm:max-h-[90vh] sm:p-6">
             <h2 className="text-xl font-bold text-slate-900 mb-4">Editar Contacto</h2>
             <div className="space-y-4">
               <div>
@@ -2415,8 +2660,8 @@ export default function ContactsPage() {
 
       {/* Duplicates Modal */}
       {showDuplicates && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-3">
-          <div className="bg-white rounded-xl w-full max-w-6xl h-[86vh] overflow-hidden flex flex-col border border-slate-200 shadow-2xl">
+        <div className="responsive-dialog-backdrop fixed inset-0 flex items-center justify-center bg-black/50">
+          <div className="responsive-dialog-panel flex w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl sm:h-[86vh]">
             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
               <div className="flex items-center gap-2">
                 <Merge className="w-4 h-4 text-emerald-600" />
@@ -2592,7 +2837,7 @@ export default function ContactsPage() {
 
       {/* Device Selector Modal for WhatsApp */}
       {showSendMessage && selectedContact && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+        <div className="app-viewport fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
 	            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
 	            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
@@ -2685,7 +2930,7 @@ export default function ContactsPage() {
 
       {/* Opportunity history for a contact */}
       {showContactLeads && contactLeadsTarget && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) closeContactOpportunities() }}>
+        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) closeContactOpportunities() }}>
           <div ref={contactOpportunitiesDialogRef} role="dialog" aria-modal="true" aria-labelledby="contact-opportunities-title" aria-describedby="contact-opportunities-description" tabIndex={-1} className="flex h-full w-full max-w-3xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[88vh] sm:rounded-3xl">
             <header className="flex items-start gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><Radio className="h-5 w-5" /></div>
@@ -2801,7 +3046,7 @@ export default function ContactsPage() {
       )}
 
       {showExportModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="responsive-dialog-backdrop fixed inset-0 flex items-center justify-center bg-black/50">
           <div className="bg-white rounded-xl p-6 w-full max-w-sm">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">

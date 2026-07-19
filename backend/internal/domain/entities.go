@@ -599,6 +599,8 @@ type Message struct {
 	IsEdited      bool       `json:"is_edited"`
 	IsViewOnce    bool       `json:"is_view_once"`
 	Status        *string    `json:"status,omitempty"` // sent, delivered, read, failed
+	DeliveredAt   *time.Time `json:"delivered_at,omitempty"`
+	ReadAt        *time.Time `json:"read_at,omitempty"`
 	Provider      *string    `json:"provider,omitempty"`
 	TemplateName  *string    `json:"template_name,omitempty"`
 	Timestamp     time.Time  `json:"timestamp"`

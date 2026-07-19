@@ -36,17 +36,36 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      testIgnore: /responsive-dashboard\.spec\.ts/,
       use: { ...devices['Desktop Chrome'] },
     },
 
     {
       name: 'firefox',
+      testIgnore: /responsive-dashboard\.spec\.ts/,
       use: { ...devices['Desktop Firefox'] },
     },
 
     {
       name: 'webkit',
+      testIgnore: /responsive-dashboard\.spec\.ts/,
       use: { ...devices['Desktop Safari'] },
+    },
+
+    {
+      name: 'responsive-desktop',
+      testMatch: /responsive-dashboard\.spec\.ts/,
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'responsive-mobile-chrome',
+      testMatch: /responsive-dashboard\.spec\.ts/,
+      use: { ...devices['Pixel 5'] },
+    },
+    {
+      name: 'responsive-mobile-safari',
+      testMatch: /responsive-dashboard\.spec\.ts/,
+      use: { ...devices['iPhone 12'] },
     },
 
     /* Test against mobile viewports. */

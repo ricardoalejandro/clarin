@@ -11,6 +11,7 @@ import { es } from 'date-fns/locale'
 import MessageBubble from '@/components/chat/MessageBubble'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '@/components/WhatsAppTextInput'
 import EmojiPicker from '@/components/chat/EmojiPicker'
+import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { compressImageStandard } from '@/utils/imageCompression'
 
 interface Device {
@@ -102,6 +103,14 @@ const BASE_VARIABLES = [
 ]
 
 const DEFAULT_COLUMNS = ['celular', 'nombre_corto']
+const MOBILE_RECIPIENT_PAGE_SIZE = 20
+const MOBILE_STEPS = [
+  { id: 'message', label: 'Mensaje' },
+  { id: 'recipients', label: 'Destinatarios' },
+  { id: 'settings', label: 'Configuración' },
+  { id: 'review', label: 'Revisión' },
+] as const
+type MobileStep = typeof MOBILE_STEPS[number]['id']
 
 // ─── TSV / CSV parser ────────────────────────────────────────────────
 interface ParseResult {
@@ -245,18 +254,22 @@ export default function CreateCampaignModal({
   const [newColName, setNewColName] = useState('')
   const [showAddCol, setShowAddCol] = useState(false)
   const [pasteInfo, setPasteInfo] = useState<{ added: number; dupes: number } | null>(null)
+  const [mobileRecipientPage, setMobileRecipientPage] = useState(0)
 
   // Right column sections collapse state
   const [showSettings, setShowSettings] = useState(false)
   const [showSchedule, setShowSchedule] = useState(false)
+  const [mobileStep, setMobileStep] = useState<MobileStep>('message')
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
 
-  // Close on Escape
-  useEffect(() => {
-    if (!open) return
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', h)
-    return () => document.removeEventListener('keydown', h)
-  }, [open, onClose])
+  const handleCampaignEscape = useCallback(() => {
+    if (showAttachMenu) { setShowAttachMenu(false); return }
+    if (showEmoji) { setShowEmoji(false); return }
+    if (showAddCol) { setShowAddCol(false); setNewColName(''); return }
+    onClose()
+  }, [onClose, showAddCol, showAttachMenu, showEmoji])
+  useAccessibleDialog(open, dialogRef, handleCampaignEscape, closeButtonRef)
 
   // Reset form when modal opens
   useEffect(() => {
@@ -293,6 +306,8 @@ export default function CreateCampaignModal({
       setShowAddCol(false)
       setNewColName('')
       setPasteInfo(null)
+      setMobileRecipientPage(0)
+      setMobileStep('message')
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
@@ -382,7 +397,8 @@ export default function CreateCampaignModal({
     const emptyRow: Record<string, string> = {}
     sheetColumns.forEach(col => { emptyRow[col] = '' })
     setSheetRows(prev => [...prev, emptyRow])
-  }, [sheetColumns])
+    setMobileRecipientPage(Math.floor(sheetRows.length / MOBILE_RECIPIENT_PAGE_SIZE))
+  }, [sheetColumns, sheetRows.length])
 
   const updateSheetCell = useCallback((rowIdx: number, col: string, value: string) => {
     setSheetRows(prev => prev.map((r, i) => i === rowIdx ? { ...r, [col]: value } : r))
@@ -409,7 +425,10 @@ export default function CreateCampaignModal({
 
   const handleSheetPaste = useCallback((e: React.ClipboardEvent) => {
     const text = e.clipboardData.getData('text')
-    if (!text || (!text.includes('\n') && !text.includes('\t'))) return
+    const pasteTarget = e.target instanceof HTMLElement
+      ? e.target.closest('[data-campaign-paste-catcher="true"]')
+      : null
+    if (!text || (!pasteTarget && !text.includes('\n') && !text.includes('\t'))) return
     e.preventDefault()
     const result = parsePastedText(text, sheetColumns, sheetRows)
     if (result.detectedColumns) {
@@ -417,6 +436,7 @@ export default function CreateCampaignModal({
     }
     if (result.rows.length > 0) {
       setSheetRows(prev => [...prev, ...result.rows])
+      setMobileRecipientPage(0)
     }
     setPasteInfo({ added: result.rows.length, dupes: result.duplicatesRemoved })
     setTimeout(() => setPasteInfo(null), 4000)
@@ -431,6 +451,10 @@ export default function CreateCampaignModal({
 
   // Compute valid sheet recipients
   const validSheetRows = sheetRows.filter(r => r.celular?.replace(/[^0-9]/g, '').length >= 7)
+  const mobileRecipientPageCount = Math.max(1, Math.ceil(sheetRows.length / MOBILE_RECIPIENT_PAGE_SIZE))
+  const safeMobileRecipientPage = Math.min(mobileRecipientPage, mobileRecipientPageCount - 1)
+  const mobileRecipientStart = safeMobileRecipientPage * MOBILE_RECIPIENT_PAGE_SIZE
+  const mobileRecipientRows = sheetRows.slice(mobileRecipientStart, mobileRecipientStart + MOBILE_RECIPIENT_PAGE_SIZE)
 
   const connectedDevices = devices.filter(d => d.status === 'connected')
   const accent = accentColor === 'purple' ? {
@@ -512,36 +536,47 @@ export default function CreateCampaignModal({
   }
 
   const defaultSubmitLabel = hasSchedule ? 'Programar Campaña' : 'Crear Campaña'
+  const mobileStepIndex = MOBILE_STEPS.findIndex(step => step.id === mobileStep)
 
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-3">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[95vh] overflow-hidden flex flex-col">
+    <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 lg:items-center lg:p-3">
+      <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="campaign-modal-title" className="campaign-dialog flex h-[var(--app-height)] w-full max-w-6xl flex-col overflow-hidden rounded-none bg-white pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] shadow-2xl outline-none lg:h-auto lg:max-h-[95vh] lg:rounded-xl lg:pl-0 lg:pr-0">
         {/* ─── Header ──────────────────────────────────────── */}
-        <div className="flex items-center justify-between px-6 py-3 border-b border-gray-200 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${accentColor === 'purple' ? 'bg-purple-100' : 'bg-green-100'}`}>
+        <div className="campaign-dialog-header flex shrink-0 items-center justify-between gap-3 border-b border-gray-200 px-4 pb-3 pt-[max(.75rem,env(safe-area-inset-top))] lg:px-6 lg:py-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className={`campaign-dialog-icon w-9 h-9 rounded-lg flex items-center justify-center ${accentColor === 'purple' ? 'bg-purple-100' : 'bg-green-100'}`}>
               <Radio className={`w-5 h-5 ${accentColor === 'purple' ? 'text-purple-600' : 'text-green-600'}`} />
             </div>
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
-              {subtitle && <p className="text-xs text-gray-500">{subtitle}</p>}
+            <div className="min-w-0">
+              <h2 id="campaign-modal-title" className="truncate text-lg font-semibold text-gray-900">{title}</h2>
+              {subtitle && <p className="campaign-dialog-subtitle truncate text-xs text-gray-500">{subtitle}</p>}
             </div>
           </div>
-          <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition">
+          <button ref={closeButtonRef} onClick={onClose} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-gray-400 transition hover:bg-gray-100 hover:text-gray-600" aria-label="Cerrar campaña">
             <X className="w-5 h-5" />
           </button>
         </div>
 
+        <div className="campaign-stepbar shrink-0 overflow-x-auto border-b border-gray-200 bg-white px-3 py-2 lg:hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="flex min-w-max gap-1" role="tablist" aria-label="Pasos de la campaña">
+            {MOBILE_STEPS.map((step, index) => (
+              <button key={step.id} type="button" role="tab" aria-selected={mobileStep === step.id} onClick={() => setMobileStep(step.id)} className={`flex min-h-11 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition-colors ${mobileStep === step.id ? 'bg-emerald-50 text-emerald-700' : 'text-gray-500 hover:bg-gray-50'}`}>
+                <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] ${mobileStep === step.id ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-500'}`}>{index + 1}</span>{step.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* ─── Body: Two columns ───────────────────────────── */}
-        <div className="flex-1 overflow-hidden flex">
+        <div className={`${mobileStep === 'review' ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col overflow-y-auto lg:flex lg:flex-row lg:overflow-hidden`}>
           {/* ═══ LEFT COLUMN: Message & Attachments ═══ */}
-          <div className="w-1/2 border-r border-gray-200 overflow-y-auto p-5 space-y-4">
+          <div className={`${mobileStep === 'message' ? 'block' : 'hidden'} w-full space-y-4 p-4 lg:block lg:w-1/2 lg:overflow-y-auto lg:border-r lg:border-gray-200 lg:p-5`}>
             {infoPanel}
 
             {/* Name + Device row */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Nombre *</label>
                 <input
@@ -597,9 +632,9 @@ export default function CreateCampaignModal({
                 rows={5}
                 placeholder="Hola {{nombre}}, te escribimos para..."
               />
-              <div className="flex items-center justify-between mt-1">
-                <div className="flex items-center gap-2">
-                  <p className="text-[10px] text-gray-400">
+              <div className="mt-1 flex items-start justify-between gap-2">
+                <div className="flex min-w-0 items-start gap-1">
+                  <p className="min-w-0 break-words pt-2 text-[10px] text-gray-400">
                     Variables: {allVariables.map(v => v.value).join(', ')}
                   </p>
                   <EmojiPicker
@@ -610,13 +645,14 @@ export default function CreateCampaignModal({
                     }}
                     isOpen={showEmoji}
                     onToggle={() => setShowEmoji(!showEmoji)}
-                    buttonClassName="p-1 text-gray-400 hover:text-gray-600 rounded"
+                    portalTarget={dialogRef.current}
+                    buttonClassName="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-gray-400 hover:bg-gray-100 hover:text-gray-600 lg:h-8 lg:w-8"
                   />
                 </div>
                 <button
                   type="button"
                   onClick={() => setShowPreview(!showPreview)}
-                  className="text-[11px] text-green-600 hover:text-green-700 font-medium flex items-center gap-1"
+                  className="flex min-h-11 shrink-0 items-center gap-1 rounded-lg px-2 text-[11px] font-medium text-green-600 hover:bg-green-50 hover:text-green-700 lg:min-h-0 lg:py-1"
                 >
                   <Eye className="w-3 h-3" />
                   {showPreview ? 'Ocultar' : 'Vista previa'}
@@ -765,7 +801,7 @@ export default function CreateCampaignModal({
                     Adjuntar archivo
                   </button>
                   {showAttachMenu && (
-                    <div className="absolute bottom-full mb-2 left-0 bg-white rounded-xl shadow-xl border border-gray-200 p-1.5 z-50 min-w-44">
+                    <div className="fixed inset-x-4 bottom-[calc(5rem+env(safe-area-inset-bottom))] z-[60] rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl lg:absolute lg:inset-x-auto lg:bottom-full lg:left-0 lg:mb-2 lg:min-w-44">
                       <div className="space-y-0.5">
                         <button onClick={() => handleAttachSelect(ACCEPTED_TYPES.image.join(','))} className="w-full flex items-center gap-2.5 px-2.5 py-2 hover:bg-purple-50 rounded-lg text-left">
                           <div className="w-7 h-7 bg-purple-100 rounded flex items-center justify-center"><Image className="w-3.5 h-3.5 text-purple-600" /></div>
@@ -792,7 +828,8 @@ export default function CreateCampaignModal({
           </div>
 
           {/* ═══ RIGHT COLUMN: Config + Spreadsheet ═══ */}
-          <div className="w-1/2 overflow-y-auto p-5 space-y-4">
+          <div className={`${mobileStep === 'recipients' || mobileStep === 'settings' ? 'block' : 'hidden'} w-full space-y-4 p-4 lg:block lg:w-1/2 lg:overflow-y-auto lg:p-5`}>
+            <div className={`${mobileStep === 'settings' ? 'space-y-4' : 'hidden'} lg:block lg:space-y-4`}>
             {/* ── Anti-ban settings (collapsible) ── */}
             <div className="border border-gray-200 rounded-lg overflow-hidden">
               <button
@@ -808,7 +845,7 @@ export default function CreateCampaignModal({
               </button>
               {showSettings && (
                 <div className="p-4 border-t border-gray-200">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">Delay mín (seg)</label>
                       <input type="number" value={formData.min_delay} onChange={e => setFormData({ ...formData, min_delay: +e.target.value })} className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900" />
@@ -831,7 +868,7 @@ export default function CreateCampaignModal({
                     </div>
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">Horas activas</label>
-                      <div className="flex items-center gap-1">
+                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1">
                         <input type="time" value={formData.active_hours_start} onChange={e => setFormData({ ...formData, active_hours_start: e.target.value })} className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs text-gray-900" />
                         <span className="text-xs text-gray-400">-</span>
                         <input type="time" value={formData.active_hours_end} onChange={e => setFormData({ ...formData, active_hours_end: e.target.value })} className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs text-gray-900" />
@@ -862,7 +899,7 @@ export default function CreateCampaignModal({
               </button>
               {showSchedule && (
                 <div className="p-4 border-t border-gray-200">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
                       <label className="block text-xs text-gray-500 mb-1">Fecha</label>
                       <input type="date" value={formData.scheduled_date} onChange={e => setFormData({ ...formData, scheduled_date: e.target.value })} min={new Date().toISOString().split('T')[0]} max={new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm text-gray-900" />
@@ -904,9 +941,10 @@ export default function CreateCampaignModal({
                 </div>
               )
             })()}
+            </div>
 
             {/* ═══ SPREADSHEET RECIPIENTS ═══ */}
-            <div className="border border-gray-200 rounded-lg overflow-hidden">
+            <div className={`${mobileStep === 'recipients' ? 'block' : 'hidden'} overflow-hidden rounded-lg border border-gray-200 lg:block`}>
               <button
                 type="button"
                 onClick={() => { setShowSheet(!showSheet); if (!showSheet && sheetRows.length === 0) addSheetRow() }}
@@ -969,8 +1007,56 @@ export default function CreateCampaignModal({
                   </div>
 
                   {/* Spreadsheet table */}
-                  <div className="max-h-60 overflow-auto" onPaste={handleSheetPaste}>
-                    <table className="w-full text-xs">
+                  <div className="overflow-visible lg:max-h-60 lg:overflow-auto" onPaste={handleSheetPaste}>
+                    <div className="space-y-3 p-3 lg:hidden">
+                      <textarea
+                        data-campaign-paste-catcher="true"
+                        aria-label="Pegar lista de destinatarios"
+                        placeholder="Pega aquí filas copiadas desde Excel o una lista con celular y nombre"
+                        className="min-h-20 w-full resize-none rounded-xl border border-dashed border-emerald-300 bg-emerald-50/50 p-3 text-sm text-gray-700 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                        value=""
+                        onChange={() => {}}
+                      />
+                      {mobileRecipientRows.map((row, pageRowIdx) => {
+                        const rowIdx = mobileRecipientStart + pageRowIdx
+                        const phone = row.celular?.replace(/[^0-9]/g, '') || ''
+                        const isInvalid = Boolean(row.celular && phone.length < 7)
+                        return (
+                          <div key={rowIdx} className={`rounded-xl border p-3 ${isInvalid ? 'border-red-200 bg-red-50/40' : 'border-gray-200 bg-white'}`}>
+                            <div className="mb-3 flex items-center justify-between"><span className="text-xs font-semibold text-gray-500">Destinatario {rowIdx + 1}</span><button type="button" onClick={() => removeSheetRow(rowIdx)} className="flex h-11 w-11 items-center justify-center rounded-xl text-gray-400 hover:bg-red-50 hover:text-red-500" aria-label={`Eliminar destinatario ${rowIdx + 1}`}><Trash2 className="h-4 w-4" /></button></div>
+                            <div className="space-y-3">
+                              {sheetColumns.map(col => (
+                                <label key={col} className="block"><span className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-gray-500">{col}{col === 'celular' && <span className="text-red-500"> *</span>}</span><input type="text" inputMode={col === 'celular' ? 'tel' : 'text'} value={row[col] || ''} onChange={event => updateSheetCell(rowIdx, col, event.target.value)} placeholder={col === 'celular' ? '51999888777' : col === 'nombre_corto' ? 'Nombre' : ''} className={`min-h-11 w-full rounded-xl border px-3 text-sm text-gray-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 ${isInvalid && col === 'celular' ? 'border-red-300 bg-red-50' : 'border-gray-200'}`} /></label>
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      })}
+                      {sheetRows.length > MOBILE_RECIPIENT_PAGE_SIZE && (
+                        <div className="flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-gray-50 p-2" aria-label="Paginación de destinatarios">
+                          <button
+                            type="button"
+                            onClick={() => setMobileRecipientPage(Math.max(0, safeMobileRecipientPage - 1))}
+                            disabled={safeMobileRecipientPage === 0}
+                            className="min-h-11 min-w-11 rounded-xl border border-gray-200 bg-white px-3 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Anterior
+                          </button>
+                          <span className="text-center text-xs text-gray-500" aria-live="polite">
+                            {mobileRecipientStart + 1}–{Math.min(mobileRecipientStart + MOBILE_RECIPIENT_PAGE_SIZE, sheetRows.length)} de {sheetRows.length}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setMobileRecipientPage(Math.min(mobileRecipientPageCount - 1, safeMobileRecipientPage + 1))}
+                            disabled={safeMobileRecipientPage >= mobileRecipientPageCount - 1}
+                            className="min-h-11 min-w-11 rounded-xl border border-gray-200 bg-white px-3 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Siguiente
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <table className="hidden w-full text-xs lg:table">
                       <thead className="sticky top-0 z-10">
                         <tr className="bg-gray-100 border-b border-gray-200">
                           <th className="w-8 px-1 py-1.5 text-center text-[10px] text-gray-400 font-medium">#</th>
@@ -1013,16 +1099,16 @@ export default function CreateCampaignModal({
                   </div>
 
                   {/* Spreadsheet footer */}
-                  <div className="px-3 py-2 border-t border-gray-200 bg-gray-50/50 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                  <div className="flex flex-col gap-2 border-t border-gray-200 bg-gray-50/50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={addSheetRow}
                         className="inline-flex items-center gap-1 px-2 py-1 text-[11px] text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded transition font-medium"
                       >
                         <Plus className="w-3 h-3" /> Fila
                       </button>
-                      <span className="text-[10px] text-gray-400 flex items-center gap-1">
-                        <ClipboardPaste className="w-3 h-3" /> Ctrl+V para pegar desde Excel
+                      <span className="flex items-center gap-1 text-[10px] text-gray-400">
+                        <ClipboardPaste className="w-3 h-3" /> <span className="hidden lg:inline">Ctrl+V para pegar desde Excel</span><span className="lg:hidden">Pega una lista arriba o agrega filas</span>
                       </span>
                       {pasteInfo && (
                         <span className="text-[10px] text-emerald-600 font-medium animate-pulse">
@@ -1030,7 +1116,7 @@ export default function CreateCampaignModal({
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {sheetRows.length > 0 && sheetRows.length !== validSheetRows.length && (
                         <span className="text-[10px] text-amber-600 flex items-center gap-0.5">
                           <AlertTriangle className="w-3 h-3" /> {sheetRows.length - validSheetRows.length} sin celular válido
@@ -1041,7 +1127,7 @@ export default function CreateCampaignModal({
                       </span>
                       {sheetRows.length > 0 && (
                         <button
-                          onClick={() => setSheetRows([])}
+                          onClick={() => { setSheetRows([]); setMobileRecipientPage(0) }}
                           className="text-[10px] text-red-500 hover:text-red-700 transition"
                         >
                           Limpiar
@@ -1056,7 +1142,38 @@ export default function CreateCampaignModal({
         </div>
 
         {/* ─── Footer ──────────────────────────────────────── */}
-        <div className="px-6 py-3 border-t border-gray-200 flex items-center justify-between shrink-0">
+        <div className={`${mobileStep === 'review' ? 'block' : 'hidden'} min-h-0 flex-1 space-y-4 overflow-y-auto p-4 lg:hidden`}>
+          <div>
+            <h3 className="text-base font-semibold text-gray-900">Revisa antes de crear</h3>
+            <p className="mt-1 text-xs text-gray-500">Confirma el dispositivo, el contenido y la configuración de entrega.</p>
+          </div>
+          {infoPanel}
+          <dl className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white text-sm">
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Nombre</dt><dd className="max-w-[65%] break-words text-right font-medium text-gray-900">{formData.name || '—'}</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Dispositivo</dt><dd className="max-w-[65%] break-words text-right font-medium text-gray-900">{connectedDevices.find(device => device.id === formData.device_id)?.name || 'Sin seleccionar'}</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Mensaje</dt><dd className="max-w-[65%] text-right font-medium text-gray-900">{formData.message_template ? `${formData.message_template.length} caracteres` : 'Solo adjuntos'}</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Adjuntos</dt><dd className="font-medium text-gray-900">{readyAttachments.length}</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Directos</dt><dd className="font-medium text-gray-900">{validSheetRows.length}</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Intervalo</dt><dd className="max-w-[65%] text-right font-medium text-gray-900">{formData.min_delay}–{formData.max_delay} s por mensaje</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Lotes</dt><dd className="max-w-[65%] text-right font-medium text-gray-900">{formData.batch_size} mensajes · pausa {formData.batch_pause} min</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Límite diario</dt><dd className="font-medium text-gray-900">{formData.daily_limit}</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Horario activo</dt><dd className="max-w-[65%] text-right font-medium text-gray-900">{formData.active_hours_start}–{formData.active_hours_end}</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Simular escritura</dt><dd className="font-medium text-gray-900">{formData.simulate_typing ? 'Sí' : 'No'}</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Aleatorizar mensaje</dt><dd className="font-medium text-gray-900">Sí</dd></div>
+            <div className="flex items-start justify-between gap-4 p-3"><dt className="text-gray-500">Envío</dt><dd className="max-w-[65%] text-right font-medium text-gray-900">{hasSchedule ? `${formData.scheduled_date} ${formData.scheduled_time}` : 'Inicio manual'}</dd></div>
+          </dl>
+          {!canSubmit && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">Completa el nombre, selecciona un dispositivo conectado y agrega un mensaje o adjunto antes de crear la campaña.</div>}
+        </div>
+
+        <div className="campaign-dialog-footer flex shrink-0 gap-3 border-t border-gray-200 bg-white px-4 py-3 pb-[calc(.75rem+env(safe-area-inset-bottom))] lg:hidden">
+          <button type="button" onClick={mobileStepIndex === 0 ? onClose : () => setMobileStep(MOBILE_STEPS[mobileStepIndex - 1].id)} className="min-h-11 flex-1 rounded-xl border border-gray-300 px-4 text-sm font-medium text-gray-700 hover:bg-gray-50">{mobileStepIndex === 0 ? 'Cancelar' : 'Anterior'}</button>
+          {mobileStepIndex < MOBILE_STEPS.length - 1 ? (
+            <button type="button" onClick={() => setMobileStep(MOBILE_STEPS[mobileStepIndex + 1].id)} className={`min-h-11 flex-1 rounded-xl px-4 text-sm font-semibold text-white ${accent.bg} ${accent.bgHover}`}>Siguiente</button>
+          ) : (
+            <button type="button" onClick={handleSubmit} disabled={!canSubmit} className={`flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold text-white disabled:opacity-50 ${accent.bg} ${accent.bgHover}`}><Send className="h-4 w-4" />{submitting ? 'Creando...' : (submitLabel || defaultSubmitLabel)}</button>
+          )}
+        </div>
+        <div className="hidden shrink-0 items-center justify-between border-t border-gray-200 px-6 py-3 lg:flex">
           <div className="text-xs text-gray-400">
             {validSheetRows.length > 0 && (
               <span className="text-emerald-600 font-medium">{validSheetRows.length} destinatario{validSheetRows.length !== 1 ? 's' : ''} directo{validSheetRows.length !== 1 ? 's' : ''}</span>

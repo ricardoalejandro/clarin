@@ -19,6 +19,7 @@ import {
   WifiOff,
 } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 
 type PeriodPreset = '7d' | '30d' | '90d'
 
@@ -283,13 +284,15 @@ function EmptyState({ message, detail = 'No hay acciones pendientes en este mome
 }
 
 function TrendChart({ points }: { points: DashboardTrendPoint[] }) {
+  const { ref: chartContainerRef, width: containerWidth } = useContainerWidth<HTMLDivElement>()
+  const compact = containerWidth > 0 && containerWidth < 480
   const chart = useMemo(() => {
-    const width = 720
-    const height = 220
-    const left = 38
+    const width = compact ? Math.max(280, containerWidth) : 720
+    const height = compact ? 190 : 220
+    const left = compact ? 30 : 38
     const right = 12
     const top = 14
-    const bottom = 30
+    const bottom = compact ? 26 : 30
     const plotWidth = width - left - right
     const plotHeight = height - top - bottom
     const maximum = Math.max(2, ...points.flatMap(point => [point.new, point.won, point.lost]))
@@ -301,15 +304,17 @@ function TrendChart({ points }: { points: DashboardTrendPoint[] }) {
       { key: 'lost' as const, label: 'Perdidas', color: '#e11d48' },
     ]
     return { width, height, left, right, top, bottom, plotWidth, plotHeight, maximum, x, y, series }
-  }, [points])
+  }, [compact, containerWidth, points])
 
   const hasActivity = points.some(point => point.new > 0 || point.won > 0 || point.lost > 0)
   if (!hasActivity) return <EmptyState message="Aún no hay actividad comercial en este periodo" detail="Prueba otro periodo o revisa las oportunidades en Leads." />
 
-  const tickIndexes = Array.from(new Set([0, Math.floor((points.length - 1) / 2), points.length - 1])).filter(index => index >= 0)
+  const tickIndexes = Array.from(new Set(compact
+    ? [0, points.length - 1]
+    : [0, Math.floor((points.length - 1) / 2), points.length - 1])).filter(index => index >= 0)
   return (
     <div>
-      <div className="h-[220px] w-full overflow-hidden">
+      <div ref={chartContainerRef} className={`${compact ? 'h-[190px]' : 'h-[220px]'} w-full overflow-hidden`}>
         <svg viewBox={`0 0 ${chart.width} ${chart.height}`} className="h-full w-full" role="img" aria-label="Tendencia de oportunidades nuevas, ganadas y perdidas">
           {[0, 0.5, 1].map(fraction => {
             const y = chart.top + chart.plotHeight * fraction
@@ -326,7 +331,7 @@ function TrendChart({ points }: { points: DashboardTrendPoint[] }) {
               key={serie.key}
               fill="none"
               stroke={serie.color}
-              strokeWidth="2.5"
+              strokeWidth={compact ? 3 : 2.5}
               strokeLinecap="round"
               strokeLinejoin="round"
               points={points.map((point, index) => `${chart.x(index)},${chart.y(point[serie.key])}`).join(' ')}
@@ -339,7 +344,7 @@ function TrendChart({ points }: { points: DashboardTrendPoint[] }) {
           ))}
         </svg>
       </div>
-      <div className="mt-1 flex flex-wrap items-center justify-center gap-4">
+      <div className="mt-1 flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
         {chart.series.map(serie => (
           <span key={serie.key} className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-500">
             <span className="h-2 w-2 rounded-full" style={{ backgroundColor: serie.color }} /> {serie.label}
@@ -352,10 +357,10 @@ function TrendChart({ points }: { points: DashboardTrendPoint[] }) {
 
 function DashboardSkeleton() {
   return (
-    <div className="animate-pulse space-y-5">
-      <div className="flex items-center justify-between">
-        <div className="space-y-2"><div className="h-6 w-44 rounded bg-slate-200" /><div className="h-4 w-72 rounded bg-slate-100" /></div>
-        <div className="h-9 w-48 rounded-xl bg-slate-200" />
+    <div className="min-h-0 w-full animate-pulse space-y-5 overflow-hidden">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 space-y-2"><div className="h-6 w-44 max-w-full rounded bg-slate-200" /><div className="h-4 w-72 max-w-full rounded bg-slate-100" /></div>
+        <div className="h-9 w-48 max-w-full rounded-xl bg-slate-200" />
       </div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[0, 1, 2, 3].map(item => <div key={item} className="h-20 rounded-xl bg-slate-100" />)}</div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[0, 1, 2, 3].map(item => <div key={item} className="h-40 rounded-2xl bg-slate-100" />)}</div>
@@ -460,8 +465,8 @@ export default function DashboardPage() {
     <div className="mx-auto min-h-0 w-full max-w-[1600px] space-y-5 overflow-y-auto pb-4">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl font-black tracking-tight text-slate-900">Resumen de la cuenta</h1>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h1 className="min-w-0 text-xl font-black tracking-tight text-slate-900">Resumen de la cuenta</h1>
             <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">Datos reales</span>
           </div>
           <p className="mt-1 text-sm text-slate-500">Prioridades actuales y evolución comercial en un solo lugar.</p>
@@ -495,9 +500,9 @@ export default function DashboardPage() {
       </header>
 
       {error && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          <span className="flex items-center gap-2"><AlertCircle className="h-4 w-4 shrink-0" /> {error} Se mantienen los últimos datos disponibles.</span>
-          <button type="button" onClick={() => void loadDashboard(false)} className="shrink-0 text-xs font-bold underline">Reintentar</button>
+        <div className="flex flex-col items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 sm:flex-row sm:items-center sm:justify-between">
+          <span className="flex min-w-0 items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /> <span className="min-w-0 break-words">{error} Se mantienen los últimos datos disponibles.</span></span>
+          <button type="button" onClick={() => void loadDashboard(false)} className="min-h-11 shrink-0 rounded-lg px-2 text-xs font-bold underline sm:min-h-0 sm:px-0">Reintentar</button>
         </div>
       )}
 
@@ -511,12 +516,12 @@ export default function DashboardPage() {
 
       {hasAttention && (
         <section>
-          <div className="mb-2 flex items-center justify-between">
+          <div className="mb-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-sm font-black text-slate-800">Requiere atención</h2>
               <p className="text-[11px] text-slate-400">Indicadores actuales, fuera del filtro de periodo.</p>
             </div>
-            <span className="text-[11px] text-slate-400">Actualizado {formatUpdatedAt(dashboard.generated_at, dashboard.timezone)}</span>
+            <span className="text-[11px] text-slate-400 sm:text-right">Actualizado {formatUpdatedAt(dashboard.generated_at, dashboard.timezone)}</span>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {sections.chats && chats && (
@@ -598,10 +603,10 @@ export default function DashboardPage() {
               {chats.items.length === 0 ? <EmptyState message="No hay conversaciones esperando respuesta" /> : (
                 <div className="divide-y divide-slate-100">
                   {chats.items.map(chat => (
-                    <Link key={chat.id} href={`/dashboard/chats?open=${chat.id}`} className="group flex items-center gap-3 px-4 py-3 hover:bg-slate-50/70">
+                    <Link key={chat.id} href={`/dashboard/chats?open=${chat.id}`} className="group flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 hover:bg-slate-50/70 sm:flex-nowrap">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-sm font-black text-emerald-700">{chat.display_name.charAt(0).toUpperCase()}</div>
                       <div className="min-w-0 flex-1"><div className="flex items-center gap-2"><p className="truncate text-sm font-bold text-slate-700">{chat.display_name}</p>{chat.unread_count > 0 && <span className="rounded-full bg-emerald-600 px-1.5 py-0.5 text-[9px] font-black text-white">{chat.unread_count}</span>}</div><p className="mt-0.5 truncate text-xs text-slate-400">{chat.last_message || 'Mensaje recibido sin vista previa'}</p></div>
-                      <span className="shrink-0 text-[10px] font-bold text-amber-600">{formatWaitingSince(chat.last_inbound_at)}</span>
+                      <span className="ml-12 w-full shrink-0 text-[10px] font-bold text-amber-600 sm:ml-0 sm:w-auto sm:text-right">{formatWaitingSince(chat.last_inbound_at)}</span>
                     </Link>
                   ))}
                 </div>
@@ -614,17 +619,17 @@ export default function DashboardPage() {
               <div className="border-b border-slate-100 px-4 py-3"><h2 className="text-sm font-black text-slate-800">Agenda operativa</h2><p className="mt-0.5 text-[11px] text-slate-400">Tareas personales y próximos seguimientos.</p></div>
               <div className="divide-y divide-slate-100">
                 {sections.tasks && tasks && tasks.items.slice(0, 3).map(task => (
-                  <Link key={`task-${task.id}`} href="/dashboard/tasks" className="flex items-center gap-3 px-4 py-3 hover:bg-slate-50/70">
+                  <Link key={`task-${task.id}`} href="/dashboard/tasks" className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 hover:bg-slate-50/70 sm:flex-nowrap">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600"><ListChecks className="h-4 w-4" /></div>
                     <div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-700">{task.title}</p><p className="mt-0.5 text-[11px] text-slate-400">Mi tarea · {formatDateTime(task.due_at, dashboard.timezone)}</p></div>
-                    {task.due_at && new Date(task.due_at).getTime() < Date.now() && <span className="text-[10px] font-bold text-rose-600">Vencida</span>}
+                    {task.due_at && new Date(task.due_at).getTime() < Date.now() && <span className="ml-11 w-full text-[10px] font-bold text-rose-600 sm:ml-0 sm:w-auto">Vencida</span>}
                   </Link>
                 ))}
                 {sections.events && events && events.items.slice(0, 3).map(item => (
-                  <Link key={`event-${item.participant_id}`} href={`/dashboard/events/${item.event_id}`} className="flex items-center gap-3 px-4 py-3 hover:bg-slate-50/70">
+                  <Link key={`event-${item.participant_id}`} href={`/dashboard/events/${item.event_id}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 hover:bg-slate-50/70 sm:flex-nowrap">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-600"><CalendarClock className="h-4 w-4" /></div>
                     <div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-700">{item.next_action || `Seguimiento con ${item.participant_name}`}</p><p className="mt-0.5 truncate text-[11px] text-slate-400">{item.event_name} · {item.participant_name}</p></div>
-                    <span className={`shrink-0 text-[10px] font-bold ${new Date(item.next_action_date).getTime() < Date.now() ? 'text-rose-600' : 'text-slate-400'}`}>{formatDateTime(item.next_action_date, dashboard.timezone)}</span>
+                    <span className={`ml-11 w-full shrink-0 text-[10px] font-bold sm:ml-0 sm:w-auto sm:text-right ${new Date(item.next_action_date).getTime() < Date.now() ? 'text-rose-600' : 'text-slate-400'}`}>{formatDateTime(item.next_action_date, dashboard.timezone)}</span>
                   </Link>
                 ))}
                 {((!tasks || tasks.items.length === 0) && (!events || events.items.length === 0)) && <EmptyState message="Tu agenda está al día" />}
@@ -641,9 +646,9 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <footer className="flex items-center justify-between border-t border-slate-200 pt-3 text-[10px] text-slate-400">
-        <span>{sections.leads ? `Periodo comercial: ${dashboard.period.preset.replace('d', ' días')} · ` : 'Indicadores operativos actuales · '}Zona horaria {dashboard.timezone}</span>
-        <span className="inline-flex items-center gap-1"><Clock3 className="h-3 w-3" /> Actualización automática cada minuto</span>
+      <footer className="flex flex-col gap-1 border-t border-slate-200 pt-3 text-[10px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
+        <span className="min-w-0 break-words">{sections.leads ? `Periodo comercial: ${dashboard.period.preset.replace('d', ' días')} · ` : 'Indicadores operativos actuales · '}Zona horaria {dashboard.timezone}</span>
+        <span className="inline-flex items-center gap-1"><Clock3 className="h-3 w-3 shrink-0" /> Actualización automática cada minuto</span>
       </footer>
     </div>
   )

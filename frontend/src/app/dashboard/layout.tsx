@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
 import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
+import { ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
 import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSession } from '@/lib/api'
 import {
   MessageSquare,
@@ -99,7 +100,93 @@ export default function DashboardLayout({
   const [showChangelog, setShowChangelog] = useState(false)
   const [changelogContent, setChangelogContent] = useState('')
   const [isErosOpen, setIsErosOpen] = useState(false)
+  const [chatComposerKeyboardOpen, setChatComposerKeyboardOpen] = useState(false)
+  const [chatComposerAccessoryOpen, setChatComposerAccessoryOpen] = useState(false)
+  const chatMobileChromeContextValue = useMemo(() => ({
+    setComposerAccessoryOpen: setChatComposerAccessoryOpen,
+  }), [])
+  const chatKeyboardSessionRef = useRef(false)
   const clientVersion = process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev'
+
+  useEffect(() => {
+    if (pathname !== '/dashboard/chats') {
+      chatKeyboardSessionRef.current = false
+      setChatComposerKeyboardOpen(false)
+      setChatComposerAccessoryOpen(false)
+      return
+    }
+
+    const viewport = window.visualViewport
+    const coarsePointer = window.matchMedia('(pointer: coarse)')
+    let baselineHeight = Math.max(window.innerHeight, viewport?.height || 0)
+    let frame = 0
+    let orientationTimer = 0
+
+    const isComposerTarget = (target: EventTarget | null) =>
+      target instanceof HTMLElement && target.dataset.chatKeyboardTarget === 'true'
+
+    const isPhoneLayout = () => window.innerWidth < 768 || (
+      coarsePointer.matches && Math.min(window.screen.width, window.screen.height) <= 600
+    )
+
+    const updateKeyboardState = () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        const activeComposer = isComposerTarget(document.activeElement)
+        if (activeComposer) chatKeyboardSessionRef.current = true
+
+        const visibleHeight = viewport?.height || window.innerHeight
+        const viewportInset = Math.max(0, window.innerHeight - visibleHeight - (viewport?.offsetTop || 0))
+        const baselineLoss = Math.max(0, baselineHeight - visibleHeight)
+        const keyboardAmount = Math.max(viewportInset, baselineLoss)
+
+        if (keyboardAmount < 72) {
+          chatKeyboardSessionRef.current = false
+          baselineHeight = Math.max(window.innerHeight, visibleHeight)
+        }
+
+        setChatComposerKeyboardOpen(
+          isPhoneLayout() && chatKeyboardSessionRef.current && keyboardAmount > 96,
+        )
+      })
+    }
+
+    const handleFocusIn = (event: FocusEvent) => {
+      if (isComposerTarget(event.target)) {
+        chatKeyboardSessionRef.current = true
+        baselineHeight = Math.max(baselineHeight, window.innerHeight, viewport?.height || 0)
+      }
+      updateKeyboardState()
+    }
+
+    const handleOrientationChange = () => {
+      chatKeyboardSessionRef.current = false
+      setChatComposerKeyboardOpen(false)
+      if (orientationTimer) window.clearTimeout(orientationTimer)
+      orientationTimer = window.setTimeout(() => {
+        baselineHeight = Math.max(window.innerHeight, viewport?.height || 0)
+        updateKeyboardState()
+      }, 250)
+    }
+
+    document.addEventListener('focusin', handleFocusIn)
+    window.addEventListener('resize', updateKeyboardState, { passive: true })
+    window.addEventListener('orientationchange', handleOrientationChange, { passive: true })
+    viewport?.addEventListener('resize', updateKeyboardState, { passive: true })
+    viewport?.addEventListener('scroll', updateKeyboardState, { passive: true })
+    updateKeyboardState()
+
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      if (orientationTimer) window.clearTimeout(orientationTimer)
+      document.removeEventListener('focusin', handleFocusIn)
+      window.removeEventListener('resize', updateKeyboardState)
+      window.removeEventListener('orientationchange', handleOrientationChange)
+      viewport?.removeEventListener('resize', updateKeyboardState)
+      viewport?.removeEventListener('scroll', updateKeyboardState)
+      chatKeyboardSessionRef.current = false
+    }
+  }, [pathname])
 
   // Ctrl+I to toggle Eros
   useEffect(() => {
@@ -414,7 +501,8 @@ export default function DashboardLayout({
 
   return (
     <NotificationProvider accountId={user.account_id}>
-    <div className="bg-slate-50 flex overflow-hidden" style={{ height: 'var(--app-height, 100vh)' }}>
+    <ChatMobileChromeProvider value={chatMobileChromeContextValue}>
+    <div className="app-viewport bg-slate-50 flex overflow-hidden">
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
         <div
@@ -431,6 +519,7 @@ export default function DashboardLayout({
         transform transition-all duration-200 ease-in-out
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
         flex flex-col shadow-xl shadow-slate-900/20
+        pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] lg:pt-0 lg:pb-0
       `}>
         {/* Logo */}
         <div className={`h-14 flex items-center justify-between ${isCollapsed ? 'px-3' : 'px-4'} border-b border-slate-700/50 shrink-0`}>
@@ -442,7 +531,8 @@ export default function DashboardLayout({
           </Link>
           <button
             onClick={() => setSidebarOpen(false)}
-            className="lg:hidden p-1 hover:bg-slate-700 rounded-lg transition-colors"
+            className="lg:hidden flex h-11 w-11 items-center justify-center hover:bg-slate-700 rounded-lg transition-colors"
+            aria-label="Cerrar menú"
           >
             <X className="w-5 h-5 text-slate-400" />
           </button>
@@ -469,7 +559,7 @@ export default function DashboardLayout({
                 href={item.href}
                 onClick={() => setSidebarOpen(false)}
                 className={`
-                  group/nav relative flex items-center ${isCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-lg transition-all duration-200 text-[13px]
+                  group/nav relative flex min-h-11 lg:min-h-0 items-center ${isCollapsed ? 'justify-center px-2' : 'gap-3 px-3'} py-2 rounded-lg transition-all duration-200 text-[13px]
                   ${isActive
                     ? 'bg-emerald-500/15 text-emerald-400 font-semibold shadow-sm shadow-emerald-500/10'
                     : 'text-slate-400 hover:bg-slate-700/50 hover:text-slate-200'
@@ -499,7 +589,7 @@ export default function DashboardLayout({
             onClick={() => setIsErosOpen(true)}
             aria-label="Abrir Eros"
             aria-keyshortcuts="Control+I Meta+I"
-            className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2.5 px-3 py-2'} rounded-lg border border-emerald-500/20 bg-emerald-500/10 text-emerald-300 transition-all hover:border-emerald-400/40 hover:bg-emerald-500/15 hover:text-emerald-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60`}
+            className={`w-full min-h-11 lg:min-h-0 flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2.5 px-3 py-2'} rounded-lg border border-emerald-500/20 bg-emerald-500/10 text-emerald-300 transition-all hover:border-emerald-400/40 hover:bg-emerald-500/15 hover:text-emerald-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60`}
             title={isCollapsed ? 'Abrir Eros (Ctrl+I)' : undefined}
           >
             <Sparkles className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
@@ -625,13 +715,13 @@ export default function DashboardLayout({
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
         {/* Update available banner */}
         {updateAvailable && (
-          <div className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white px-4 py-2 flex items-center justify-between shrink-0 shadow-sm">
-            <div className="flex items-center gap-2 text-sm">
+          <div className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:px-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-2 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between shrink-0 shadow-sm">
+            <div className="flex min-w-0 items-center gap-2 text-sm">
               <RefreshCw className="w-4 h-4" />
-              <span className="font-medium">Nueva versión disponible</span>
+              <span className="min-w-0 truncate font-medium">Nueva versión disponible</span>
               {serverVersion && <span className="text-emerald-100 text-xs">v{serverVersion}</span>}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center justify-end gap-2">
               <button
                 onClick={openChangelog}
                 className="text-xs text-emerald-100 hover:text-white underline underline-offset-2 transition-colors"
@@ -640,13 +730,14 @@ export default function DashboardLayout({
               </button>
               <button
                 onClick={() => window.location.reload()}
-                className="px-3 py-1 bg-white/20 hover:bg-white/30 rounded-md text-xs font-medium transition-colors"
+                className="min-h-9 px-3 py-1 bg-white/20 hover:bg-white/30 rounded-md text-xs font-medium transition-colors"
               >
                 Actualizar
               </button>
               <button
                 onClick={dismissUpdate}
-                className="p-0.5 hover:bg-white/20 rounded transition-colors"
+                className="flex h-9 w-9 items-center justify-center hover:bg-white/20 rounded transition-colors"
+                aria-label="Descartar actualización"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -655,10 +746,11 @@ export default function DashboardLayout({
         )}
 
         {/* Top bar - mobile only */}
-        <header className="h-14 bg-white border-b border-slate-200/80 flex items-center px-4 lg:hidden shrink-0">
+        <header data-testid="dashboard-mobile-header" className={`${updateAvailable ? 'h-14' : 'h-[calc(3.5rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)]'} ${chatComposerKeyboardOpen || chatComposerAccessoryOpen ? 'hidden' : 'flex'} items-center border-b border-slate-200/80 bg-white pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:px-4 lg:hidden shrink-0`}>
           <button
             onClick={() => setSidebarOpen(true)}
-            className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+            className="flex h-11 w-11 items-center justify-center hover:bg-slate-100 rounded-lg transition-colors"
+            aria-label="Abrir menú"
           >
             <Menu className="w-5 h-5 text-slate-600" />
           </button>
@@ -671,7 +763,7 @@ export default function DashboardLayout({
           <button
             type="button"
             onClick={() => setIsErosOpen(true)}
-            className="rounded-lg p-2 text-emerald-600 transition-colors hover:bg-emerald-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+            className="flex h-11 w-11 items-center justify-center rounded-lg text-emerald-600 transition-colors hover:bg-emerald-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
             aria-label="Abrir Eros"
           >
             <Sparkles className="h-5 w-5" aria-hidden="true" />
@@ -680,8 +772,8 @@ export default function DashboardLayout({
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          pathname === '/dashboard/chats' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : 'p-3 sm:p-4 lg:p-5'
-        }`}>
+          pathname === '/dashboard/chats' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
+        } ${(chatComposerKeyboardOpen || chatComposerAccessoryOpen) && !updateAvailable ? 'pt-[env(safe-area-inset-top)]' : ''}`}>
           {children}
         </main>
       </div>
@@ -693,23 +785,23 @@ export default function DashboardLayout({
 
     {/* Changelog Modal */}
     {showChangelog && (
-      <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+      <div className="responsive-dialog-backdrop fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center">
+        <div className="responsive-dialog-panel bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100">
-            <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center justify-between gap-3 px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))] sm:px-6 sm:py-5 border-b border-slate-100">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
               <h2 className="text-lg font-bold text-slate-800">Novedades</h2>
               <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-full">
                 <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
                 <span className="text-xs font-semibold text-emerald-700 font-mono">v{clientVersion}</span>
               </span>
             </div>
-            <button onClick={() => setShowChangelog(false)} className="p-1.5 hover:bg-slate-100 rounded-lg transition-colors" title="Cerrar (Esc)">
+            <button onClick={() => setShowChangelog(false)} className="flex h-11 w-11 shrink-0 items-center justify-center hover:bg-slate-100 rounded-lg transition-colors" title="Cerrar (Esc)" aria-label="Cerrar novedades">
               <X className="w-5 h-5 text-slate-400" />
             </button>
           </div>
           {/* Body */}
-          <div className="flex-1 overflow-y-auto px-6 py-5">
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-6 sm:py-5">
             {changelogContent ? (
               <div className="space-y-6">
                 {(() => {
@@ -781,6 +873,7 @@ export default function DashboardLayout({
       </div>
     )}
 
+    </ChatMobileChromeProvider>
     </NotificationProvider>
   )
 }

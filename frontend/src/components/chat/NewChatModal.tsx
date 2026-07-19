@@ -152,9 +152,10 @@ function formatPhone(value: string): string {
 }
 
 function viewportSize() {
+  const visualViewport = typeof window === 'undefined' ? null : window.visualViewport
   return {
-    width: typeof window === 'undefined' ? 1440 : window.innerWidth,
-    height: typeof window === 'undefined' ? 900 : window.innerHeight,
+    width: typeof window === 'undefined' ? 1440 : visualViewport?.width ?? window.innerWidth,
+    height: typeof window === 'undefined' ? 900 : visualViewport?.height ?? window.innerHeight,
   }
 }
 
@@ -165,7 +166,7 @@ function clamp(value: number, min: number, max: number) {
 function defaultGeometry(): WindowGeometry {
   const viewport = viewportSize()
   const maxWidth = Math.max(320, viewport.width - VIEWPORT_MARGIN * 2)
-  const maxHeight = Math.max(420, viewport.height - VIEWPORT_MARGIN * 2)
+  const maxHeight = Math.max(240, viewport.height - VIEWPORT_MARGIN * 2)
   const width = Math.min(DEFAULT_WIDTH, maxWidth)
   const height = Math.min(DEFAULT_HEIGHT, maxHeight)
   return {
@@ -179,7 +180,7 @@ function defaultGeometry(): WindowGeometry {
 function clampGeometry(geometry: WindowGeometry): WindowGeometry {
   const viewport = viewportSize()
   const maxWidth = Math.max(320, viewport.width - VIEWPORT_MARGIN * 2)
-  const maxHeight = Math.max(420, viewport.height - VIEWPORT_MARGIN * 2)
+  const maxHeight = Math.max(240, viewport.height - VIEWPORT_MARGIN * 2)
   const width = clamp(geometry.width, Math.min(MIN_WIDTH, maxWidth), maxWidth)
   const height = clamp(geometry.height, Math.min(MIN_HEIGHT, maxHeight), maxHeight)
   return {
@@ -367,13 +368,24 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
 
   useEffect(() => {
     if (!isOpen) return
+    const compactQuery = window.matchMedia(
+      '(max-width: 767px), (max-height: 599px), ((max-width: 1023px) and (hover: none) and (pointer: coarse))',
+    )
     const updateViewport = () => {
-      setIsMobile(window.matchMedia('(max-width: 767px)').matches)
+      setIsMobile(compactQuery.matches)
       setGeometry(current => clampGeometry(current))
     }
     updateViewport()
     window.addEventListener('resize', updateViewport)
-    return () => window.removeEventListener('resize', updateViewport)
+    compactQuery.addEventListener('change', updateViewport)
+    window.visualViewport?.addEventListener('resize', updateViewport)
+    window.visualViewport?.addEventListener('scroll', updateViewport)
+    return () => {
+      window.removeEventListener('resize', updateViewport)
+      compactQuery.removeEventListener('change', updateViewport)
+      window.visualViewport?.removeEventListener('resize', updateViewport)
+      window.visualViewport?.removeEventListener('scroll', updateViewport)
+    }
   }, [isOpen])
 
   const searchContacts = useCallback(async (query: string, offset: number, append: boolean) => {
@@ -773,7 +785,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
   }, [beginPointerSession, isMaximized, isMobile])
 
   const panelStyle = useMemo<CSSProperties>(() => {
-    if (isMobile) return { inset: 0, width: '100vw', height: '100dvh' }
+    if (isMobile) return { inset: 0, width: 'var(--app-width, 100vw)', height: 'var(--app-height, 100dvh)' }
     if (isMaximized) return { inset: VIEWPORT_MARGIN }
     return {
       left: geometry.x,
@@ -794,7 +806,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
 
   return (
     <div
-      className="fixed inset-0 z-[70] bg-slate-950/45 backdrop-blur-[2px]"
+      className="app-viewport fixed inset-0 z-[70] bg-slate-950/45 backdrop-blur-[2px]"
       onMouseDown={event => {
         if (event.target === event.currentTarget) requestClose()
       }}
@@ -807,7 +819,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
         aria-describedby="new-chat-description"
         aria-busy={submitting}
         tabIndex={-1}
-        className={`fixed flex flex-col overflow-hidden bg-white outline-none ${
+        className={`${isMobile ? 'absolute' : 'fixed'} flex flex-col overflow-hidden bg-white outline-none ${
           !isInteracting ? 'transition-[inset,width,height,border-radius,box-shadow] duration-200 ease-out' : ''
         } ${
           isMobile
@@ -865,7 +877,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
               type="button"
               onClick={requestClose}
               disabled={submitting || retryingInitialMessage}
-              className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40 sm:h-10 sm:w-10"
               aria-label={submitting || retryingInitialMessage ? 'Espera a que termine la operación' : 'Cerrar nueva conversación'}
             >
               <X className="h-5 w-5" />
@@ -892,7 +904,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
                 )}
               </div>
             </div>
-            <footer className="flex shrink-0 flex-col-reverse gap-3 border-t border-slate-200 bg-slate-50/80 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
+            <footer className="flex shrink-0 flex-col-reverse gap-3 border-t border-slate-200 bg-slate-50/80 px-4 pt-4 sm:flex-row sm:justify-end sm:px-6" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
               <button
                 type="button"
                 onClick={() => void retryInitialMessage()}
@@ -1242,7 +1254,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
               )}
             </div>
 
-            <footer className="flex shrink-0 flex-col-reverse gap-3 border-t border-slate-200 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-end sm:px-6">
+            <footer className="flex shrink-0 flex-col-reverse gap-3 border-t border-slate-200 bg-white px-4 pt-4 sm:flex-row sm:items-center sm:justify-end sm:px-6" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
               <button
                 type="button"
                 onClick={requestClose}

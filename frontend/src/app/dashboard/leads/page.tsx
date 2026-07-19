@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
+import { createPortal } from 'react-dom'
 import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, AlertTriangle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { useKanbanPan } from '@/lib/useKanbanPan'
@@ -20,6 +21,7 @@ import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
+import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { Chat } from '@/types/chat'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
@@ -67,6 +69,8 @@ interface LeadCardProps {
   onDelete: (id: string) => void
   onRestore: (id: string) => void
   onLifecycleAction: (lead: Lead, mode: 'won' | 'lost' | 'reopen') => void
+  stageOptions: PipelineStage[]
+  onStageChange: (lead: Lead, stage: PipelineStage) => void
   isTrash: boolean
   onDragStart: (e: React.DragEvent, id: string) => void
   onDragEnd: (e: React.DragEvent) => void
@@ -74,15 +78,16 @@ interface LeadCardProps {
 
 const LeadCard = memo(function LeadCard({
   lead, isSelected, isDetailActive, isDragged, selectionMode,
-  onToggleSelection, onOpenDetail, onDelete, onRestore, onLifecycleAction, isTrash, onDragStart, onDragEnd,
+  onToggleSelection, onOpenDetail, onDelete, onRestore, onLifecycleAction, stageOptions, onStageChange, isTrash, onDragStart, onDragEnd,
 }: LeadCardProps) {
   const [actionsOpen, setActionsOpen] = useState(false)
   const actionsRef = useRef<HTMLDivElement>(null)
+  const mobileActionsRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!actionsOpen) return
     const close = (event: MouseEvent | KeyboardEvent) => {
       if (event instanceof KeyboardEvent && event.key !== 'Escape') return
-      if (event instanceof MouseEvent && actionsRef.current?.contains(event.target as Node)) return
+      if (event instanceof MouseEvent && (actionsRef.current?.contains(event.target as Node) || mobileActionsRef.current?.contains(event.target as Node))) return
       setActionsOpen(false)
     }
     document.addEventListener('mousedown', close)
@@ -130,7 +135,7 @@ const LeadCard = memo(function LeadCard({
         {!selectionMode && isTrash && (
           <button
             onClick={(e) => { e.stopPropagation(); onRestore(lead.id) }}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 opacity-0 transition-all hover:bg-emerald-50 hover:text-emerald-700 focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 group-hover:opacity-100"
+            className="touch-action-visible inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 opacity-100 transition-all hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 lg:h-10 lg:w-10 lg:opacity-0 lg:focus:opacity-100 lg:group-hover:opacity-100"
             aria-label={`Restaurar ${lead.name || 'lead'}`}
           >
             <ArchiveRestore className="h-4 w-4" />
@@ -141,7 +146,7 @@ const LeadCard = memo(function LeadCard({
             <button
               type="button"
               onClick={(event) => { event.stopPropagation(); setActionsOpen(open => !open) }}
-              className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 opacity-0 transition-all hover:bg-slate-100 hover:text-slate-700 focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 group-hover:opacity-100"
+              className="touch-action-visible inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 opacity-100 transition-all hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 lg:h-10 lg:w-10 lg:opacity-0 lg:focus:opacity-100 lg:group-hover:opacity-100"
               aria-label={`Acciones de ${lead.name || 'lead'}`}
               aria-haspopup="menu"
               aria-expanded={actionsOpen}
@@ -149,7 +154,7 @@ const LeadCard = memo(function LeadCard({
               <MoreHorizontal className="h-4 w-4" />
             </button>
             {actionsOpen && (
-              <div role="menu" className="absolute right-0 top-10 z-30 w-48 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl" onClick={event => event.stopPropagation()}>
+              <div role="menu" className="touch-menu-hidden absolute right-0 top-10 z-30 hidden w-48 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl lg:block" onClick={event => event.stopPropagation()}>
                 {lead.status === 'won' || lead.status === 'lost' ? (
                   <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'reopen') }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-blue-700 hover:bg-blue-50">
                     <ArchiveRestore className="h-4 w-4" /> Reabrir lead
@@ -169,6 +174,22 @@ const LeadCard = memo(function LeadCard({
                   <Trash2 className="h-4 w-4" /> Mover a papelera
                 </button>
               </div>
+            )}
+            {actionsOpen && typeof document !== 'undefined' && createPortal(
+              <div ref={mobileActionsRef} role="menu" className="touch-menu-visible fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[90] max-h-[70vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl lg:hidden" onClick={event => event.stopPropagation()}>
+                <p className="px-3 py-2 text-xs font-semibold text-slate-500">Acciones de {lead.name || 'lead'}</p>
+                {lead.status === 'won' || lead.status === 'lost' ? (
+                  <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'reopen') }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-blue-700 hover:bg-blue-50"><ArchiveRestore className="h-4 w-4" /> Reabrir lead</button>
+                ) : (
+                  <>
+                    <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'won') }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-emerald-700 hover:bg-emerald-50"><CheckCircle2 className="h-4 w-4" /> Marcar como ganado</button>
+                    <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'lost') }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-700 hover:bg-red-50"><XCircle className="h-4 w-4" /> Marcar como perdido</button>
+                  </>
+                )}
+                <div className="my-1 border-t border-slate-100" />
+                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onDelete(lead.id) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-red-50 hover:text-red-700"><Trash2 className="h-4 w-4" /> Mover a papelera</button>
+              </div>,
+              document.body,
             )}
           </div>
         )}
@@ -195,6 +216,23 @@ const LeadCard = memo(function LeadCard({
           {lead.tags.length > 2 && <span className="px-1.5 py-0.5 text-slate-400 text-[10px]">+{lead.tags.length - 2}</span>}
         </div>
       ) : null}
+      {!selectionMode && !isTrash && stageOptions.length > 0 && (
+        <label className="touch-stage-visible mt-2 block lg:hidden" onClick={event => event.stopPropagation()}>
+          <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Mover a etapa</span>
+          <select
+            value={lead.stage_id || ''}
+            onChange={event => {
+              const stage = stageOptions.find(option => option.id === event.target.value)
+              if (stage && stage.id !== lead.stage_id) onStageChange(lead, stage)
+            }}
+            className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+            aria-label={`Mover ${lead.name || 'lead'} a otra etapa`}
+          >
+            {!lead.stage_id && <option value="">Sin etapa</option>}
+            {stageOptions.map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+          </select>
+        </label>
+      )}
       <div className="flex items-center justify-between mt-2 text-[10px] text-slate-400">
         <span>{trashRemainingDays !== null ? (trashRemainingDays > 0 ? `${trashRemainingDays} día${trashRemainingDays === 1 ? '' : 's'} para restaurar` : 'Pendiente de purga') : formatDistanceToNow(new Date(lead.created_at), { locale: es })}</span>
         {isTrash ? <Trash2 className="h-3 w-3" aria-hidden="true" /> : <MessageCircle className="w-3 h-3" aria-hidden="true" />}
@@ -220,6 +258,8 @@ interface VirtualColumnProps {
   onDelete: (id: string) => void
   onRestore: (id: string) => void
   onLifecycleAction: (lead: Lead, mode: 'won' | 'lost' | 'reopen') => void
+  stageOptions: PipelineStage[]
+  onStageChange: (lead: Lead, stage: PipelineStage) => void
   isTrash: boolean
   onDragStart: (e: React.DragEvent, id: string) => void
   onDragEnd: (e: React.DragEvent) => void
@@ -232,7 +272,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   column, totalCount, hasMore, loadingMore, onLoadMore,
   selectedIds, detailLeadId, draggedLeadId, dragOverColumn, selectionMode,
   onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
-  onRestore, onLifecycleAction, isTrash,
+  onRestore, onLifecycleAction, stageOptions, onStageChange, isTrash,
 }: VirtualColumnProps) {
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
@@ -288,6 +328,8 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
             return (
               <div
                 key={lead.id}
+                ref={virtualizer.measureElement}
+                data-index={virtualItem.index}
                 style={{
                   position: 'absolute',
                   top: 0,
@@ -308,6 +350,8 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
                     onDelete={onDelete}
                     onRestore={onRestore}
                     onLifecycleAction={onLifecycleAction}
+                    stageOptions={stageOptions}
+                    onStageChange={onStageChange}
                     isTrash={isTrash}
                     onDragStart={onDragStart}
                     onDragEnd={onDragEnd}
@@ -390,6 +434,8 @@ function resolveDatePreset(preset: string, customFrom?: string, customTo?: strin
 }
 
 export default function LeadsPage() {
+  const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
+  const isCompactListWorkspace = workspaceWidth > 0 && workspaceWidth < 900
   const router = useRouter()
   // Server-side paginated data
   const [stageData, setStageData] = useState<StageData[]>([])
@@ -2564,6 +2610,10 @@ export default function LeadsPage() {
     overscan: 10,
   })
 
+  useEffect(() => {
+    if (viewMode === 'list') listVirtualizer.measure()
+  }, [isCompactListWorkspace, viewMode])
+
   // Batch-fetch observations for visible list rows
   useEffect(() => {
     if (viewMode !== 'list' || listLeads.length === 0) return
@@ -2592,7 +2642,7 @@ export default function LeadsPage() {
 
   if (loading) {
     return (
-      <div className="flex flex-col h-full min-h-0 animate-pulse">
+      <div ref={workspaceRef} className="flex flex-col h-full min-h-0 animate-pulse">
         {/* Skeleton header */}
         <div className="flex items-center justify-between mb-3">
           <div>
@@ -2636,9 +2686,9 @@ export default function LeadsPage() {
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div ref={workspaceRef} className="flex flex-col h-full min-h-0">
       {/* Row 1: Title + View Toggle + Search + Más */}
-      <div className="flex items-center gap-3 py-2 shrink-0">
+      <div className="flex flex-wrap items-center gap-2 py-2 shrink-0 sm:gap-3">
         <div className="flex items-center gap-2 min-w-0">
           <h1 className="text-lg font-bold text-slate-900 whitespace-nowrap">Leads</h1>
           <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full">{(viewMode === 'list' ? listTotal : totalLeadCount).toLocaleString()}</span>
@@ -2667,7 +2717,7 @@ export default function LeadsPage() {
           </div>
         )}
 
-        <div ref={filterDropdownRef} className="relative max-w-lg flex-1">
+        <div ref={filterDropdownRef} className="relative order-last w-full sm:order-none sm:max-w-lg sm:flex-1">
           <div className="relative min-w-0 flex-1">
             <Search className="absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
             <input
@@ -2696,7 +2746,7 @@ export default function LeadsPage() {
           {showFilterDropdown && (
             <div
               ref={filterDialogRef}
-              className={`fixed inset-0 z-[70] flex w-full flex-col rounded-none border border-slate-200/80 bg-white shadow-2xl shadow-slate-900/15 sm:inset-auto sm:rounded-2xl ${filterPanelPosition ? 'sm:opacity-100' : 'sm:pointer-events-none sm:opacity-0'}`}
+              className={`app-viewport fixed inset-0 z-[70] flex w-full flex-col rounded-none border border-slate-200/80 bg-white pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] shadow-2xl shadow-slate-900/15 sm:inset-auto sm:h-auto sm:rounded-2xl sm:p-0 ${filterPanelPosition ? 'sm:opacity-100' : 'sm:pointer-events-none sm:opacity-0'}`}
               style={filterPanelPosition ? { left: filterPanelPosition.left, top: filterPanelPosition.top, width: filterPanelPosition.width, maxHeight: filterPanelPosition.maxHeight } : undefined}
               role="dialog"
               aria-modal="true"
@@ -3286,7 +3336,7 @@ export default function LeadsPage() {
         </div>
 
         {/* Actions area */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className={`flex min-w-0 items-center gap-2 shrink-0 ${selectionMode ? 'w-full overflow-x-auto pb-1 sm:w-auto sm:overflow-visible sm:pb-0' : 'ml-auto'}`}>
           {selectionMode ? (
             <>
               <span className="flex items-center px-2 py-1.5 text-xs text-slate-500 font-medium whitespace-nowrap">
@@ -3377,7 +3427,7 @@ export default function LeadsPage() {
             <div ref={moreMenuRef} className="relative">
               <button
                 onClick={() => setShowMoreMenu(v => !v)}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm transition-colors ${
+                className={`inline-flex min-h-11 items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm transition-colors ${
                   showMoreMenu ? 'border-slate-400 bg-slate-100 text-slate-700' : 'border-slate-300 hover:bg-slate-50 text-slate-600'
                 }`}
                 title="Más acciones"
@@ -3387,7 +3437,7 @@ export default function LeadsPage() {
                 <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showMoreMenu ? 'rotate-180' : ''}`} />
               </button>
               {showMoreMenu && (
-                <div className="absolute right-0 top-full mt-1.5 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 py-1 overflow-hidden">
+                  <div className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[80] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white py-1 shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-full sm:mt-1.5 sm:w-56 sm:rounded-xl sm:shadow-xl">
                   <button
                     onClick={() => { setShowAddModal(true); setShowMoreMenu(false) }}
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors"
@@ -3633,6 +3683,8 @@ export default function LeadsPage() {
               onDelete={handleDeleteLead}
               onRestore={handleRestoreLead}
               onLifecycleAction={requestLifecycleAction}
+              stageOptions={allStages}
+              onStageChange={requestLeadStageChange}
               isTrash={statusFilter === 'trash'}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
@@ -3665,6 +3717,8 @@ export default function LeadsPage() {
               onDelete={handleDeleteLead}
               onRestore={handleRestoreLead}
               onLifecycleAction={requestLifecycleAction}
+              stageOptions={allStages}
+              onStageChange={requestLeadStageChange}
               isTrash={statusFilter === 'trash'}
               onDragStart={handleDragStart}
               onDragEnd={handleDragEnd}
@@ -3689,7 +3743,7 @@ export default function LeadsPage() {
             </div>
           )}
           {/* Sticky header */}
-          <div className="bg-slate-50 border-b-2 border-slate-200 flex-shrink-0">
+          {!isCompactListWorkspace && <div className="flex-shrink-0 border-b-2 border-slate-200 bg-slate-50">
             <div className="flex">
               {selectionMode && (
                 <div className="px-2 py-2.5 w-[36px] flex items-center justify-center">
@@ -3751,9 +3805,9 @@ export default function LeadsPage() {
                 </div>
               )}
             </div>
-          </div>
+          </div>}
           {/* Virtualized rows */}
-          <div ref={listScrollRef} className="flex-1 min-h-0 overflow-auto">
+          <div ref={listScrollRef} className={`min-h-0 flex-1 overflow-y-auto ${isCompactListWorkspace ? 'overflow-x-hidden' : 'overflow-x-auto'}`}>
             {listLeads.length > 0 ? (
               <div style={{ height: listVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
                 {listVirtualizer.getVirtualItems().map((virtualRow) => {
@@ -3777,7 +3831,7 @@ export default function LeadsPage() {
                       }}
                     >
                       <div
-                        className={`flex items-start group border-b border-slate-200/80 hover:bg-emerald-50/40 hover:shadow-sm transition-all duration-150 cursor-pointer ${
+                        className={`group relative flex cursor-pointer items-stretch transition-all duration-150 hover:bg-emerald-50/40 hover:shadow-sm ${isCompactListWorkspace ? 'mx-1 mb-2 flex-col rounded-xl border border-slate-200/80 bg-white shadow-sm' : 'm-0 flex-row items-start rounded-none border-x-0 border-b border-t-0 border-slate-200/80 bg-transparent shadow-none'} ${
                           selectionMode && selectedIds.has(lead.id) ? 'bg-emerald-50 border-l-[3px] border-l-emerald-500' :
                           detailLead?.id === lead.id ? 'bg-emerald-100 border-l-[3px] border-l-emerald-500 shadow-sm ring-1 ring-emerald-200/60' : 'border-l-[3px] border-l-transparent'
                         }`}
@@ -3785,14 +3839,14 @@ export default function LeadsPage() {
                       >
                         {/* Selection checkbox */}
                         {selectionMode && (
-                          <div className="px-2 py-2.5 w-[36px] flex items-center justify-center shrink-0">
-                            <button onClick={(e) => { e.stopPropagation(); toggleSelection(lead.id) }} className="p-0.5">
+                          <div className={`${isCompactListWorkspace ? 'absolute left-2 top-2 h-11 w-11' : 'static h-auto w-[36px] px-2 py-2.5'} z-10 flex items-center justify-center`}>
+                            <button onClick={(e) => { e.stopPropagation(); toggleSelection(lead.id) }} className={`flex items-center justify-center ${isCompactListWorkspace ? 'h-11 w-11' : 'h-auto w-auto p-0.5'}`}>
                               {selectedIds.has(lead.id) ? <CheckSquare className="w-4 h-4 text-emerald-600" /> : <Square className="w-4 h-4 text-slate-300" />}
                             </button>
                           </div>
                         )}
                         {/* Lead info */}
-                        <div className="px-3 py-2.5 w-[220px]">
+                        <div className={`${isCompactListWorkspace ? 'w-full px-3 py-3 pr-14' : 'w-[220px] px-3 py-2.5 pr-3'} ${selectionMode ? (isCompactListWorkspace ? 'pl-14' : 'pl-3') : ''}`}>
                           <div className="flex items-center gap-2.5">
                             <div className="w-8 h-8 bg-emerald-50 rounded-full flex items-center justify-center shrink-0">
                               <span className="text-emerald-700 text-xs font-semibold">
@@ -3807,19 +3861,35 @@ export default function LeadsPage() {
                         </div>
 
                         {/* Stage */}
-                        <div className="px-3 py-2.5 w-[110px]">
-                          {stageName ? (
-                            <span className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
-                              <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: stageColor }} aria-hidden="true" />
-                              {stageName}
-                            </span>
-                          ) : (
-                            <span className="text-[10px] text-slate-400 italic">Sin etapa</span>
-                          )}
+                        <div className={`${isCompactListWorkspace ? 'flex w-full items-center gap-2 px-3 pb-2' : 'block w-[110px] px-3 py-2.5'}`}>
+                          {isCompactListWorkspace && <span className="w-20 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Etapa</span>}
+                          {isCompactListWorkspace ? <select
+                            value={lead.stage_id || ''}
+                            onClick={event => event.stopPropagation()}
+                            onChange={event => {
+                              const stage = allStages.find(option => option.id === event.target.value)
+                              if (stage && stage.id !== lead.stage_id) requestLeadStageChange(lead, stage)
+                            }}
+                            className="h-11 min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                            aria-label={`Mover ${lead.name || 'lead'} a otra etapa`}
+                          >
+                            {!lead.stage_id && <option value="">Sin etapa</option>}
+                            {allStages.map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
+                          </select> : <div>
+                            {stageName ? (
+                              <span className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: stageColor }} aria-hidden="true" />
+                                {stageName}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-400 italic">Sin etapa</span>
+                            )}
+                          </div>}
                         </div>
 
                         {/* Tags */}
-                        <div className="px-3 py-2.5 w-[180px]">
+                        <div className={`${isCompactListWorkspace ? 'flex w-full items-start gap-2 px-3 pb-2' : 'block w-[180px] px-3 py-2.5'}`}>
+                          {isCompactListWorkspace && <span className="w-20 shrink-0 pt-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Etiquetas</span>}
                           {lead.structured_tags && lead.structured_tags.length > 0 ? (
                             <div className="flex flex-wrap gap-1">
                               {lead.structured_tags.slice(0, 3).map(tag => (
@@ -3841,15 +3911,15 @@ export default function LeadsPage() {
                         </div>
 
                         {/* Custom field columns */}
-                        {cfDefs.filter(d => cfVisibleIds.has(d.id)).sort((a, b) => a.sort_order - b.sort_order).map(def => (
-                          <div key={def.id} className="px-3 py-2.5 w-[140px] text-[11px] text-slate-600 truncate">
+                        {!isCompactListWorkspace && cfDefs.filter(d => cfVisibleIds.has(d.id)).sort((a, b) => a.sort_order - b.sort_order).map(def => (
+                          <div key={def.id} className="w-[140px] truncate px-3 py-2.5 text-[11px] text-slate-600">
                             {formatCfCell(def, lead)}
                           </div>
                         ))}
 
                         {/* Observations preview */}
                         <div
-                          className="px-3 py-2.5 flex-1 cursor-pointer hover:bg-slate-50 rounded-lg transition-colors"
+                          className={`${isCompactListWorkspace ? 'w-full px-3 pb-3 pt-1' : 'w-auto flex-1 px-3 py-2.5'} cursor-pointer rounded-lg transition-colors hover:bg-slate-50`}
                           onClick={(e) => {
                             e.stopPropagation()
                             if (obs && obs.length > 0) {
@@ -3890,10 +3960,10 @@ export default function LeadsPage() {
 
                         {/* Actions */}
                         {!selectionMode && (
-                        <div className="w-[52px] px-1 py-1.5">
+                        <div className={`${isCompactListWorkspace ? 'absolute right-2 top-2 w-11' : 'static w-[52px] px-1 py-1.5'} z-10`}>
                           <button
                             onClick={(e) => { e.stopPropagation(); statusFilter === 'trash' ? handleRestoreLead(lead.id) : handleDeleteLead(lead.id) }}
-                            className={`inline-flex h-10 w-10 items-center justify-center rounded-xl opacity-0 transition-all focus:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 group-hover:opacity-100 ${statusFilter === 'trash' ? 'text-slate-400 hover:bg-emerald-50 hover:text-emerald-700' : 'text-slate-300 hover:bg-red-50 hover:text-red-600'}`}
+                            className={`inline-flex items-center justify-center rounded-xl transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${isCompactListWorkspace ? 'h-11 w-11 opacity-100' : 'h-10 w-10 opacity-0 focus:opacity-100 group-hover:opacity-100'} ${statusFilter === 'trash' ? 'text-slate-400 hover:bg-emerald-50 hover:text-emerald-700' : 'text-slate-400 hover:bg-red-50 hover:text-red-600'}`}
                             aria-label={statusFilter === 'trash' ? `Restaurar ${lead.title || lead.name || 'oportunidad'}` : `Mover ${lead.title || lead.name || 'oportunidad'} a la papelera`}
                           >
                             {statusFilter === 'trash' ? <ArchiveRestore className="h-4 w-4" /> : <Trash2 className="h-4 w-4" />}
@@ -3938,7 +4008,7 @@ export default function LeadsPage() {
 
       {/* Add Lead Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) closeAddLeadDialog() }}>
+        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) closeAddLeadDialog() }}>
           <div ref={addLeadDialogRef} role="dialog" aria-modal="true" aria-labelledby="create-lead-title" aria-describedby="create-lead-description" tabIndex={-1} className="flex h-full w-full max-w-xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-3xl sm:border sm:border-slate-100">
             <header className="flex items-start gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><Plus className="h-5 w-5" /></div>
@@ -4080,7 +4150,7 @@ export default function LeadsPage() {
       )}
 
       {duplicateConfirmation && (
-        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+        <div className="app-viewport fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
           <div ref={duplicateDialogRef} role="alertdialog" aria-modal="true" aria-labelledby="duplicate-opportunity-title" tabIndex={-1} className="w-full max-w-md rounded-3xl border border-amber-200 bg-white p-6 shadow-2xl">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-700">
               <AlertTriangle className="h-6 w-6" aria-hidden="true" />
@@ -4101,7 +4171,7 @@ export default function LeadsPage() {
       )}
 
       {lifecycleRequest && (
-        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+        <div className="app-viewport fixed inset-0 z-[75] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
           <div ref={lifecycleDialogRef} role="dialog" aria-modal="true" aria-labelledby="lifecycle-dialog-title" tabIndex={-1} className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
             <div className={`flex h-12 w-12 items-center justify-center rounded-2xl ${lifecycleRequest.mode === 'won' ? 'bg-emerald-50 text-emerald-700' : lifecycleRequest.mode === 'lost' ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
               {lifecycleRequest.mode === 'won' ? <CheckCircle2 className="h-6 w-6" /> : lifecycleRequest.mode === 'lost' ? <XCircle className="h-6 w-6" /> : <ArchiveRestore className="h-6 w-6" />}
@@ -4152,16 +4222,16 @@ export default function LeadsPage() {
 
       {/* Lead Detail Panel (Slide-over) with Inline Chat */}
       {(showDetailPanel || showInlineChat) && detailLead && (
-        <div className="fixed inset-0 z-50 flex justify-end overflow-hidden">
+        <div className="app-viewport fixed inset-0 z-[70] flex justify-end overflow-hidden">
           <div
-            className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
+            className="absolute inset-0 bg-black/30"
             onClick={() => { setShowDetailPanel(false); resetInlineChatState(); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
           />
-          <div className={`relative h-full bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'w-[85vw] max-w-6xl' : 'w-full max-w-md'}`}>
+          <div className={`relative flex h-full w-full border-l border-slate-200 bg-white shadow-2xl transition-all duration-300 ${showInlineChat ? 'lg:w-[85vw] lg:max-w-6xl' : 'max-w-md'}`}>
 
             {/* Chat Panel - Left Side */}
             {showInlineChat && inlineChatId && (
-              <div className="flex-1 min-w-0 border-r border-slate-200 flex flex-col h-full bg-slate-50/50">
+              <div className="flex h-full min-w-0 flex-1 flex-col border-r border-slate-200 bg-slate-50/50">
                 <ChatPanel
                   key={inlineChatId}
                   chatId={inlineChatId}
@@ -4175,7 +4245,7 @@ export default function LeadsPage() {
             )}
 
             {/* Lead Details - Right Side */}
-            <div className={`${showInlineChat ? 'w-[360px] shrink-0' : 'w-full'} flex flex-col h-full bg-white`}>
+            <div className={`${showInlineChat ? 'hidden lg:flex lg:w-[360px] lg:shrink-0' : 'flex w-full'} h-full flex-col bg-white`}>
               <LeadDetailPanel
                 lead={detailLead}
                 scrollToTasks={scrollToTasks}
@@ -4226,7 +4296,7 @@ export default function LeadsPage() {
 
       {/* Device Selector Modal for WhatsApp */}
       {showDeviceSelector && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
 	            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
 	            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
@@ -4346,7 +4416,7 @@ export default function LeadsPage() {
 
       {/* Create Event from Leads Modal */}
       {showCreateEventModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <div>
@@ -4454,7 +4524,7 @@ export default function LeadsPage() {
 
       {/* Block Reason Modal */}
       {showBlockModal && (
-        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+        <div className="app-viewport fixed inset-0 z-[85] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
           <div ref={blockDialogRef} role="dialog" aria-modal="true" aria-labelledby="lead-do-not-contact-title" tabIndex={-1} className="w-full max-w-md overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
             <div className="px-6 py-4 border-b border-slate-200">
               <h3 id="lead-do-not-contact-title" className="text-lg font-semibold text-slate-900 flex items-center gap-2">
@@ -4518,7 +4588,7 @@ export default function LeadsPage() {
 
       {/* Archive Reason Modal */}
       {showArchiveModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-2xl shadow-2xl w-[420px] max-w-[95vw]">
             <div className="px-6 py-4 border-b border-slate-200">
               <h3 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
@@ -4588,7 +4658,7 @@ export default function LeadsPage() {
       )}
 
       {showExportModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
           <div className="bg-white rounded-xl p-6 w-full max-w-sm">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">

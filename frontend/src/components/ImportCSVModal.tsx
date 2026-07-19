@@ -469,14 +469,14 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   })
 
   return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-2xl border border-gray-100 max-h-[90vh] overflow-y-auto">
+    <div className="responsive-dialog-backdrop fixed inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div role="dialog" aria-modal="true" aria-label={title} className="responsive-dialog-panel safe-area-bottom safe-area-top w-full max-w-2xl overflow-y-auto rounded-2xl border border-gray-100 bg-white p-4 shadow-2xl sm:max-h-[90vh] sm:p-6">
         <div className="flex items-start justify-between mb-5">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
             <p className="text-sm text-gray-500 mt-0.5">Modo seguro para cargas recurrentes desde Excel de Kommo</p>
           </div>
-          <button onClick={handleClose} className="p-1.5 hover:bg-gray-100 rounded-lg transition">
+          <button onClick={handleClose} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition hover:bg-gray-100 sm:h-8 sm:w-8 sm:rounded-lg">
             <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
@@ -519,7 +519,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 ))}
               </div>
             )}
-            <button onClick={handleClose} className="w-full px-4 py-2.5 bg-green-600 text-white rounded-xl hover:bg-green-700 font-medium text-sm transition">
+            <button onClick={handleClose} className="min-h-11 w-full rounded-xl bg-green-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-green-700">
               Cerrar
             </button>
           </div>
@@ -603,10 +603,10 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
             )}
 
             <div className="flex gap-3 pt-1">
-              <button onClick={() => setPreview(null)} className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-600 rounded-xl hover:bg-gray-50 font-medium text-sm transition">
+              <button onClick={() => setPreview(null)} className="min-h-11 flex-1 rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-50">
                 Volver
               </button>
-              <button onClick={handleUpload} disabled={uploading || preview.total_rows === 0} className="flex-1 px-4 py-2.5 bg-green-600 text-white rounded-xl hover:bg-green-700 disabled:opacity-50 font-medium text-sm transition">
+              <button onClick={handleUpload} disabled={uploading || preview.total_rows === 0} className="min-h-11 flex-1 rounded-xl bg-green-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-green-700 disabled:opacity-50">
                 {uploading ? (
                   <span className="flex items-center justify-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Importando...</span>
                 ) : (
@@ -816,10 +816,10 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
             )}
 
             <div className="flex gap-3 mt-5">
-              <button onClick={handleClose} className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-600 rounded-xl hover:bg-gray-50 font-medium text-sm transition">
+              <button onClick={handleClose} className="min-h-11 flex-1 rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-50">
                 Cancelar
               </button>
-              <button onClick={handlePreview} disabled={!canPreview} className="flex-1 px-4 py-2.5 bg-green-600 text-white rounded-xl hover:bg-green-700 disabled:opacity-50 font-medium text-sm transition">
+              <button onClick={handlePreview} disabled={!canPreview} className="min-h-11 flex-1 rounded-xl bg-green-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-green-700 disabled:opacity-50">
                 {previewing ? (
                   <span className="flex items-center justify-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Analizando...</span>
                 ) : (

@@ -1875,7 +1875,7 @@ func (p *DevicePool) handleReceipt(ctx context.Context, instance *DeviceInstance
 	// Persist receipt status in database (only upgrade: sent→delivered→read)
 	if len(evt.MessageIDs) > 0 {
 		for _, msgID := range evt.MessageIDs {
-			if err := p.repos.Message.UpdateStatusUpgrade(ctx, instance.AccountID, chatJID, msgID, status); err != nil {
+			if err := p.repos.Message.UpdateStatusUpgrade(ctx, instance.AccountID, chatJID, msgID, status, evt.Timestamp); err != nil {
 				log.Printf("[Receipt] Failed to update status for %s: %v", msgID, err)
 			}
 		}

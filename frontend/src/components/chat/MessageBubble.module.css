@@ -1,0 +1,72 @@
+.messageActions {
+  opacity: 1;
+}
+
+.compactSelectionSurface {
+  -webkit-touch-callout: none;
+  touch-action: pan-y;
+  user-select: none;
+}
+
+.messageActionButton {
+  align-items: center;
+  display: inline-flex;
+  height: 44px;
+  justify-content: center;
+  width: 44px;
+}
+
+.reactionOption {
+  align-items: center;
+  display: inline-flex;
+  height: 40px;
+  justify-content: center;
+  width: 40px;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .touchActionWrapper {
+    max-width: min(85%, calc(100% - 48px));
+  }
+
+  .messageActionsIncoming {
+    right: -48px;
+  }
+
+  .messageActionsFromMe {
+    left: -48px;
+    right: auto;
+  }
+
+  .reactionTrigger {
+    display: none;
+  }
+}
+
+@media (hover: none) and (min-width: 640px), (pointer: coarse) and (min-width: 640px) {
+  .touchActionWrapper {
+    max-width: min(70%, calc(100% - 48px));
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .messageActions {
+    opacity: 0;
+  }
+
+  .messageContainer:hover .messageActions,
+  .messageContainer:focus-within .messageActions,
+  .messageActions[data-open='true'] {
+    opacity: 1;
+  }
+
+  .messageActionButton {
+    height: 28px;
+    width: 28px;
+  }
+
+  .reactionOption {
+    height: 36px;
+    width: 36px;
+  }
+}

@@ -7,6 +7,7 @@ import { Program, ProgramDashboardSummary, ProgramFolder, ProgramGoal } from '@/
 import Link from 'next/link';
 import { es } from 'date-fns/locale';
 import { formatCalendarDate } from '@/utils/calendarDate';
+import { useContainerWidth } from '@/components/responsive/useContainerWidth';
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: React.ReactNode }> = {
   active: { label: 'Activo', bg: 'bg-emerald-50', text: 'text-emerald-700', icon: <CheckCircle2 className="w-3 h-3" /> },
@@ -21,8 +22,16 @@ const FOLDER_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#
 const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : '';
 
 export default function ProgramsPage() {
+  const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
+  const measuredWorkspaceWidth = workspaceWidth || 320;
+  const programGridColumns = Math.max(1, Math.min(4, Math.floor((measuredWorkspaceWidth + 16) / 276)));
+  const folderGridColumns = Math.max(1, Math.min(5, Math.floor((measuredWorkspaceWidth + 12) / 192)));
   const [programs, setPrograms] = useState<Program[]>([]);
   const [loading, setLoading] = useState(true);
+  const [programsLoaded, setProgramsLoaded] = useState(false);
+  const [programsError, setProgramsError] = useState('');
+  const programsRequestRef = useRef<AbortController | null>(null);
+  const programsRequestSequence = useRef(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newProgram, setNewProgram] = useState<{
@@ -38,6 +47,9 @@ export default function ProgramsPage() {
   const [pipelines, setPipelines] = useState<Array<{ id: string; name: string }>>([]);
   const [dashboard, setDashboard] = useState<ProgramDashboardSummary | null>(null);
   const [loadingDashboard, setLoadingDashboard] = useState(true);
+  const [dashboardError, setDashboardError] = useState('');
+  const dashboardRequestRef = useRef<AbortController | null>(null);
+  const dashboardRequestSequence = useRef(0);
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [goalForm, setGoalForm] = useState<ProgramGoal>({ attendance_goal_percent: 80, transfer_goal_percent: 70 });
@@ -51,12 +63,19 @@ export default function ProgramsPage() {
 
   // Folder state
   const [folders, setFolders] = useState<ProgramFolder[]>([]);
+  const [foldersLoaded, setFoldersLoaded] = useState(false);
+  const [foldersLoading, setFoldersLoading] = useState(true);
+  const [foldersError, setFoldersError] = useState('');
+  const foldersRequestRef = useRef<AbortController | null>(null);
+  const foldersRequestSequence = useRef(0);
   const [currentFolderID, setCurrentFolderID] = useState<string | null>(null);
   const [folderPath, setFolderPath] = useState<ProgramFolder[]>([]);
   const [showFolderModal, setShowFolderModal] = useState(false);
   const [editFolder, setEditFolder] = useState<ProgramFolder | null>(null);
   const [folderForm, setFolderForm] = useState({ name: '', color: '#10b981', icon: '📁' });
   const [menuID, setMenuID] = useState<string | null>(null);
+  const [coarsePointer, setCoarsePointer] = useState(false);
+  const [visualViewportHeight, setVisualViewportHeight] = useState(900);
 
   // View mode
   const [viewMode, setViewMode] = useState<'grid' | 'list' | 'compact'>('grid');
@@ -85,15 +104,51 @@ export default function ProgramsPage() {
     setToastType(type);
   };
 
+  const compactWorkspace = workspaceWidth === 0 || workspaceWidth < 768;
+  const touchWorkspace = compactWorkspace || coarsePointer;
+  const mobileWorkspace = workspaceWidth === 0 || workspaceWidth < 700 || (coarsePointer && visualViewportHeight < 600);
+  const effectiveViewMode = mobileWorkspace ? 'grid' : viewMode;
+
   useEffect(() => {
-    fetchPrograms();
-    fetchFolders();
-    fetchPipelines();
+    if (!mobileWorkspace) return;
+    setMenuID(null);
+    setIsCreateModalOpen(false);
+    setEditingProgram(null);
+    setShowFolderModal(false);
+    setConfirmAction(null);
+  }, [mobileWorkspace]);
+
+  useEffect(() => {
+    void fetchPrograms();
+    void fetchFolders();
+    void fetchPipelines();
+    return () => {
+      programsRequestRef.current?.abort();
+      foldersRequestRef.current?.abort();
+      dashboardRequestRef.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
-    fetchDashboard();
+    void fetchDashboard();
   }, [dateFrom, dateTo]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(hover: none), (pointer: coarse)');
+    const update = () => {
+      setCoarsePointer(media.matches);
+      setVisualViewportHeight(window.visualViewport?.height || window.innerHeight);
+    };
+    update();
+    media.addEventListener('change', update);
+    window.addEventListener('resize', update);
+    window.visualViewport?.addEventListener('resize', update);
+    return () => {
+      media.removeEventListener('change', update);
+      window.removeEventListener('resize', update);
+      window.visualViewport?.removeEventListener('resize', update);
+    };
+  }, []);
 
   const fetchPipelines = async () => {
     try {
@@ -116,39 +171,50 @@ export default function ProgramsPage() {
   }, [menuID]);
 
   const fetchPrograms = async () => {
-    try {
-      setLoading(true);
-      const response = await api<Program[]>('/api/programs?status=active');
-      if (response.success) {
-        setPrograms(response.data || []);
-      }
-    } catch (error) {
-      console.error('Error fetching programs:', error);
-    } finally {
-      setLoading(false);
+    programsRequestRef.current?.abort();
+    const controller = new AbortController();
+    programsRequestRef.current = controller;
+    const requestID = ++programsRequestSequence.current;
+    if (!programsLoaded) setLoading(true);
+    setProgramsError('');
+
+    const response = await api<Program[]>('/api/programs?status=active', { signal: controller.signal });
+    if (controller.signal.aborted || requestID !== programsRequestSequence.current) return;
+
+    if (!response.success || !Array.isArray(response.data)) {
+      setProgramsError(response.error || 'No se pudo cargar la lista de programas.');
+    } else {
+      setPrograms(response.data);
+      setProgramsLoaded(true);
     }
+    setLoading(false);
   };
 
   const fetchDashboard = async () => {
-    setLoadingDashboard(true);
-    try {
-      const params = new URLSearchParams();
-      if (dateFrom) params.set('from', dateFrom);
-      if (dateTo) params.set('to', dateTo);
-      const response = await api<{ success: boolean; dashboard: ProgramDashboardSummary }>(`/api/programs/dashboard${params.toString() ? `?${params.toString()}` : ''}`);
-      const data = response.data;
-      if (response.success && data?.success) {
-        setDashboard(data.dashboard);
-        setGoalForm({
-          attendance_goal_percent: data.dashboard.attendance_goal_percent || 80,
-          transfer_goal_percent: data.dashboard.transfer_goal_percent || 70,
-        });
-      }
-    } catch (error) {
-      console.error('Error fetching programs dashboard:', error);
-    } finally {
-      setLoadingDashboard(false);
+    dashboardRequestRef.current?.abort();
+    const controller = new AbortController();
+    dashboardRequestRef.current = controller;
+    const requestID = ++dashboardRequestSequence.current;
+    if (!dashboard) setLoadingDashboard(true);
+    setDashboardError('');
+
+    const params = new URLSearchParams();
+    if (dateFrom) params.set('from', dateFrom);
+    if (dateTo) params.set('to', dateTo);
+    const response = await api<{ success: boolean; dashboard: ProgramDashboardSummary }>(`/api/programs/dashboard${params.toString() ? `?${params.toString()}` : ''}`, { signal: controller.signal });
+    if (controller.signal.aborted || requestID !== dashboardRequestSequence.current) return;
+
+    const data = response.data;
+    if (!response.success || !data?.success || !data.dashboard) {
+      setDashboardError(response.error || 'No se pudo cargar la salud general.');
+    } else {
+      setDashboard(data.dashboard);
+      setGoalForm({
+        attendance_goal_percent: data.dashboard.attendance_goal_percent || 80,
+        transfer_goal_percent: data.dashboard.transfer_goal_percent || 70,
+      });
     }
+    setLoadingDashboard(false);
   };
 
   const saveGlobalGoals = async () => {
@@ -176,16 +242,25 @@ export default function ProgramsPage() {
   };
 
   const fetchFolders = useCallback(async () => {
-    try {
-      const res = await fetch('/api/programs/folders?status=active', {
-        headers: { Authorization: `Bearer ${token()}` },
-      });
-      const data = await res.json();
-      if (data.success) setFolders(data.folders || []);
-    } catch (e) {
-      console.error(e);
+    foldersRequestRef.current?.abort();
+    const controller = new AbortController();
+    foldersRequestRef.current = controller;
+    const requestID = ++foldersRequestSequence.current;
+    setFoldersLoading(previous => foldersLoaded ? previous : true);
+    setFoldersError('');
+
+    const response = await api<{ success: boolean; folders: ProgramFolder[] }>('/api/programs/folders?status=active', { signal: controller.signal });
+    if (controller.signal.aborted || requestID !== foldersRequestSequence.current) return;
+
+    const data = response.data;
+    if (!response.success || !data?.success || !Array.isArray(data.folders)) {
+      setFoldersError(response.error || 'No se pudieron cargar las carpetas.');
+    } else {
+      setFolders(data.folders);
+      setFoldersLoaded(true);
     }
-  }, []);
+    setFoldersLoading(false);
+  }, [foldersLoaded]);
 
   const handleCreateProgram = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -254,6 +329,7 @@ export default function ProgramsPage() {
   const openEditProgram = (program: Program, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    setMenuID(null);
     setEditForm({
       name: program.name,
       description: program.description || '',
@@ -459,55 +535,69 @@ export default function ProgramsPage() {
     return 'Saludable';
   };
 
+  const renderProgramMenu = (program: Program) => (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        data-menu-toggle
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setMenuID(menuID === program.id ? null : program.id); }}
+        className={`flex items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 ${touchWorkspace ? 'h-11 w-11' : 'h-8 w-8'}`}
+        title="Más opciones"
+        aria-label={`Acciones de ${program.name}`}
+        aria-expanded={menuID === program.id}
+      >
+        <MoreHorizontal className="h-5 w-5 md:h-4 md:w-4" />
+      </button>
+      {menuID === program.id && (
+        <div
+          data-menu-dropdown
+          className={touchWorkspace
+            ? 'fixed inset-x-3 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-[70] max-h-[min(70vh,24rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white py-2 shadow-2xl'
+            : 'absolute right-0 top-full z-30 mt-1 min-w-[200px] overflow-y-auto rounded-xl border border-slate-200 bg-white py-1 shadow-xl'}
+          onMouseDown={e => e.stopPropagation()}
+          onClick={e => e.stopPropagation()}
+        >
+          <button onClick={(e) => openEditProgram(program, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
+            <Edit2 className="h-4 w-4" /> Editar
+          </button>
+          {folders.length > 0 && (
+            <>
+              <div className="my-1 border-t border-slate-100" />
+              <p className="px-4 py-1 text-xs font-medium text-slate-400">Mover a...</p>
+              {program.folder_id && (
+                <button onClick={(e) => handleMoveToFolder(program.id, null, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
+                  <Home className="h-4 w-4" /> Raíz
+                </button>
+              )}
+              {folders.filter(f => f.id !== program.folder_id).map(f => (
+                <button key={f.id} onClick={(e) => handleMoveToFolder(program.id, f.id, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
+                  <span className="text-base">{f.icon}</span><span className="truncate">{f.name}</span>
+                </button>
+              ))}
+            </>
+          )}
+          <div className="my-1 border-t border-slate-100" />
+          <button disabled={deleting === program.id} onClick={(e) => handleDeleteProgram(program.id, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60">
+            {deleting === program.id ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-red-200 border-t-red-600" /> : <Trash2 className="h-4 w-4" />} {deleting === program.id ? 'Eliminando…' : 'Eliminar'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
   // Render program card for Grid view
   const renderProgramCard = (program: Program) => {
     const status = STATUS_CONFIG[program.status] || STATUS_CONFIG.active;
     return (
       <Link href={`/dashboard/programs/${program.id}`} key={program.id}
-        draggable
+        draggable={!touchWorkspace}
         onDragStart={e => handleProgramDragStart(e, program.id)}
         onDragEnd={handleProgramDragEnd}>
         <div className="group bg-white rounded-xl border border-slate-200 p-4 hover:shadow-md hover:border-slate-300 transition-all duration-200 cursor-pointer h-full flex flex-col relative">
           {/* Action buttons */}
-          <div className={`absolute top-3 right-3 flex gap-1 transition-all ${menuID === program.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
-            <div className="relative">
-              <button
-                data-menu-toggle
-                onClick={(e) => { e.preventDefault(); e.stopPropagation(); setMenuID(menuID === program.id ? null : program.id); }}
-                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all"
-                title="Más opciones"
-              >
-                <MoreHorizontal className="w-3.5 h-3.5" />
-              </button>
-              {menuID === program.id && (
-                <div data-menu-dropdown className="absolute top-full right-0 mt-1 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
-                  <button onClick={(e) => openEditProgram(program, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
-                    <Edit2 className="w-3.5 h-3.5" /> Editar
-                  </button>
-                  {folders.length > 0 && (
-                    <>
-                      <div className="border-t border-slate-100 my-1" />
-                      <p className="px-4 py-1 text-xs text-slate-400 font-medium">Mover a...</p>
-                      {program.folder_id && (
-                        <button onClick={(e) => handleMoveToFolder(program.id, null, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
-                          <Home className="w-3.5 h-3.5" /> Raíz
-                        </button>
-                      )}
-                      {folders.filter(f => f.id !== program.folder_id).map(f => (
-                        <button key={f.id} onClick={(e) => handleMoveToFolder(program.id, f.id, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
-                          <span className="text-base">{f.icon}</span> {f.name}
-                        </button>
-                      ))}
-                    </>
-                  )}
-                  <div className="border-t border-slate-100 my-1" />
-                  <button onClick={(e) => handleDeleteProgram(program.id, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50">
-                    <Trash2 className="w-3.5 h-3.5" /> Eliminar
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
+          {!mobileWorkspace && <div className={`absolute flex gap-1 transition-all ${touchWorkspace ? 'right-2 top-2 opacity-100' : `right-3 top-3 ${menuID === program.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'}`}`}>
+            {renderProgramMenu(program)}
+          </div>}
 
           {/* Program header */}
           <div className="flex items-start gap-3 mb-2.5">
@@ -552,7 +642,7 @@ export default function ProgramsPage() {
           )}
 
           {/* Stats footer */}
-          <div className="flex items-center gap-3 text-xs pt-2.5 border-t border-slate-100">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs pt-2.5 border-t border-slate-100">
             <div className="flex items-center gap-1 text-slate-500">
               <Users className="w-3.5 h-3.5 text-slate-400" />
               <span className="font-semibold text-slate-700">{program.participant_count || 0}</span>
@@ -574,7 +664,7 @@ export default function ProgramsPage() {
     const status = STATUS_CONFIG[program.status] || STATUS_CONFIG.active;
     return (
       <Link href={`/dashboard/programs/${program.id}`} key={program.id}
-        draggable
+        draggable={!touchWorkspace}
         onDragStart={e => handleProgramDragStart(e, program.id)}
         onDragEnd={handleProgramDragEnd}>
         <div className="group flex items-center gap-4 bg-white border border-slate-200 rounded-xl px-4 py-3 hover:shadow-sm hover:border-slate-300 transition-all cursor-pointer">
@@ -588,7 +678,7 @@ export default function ProgramsPage() {
             <h3 className="font-semibold text-slate-800 truncate text-sm group-hover:text-emerald-700 transition-colors">{program.name}</h3>
             <p className="text-xs text-slate-500 truncate">{program.description || 'Sin descripción'}</p>
           </div>
-          <div className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${status.bg} ${status.text} shrink-0`}>
+          <div className={`hidden items-center gap-1 rounded-full px-2 py-0.5 text-xs sm:inline-flex ${status.bg} ${status.text} shrink-0`}>
             {status.icon}
             {status.label}
           </div>
@@ -596,14 +686,15 @@ export default function ProgramsPage() {
             <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" />{program.participant_count || 0}</span>
             <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" />{program.session_count || 0}</span>
           </div>
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all shrink-0">
-            <button onClick={(e) => openEditProgram(program, e)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all" title="Editar">
-              <Edit2 className="w-3.5 h-3.5" />
+          {!touchWorkspace && <div className="flex shrink-0 items-center gap-1 opacity-0 transition-all group-hover:opacity-100 group-focus-within:opacity-100">
+            <button onClick={(e) => openEditProgram(program, e)} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600" title="Editar" aria-label={`Editar ${program.name}`}>
+              <Edit2 className="h-3.5 w-3.5" />
             </button>
-            <button onClick={(e) => handleDeleteProgram(program.id, e)} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all" title="Eliminar">
-              {deleting === program.id ? <div className="w-3.5 h-3.5 border-2 border-red-300 border-t-red-600 rounded-full animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+            <button disabled={deleting === program.id} onClick={(e) => handleDeleteProgram(program.id, e)} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-red-50 hover:text-red-500 disabled:cursor-wait" title="Eliminar" aria-label={`Eliminar ${program.name}`}>
+              {deleting === program.id ? <span className="block h-3.5 w-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600" /> : <Trash2 className="h-3.5 w-3.5" />}
             </button>
-          </div>
+          </div>}
+          {touchWorkspace && renderProgramMenu(program)}
         </div>
       </Link>
     );
@@ -614,7 +705,7 @@ export default function ProgramsPage() {
     const status = STATUS_CONFIG[program.status] || STATUS_CONFIG.active;
     return (
       <Link href={`/dashboard/programs/${program.id}`} key={program.id}
-        draggable
+        draggable={!touchWorkspace}
         onDragStart={e => handleProgramDragStart(e, program.id)}
         onDragEnd={handleProgramDragEnd}>
         <div className="group flex items-center gap-3 px-3 py-2 hover:bg-slate-50 rounded-lg transition-all cursor-pointer border-b border-slate-100 last:border-b-0">
@@ -624,19 +715,21 @@ export default function ProgramsPage() {
             {status.label}
           </div>
           <span className="text-xs text-slate-400 shrink-0 hidden sm:inline">{program.participant_count || 0}p · {program.session_count || 0}s</span>
-          <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteProgram(program.id, e); }}
-            className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all shrink-0">
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+          {!touchWorkspace && <button disabled={deleting === program.id} onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteProgram(program.id, e); }}
+            className="shrink-0 rounded p-1 text-slate-400 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 group-focus-within:opacity-100 disabled:cursor-wait"
+            aria-label={`Eliminar ${program.name}`}>
+            {deleting === program.id ? <span className="block h-3.5 w-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600" /> : <Trash2 className="h-3.5 w-3.5" />}
+          </button>}
+          {touchWorkspace && renderProgramMenu(program)}
         </div>
       </Link>
     );
   };
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto flex flex-col gap-4 pr-1">
+    <div ref={workspaceRef} className="h-full min-h-0 overflow-y-auto flex flex-col gap-4 pr-1">
       {/* Header */}
-      <div className="flex items-center justify-between shrink-0">
+      <div className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-emerald-600 flex items-center justify-center shrink-0">
             <GraduationCap className="w-5 h-5 text-white" />
@@ -646,27 +739,27 @@ export default function ProgramsPage() {
             <p className="text-xs text-slate-500">Cursos, talleres y control de asistencia</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        {!mobileWorkspace && <div className="flex items-center gap-2 sm:shrink-0">
           <button
             onClick={openCreateFolder}
-            className="flex items-center gap-2 px-3 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-all text-sm font-medium"
+            className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-slate-50 sm:flex-none"
           >
             <FolderPlus className="w-4 h-4" />
             <span className="hidden sm:inline">Carpeta</span>
           </button>
           <button
             onClick={() => setIsCreateModalOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium text-sm"
+            className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
           >
             <Plus className="w-4 h-4" />
             <span className="hidden sm:inline">Nuevo Programa</span>
             <span className="sm:hidden">Nuevo</span>
           </button>
-        </div>
+        </div>}
       </div>
 
       {/* General health dashboard */}
-      <section className="bg-white border border-slate-200 rounded-xl shrink-0 overflow-hidden">
+      {!mobileWorkspace && <section className="bg-white border border-slate-200 rounded-xl shrink-0 overflow-hidden">
         <button
           type="button"
           onClick={() => setHealthExpanded(value => !value)}
@@ -694,6 +787,13 @@ export default function ProgramsPage() {
           </span>
         </button>
 
+        {dashboardError && !healthExpanded && (
+          <div role="alert" className="flex flex-col gap-2 border-t border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between">
+            <span className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{dashboardError}</span>
+            <button type="button" onClick={() => { void fetchDashboard(); }} className="min-h-11 shrink-0 rounded-lg border border-red-200 bg-white px-3 text-xs font-semibold hover:bg-red-100">Reintentar</button>
+          </div>
+        )}
+
         {healthExpanded && (
           <div className="border-t border-slate-100 px-4 py-3">
             <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
@@ -708,11 +808,34 @@ export default function ProgramsPage() {
               </div>
             </div>
 
+            {dashboardError && (
+              <div role="alert" className="mb-3 flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between">
+                <span className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{dashboardError}</span>
+                <button type="button" onClick={() => { void fetchDashboard(); }} className="min-h-11 shrink-0 rounded-lg border border-red-200 bg-white px-3 text-xs font-semibold hover:bg-red-100">Reintentar</button>
+              </div>
+            )}
+
             {loadingDashboard ? (
               <div className="h-20 bg-slate-50 rounded-lg animate-pulse" />
             ) : dashboard && dashboard.groups.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+              <>
+                {compactWorkspace && <div className="space-y-2">
+                  {dashboard.groups.slice(0, 6).map(group => (
+                    <Link key={group.program_id} href={`/dashboard/programs/${group.program_id}`} className="block rounded-xl border border-slate-100 p-3 transition-colors hover:bg-slate-50">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-center gap-2"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: group.color || '#10b981' }} /><span className="truncate text-sm font-semibold text-slate-800">{group.name}</span></div>
+                        <span className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${healthClass(group.health)}`}>{healthLabel(group.health)}</span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                        <div><span className="block text-slate-400">Asistencia</span><span className={group.attendance_rate >= group.attendance_goal_percent ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>{formatPct(group.attendance_rate)} / {group.attendance_goal_percent}%</span></div>
+                        <div><span className="block text-slate-400">Traspaso</span><span className={group.transfer_rate >= group.transfer_goal_percent ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>{formatPct(group.transfer_rate)} / {group.transfer_goal_percent}%</span></div>
+                        <div className="text-right"><span className="block text-slate-400">Riesgo</span><span className="font-semibold text-slate-700">{group.at_risk_count}</span></div>
+                      </div>
+                    </Link>
+                  ))}
+                </div>}
+                {!compactWorkspace && <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
                   <thead><tr className="text-left text-xs text-slate-500 border-b border-slate-100"><th className="py-2 font-medium">Grupo</th><th className="py-2 font-medium">Salud</th><th className="py-2 font-medium">Asistencia</th><th className="py-2 font-medium">Traspaso</th><th className="py-2 font-medium text-right">Riesgo</th></tr></thead>
                   <tbody className="divide-y divide-slate-100">
                     {dashboard.groups.slice(0, 6).map(group => (
@@ -725,18 +848,26 @@ export default function ProgramsPage() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                  </table>
+                </div>}
+              </>
+            ) : dashboard ? (
+              <div className="rounded-xl bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">No hay grupos con actividad para este período.</div>
+            ) : (
+              <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-5 text-center text-sm text-red-700">
+                No se pudo cargar la salud general.
+                <button type="button" onClick={() => { void fetchDashboard(); }} className="ml-2 min-h-11 font-semibold underline underline-offset-2">Reintentar</button>
               </div>
-            ) : <div className="text-sm text-slate-500">No se pudo cargar el dashboard general.</div>}
+            )}
           </div>
         )}
-      </section>
+      </section>}
 
       {goalsOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/40 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setGoalsOpen(false); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="program-goals-title" className="w-full max-w-sm rounded-2xl bg-white shadow-2xl border border-slate-200 overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100"><h2 id="program-goals-title" className="text-sm font-semibold text-slate-800">Metas globales</h2><button type="button" onClick={() => setGoalsOpen(false)} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-4 h-4" /></button></div>
-            <div className="grid grid-cols-2 gap-3 p-5">
+            <div className="grid grid-cols-1 gap-3 p-5 sm:grid-cols-2">
               <label className="text-xs text-slate-500">Asistencia %<input type="number" min={1} max={100} value={goalForm.attendance_goal_percent} onChange={(e) => setGoalForm(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></label>
               <label className="text-xs text-slate-500">Traspaso %<input type="number" min={1} max={100} value={goalForm.transfer_goal_percent} onChange={(e) => setGoalForm(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></label>
             </div>
@@ -759,27 +890,39 @@ export default function ProgramsPage() {
         </div>
 
         {/* View mode toggle */}
-        <div className="flex bg-slate-100 rounded-xl p-1 shrink-0">
-          <button onClick={() => setViewMode('grid')} title="Cuadrícula" className={`p-2 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
+        {!mobileWorkspace && <div className="flex bg-slate-100 rounded-xl p-1 shrink-0">
+          <button onClick={() => setViewMode('grid')} title="Cuadrícula" className={`flex h-11 flex-1 items-center justify-center rounded-lg transition-colors sm:h-8 sm:w-8 sm:flex-none ${viewMode === 'grid' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
             <LayoutGrid className="w-4 h-4" />
           </button>
-          <button onClick={() => setViewMode('list')} title="Lista" className={`p-2 rounded-lg transition-colors ${viewMode === 'list' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
+          <button onClick={() => setViewMode('list')} title="Lista" className={`flex h-11 flex-1 items-center justify-center rounded-lg transition-colors sm:h-8 sm:w-8 sm:flex-none ${viewMode === 'list' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
             <List className="w-4 h-4" />
           </button>
-          <button onClick={() => setViewMode('compact')} title="Compacta" className={`p-2 rounded-lg transition-colors ${viewMode === 'compact' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
+          <button onClick={() => setViewMode('compact')} title="Compacta" className={`flex h-11 flex-1 items-center justify-center rounded-lg transition-colors sm:h-8 sm:w-8 sm:flex-none ${viewMode === 'compact' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
             <LayoutTemplate className="w-4 h-4" />
           </button>
-        </div>
+        </div>}
       </div>
+
+      {(programsError || foldersError) && (programsLoaded || foldersLoaded) && (
+        <div role="alert" className="flex shrink-0 flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{[programsError, foldersError].filter(Boolean).join(' ')}</span>
+          </div>
+          <button type="button" onClick={() => { void fetchPrograms(); void fetchFolders(); }} className="min-h-11 shrink-0 rounded-xl border border-red-200 bg-white px-4 font-semibold text-red-700 hover:bg-red-100">
+            Reintentar
+          </button>
+        </div>
+      )}
 
       {/* Breadcrumb */}
       {folderPath.length > 0 && (
-        <nav className="flex items-center gap-1 text-sm shrink-0">
+        <nav className="flex shrink-0 items-center gap-1 overflow-x-auto pb-1 text-sm [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <button onClick={() => navigateToBreadcrumb(-1)}
             onDragOver={handleRootDragOver}
             onDragLeave={() => setDragOverRoot(false)}
             onDrop={e => handleFolderDrop(e, null)}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors ${dragOverRoot ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-400' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
+            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1 transition-colors ${dragOverRoot ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-400' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
             <Home className="w-3.5 h-3.5" />
             <span>Programas</span>
           </button>
@@ -793,7 +936,7 @@ export default function ProgramsPage() {
                 onDragOver={isLast ? undefined : e => handleFolderDragOver(e, folder.id)}
                 onDragLeave={isLast ? undefined : () => setDragOverFolderID(prev => prev === folder.id ? null : prev)}
                 onDrop={isLast ? undefined : e => handleFolderDrop(e, folder.id)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors font-medium ${isLast ? 'text-slate-900 bg-slate-100 cursor-default' : isDropTarget ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-400' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
+                className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1 font-medium transition-colors ${isLast ? 'text-slate-900 bg-slate-100 cursor-default' : isDropTarget ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-400' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
                 <span className="text-base leading-none">{folder.icon}</span>
                 {folder.name}
               </button>
@@ -805,8 +948,8 @@ export default function ProgramsPage() {
 
       {/* Content — scrollable */}
       <div className="min-h-0">
-      {loading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      {(loading && !programsLoaded) || (foldersLoading && !foldersLoaded) ? (
+        <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${programGridColumns}, minmax(0, 1fr))` }}>
           {[1, 2, 3, 4, 5, 6, 7, 8].map(i => (
             <div key={i} className="bg-white rounded-xl border border-slate-200 p-5 animate-pulse">
               <div className="flex items-center gap-3 mb-3">
@@ -822,6 +965,15 @@ export default function ProgramsPage() {
             </div>
           ))}
         </div>
+      ) : (!programsLoaded || !foldersLoaded) ? (
+        <div role="alert" className="rounded-2xl border border-red-200 bg-white px-5 py-14 text-center">
+          <AlertCircle className="mx-auto h-10 w-10 text-red-400" />
+          <h3 className="mt-4 text-lg font-semibold text-slate-800">No se pudieron cargar los programas</h3>
+          <p className="mx-auto mt-2 max-w-lg text-sm text-slate-500">{[programsError, foldersError].filter(Boolean).join(' ') || 'Ocurrió un problema al consultar la información.'}</p>
+          <button type="button" onClick={() => { void fetchPrograms(); void fetchFolders(); }} className="mt-5 min-h-11 rounded-xl bg-emerald-600 px-5 text-sm font-semibold text-white hover:bg-emerald-700">
+            Reintentar
+          </button>
+        </div>
       ) : filteredPrograms.length === 0 && visibleFolders.length === 0 ? (
         <div className="text-center py-20 bg-white rounded-2xl border border-slate-200">
           <div className="w-20 h-20 rounded-2xl bg-emerald-50 flex items-center justify-center mx-auto mb-5">
@@ -835,7 +987,7 @@ export default function ProgramsPage() {
               ? 'No se encontraron programas activos con esa búsqueda.'
               : 'Organiza cursos, talleres y clases. Controla la asistencia y envía mensajes masivos a los participantes.'}
           </p>
-          {!searchQuery && (
+          {!searchQuery && !mobileWorkspace && (
             <button
               onClick={() => setIsCreateModalOpen(true)}
               className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium"
@@ -850,7 +1002,7 @@ export default function ProgramsPage() {
           {visibleFolders.length > 0 && (
             <div>
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Carpetas</p>
-              <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${mobileWorkspace ? 1 : folderGridColumns}, minmax(0, 1fr))` }}>
                 {visibleFolders.map(folder => {
                   const isDropTarget = dragOverFolderID === folder.id;
                   return (
@@ -863,21 +1015,21 @@ export default function ProgramsPage() {
                     <div className="absolute top-0 left-0 right-0 h-1 rounded-t-xl" style={{ backgroundColor: folder.color }} />
                     <div className="flex items-start justify-between mt-1">
                       <span className="text-3xl leading-none">{folder.icon}</span>
-                      <button
+                      {!mobileWorkspace && <button
                         data-menu-toggle
                         onClick={e => { e.stopPropagation(); setMenuID(menuID === `f-${folder.id}` ? null : `f-${folder.id}`); }}
-                        className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-md transition-all">
+                        className={`flex items-center justify-center rounded-xl text-slate-500 transition-all hover:bg-slate-100 hover:text-slate-700 ${touchWorkspace ? 'h-11 w-11 opacity-100' : 'h-8 w-8 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'}`}>
                         <MoreHorizontal className="w-4 h-4" />
-                      </button>
+                      </button>}
                     </div>
                     <p className="mt-2 text-sm font-semibold text-slate-800 truncate">{folder.name}</p>
                     <p className="text-xs text-slate-400 mt-0.5">{folder.program_count} programa{folder.program_count !== 1 ? 's' : ''}</p>
-                    {menuID === `f-${folder.id}` && (
-                      <div data-menu-dropdown className="absolute top-8 right-2 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[120px]" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
-                        <button onClick={e => openEditFolder(folder, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                    {!mobileWorkspace && menuID === `f-${folder.id}` && (
+                      <div data-menu-dropdown className={touchWorkspace ? 'fixed inset-x-3 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-[70] rounded-2xl border border-slate-200 bg-white py-2 shadow-2xl' : 'absolute right-2 top-8 z-20 min-w-[160px] rounded-xl border border-slate-200 bg-white py-1 shadow-lg'} onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+                        <button onClick={e => openEditFolder(folder, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                           <Edit2 className="w-3.5 h-3.5" /> Editar
                         </button>
-                        <button onClick={e => handleDeleteFolder(folder.id, e)} className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50">
+                        <button onClick={e => handleDeleteFolder(folder.id, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50">
                           <Trash2 className="w-3.5 h-3.5" /> Eliminar
                         </button>
                       </div>
@@ -896,19 +1048,19 @@ export default function ProgramsPage() {
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3 mt-2">Programas</p>
               )}
 
-              {viewMode === 'grid' && (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {effectiveViewMode === 'grid' && (
+                <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${mobileWorkspace ? 1 : programGridColumns}, minmax(0, 1fr))` }}>
                   {filteredPrograms.map(renderProgramCard)}
                 </div>
               )}
 
-              {viewMode === 'list' && (
+              {effectiveViewMode === 'list' && (
                 <div className="space-y-2">
                   {filteredPrograms.map(renderProgramRow)}
                 </div>
               )}
 
-              {viewMode === 'compact' && (
+              {effectiveViewMode === 'compact' && (
                 <div className="bg-white rounded-xl border border-slate-200 divide-y-0">
                   {filteredPrograms.map(renderProgramCompact)}
                 </div>
@@ -921,13 +1073,13 @@ export default function ProgramsPage() {
 
       {/* Create Modal */}
       {isCreateModalOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
+        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="create-program-title" className="h-[var(--app-height)] w-full max-w-md overflow-y-auto rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6">
             <div className="flex justify-between items-center mb-5">
-              <h2 className="text-xl font-bold text-slate-800">Nuevo Programa</h2>
+              <h2 id="create-program-title" className="text-xl font-bold text-slate-800">Nuevo Programa</h2>
               <button
                 onClick={() => setIsCreateModalOpen(false)}
-                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors"
+                className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -1007,7 +1159,7 @@ export default function ProgramsPage() {
                         </p>
                       )}
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div>
                         <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha inicio</label>
                         <input
@@ -1041,7 +1193,7 @@ export default function ProgramsPage() {
                 )}
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">Color</label>
-                  <div className="flex gap-2.5">
+                  <div className="flex flex-wrap gap-3">
                     {COLORS.map(color => (
                       <button
                         key={color}
@@ -1058,17 +1210,17 @@ export default function ProgramsPage() {
                   </div>
                 </div>
               </div>
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+              <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-4 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">
                 <button
                   type="button"
                   onClick={() => setIsCreateModalOpen(false)}
-                  className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium"
+                  className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium"
+                  className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
                 >
                   Crear Programa
                 </button>
@@ -1080,11 +1232,11 @@ export default function ProgramsPage() {
 
       {/* Edit Program Modal */}
       {editingProgram && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setEditingProgram(null)}>
-          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={() => setEditingProgram(null)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="edit-program-title" className="h-[var(--app-height)] w-full max-w-md overflow-y-auto rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex justify-between items-center mb-5">
-              <h2 className="text-xl font-bold text-slate-800">Editar Programa</h2>
-              <button onClick={() => setEditingProgram(null)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
+              <h2 id="edit-program-title" className="text-xl font-bold text-slate-800">Editar Programa</h2>
+              <button onClick={() => setEditingProgram(null)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -1111,7 +1263,7 @@ export default function ProgramsPage() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">Color</label>
-                  <div className="flex gap-2.5">
+                  <div className="flex flex-wrap gap-3">
                     {COLORS.map(color => (
                       <button
                         key={color}
@@ -1136,11 +1288,11 @@ export default function ProgramsPage() {
                   </select>
                 </div>
               </div>
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
-                <button type="button" onClick={() => setEditingProgram(null)} className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors font-medium">
+              <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-4 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">
+                <button type="button" onClick={() => setEditingProgram(null)} className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none">
                   Cancelar
                 </button>
-                <button type="submit" disabled={savingEdit || !editForm.name.trim()} className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium disabled:opacity-50">
+                <button type="submit" disabled={savingEdit || !editForm.name.trim()} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:opacity-50 sm:flex-none">
                   {savingEdit ? 'Guardando...' : 'Guardar Cambios'}
                 </button>
               </div>
@@ -1151,10 +1303,10 @@ export default function ProgramsPage() {
 
       {/* Folder Modal */}
       {showFolderModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowFolderModal(false)}>
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
-            <div className="p-6">
-              <h2 className="text-lg font-semibold text-slate-900 mb-4">
+        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4" onClick={() => setShowFolderModal(false)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title" className="h-[var(--app-height)] w-full max-w-sm overflow-y-auto rounded-none bg-white shadow-xl sm:h-auto sm:max-h-[92vh] sm:rounded-xl" onClick={e => e.stopPropagation()}>
+            <div className="p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:p-6">
+              <h2 id="folder-dialog-title" className="text-lg font-semibold text-slate-900 mb-4">
                 {editFolder ? 'Editar carpeta' : 'Nueva carpeta'}
               </h2>
               <div className="space-y-4">
@@ -1186,10 +1338,10 @@ export default function ProgramsPage() {
                   </div>
                 </div>
               </div>
-              <div className="flex justify-end gap-3 mt-6">
-                <button onClick={() => setShowFolderModal(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Cancelar</button>
+              <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-3 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">
+                <button onClick={() => setShowFolderModal(false)} className="min-h-11 flex-1 rounded-lg px-4 py-2 text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none">Cancelar</button>
                 <button disabled={!folderForm.name} onClick={handleSaveFolder}
-                  className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors">
+                  className="min-h-11 flex-1 rounded-lg bg-emerald-600 px-6 py-2 text-white transition-colors hover:bg-emerald-700 disabled:opacity-50 sm:flex-none">
                   {editFolder ? 'Guardar' : 'Crear'}
                 </button>
               </div>

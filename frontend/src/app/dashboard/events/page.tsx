@@ -11,6 +11,7 @@ import {
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import FormulaEditor from '@/components/FormulaEditor'
+import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -135,6 +136,7 @@ const PARTICIPANT_STATUSES = [
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function EventsPage() {
+  const { ref: pageRef, width: pageWidth } = useContainerWidth<HTMLDivElement>()
   const router = useRouter()
   const searchParams = useSearchParams()
   // Events & Folders state
@@ -142,10 +144,18 @@ export default function EventsPage() {
   const [folders, setFolders] = useState<EventFolder[]>([])
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [eventsError, setEventsError] = useState('')
   const [hasMore, setHasMore] = useState(true)
   const [total, setTotal] = useState(0)
   const offsetRef = useRef(0)
-  const eventsScrollRef = useRef<HTMLDivElement>(null)
+  const hasMoreRef = useRef(true)
+  const loadingMoreRef = useRef(false)
+  const eventsRequestRef = useRef(0)
+  const eventsScrollRef = useRef<HTMLDivElement | null>(null)
+  const setEventsPageRef = useCallback((node: HTMLDivElement | null) => {
+    eventsScrollRef.current = node
+    pageRef.current = node
+  }, [pageRef])
   const EVENTS_PAGE_SIZE = 50
 
   // Navigation state
@@ -225,10 +235,18 @@ export default function EventsPage() {
   }, [token])
 
   const fetchEvents = useCallback(async (reset: boolean = true) => {
-    if (!reset && !hasMore) return
-    if (!reset) setLoadingMore(true)
+    if (!reset && (!hasMoreRef.current || loadingMoreRef.current)) return
+    if (!reset) {
+      loadingMoreRef.current = true
+      setLoadingMore(true)
+    }
+    const requestID = ++eventsRequestRef.current
+    if (reset) setEventsError('')
     try {
-      if (reset) offsetRef.current = 0
+      if (reset) {
+        offsetRef.current = 0
+        hasMoreRef.current = true
+      }
       const params = new URLSearchParams()
       if (search) params.set('search', search)
       if (statusFilter) params.set('status', statusFilter)
@@ -238,7 +256,11 @@ export default function EventsPage() {
       const res = await fetch(`/api/events?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
+      if (requestID !== eventsRequestRef.current) return
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'No se pudieron cargar los eventos')
+      }
       if (data.success) {
         const newEvents: Event[] = data.events || []
         if (reset) {
@@ -252,15 +274,22 @@ export default function EventsPage() {
         const serverTotal = data.total ?? newEvents.length
         setTotal(serverTotal)
         offsetRef.current += newEvents.length
-        setHasMore(offsetRef.current < serverTotal)
+        const nextHasMore = offsetRef.current < serverTotal
+        hasMoreRef.current = nextHasMore
+        setHasMore(nextHasMore)
       }
     } catch (e) {
+      if (requestID !== eventsRequestRef.current) return
       console.error(e)
+      setEventsError(e instanceof Error ? e.message : 'No se pudieron cargar los eventos')
     } finally {
-      setLoading(false)
-      setLoadingMore(false)
+      if (requestID === eventsRequestRef.current) {
+        setLoading(false)
+        setLoadingMore(false)
+        loadingMoreRef.current = false
+      }
     }
-  }, [token, search, statusFilter, currentFolderID, hasMore])
+  }, [token, search, statusFilter, currentFolderID])
 
   // Restore folder from URL on mount
   useEffect(() => {
@@ -460,13 +489,18 @@ export default function EventsPage() {
   }
 
   const moveEventToFolder = async (eventID: string, folderID: string | null) => {
-    await fetch(`/api/events/${eventID}/move-folder`, {
-      method: 'PATCH',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folder_id: folderID }),
-    })
-    fetchEvents()
-    fetchFolders()
+    try {
+      const res = await fetch(`/api/events/${eventID}/move-folder`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder_id: folderID }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo mover el evento')
+      await Promise.all([fetchEvents(), fetchFolders()])
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'No se pudo mover el evento')
+    }
   }
 
   // ─── Event CRUD ─────────────────────────────────────────────────────────────
@@ -704,12 +738,17 @@ export default function EventsPage() {
 
   const handleDeleteEvent = async (id: string) => {
     if (!confirm('¿Eliminar este evento y todos sus participantes?')) return
-    await fetch(`/api/events/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    fetchEvents()
-    fetchFolders()
+    try {
+      const res = await fetch(`/api/events/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || data.success === false) throw new Error(data.error || 'No se pudo eliminar el evento')
+      await Promise.all([fetchEvents(), fetchFolders()])
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'No se pudo eliminar el evento')
+    }
   }
 
   const handleDuplicateEvent = async (id: string) => {
@@ -750,40 +789,49 @@ export default function EventsPage() {
   }
 
   const handleSaveFolder = async () => {
-    if (editFolder) {
-      await fetch(`/api/events/folders/${editFolder.id}`, {
-        method: 'PUT',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(folderForm),
-      })
-    } else {
-      await fetch('/api/events/folders', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...folderForm, parent_id: currentFolderID || undefined }),
-      })
+    try {
+      const res = editFolder
+        ? await fetch(`/api/events/folders/${editFolder.id}`, {
+            method: 'PUT',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(folderForm),
+          })
+        : await fetch('/api/events/folders', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...folderForm, parent_id: currentFolderID || undefined }),
+          })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo guardar la carpeta')
+      setShowFolderModal(false)
+      setEditFolder(null)
+      await fetchFolders()
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'No se pudo guardar la carpeta')
     }
-    setShowFolderModal(false)
-    setEditFolder(null)
-    fetchFolders()
   }
 
   const handleDeleteFolder = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation()
     if (!confirm('¿Eliminar carpeta? Los eventos se moverán a la carpeta padre.')) return
-    await fetch(`/api/events/folders/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    fetchFolders()
-    fetchEvents()
+    try {
+      const res = await fetch(`/api/events/folders/${id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok || data.success === false) throw new Error(data.error || 'No se pudo eliminar la carpeta')
+      await Promise.all([fetchFolders(), fetchEvents()])
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'No se pudo eliminar la carpeta')
+    }
   }
 
   // ─── Loading ─────────────────────────────────────────────────────────────────
 
   if (loading && events.length === 0 && folders.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64">
+      <div ref={setEventsPageRef} className="flex h-64 min-w-0 flex-1 items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600" />
       </div>
     )
@@ -792,16 +840,16 @@ export default function EventsPage() {
   // ─── Render Helpers ───────────────────────────────────────────────────────────
 
   const renderEventForm = (onSubmit: () => void, submitLabel: string) => (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl h-[calc(100vh-2rem)] flex flex-col">
+    <div className="responsive-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="responsive-dialog-panel flex w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl sm:h-[calc(var(--app-height,100dvh)-2rem)]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 flex-shrink-0">
+        <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))] sm:px-6 sm:py-4">
           <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
             <CalendarDays className="w-5 h-5 text-emerald-600" />
             {submitLabel === 'Crear' ? 'Nuevo Evento' : 'Editar Evento'}
           </h2>
           <button onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}
-            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors">
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Cerrar formulario de evento">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -810,7 +858,7 @@ export default function EventsPage() {
         <div className="flex-1 overflow-y-auto">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 lg:divide-x lg:divide-slate-200 h-full">
             {/* LEFT COLUMN — Event details */}
-            <div className="p-6 space-y-4 overflow-y-auto">
+            <div className="space-y-4 p-4 sm:p-6 lg:overflow-y-auto">
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">Nombre *</label>
                 <input value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} autoFocus
@@ -823,7 +871,7 @@ export default function EventsPage() {
                   className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
                   placeholder="Describe la actividad..." />
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Fecha inicio</label>
                   <input type="datetime-local" value={formData.event_date}
@@ -843,13 +891,13 @@ export default function EventsPage() {
                   className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900"
                   placeholder="Ej: Zoom, Oficina central..." />
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Color</label>
                   <div className="flex flex-wrap gap-2">
                     {COLOR_OPTIONS.map(c => (
                       <button key={c} onClick={() => setFormData({ ...formData, color: c })}
-                        className={`w-7 h-7 rounded-full border-2 transition-all ${formData.color === c ? 'border-slate-900 scale-110' : 'border-transparent hover:scale-105'}`}
+                        className={`h-11 w-11 rounded-full border-2 transition-all sm:h-7 sm:w-7 ${formData.color === c ? 'border-slate-900 scale-110' : 'border-transparent hover:scale-105'}`}
                         style={{ backgroundColor: c }} />
                     ))}
                   </div>
@@ -886,7 +934,7 @@ export default function EventsPage() {
             {/* RIGHT COLUMN — Tag formula configuration */}
             <fieldset
               disabled={Boolean(editEvent && (editEvent.status === 'completed' || editEvent.status === 'cancelled'))}
-              className="min-w-0 overflow-y-auto bg-slate-50/50 p-6 disabled:cursor-not-allowed"
+              className="min-w-0 bg-slate-50/50 p-4 disabled:cursor-not-allowed sm:p-6 lg:overflow-y-auto"
             >
               <div className="flex items-center gap-2 mb-1">
                 <Tag className="w-4 h-4 text-emerald-600" />
@@ -1164,12 +1212,12 @@ export default function EventsPage() {
         </div>
 
         {/* Footer */}
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-200 flex-shrink-0 bg-white rounded-b-2xl">
+        <div className="flex flex-shrink-0 gap-3 rounded-b-2xl border-t border-slate-200 bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:justify-end sm:px-6 sm:py-4">
           <button onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}
-            className="px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium">Cancelar</button>
+            className="min-h-11 flex-1 px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium sm:flex-none">Cancelar</button>
           <button disabled={savingEvent || !formData.name || (formData.tag_formula_type === 'advanced' && !formulaIsValid)}
             onClick={onSubmit}
-            className="px-6 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium">
+            className="min-h-11 flex-1 px-6 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium sm:flex-none">
             {savingEvent ? 'Guardando…' : submitLabel}
           </button>
         </div>
@@ -1178,10 +1226,10 @@ export default function EventsPage() {
   )
 
   const renderFolderModal = () => (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+    <div className="responsive-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       onClick={() => setShowFolderModal(false)}>
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-sm" onClick={e => e.stopPropagation()}>
-        <div className="p-6">
+      <div className="responsive-dialog-panel w-full max-w-sm overflow-y-auto rounded-xl bg-white shadow-xl" onClick={e => e.stopPropagation()}>
+        <div className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))] sm:p-6">
           <h2 className="text-lg font-semibold text-slate-900 mb-4">
             {editFolder ? 'Editar carpeta' : 'Nueva carpeta'}
           </h2>
@@ -1197,7 +1245,7 @@ export default function EventsPage() {
               <div className="flex flex-wrap gap-2">
                 {FOLDER_ICONS.map(icon => (
                   <button key={icon} onClick={() => setFolderForm({ ...folderForm, icon })}
-                    className={`w-10 h-10 text-xl rounded-lg border-2 transition-all flex items-center justify-center ${folderForm.icon === icon ? 'border-emerald-500 bg-emerald-50 scale-110' : 'border-transparent hover:border-slate-200 hover:bg-slate-50'}`}>
+                    className={`w-11 h-11 text-xl rounded-lg border-2 transition-all flex items-center justify-center ${folderForm.icon === icon ? 'border-emerald-500 bg-emerald-50 scale-110' : 'border-transparent hover:border-slate-200 hover:bg-slate-50'}`}>
                     {icon}
                   </button>
                 ))}
@@ -1208,7 +1256,7 @@ export default function EventsPage() {
               <div className="flex flex-wrap gap-2">
                 {COLOR_OPTIONS.map(c => (
                   <button key={c} onClick={() => setFolderForm({ ...folderForm, color: c })}
-                    className={`w-7 h-7 rounded-full border-2 transition-all ${folderForm.color === c ? 'border-slate-900 scale-110' : 'border-transparent hover:scale-105'}`}
+                    className={`h-11 w-11 rounded-full border-2 transition-all sm:h-7 sm:w-7 ${folderForm.color === c ? 'border-slate-900 scale-110' : 'border-transparent hover:scale-105'}`}
                     style={{ backgroundColor: c }} />
                 ))}
               </div>
@@ -1216,9 +1264,9 @@ export default function EventsPage() {
           </div>
           <div className="flex justify-end gap-3 mt-6">
             <button onClick={() => setShowFolderModal(false)}
-              className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Cancelar</button>
+              className="min-h-11 flex-1 px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">Cancelar</button>
             <button disabled={!folderForm.name} onClick={handleSaveFolder}
-              className="px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors">
+              className="min-h-11 flex-1 px-6 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition-colors">
               {editFolder ? 'Guardar' : 'Crear'}
             </button>
           </div>
@@ -1227,10 +1275,16 @@ export default function EventsPage() {
     </div>
   )
 
+  const compactWorkspace = pageWidth > 0 && pageWidth < 1024
+  const effectiveViewMode = compactWorkspace ? 'grid' : viewMode
+  const folderGridColumns = pageWidth >= 1200 ? 5 : pageWidth >= 900 ? 4 : pageWidth >= 640 ? 3 : 2
+  const compactGridColumns = pageWidth >= 1000 ? 4 : pageWidth >= 680 ? 3 : 2
+  const eventGridColumns = pageWidth >= 1000 ? 3 : pageWidth >= 640 ? 2 : 1
+
   // ─── JSX ─────────────────────────────────────────────────────────────────────
 
   return (
-    <div ref={eventsScrollRef} className="space-y-5 overflow-y-auto flex-1 min-h-0 pb-6">
+    <div ref={setEventsPageRef} className="min-h-0 min-w-0 flex-1 space-y-5 overflow-x-hidden overflow-y-auto pb-[max(1.5rem,env(safe-area-inset-bottom))]">
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -1238,14 +1292,14 @@ export default function EventsPage() {
           <h1 className="text-2xl font-bold text-slate-900">Eventos</h1>
           <p className="text-slate-500 text-sm mt-0.5">Gestiona actividades y haz seguimiento a tus contactos</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex w-full gap-2 sm:w-auto">
           <button onClick={openCreateFolder}
-            className="flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors shadow-sm text-sm font-medium">
+            className="flex min-h-11 flex-1 items-center justify-center gap-2 px-3 py-2.5 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors shadow-sm text-sm font-medium sm:flex-none sm:px-4">
             <FolderPlus className="w-4 h-4" />
             Nueva carpeta
           </button>
           <button onClick={() => { resetEventForm(); setShowCreate(true) }}
-            className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors shadow-sm text-sm font-medium">
+            className="flex min-h-11 flex-1 items-center justify-center gap-2 px-3 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors shadow-sm text-sm font-medium sm:flex-none sm:px-4">
             <Plus className="w-4 h-4" />
             Nuevo Evento
           </button>
@@ -1254,7 +1308,7 @@ export default function EventsPage() {
 
       {/* Breadcrumb */}
       {folderPath.length > 0 && (
-        <nav className="flex items-center gap-1 text-sm">
+        <nav className="flex items-center gap-1 overflow-x-auto pb-1 text-sm">
           <button onClick={() => navigateToBreadcrumb(-1)}
             className="flex items-center gap-1.5 px-2.5 py-1 text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors">
             <Home className="w-3.5 h-3.5" />
@@ -1264,7 +1318,7 @@ export default function EventsPage() {
             <div key={folder.id} className="flex items-center gap-1">
               <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
               <button onClick={() => navigateToBreadcrumb(i)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors font-medium ${i === folderPath.length - 1 ? 'text-slate-900 bg-slate-100 cursor-default' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
+                className={`flex items-center gap-1.5 whitespace-nowrap px-2.5 py-1 rounded-lg transition-colors font-medium ${i === folderPath.length - 1 ? 'text-slate-900 bg-slate-100 cursor-default' : 'text-slate-500 hover:text-emerald-700 hover:bg-emerald-50'}`}>
                 <span className="text-base leading-none">{folder.icon}</span>
                 {folder.name}
               </button>
@@ -1302,7 +1356,7 @@ export default function EventsPage() {
           {hideCancelled ? <AlertCircle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
           {hideCancelled ? 'Cancelados ocultos' : 'Todos visibles'}
         </button>
-        <div className="flex bg-slate-100 rounded-lg p-0.5">
+        <div className="hidden bg-slate-100 rounded-lg p-0.5 sm:flex">
           <button onClick={() => setViewMode('grid')} title="Cuadrícula"
             className={`p-2 rounded-md transition-colors ${viewMode === 'grid' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
             <LayoutGrid className="w-4 h-4" />
@@ -1318,11 +1372,24 @@ export default function EventsPage() {
         </div>
       </div>
 
+      {eventsError && (
+        <div className="flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between" role="alert">
+          <span>{eventsError}. Conservamos los datos que ya estaban cargados.</span>
+          <button
+            type="button"
+            onClick={() => { setLoading(true); void fetchEvents(true) }}
+            className="min-h-11 shrink-0 rounded-lg border border-red-300 bg-white px-4 font-semibold text-red-700 hover:bg-red-100"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
+
       {/* ─── Folders section ──────────────────────────────────────────────────── */}
       {visibleFolders.length > 0 && (
         <div>
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Carpetas</p>
-          <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+          <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${folderGridColumns}, minmax(0, 1fr))` }}>
             {visibleFolders.map(folder => (
               <div key={folder.id}
                 onDragOver={e => handleFolderDragOver(e, folder.id)}
@@ -1340,20 +1407,23 @@ export default function EventsPage() {
                   <button
                     data-menu-toggle
                     onClick={e => { e.stopPropagation(); setMenuEventID(menuEventID === `f-${folder.id}` ? null : `f-${folder.id}`) }}
-                    className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-md transition-all">
+                    className="touch-action-visible flex h-11 w-11 items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg opacity-100 transition-all lg:h-auto lg:w-auto lg:p-1 lg:opacity-0 lg:group-hover:opacity-100" aria-label={`Acciones de la carpeta ${folder.name}`}>
                     <MoreHorizontal className="w-4 h-4" />
                   </button>
                 </div>
                 <p className="mt-2 text-sm font-semibold text-slate-800 truncate">{folder.name}</p>
                 <p className="text-xs text-slate-400 mt-0.5">{folder.event_count} evento{folder.event_count !== 1 ? 's' : ''}</p>
                 {menuEventID === `f-${folder.id}` && (
-                  <div className="absolute top-8 right-2 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[120px]" onClick={e => e.stopPropagation()}>
+                  <div className={compactWorkspace
+                    ? 'fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[70vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white py-1 shadow-2xl'
+                    : 'absolute right-2 top-8 z-20 min-w-[160px] rounded-xl border border-slate-200 bg-white py-1 shadow-lg'
+                  } onClick={e => e.stopPropagation()}>
                     <button onClick={e => openEditFolder(folder, e)}
-                      className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                      className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                       <Edit2 className="w-3.5 h-3.5" /> Editar
                     </button>
                     <button onClick={e => handleDeleteFolder(folder.id, e)}
-                      className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50">
+                      className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50">
                       <Trash2 className="w-3.5 h-3.5" /> Eliminar
                     </button>
                   </div>
@@ -1372,7 +1442,7 @@ export default function EventsPage() {
       )}
 
       {/* ─── Events ──────────────────────────────────────────────────────────── */}
-      {filteredEvents.length === 0 && visibleFolders.length === 0 ? (
+      {eventsError && filteredEvents.length === 0 && visibleFolders.length === 0 ? null : filteredEvents.length === 0 && visibleFolders.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-xl border border-slate-200">
           <CalendarDays className="w-12 h-12 text-slate-300 mx-auto mb-3" />
           <p className="text-slate-500 font-medium">No hay eventos{hideCancelled && events.length > 0 ? ' visibles' : ''}</p>
@@ -1385,9 +1455,9 @@ export default function EventsPage() {
         <div className="text-center py-10 bg-white rounded-xl border border-dashed border-slate-200">
           <FolderOpen className="w-10 h-10 text-slate-300 mx-auto mb-2" />
           <p className="text-slate-500 text-sm">No hay eventos aquí</p>
-          <p className="text-slate-400 text-xs mt-0.5">Arrastra eventos a esta carpeta o crea uno nuevo</p>
+          <p className="text-slate-400 text-xs mt-0.5">Mueve eventos desde su menú de acciones o crea uno nuevo</p>
         </div>
-      ) : viewMode === 'list' ? (
+      ) : effectiveViewMode === 'list' ? (
         /* List View */
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <table className="w-full">
@@ -1507,9 +1577,9 @@ export default function EventsPage() {
             </tbody>
           </table>
         </div>
-      ) : viewMode === 'compact' ? (
+      ) : effectiveViewMode === 'compact' ? (
         /* Compact View */
-        <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
+        <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${compactGridColumns}, minmax(0, 1fr))` }}>
           {filteredEvents.map(ev => {
             const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
             return (
@@ -1521,13 +1591,13 @@ export default function EventsPage() {
                   <div className="flex items-start justify-between gap-1">
                     <p className="text-sm font-semibold text-slate-800 leading-snug line-clamp-2 flex-1">{ev.name}</p>
                     <button onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
-                      className="opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded">
+                      className="touch-menu-hidden opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded">
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
                     <button
                       onClick={e => { e.stopPropagation(); handleDuplicateEvent(ev.id) }}
                       disabled={duplicatingEventID === ev.id}
-                      className="opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded disabled:opacity-50"
+                      className="touch-menu-hidden opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded disabled:opacity-50"
                       title="Duplicar"
                     >
                       <Copy className="w-3.5 h-3.5" />
@@ -1537,12 +1607,37 @@ export default function EventsPage() {
                       onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
                       onDragEnd={handleDragEnd}
                       onClick={e => e.stopPropagation()}
-                      className="flex-shrink-0 cursor-grab rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
+                      className="touch-menu-hidden flex-shrink-0 cursor-grab rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
                       title="Arrastrar para mover"
                       aria-label={`Mover ${ev.name} arrastrando`}
                     >
                       <GripVertical className="h-3.5 w-3.5" />
                     </button>
+                    <div className="touch-only-flex relative hidden shrink-0">
+                      <button
+                        type="button"
+                        data-menu-toggle
+                        onClick={e => { e.stopPropagation(); setMenuEventID(menuEventID === ev.id ? null : ev.id) }}
+                        className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"
+                        aria-label={`Acciones de ${ev.name}`}
+                        aria-expanded={menuEventID === ev.id}
+                      >
+                        <MoreHorizontal className="h-5 w-5" />
+                      </button>
+                      {menuEventID === ev.id && (
+                        <div role="menu" className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl" onClick={e => e.stopPropagation()}>
+                          <button type="button" onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-4 w-4" />Ver detalle</button>
+                          <button type="button" onClick={() => { openEditEvent(ev); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-4 w-4" />Editar</button>
+                          <button type="button" onClick={() => { void handleDuplicateEvent(ev.id); setMenuEventID(null) }} disabled={duplicatingEventID === ev.id} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Copy className="h-4 w-4" />Duplicar</button>
+                          <p className="mt-1 border-t border-slate-100 px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Mover a carpeta</p>
+                          {ev.folder_id && <button type="button" onClick={() => { void moveEventToFolder(ev.id, null); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Home className="h-4 w-4" />Sin carpeta</button>}
+                          {folders.filter(folder => folder.id !== ev.folder_id).map(folder => (
+                            <button key={folder.id} type="button" onClick={() => { void moveEventToFolder(ev.id, folder.id); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><span aria-hidden="true">{folder.icon}</span>{folder.name}</button>
+                          ))}
+                          <button type="button" onClick={() => { void handleDeleteEvent(ev.id); setMenuEventID(null) }} className="mt-1 flex min-h-11 w-full items-center gap-3 rounded-xl border-t border-slate-100 px-3 text-sm text-red-700 hover:bg-red-50"><Trash2 className="h-4 w-4" />Eliminar</button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                   {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) && (
                     <div className="mt-1.5">
@@ -1570,15 +1665,15 @@ export default function EventsPage() {
         </div>
       ) : (
         /* Grid View */
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-5" style={{ gridTemplateColumns: `repeat(${eventGridColumns}, minmax(0, 1fr))` }}>
           {filteredEvents.map(ev => {
             const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
             const counts = ev.participant_counts || {}
             const total = ev.total_participants || 0
             return (
               <div key={ev.id}
-                className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-md hover:border-slate-300 transition-all group">
-                <div className="h-1.5" style={{ backgroundColor: ev.color }} />
+                className="group rounded-xl border border-slate-200 bg-white hover:border-slate-300 hover:shadow-md transition-all">
+                <div className="h-1.5 rounded-t-xl" style={{ backgroundColor: ev.color }} />
                 <div className="p-5">
                   <div className="flex items-start justify-between mb-3">
                     <div className="flex-1 min-w-0">
@@ -1593,7 +1688,7 @@ export default function EventsPage() {
                         draggable
                         onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
                         onDragEnd={handleDragEnd}
-                        className="cursor-grab rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
+                        className="hidden cursor-grab rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing lg:block"
                         title="Arrastrar para mover"
                         aria-label={`Mover ${ev.name} arrastrando`}
                       >
@@ -1601,23 +1696,26 @@ export default function EventsPage() {
                       </button>
                       <div className="relative">
                         <button data-menu-toggle onClick={e => { e.stopPropagation(); setMenuEventID(menuEventID === ev.id ? null : ev.id) }}
-                          className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg opacity-0 group-hover:opacity-100 transition-all">
+                          className="touch-action-visible flex h-11 w-11 items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg opacity-100 transition-all lg:h-auto lg:w-auto lg:p-1 lg:opacity-0 lg:group-hover:opacity-100" aria-label={`Acciones de ${ev.name}`}>
                           <MoreHorizontal className="w-4 h-4" />
                         </button>
                         {menuEventID === ev.id && (
-                          <div className="absolute right-0 top-7 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" onClick={e => e.stopPropagation()}>
+                          <div className={compactWorkspace
+                            ? 'fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white py-1 shadow-2xl'
+                            : 'absolute right-0 top-7 z-20 min-w-[180px] rounded-xl border border-slate-200 bg-white py-1 shadow-lg'
+                          } onClick={e => e.stopPropagation()}>
                             <button onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }}
-                              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                              className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                               <Eye className="w-3.5 h-3.5" /> Ver detalle
                             </button>
                             <button onClick={() => { openEditEvent(ev); setMenuEventID(null) }}
-                              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                              className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                               <Edit2 className="w-3.5 h-3.5" /> Editar
                             </button>
                             <button
                               onClick={() => { handleDuplicateEvent(ev.id); setMenuEventID(null) }}
                               disabled={duplicatingEventID === ev.id}
-                              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                              className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                             >
                               <Copy className="w-3.5 h-3.5" /> Duplicar
                             </button>
@@ -1625,19 +1723,19 @@ export default function EventsPage() {
                             <p className="px-3 py-1 text-xs font-semibold text-slate-400 uppercase">Mover a</p>
                             {ev.folder_id && (
                               <button onClick={() => { moveEventToFolder(ev.id, null); setMenuEventID(null) }}
-                                className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">
+                                className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">
                                 <Home className="w-3.5 h-3.5" /> Sin carpeta
                               </button>
                             )}
                             {folders.filter(f => f.id !== ev.folder_id).map(f => (
                               <button key={f.id} onClick={() => { moveEventToFolder(ev.id, f.id); setMenuEventID(null) }}
-                                className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">
+                                className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">
                                 <span className="text-base">{f.icon}</span> {f.name}
                               </button>
                             ))}
                             <div className="border-t border-slate-100 my-1" />
                             <button onClick={() => { handleDeleteEvent(ev.id); setMenuEventID(null) }}
-                              className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50">
+                              className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50">
                               <Trash2 className="w-3.5 h-3.5" /> Eliminar
                             </button>
                           </div>
@@ -1690,12 +1788,12 @@ export default function EventsPage() {
 
                   <div className="flex items-center gap-2 pt-3 border-t border-slate-100">
                     <button onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors font-medium">
+                      className="flex min-h-11 flex-1 items-center justify-center gap-1.5 px-3 py-2 text-sm bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors font-medium">
                       <Eye className="w-3.5 h-3.5" />
                       Ver detalle
                     </button>
                     <button onClick={() => openEditEvent(ev)}
-                      className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
+                      className="flex h-11 w-11 items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" aria-label={`Editar ${ev.name}`}>
                       <Edit2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -1730,7 +1828,7 @@ export default function EventsPage() {
             dragEventIDRef.current = null
             await moveEventToFolder(eventID, folderPath.length > 1 ? folderPath[folderPath.length - 2].id : null)
           }}
-          className={`mt-4 flex items-center justify-center gap-2 px-6 py-4 border-2 border-dashed rounded-xl transition-all text-sm ${
+          className={`mt-4 hidden items-center justify-center gap-2 px-6 py-4 border-2 border-dashed rounded-xl transition-all text-sm md:flex ${
             dragOverFolderID === '__root__'
               ? 'border-emerald-400 bg-emerald-50 text-emerald-600'
               : 'border-slate-200 text-slate-400 hover:border-slate-300'

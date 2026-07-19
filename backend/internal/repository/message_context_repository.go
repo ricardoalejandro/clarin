@@ -14,7 +14,7 @@ func (r *MessageRepository) GetByReference(ctx context.Context, accountID, chatI
 	row := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
+		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited,false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked,false), COALESCE(is_view_once,false), COALESCE(media_deleted,false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
@@ -33,7 +33,7 @@ func (r *MessageRepository) GetWindowByChatID(ctx context.Context, accountID, ch
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, provider, template_name, timestamp, created_at,
+		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited,false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked,false), COALESCE(is_view_once,false), COALESCE(media_deleted,false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard
@@ -68,7 +68,8 @@ func scanContextMessage(scanner messageScanner) (*domain.Message, error) {
 		&message.ID, &message.AccountID, &message.DeviceID, &message.ChatID, &message.MessageID,
 		&message.FromJID, &message.FromName, &message.Body, &message.MessageType, &message.MediaURL,
 		&message.MediaMimetype, &message.MediaFilename, &message.MediaSize, &message.MediaAssetID,
-		&message.IsFromMe, &message.IsRead, &message.Status, &message.Provider, &message.TemplateName,
+		&message.IsFromMe, &message.IsRead, &message.Status, &message.DeliveredAt, &message.ReadAt, &message.IsEdited,
+		&message.Provider, &message.TemplateName,
 		&message.Timestamp, &message.CreatedAt, &message.QuotedMessageID, &message.QuotedBody,
 		&message.QuotedSender, &message.QuotedIsFromMe, &message.IsRevoked, &message.IsViewOnce, &message.MediaDeleted,
 		&message.Latitude, &message.Longitude, &message.ContactName, &message.ContactPhone,

@@ -3504,30 +3504,54 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	if req.MessageID == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "message_id is required"})
+	if strings.TrimSpace(req.ChatJID) == "" || strings.TrimSpace(req.MessageID) == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Selecciona un mensaje válido", "code": "invalid_message"})
 	}
 
-	if err := s.services.Chat.RevokeMessage(c.Context(), deviceID, req.ChatJID, req.SenderJID, req.MessageID, req.IsFromMe); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	chat, err := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID)
+	if err != nil || !chatBelongsToAccount(chat, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
+	}
+	message, err := s.services.Chat.GetMessageByID(c.Context(), chat.ID, req.MessageID)
+	if err != nil || !messageBelongsToChatAccount(message, chat.ID, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
+	}
+	if !message.IsFromMe {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Solo puedes eliminar para todos mensajes enviados desde esta cuenta", "code": "message_not_owned"})
+	}
+	if message.DeviceID == nil || *message.DeviceID != deviceID {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este mensaje se envió desde otro dispositivo", "code": "message_device_mismatch"})
+	}
+	if message.IsRevoked {
+		return c.JSON(fiber.Map{"success": true, "persisted": true})
 	}
 
-	// Mark as revoked in DB
-	_ = s.repos.Message.MarkAsRevoked(c.Context(), accountID, req.ChatJID, req.MessageID)
-	if chat, _ := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID); chat != nil {
-		s.invalidateMessagesCache(accountID, &chat.ID)
-	} else {
-		s.invalidateMessagesCache(accountID, nil)
+	senderJID := ""
+	if message.FromJID != nil {
+		senderJID = *message.FromJID
 	}
+	if err := s.services.Chat.RevokeMessage(c.Context(), deviceID, chat.JID, senderJID, message.MessageID, true); err != nil {
+		log.Printf("[MessageAction] revoke failed account=%s device=%s chat=%s message=%s: %v", accountID, deviceID, chat.ID, message.ID, err)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": "WhatsApp no pudo eliminar el mensaje para todos", "code": "provider_revoke_failed"})
+	}
+
+	persisted := true
+	warning := ""
+	if err := s.repos.Message.MarkAsRevoked(c.Context(), accountID, chat.JID, message.MessageID); err != nil {
+		persisted = false
+		warning = "WhatsApp eliminó el mensaje, pero Clarin todavía está reconciliando el cambio"
+		log.Printf("[MessageAction] revoke persistence failed account=%s chat=%s message=%s: %v", accountID, chat.ID, message.ID, err)
+	}
+	s.invalidateMessagesCache(accountID, &chat.ID)
 
 	// Broadcast revocation to frontend
-	s.hub.BroadcastToAccount(accountID, "message_revoked", map[string]interface{}{
-		"chat_jid":   req.ChatJID,
-		"message_id": req.MessageID,
-		"is_from_me": req.IsFromMe,
+	s.hub.BroadcastToAccount(accountID, ws.EventMessageRevoked, map[string]interface{}{
+		"chat_jid":   chat.JID,
+		"message_id": message.MessageID,
+		"is_from_me": true,
 	})
 
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "persisted": persisted, "warning": warning})
 }
 
 func (s *Server) handleEditMessage(c *fiber.Ctx) error {
@@ -3553,31 +3577,55 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	if req.MessageID == "" || req.NewBody == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "message_id and new_body are required"})
+	if strings.TrimSpace(req.ChatJID) == "" || strings.TrimSpace(req.MessageID) == "" || strings.TrimSpace(req.NewBody) == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Escribe un texto válido", "code": "invalid_message_edit"})
 	}
 
-	if err := s.services.Chat.EditMessage(c.Context(), deviceID, req.ChatJID, req.MessageID, req.NewBody); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	chat, err := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID)
+	if err != nil || !chatBelongsToAccount(chat, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
+	}
+	message, err := s.services.Chat.GetMessageByID(c.Context(), chat.ID, req.MessageID)
+	if err != nil || !messageBelongsToChatAccount(message, chat.ID, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
+	}
+	messageType := domain.MessageTypeText
+	if message.MessageType != nil && strings.TrimSpace(*message.MessageType) != "" {
+		messageType = *message.MessageType
+	}
+	if !message.IsFromMe || messageType != domain.MessageTypeText || message.IsRevoked {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este mensaje no se puede editar", "code": "message_not_editable"})
+	}
+	if message.DeviceID == nil || *message.DeviceID != deviceID {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este mensaje se envió desde otro dispositivo", "code": "message_device_mismatch"})
+	}
+	if time.Since(message.Timestamp) > 15*time.Minute {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "WhatsApp solo permite editar durante los primeros 15 minutos", "code": "message_edit_window_expired"})
 	}
 
-	// Update in DB
-	_ = s.repos.Message.UpdateBody(c.Context(), accountID, req.ChatJID, req.MessageID, req.NewBody)
-	if chat, _ := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID); chat != nil {
-		s.invalidateMessagesCache(accountID, &chat.ID)
-	} else {
-		s.invalidateMessagesCache(accountID, nil)
+	if err := s.services.Chat.EditMessage(c.Context(), deviceID, chat.JID, message.MessageID, req.NewBody); err != nil {
+		log.Printf("[MessageAction] edit failed account=%s device=%s chat=%s message=%s: %v", accountID, deviceID, chat.ID, message.ID, err)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": "WhatsApp no pudo editar el mensaje", "code": "provider_edit_failed"})
 	}
+
+	persisted := true
+	warning := ""
+	if err := s.repos.Message.UpdateBody(c.Context(), accountID, chat.JID, message.MessageID, req.NewBody); err != nil {
+		persisted = false
+		warning = "WhatsApp editó el mensaje, pero Clarin todavía está reconciliando el cambio"
+		log.Printf("[MessageAction] edit persistence failed account=%s chat=%s message=%s: %v", accountID, chat.ID, message.ID, err)
+	}
+	s.invalidateMessagesCache(accountID, &chat.ID)
 
 	// Broadcast to frontend
 	s.hub.BroadcastToAccount(accountID, ws.EventMessageEdited, map[string]interface{}{
-		"chat_jid":   req.ChatJID,
-		"message_id": req.MessageID,
+		"chat_jid":   chat.JID,
+		"message_id": message.MessageID,
 		"new_body":   req.NewBody,
 		"is_from_me": true,
 	})
 
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "persisted": persisted, "warning": warning})
 }
 
 func (s *Server) handleCheckWhatsApp(c *fiber.Ctx) error {

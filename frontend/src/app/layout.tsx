@@ -35,16 +35,31 @@ export default function RootLayout({
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
         <script dangerouslySetInnerHTML={{ __html: `
           (function() {
-            var lastW = window.innerWidth;
-            function setH() {
-              document.documentElement.style.setProperty('--app-height', window.innerHeight + 'px');
-              lastW = window.innerWidth;
+            var frame = 0;
+            function setViewport() {
+              if (frame) cancelAnimationFrame(frame);
+              frame = requestAnimationFrame(function() {
+                var viewport = window.visualViewport;
+                var height = viewport ? viewport.height : window.innerHeight;
+                var width = viewport ? viewport.width : window.innerWidth;
+                var offsetTop = viewport ? viewport.offsetTop : 0;
+                var offsetLeft = viewport ? viewport.offsetLeft : 0;
+                var keyboardInset = Math.max(0, window.innerHeight - height - offsetTop);
+                var root = document.documentElement;
+                root.style.setProperty('--app-height', Math.round(height) + 'px');
+                root.style.setProperty('--app-width', Math.round(width) + 'px');
+                root.style.setProperty('--visual-viewport-offset-top', Math.round(offsetTop) + 'px');
+                root.style.setProperty('--visual-viewport-offset-left', Math.round(offsetLeft) + 'px');
+                root.style.setProperty('--keyboard-inset', Math.round(keyboardInset) + 'px');
+              });
             }
-            setH();
-            window.addEventListener('resize', function() {
-              if (window.innerWidth !== lastW) setH();
-            });
-            window.addEventListener('orientationchange', function() { setTimeout(setH, 150); });
+            setViewport();
+            window.addEventListener('resize', setViewport, { passive: true });
+            window.addEventListener('orientationchange', function() { setTimeout(setViewport, 150); }, { passive: true });
+            if (window.visualViewport) {
+              window.visualViewport.addEventListener('resize', setViewport, { passive: true });
+              window.visualViewport.addEventListener('scroll', setViewport, { passive: true });
+            }
           })();
         `}} />
       </head>

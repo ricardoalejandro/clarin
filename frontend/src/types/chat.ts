@@ -38,6 +38,7 @@ export interface PollVote {
 
 export interface Message {
   id: string
+  device_id?: string
   message_id: string
   from_jid?: string
   from_name?: string
@@ -56,6 +57,8 @@ export interface Message {
   is_view_once?: boolean
   status: string
   timestamp: string
+  delivered_at?: string
+  read_at?: string
   quoted_message_id?: string
   quoted_body?: string
   quoted_sender?: string

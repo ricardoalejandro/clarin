@@ -480,6 +480,9 @@ func (s *Server) handleListSessions(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	if sessions == nil {
+		sessions = make([]*domain.ProgramSession, 0)
+	}
 
 	return c.JSON(sessions)
 }

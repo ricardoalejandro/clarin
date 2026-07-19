@@ -1,12 +1,13 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Send, Paperclip, MoreVertical, Search, Phone, Video,
   ArrowLeft, Smile, Image as ImageIcon, FileText, X,
   Mic, Trash2, Reply, Check, CheckCheck, Download,
   CornerUpRight, Play, Pause, AlertCircle, User, EyeOff, RefreshCw,
-  ChevronUp, ChevronDown, PanelRight,
+  ChevronUp, ChevronDown, PanelRight, Camera, Copy, Info, Keyboard,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -20,12 +21,16 @@ import StickerPicker from './StickerPicker'
 import EmojiPicker from './EmojiPicker'
 import ContactPanel from './ContactPanel'
 import ForwardMessageModal from './ForwardMessageModal'
+import MessageInfoDialog from './MessageInfoDialog'
 import QuickReplyPicker from './QuickReplyPicker'
+import MobileComposerAccessory, { MobileComposerAccessoryTab } from './MobileComposerAccessory'
+import { useChatMobileChrome } from './ChatMobileChromeContext'
 import ContactSelector, { SelectedPerson } from '../ContactSelector'
 import { compressImageStandard } from '@/utils/imageCompression'
 import { applyReactionMutation, dedupeReactions, hasOwnReaction, SELF_REACTION_ACTOR } from '@/utils/chatReactions'
 import { ChatMediaType, validateChatAttachment } from '@/utils/chatAttachments'
 import { chatMediaIdentity } from '@/utils/chatMediaUrl'
+import { useContainerWidth } from '../responsive/useContainerWidth'
 
 type CachedChatMessages = {
   messages: Message[]
@@ -146,6 +151,12 @@ function mergeFetchedMessages(current: Message[], fetched: Message[]): Message[]
   })
 }
 
+function useStableCallback<T extends (...args: any[]) => any>(callback: T): T {
+  const callbackRef = useRef(callback)
+  callbackRef.current = callback
+  return useCallback(((...args: Parameters<T>) => callbackRef.current(...args)) as T, [])
+}
+
 interface ChatPanelProps {
   chatId: string | null
   deviceId?: string
@@ -157,9 +168,13 @@ interface ChatPanelProps {
   onContactInfoToggle?: (show: boolean) => void
   contactInfoOpen?: boolean
   onRequestDelete?: () => void
+  isActive?: boolean
 }
 
-export default function ChatPanel({ chatId, deviceId, device, initialChat, onClose, className = '', readOnly = false, onContactInfoToggle, contactInfoOpen, onRequestDelete }: ChatPanelProps) {
+export default function ChatPanel({ chatId, deviceId, device, initialChat, onClose, className = '', readOnly = false, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true }: ChatPanelProps) {
+  const { ref: panelRef, width: panelWidth } = useContainerWidth<HTMLDivElement>()
+  const { setComposerAccessoryOpen } = useChatMobileChrome()
+  const compactActions = panelWidth > 0 && panelWidth < 640
   const deviceProvider = device?.provider || 'whatsapp_web'
   const deviceUnavailable = Boolean(device && (device.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
   const effectiveReadOnly = readOnly || !deviceId || deviceUnavailable
@@ -176,6 +191,9 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const [chat, setChat] = useState<Chat | null>(initialChat || null)
   const [messages, setMessages] = useState<Message[]>([])
   const messagesCacheRef = useRef<Map<string, CachedChatMessages>>(new Map())
+  const isNearBottomRef = useRef(true)
+  const [isFollowingLatest, setIsFollowingLatest] = useState(true)
+  const [pendingLatestMessages, setPendingLatestMessages] = useState(0)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const loadingMoreRef = useRef(false)
@@ -190,6 +208,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const [showAttachments, setShowAttachments] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const docFileInputRef = useRef<HTMLInputElement>(null)
+  const cameraInputRef = useRef<HTMLInputElement>(null)
   const [showContactPicker, setShowContactPicker] = useState(false)
 
   // Media preview with caption
@@ -206,6 +225,11 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   // Modals & Viewers
   const [viewImage, setViewImage] = useState<string | null>(null)
   const [activePopup, setActivePopup] = useState<'emoji' | 'sticker' | null>(null)
+  const [mobileAccessoryReady, setMobileAccessoryReady] = useState(false)
+  const [mobileAccessoryHeight, setMobileAccessoryHeight] = useState(280)
+  const accessoryHistoryActiveRef = useRef(false)
+  const closedAccessoryHistoryActiveRef = useRef(false)
+  const restoreKeyboardAfterCloseRef = useRef(false)
 
   // Panels
   const [showContactInfoLocal, setShowContactInfoLocal] = useState(false)
@@ -226,6 +250,15 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const [quotedContextActive, setQuotedContextActive] = useState(false)
   const [quoteNavigationLoading, setQuoteNavigationLoading] = useState(false)
   const [showHeaderMenu, setShowHeaderMenu] = useState(false)
+  const headerMenuTriggerRef = useRef<HTMLButtonElement>(null)
+
+  // Compact message selection
+  const [selectedMessage, setSelectedMessage] = useState<Message | null>(null)
+  const selectedMessageRef = useRef<Message | null>(null)
+  const selectionHistoryActiveRef = useRef(false)
+  const [showSelectionMenu, setShowSelectionMenu] = useState(false)
+  const [messageActionPending, setMessageActionPending] = useState<'delete' | null>(null)
+  const [infoMessage, setInfoMessage] = useState<Message | null>(null)
 
   // Forwarding
   const [forwardingMsg, setForwardingMsg] = useState<Message | null>(null)
@@ -287,6 +320,133 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const savingStickerUrlsRef = useRef<Set<string>>(new Set())
   const historySyncTimeoutRef = useRef<number | null>(null)
 
+  const removeAccessoryHistoryMarker = useCallback((consumeHistory: boolean) => {
+    if (typeof window === 'undefined' || !accessoryHistoryActiveRef.current) return
+    accessoryHistoryActiveRef.current = false
+    const state = window.history.state
+    if (!state?.__clarinComposerAccessory) return
+    if (consumeHistory) {
+      window.history.back()
+      return
+    }
+    const { __clarinComposerAccessory: _accessoryMarker, ...rest } = state
+    window.history.replaceState({ ...rest, __clarinComposerAccessoryClosed: true }, '')
+    closedAccessoryHistoryActiveRef.current = true
+  }, [])
+
+  const focusMessageComposer = useCallback(() => {
+    const editor = panelRef.current?.querySelector<HTMLElement>('[data-chat-keyboard-target="true"]')
+    editor?.focus({ preventScroll: true })
+    inputRef.current?.focus()
+  }, [panelRef])
+
+  const closeMobileAccessory = useCallback((options?: { restoreKeyboard?: boolean; consumeHistory?: boolean }) => {
+    const restoreKeyboard = options?.restoreKeyboard === true
+    restoreKeyboardAfterCloseRef.current = restoreKeyboard
+    setActivePopup(null)
+    setMobileAccessoryReady(false)
+    removeAccessoryHistoryMarker(options?.consumeHistory !== false)
+    if (restoreKeyboard) {
+      focusMessageComposer()
+      requestAnimationFrame(focusMessageComposer)
+    }
+  }, [focusMessageComposer, removeAccessoryHistoryMarker])
+
+  const openMobileAccessory = useCallback((tab: MobileComposerAccessoryTab) => {
+    if (!compactActions) {
+      setActivePopup(tab)
+      return
+    }
+
+    const viewport = window.visualViewport
+    const fullHeight = window.innerHeight
+    const keyboardInset = Math.max(0, fullHeight - (viewport?.height || fullHeight) - (viewport?.offsetTop || 0))
+    const minimum = Math.min(260, fullHeight * 0.42)
+    const maximum = Math.min(360, fullHeight * 0.56)
+    const preferred = keyboardInset > 120 ? keyboardInset : fullHeight * 0.38
+    setMobileAccessoryHeight(Math.round(Math.max(minimum, Math.min(preferred, maximum))))
+    if (activePopup === null) setMobileAccessoryReady(false)
+
+    inputRef.current?.blur()
+    setShowAttachments(false)
+    setShowQuickReply(false)
+    setQuickReplyFilter('')
+
+    const currentState = typeof window.history.state === 'object' && window.history.state ? window.history.state : {}
+    if (closedAccessoryHistoryActiveRef.current || currentState.__clarinComposerAccessoryClosed) {
+      const { __clarinComposerAccessoryClosed: _closedAccessoryMarker, ...rest } = currentState
+      window.history.replaceState({ ...rest, __clarinComposerAccessory: true }, '')
+      closedAccessoryHistoryActiveRef.current = false
+      accessoryHistoryActiveRef.current = true
+    } else if (!accessoryHistoryActiveRef.current) {
+      window.history.pushState({ ...currentState, __clarinComposerAccessory: true }, '')
+      accessoryHistoryActiveRef.current = true
+    }
+    setActivePopup(tab)
+  }, [activePopup, compactActions])
+
+  useEffect(() => {
+    const accessoryOpen = compactActions && activePopup !== null
+    setComposerAccessoryOpen(accessoryOpen)
+    if (!accessoryOpen && accessoryHistoryActiveRef.current) {
+      if (!compactActions) {
+        setActivePopup(null)
+        setMobileAccessoryReady(false)
+      }
+      removeAccessoryHistoryMarker(false)
+    }
+  }, [activePopup, compactActions, removeAccessoryHistoryMarker, setComposerAccessoryOpen])
+
+  useEffect(() => {
+    if (activePopup !== null || !restoreKeyboardAfterCloseRef.current) return
+    restoreKeyboardAfterCloseRef.current = false
+    focusMessageComposer()
+    requestAnimationFrame(focusMessageComposer)
+    const shortTimer = window.setTimeout(focusMessageComposer, 80)
+    const settledTimer = window.setTimeout(focusMessageComposer, 240)
+    return () => {
+      window.clearTimeout(shortTimer)
+      window.clearTimeout(settledTimer)
+    }
+  }, [activePopup, focusMessageComposer])
+
+  useEffect(() => () => {
+    setComposerAccessoryOpen(false)
+    removeAccessoryHistoryMarker(false)
+  }, [removeAccessoryHistoryMarker, setComposerAccessoryOpen])
+
+  useEffect(() => {
+    closedAccessoryHistoryActiveRef.current = Boolean(window.history.state?.__clarinComposerAccessoryClosed)
+  }, [])
+
+  useEffect(() => {
+    if (!compactActions || activePopup === null) {
+      setMobileAccessoryReady(false)
+      return
+    }
+
+    const viewport = window.visualViewport
+    let frame = 0
+    const markReadyWhenKeyboardCloses = () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        const visibleHeight = viewport?.height || window.innerHeight
+        const keyboardInset = Math.max(0, window.innerHeight - visibleHeight - (viewport?.offsetTop || 0))
+        if (keyboardInset < 96) setMobileAccessoryReady(true)
+      })
+    }
+    const fallback = window.setTimeout(() => setMobileAccessoryReady(true), 350)
+    viewport?.addEventListener('resize', markReadyWhenKeyboardCloses, { passive: true })
+    viewport?.addEventListener('scroll', markReadyWhenKeyboardCloses, { passive: true })
+    markReadyWhenKeyboardCloses()
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      window.clearTimeout(fallback)
+      viewport?.removeEventListener('resize', markReadyWhenKeyboardCloses)
+      viewport?.removeEventListener('scroll', markReadyWhenKeyboardCloses)
+    }
+  }, [activePopup, compactActions])
+
   const closeSearch = useCallback(() => {
     searchSessionRef.current += 1
     searchOpenRef.current = false
@@ -318,6 +478,101 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     if (searchOpenRef.current) closeSearch()
     else openSearch()
   }, [closeSearch, openSearch])
+
+  const clearMessageSelection = useCallback((consumeHistory = true) => {
+    selectedMessageRef.current = null
+    setSelectedMessage(null)
+    setShowSelectionMenu(false)
+    if (typeof window === 'undefined' || !selectionHistoryActiveRef.current) return
+    selectionHistoryActiveRef.current = false
+    const state = window.history.state
+    if (!state?.__clarinMessageSelection) return
+    if (consumeHistory) {
+      window.history.back()
+      return
+    }
+    const { __clarinMessageSelection: _selectionMarker, ...rest } = state
+    window.history.replaceState(rest, '')
+  }, [])
+
+  const selectMessage = useCallback((message: Message) => {
+    if (!compactActions || message.is_revoked || message.id.startsWith('optimistic-')) return
+    if (!selectionHistoryActiveRef.current && typeof window !== 'undefined') {
+      const currentState = typeof window.history.state === 'object' && window.history.state ? window.history.state : {}
+      window.history.pushState({ ...currentState, __clarinMessageSelection: true }, '')
+      selectionHistoryActiveRef.current = true
+    }
+    selectedMessageRef.current = message
+    setSelectedMessage(message)
+    setShowSelectionMenu(false)
+    setShowHeaderMenu(false)
+    setShowAttachments(false)
+    setActivePopup(null)
+  }, [compactActions])
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      if (accessoryHistoryActiveRef.current) {
+        accessoryHistoryActiveRef.current = false
+        closedAccessoryHistoryActiveRef.current = false
+        setActivePopup(null)
+        setMobileAccessoryReady(false)
+        return
+      }
+      if (closedAccessoryHistoryActiveRef.current) {
+        closedAccessoryHistoryActiveRef.current = false
+        window.setTimeout(() => window.history.back(), 0)
+        return
+      }
+      if (!selectionHistoryActiveRef.current || event.state?.__clarinMessageSelection) return
+      selectionHistoryActiveRef.current = false
+      selectedMessageRef.current = null
+      setSelectedMessage(null)
+      setShowSelectionMenu(false)
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  useEffect(() => {
+    if (compactActions) return
+    clearMessageSelection(false)
+  }, [clearMessageSelection, compactActions])
+
+  useEffect(() => {
+    const current = selectedMessageRef.current
+    if (!current) return
+    const latest = (searchWindowMessages || messages).find(message => hasSameMessageIdentity(message, current))
+    if (!latest) return
+    if (latest.is_revoked) {
+      clearMessageSelection()
+      return
+    }
+    if (latest !== current) {
+      selectedMessageRef.current = latest
+      setSelectedMessage(latest)
+    }
+  }, [clearMessageSelection, messages, searchWindowMessages])
+
+  useEffect(() => {
+    clearMessageSelection(false)
+    setInfoMessage(null)
+  }, [chatId, clearMessageSelection])
+
+  useEffect(() => {
+    if (isActive) return
+    closeSearch()
+    setShowHeaderMenu(false)
+    setShowAttachments(false)
+    setActivePopup(null)
+    setShowQuickReply(false)
+    setQuickReplyFilter('')
+    setShowContactPicker(false)
+    setViewImage(null)
+    setForwardingMsg(null)
+    clearMessageSelection(false)
+    setInfoMessage(null)
+  }, [clearMessageSelection, closeSearch, isActive])
 
   const scrollMessageIntoView = useCallback((messageIdentity: string) => {
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -524,7 +779,10 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     if (!showHeaderMenu) return
     const close = () => setShowHeaderMenu(false)
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
+      if (event.key === 'Escape') {
+        close()
+        requestAnimationFrame(() => headerMenuTriggerRef.current?.focus())
+      }
     }
     document.addEventListener('pointerdown', close)
     document.addEventListener('keydown', handleKeyDown)
@@ -781,6 +1039,9 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     }
     setSyncingHistory(false)
     setHistorySyncFeedback(null)
+    isNearBottomRef.current = true
+    setIsFollowingLatest(true)
+    setPendingLatestMessages(0)
     loadingMoreRef.current = false
     setLoadingMore(false)
     if (chatId) {
@@ -820,8 +1081,10 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
           if (matchChatId === chatId ||
               (chat && actualMsg.from_jid === chat?.jid) ||
               (chat && actualMsg.to === chat?.jid)) {
+            const actualMessage = actualMsg as Message
+            const shouldFollowMessage = isNearBottomRef.current
+            const alreadyKnown = (messagesCacheRef.current.get(chatId)?.messages || []).some(message => hasSameMessageIdentity(message, actualMessage))
             updateMessages(prev => {
-              const actualMessage = actualMsg as Message
               const realAlreadyExists = prev.some(message => hasSameMessageIdentity(message, actualMessage))
 
               if (actualMessage.is_from_me) {
@@ -844,7 +1107,8 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
               // Incoming message → always add
               return [...prev, actualMessage]
             })
-            scrollToBottom()
+            if (shouldFollowMessage) scrollToBottom()
+            else if (!alreadyKnown) setPendingLatestMessages(current => current + 1)
           }
         } else if ((eventType === 'message_update') && payload) {
           const actualMsg = payload.message || payload
@@ -853,14 +1117,17 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
           // Update message delivery/read status (only upgrade, never downgrade)
           const msgIds: string[] = payload.message_ids || []
           const newStatus: string = payload.status
+          const receiptTimestamp = typeof payload.timestamp === 'string' ? payload.timestamp : undefined
           const statusOrder: Record<string, number> = { sending: 0, sent: 1, delivered: 2, read: 3 }
           const newLevel = statusOrder[newStatus] ?? -1
           if (chat && payload.chat_jid === chat.jid && msgIds.length > 0 && newLevel >= 0) {
             updateMessages(prev => prev.map(m => {
               if (!msgIds.includes(m.message_id)) return m
               const currentLevel = statusOrder[m.status] ?? -1
-              if (newLevel > currentLevel) return { ...m, status: newStatus }
-              return m
+              const next: Message = newLevel > currentLevel ? { ...m, status: newStatus } : { ...m }
+              if (newStatus === 'delivered' && receiptTimestamp && !next.delivered_at) next.delivered_at = receiptTimestamp
+              if (newStatus === 'read' && receiptTimestamp && !next.read_at) next.read_at = receiptTimestamp
+              return next
             }))
           }
         } else if (eventType === 'message_revoked' && payload) {
@@ -995,7 +1262,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
 		  return merged
 		})
         setHasMoreMessages(nextHasMore)
-        scrollToBottom()
+        if (isNearBottomRef.current) scrollToBottom()
 
         // Send read receipts for unread incoming messages
         if (targetDeviceId && data.chat?.jid) {
@@ -1028,8 +1295,12 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   }
 
   const scrollToBottom = () => {
+    const targetChatId = activeChatIdRef.current
+    isNearBottomRef.current = true
+    setIsFollowingLatest(true)
+    setPendingLatestMessages(0)
     setTimeout(() => {
-      if (messagesContainerRef.current) {
+      if (activeChatIdRef.current === targetChatId && messagesContainerRef.current) {
         messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight
       }
     }, 100)
@@ -1088,6 +1359,11 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const handleMessagesScroll = () => {
     const container = messagesContainerRef.current
     if (!container) return
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    const nearBottom = distanceFromBottom <= 120
+    isNearBottomRef.current = nearBottom
+    setIsFollowingLatest(current => current === nearBottom ? current : nearBottom)
+    if (nearBottom) setPendingLatestMessages(0)
     if (container.scrollTop < 80 && hasMoreMessages && !loadingMore && !loadingMoreRef.current) {
       loadOlderMessages()
     }
@@ -1122,6 +1398,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     // Handle edit mode
     if (editingMsg) {
       const token = localStorage.getItem('token')
+      let editSucceeded = false
       try {
         const res = await fetch('/api/messages/edit', {
           method: 'POST',
@@ -1134,18 +1411,22 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
           })
         })
         const data = await res.json()
-        if (data.success) {
+        if (res.ok && data.success) {
           updateTargetMessages(prev => prev.map(m =>
             m.message_id === editingMsg.message_id ? { ...m, body: text, is_edited: true } : m
           ))
+          editSucceeded = true
+          if (data.warning) setComposerFeedback({ kind: 'info', message: data.warning })
         } else {
-          alert(data.error || 'Error al editar mensaje')
+          setComposerFeedback({ kind: 'error', message: data.error || 'No se pudo editar el mensaje.' })
         }
       } catch (err) {
         console.error('Failed to edit message', err)
+        setComposerFeedback({ kind: 'error', message: 'No se pudo conectar con WhatsApp para editar el mensaje.' })
       } finally {
         finishMessageSend()
       }
+      if (!editSucceeded) return
       if (activeChatIdRef.current !== targetChatId) return
       setEditingMsg(null)
       setMessageText('')
@@ -1777,7 +2058,178 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
      if (inputRef.current) inputRef.current.focus()
   }
 
-  const savedStickerUrls = new Set(savedStickers)
+  const isCanonicalMessage = (message: Message) => Boolean(message.message_id) && !message.id.startsWith('optimistic-') && !message.is_revoked
+
+  const canEditMessage = (message: Message) => {
+    if (effectiveReadOnly || !deviceId || !isCanonicalMessage(message) || !message.is_from_me) return false
+    if ((message.message_type || 'text') !== 'text' || message.device_id !== deviceId) return false
+    const sentAt = new Date(message.timestamp).getTime()
+    return Number.isFinite(sentAt) && Date.now() - sentAt <= 15 * 60 * 1000
+  }
+
+  const canDeleteMessage = (message: Message) => (
+    !effectiveReadOnly
+    && Boolean(deviceId)
+    && isCanonicalMessage(message)
+    && message.is_from_me
+    && message.device_id === deviceId
+  )
+
+  const handleCopyMessage = async (message: Message) => {
+    const text = message.body?.trim() || message.media_filename || ''
+    if (!text) {
+      setComposerFeedback({ kind: 'info', message: 'Este mensaje no contiene texto para copiar.' })
+      return
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        textarea.remove()
+      }
+      setComposerFeedback({ kind: 'info', message: 'Mensaje copiado.' })
+      clearMessageSelection()
+    } catch {
+      setComposerFeedback({ kind: 'error', message: 'No se pudo copiar el mensaje.' })
+    }
+  }
+
+  const handleOpenMessageInfo = (message: Message) => {
+    if (!message.is_from_me || !isCanonicalMessage(message)) return
+    clearMessageSelection()
+    setInfoMessage(message)
+  }
+
+  const handleBeginReply = (message: Message) => {
+    clearMessageSelection()
+    setReplyingTo(message)
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
+
+  const handleBeginForward = (message: Message) => {
+    clearMessageSelection()
+    setForwardingMsg(message)
+  }
+
+  const handleBeginEdit = (message: Message) => {
+    if (!canEditMessage(message)) return
+    clearMessageSelection()
+    setEditingMsg(message)
+    setMessageText(message.body || '')
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
+
+  const handleDeleteChatMessage = async (message: Message) => {
+    if (!deviceId || !chat || !canDeleteMessage(message) || messageActionPending) return
+    if (!window.confirm('¿Eliminar este mensaje para todos? WhatsApp puede rechazar la solicitud si el plazo ya venció.')) return
+    const targetChatId = chat.id
+    setMessageActionPending('delete')
+    setShowSelectionMenu(false)
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch('/api/messages/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          device_id: deviceId,
+          chat_jid: chat.jid,
+          sender_jid: message.from_jid || '',
+          message_id: message.message_id,
+          is_from_me: true,
+        }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo eliminar el mensaje para todos.')
+      updateMessagesForChat(targetChatId, previous => previous.map(item => (
+        item.message_id === message.message_id ? { ...item, is_revoked: true, body: undefined } : item
+      )))
+      clearMessageSelection()
+      setComposerFeedback({ kind: data.warning ? 'info' : 'info', message: data.warning || 'Mensaje eliminado para todos.' })
+    } catch (error) {
+      setComposerFeedback({ kind: 'error', message: error instanceof Error ? error.message : 'No se pudo eliminar el mensaje para todos.' })
+    } finally {
+      setMessageActionPending(null)
+    }
+  }
+
+  const handleReactMessage = async (message: Message, emoji: string) => {
+    if (!deviceId || !chat || effectiveReadOnly || !isCanonicalMessage(message)) return
+    const token = localStorage.getItem('token')
+    const targetChatId = chat.id
+    const requestedEmoji = hasOwnReaction(message.reactions, emoji) ? '' : emoji
+    const previousReactions = dedupeReactions(message.reactions)
+    const requestSeq = (reactionRequestSeqRef.current.get(message.message_id) || 0) + 1
+    reactionRequestSeqRef.current.set(message.message_id, requestSeq)
+
+    const rollback = () => {
+      if (reactionRequestSeqRef.current.get(message.message_id) !== requestSeq) return
+      updateMessagesForChat(targetChatId, previous => previous.map(item => (
+        item.message_id === message.message_id ? { ...item, reactions: previousReactions } : item
+      )))
+      if (activeChatIdRef.current === targetChatId) setComposerFeedback({ kind: 'error', message: 'No se pudo actualizar la reacción.' })
+    }
+
+    updateMessagesForChat(targetChatId, previous => previous.map(item => {
+      if (item.message_id !== message.message_id) return item
+      return {
+        ...item,
+        reactions: applyReactionMutation(item.reactions, {
+          targetMessageId: message.message_id,
+          senderJid: SELF_REACTION_ACTOR,
+          senderName: 'Tú',
+          emoji: requestedEmoji,
+          isFromMe: true,
+          removed: requestedEmoji === '',
+        }),
+      }
+    }))
+    try {
+      const response = await fetch('/api/messages/react', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          device_id: deviceId,
+          to: chat.jid,
+          target_message_id: message.message_id,
+          target_from_me: Boolean(message.is_from_me),
+          target_sender_jid: message.from_jid || '',
+          emoji: requestedEmoji,
+        }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || !data.success) rollback()
+      else clearMessageSelection()
+    } catch {
+      rollback()
+    }
+  }
+
+  const savedStickerUrls = useMemo(() => new Set(savedStickers), [savedStickers])
+  const openMessageMedia = useCallback((url: string) => setViewImage(url), [])
+  const retryMessage = useStableCallback(handleRetrySend)
+  const revealQuotedMessageStable = useStableCallback(revealQuotedMessage)
+  const beginReplyStable = useStableCallback(handleBeginReply)
+  const beginForwardStable = useStableCallback(handleBeginForward)
+  const deleteMessageStable = useStableCallback(handleDeleteChatMessage)
+  const editMessageStable = useStableCallback(handleBeginEdit)
+  const openMessageInfoStable = useStableCallback(handleOpenMessageInfo)
+  const copyMessageStable = useStableCallback(handleCopyMessage)
+  const toggleSavedStickerStable = useStableCallback(handleToggleSavedSticker)
+  const reactToMessageStable = useStableCallback(handleReactMessage)
+  const sendStickerStable = useStableCallback(handleSendSticker)
+  const insertMobileEmoji = useCallback((emoji: string) => {
+    inputRef.current?.insertAtCaret(emoji, { restoreFocus: false })
+  }, [])
+  const closeMobileAccessoryWithoutHistory = useCallback(() => {
+    closeMobileAccessory({ consumeHistory: false })
+  }, [closeMobileAccessory])
 
   if (!chat && loading) {
        return (
@@ -1798,8 +2250,24 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const visibleMessages = searchWindowMessages || messages
 
   return (
-    <div className={`relative flex-1 flex flex-col min-h-0 overflow-hidden h-full ${className}`}>
+    <div ref={panelRef} className={`relative flex-1 flex flex-col min-h-0 overflow-hidden h-full ${className}`}>
          {/* Chat header */}
+         {selectedMessage && compactActions ? (
+           <div data-testid="message-selection-header" className="flex min-h-14 shrink-0 items-center justify-between gap-1 border-b border-emerald-200 bg-emerald-50 px-2">
+             <div className="flex min-w-0 items-center gap-1">
+               <button type="button" onClick={() => clearMessageSelection()} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar selección del mensaje"><X className="h-5 w-5" /></button>
+               <span className="min-w-6 text-center text-sm font-bold text-slate-800" aria-label="1 mensaje seleccionado">1</span>
+             </div>
+             <div className="flex shrink-0 items-center gap-0.5">
+               {!effectiveReadOnly && <button type="button" onClick={() => handleBeginReply(selectedMessage)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Responder mensaje"><Reply className="h-5 w-5" /></button>}
+               {!effectiveReadOnly && <button type="button" onClick={() => handleBeginForward(selectedMessage)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Reenviar mensaje"><CornerUpRight className="h-5 w-5" /></button>}
+               {canDeleteMessage(selectedMessage) && (
+                 <button type="button" onClick={() => void handleDeleteChatMessage(selectedMessage)} disabled={messageActionPending === 'delete'} className="flex h-11 w-11 items-center justify-center rounded-xl text-red-600 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-wait disabled:opacity-50" aria-label="Eliminar mensaje para todos">{messageActionPending === 'delete' ? <RefreshCw className="h-5 w-5 animate-spin" /> : <Trash2 className="h-5 w-5" />}</button>
+               )}
+               <button type="button" onClick={() => setShowSelectionMenu(value => !value)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Más acciones del mensaje" aria-haspopup="menu" aria-expanded={showSelectionMenu}><MoreVertical className="h-5 w-5" /></button>
+             </div>
+           </div>
+         ) : (
          <div className="flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-slate-200 bg-white px-2 sm:px-4">
               <div className="flex min-w-0 items-center gap-2 sm:gap-3">
                 {onClose && (
@@ -1860,11 +2328,11 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
 	                       <Search className="w-5 h-5" />
 	                   </button>
                    <div className="relative">
-                     <button type="button" onPointerDown={event => event.stopPropagation()} onClick={() => setShowHeaderMenu(value => !value)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Acciones de la conversación" aria-haspopup="menu" aria-expanded={showHeaderMenu}>
+                     <button ref={headerMenuTriggerRef} type="button" onPointerDown={event => event.stopPropagation()} onClick={() => setShowHeaderMenu(value => !value)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Acciones de la conversación" aria-haspopup="menu" aria-expanded={showHeaderMenu}>
                          <MoreVertical className="w-5 h-5" />
                      </button>
 	                     {showHeaderMenu && (
-	                       <div role="menu" onPointerDown={event => event.stopPropagation()} className="absolute right-0 top-12 z-50 w-56 overflow-hidden rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15">
+	                       <div role="menu" onPointerDown={event => event.stopPropagation()} className="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[90] max-h-[min(70dvh,24rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-12 sm:z-50 sm:w-56">
 	                         <button type="button" role="menuitem" onClick={() => { setShowContactInfo(true); setShowHeaderMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><PanelRight className="h-4 w-4 text-slate-400" /> Ver detalles</button>
 	                         <button type="button" role="menuitem" onClick={() => { void handleRequestHistorySync(); setShowHeaderMenu(false) }} disabled={syncingHistory || effectiveReadOnly} title={effectiveReadOnly ? readOnlyReason : undefined} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-45"><RefreshCw className={`h-4 w-4 text-slate-400 ${syncingHistory ? 'animate-spin' : ''}`} /> {syncingHistory ? 'Recuperando historial…' : 'Recuperar mensajes anteriores'}</button>
 	                         {onRequestDelete && <><div className="my-1 border-t border-slate-100" /><button type="button" role="menuitem" onClick={() => { setShowHeaderMenu(false); onRequestDelete() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> Eliminar del CRM</button></>}
@@ -1873,19 +2341,44 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                    </div>
               </div>
          </div>
+         )}
+
+         {showSelectionMenu && selectedMessage && compactActions && typeof document !== 'undefined' && createPortal(
+           <>
+             <button type="button" className="app-viewport fixed inset-0 z-[99] bg-slate-950/20" onClick={() => setShowSelectionMenu(false)} aria-label="Cerrar acciones del mensaje" />
+             <div role="menu" aria-label="Acciones del mensaje seleccionado" className="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[100] max-h-[min(72dvh,28rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
+               {!effectiveReadOnly && <><p className="px-3 pb-2 pt-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Reaccionar</p>
+               <div className="grid grid-cols-6 gap-1 px-1 pb-2" role="group" aria-label="Reacciones rápidas">
+                 {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => <button key={emoji} type="button" onClick={() => { setShowSelectionMenu(false); void handleReactMessage(selectedMessage, emoji) }} className="flex h-11 items-center justify-center rounded-xl text-2xl hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Reaccionar con ${emoji}`}>{emoji}</button>)}
+               </div></>}
+               <div className="border-t border-slate-100 pt-1">
+                 {(selectedMessage.body || selectedMessage.media_filename) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); void handleCopyMessage(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Copy className="h-4 w-4 text-slate-400" /> Copiar</button>}
+                 {selectedMessage.is_from_me && isCanonicalMessage(selectedMessage) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); handleOpenMessageInfo(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Info className="h-4 w-4 text-slate-400" /> Información del mensaje</button>}
+                 {canEditMessage(selectedMessage) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); handleBeginEdit(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><FileText className="h-4 w-4 text-slate-400" /> Editar mensaje</button>}
+               </div>
+             </div>
+           </>,
+           document.body,
+         )}
 
          {showSearch && (
            <div className="shrink-0 border-b border-slate-200 bg-white px-3 py-2 shadow-sm" role="search">
-             <div className="flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-2 focus-within:border-emerald-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-emerald-100">
-               <Search className="h-4 w-4 shrink-0 text-slate-400" />
-               <input autoFocus type="search" value={searchQuery} onChange={event => setSearchQuery(event.target.value)} placeholder="Buscar mensajes…" className="min-w-0 flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400" aria-label="Texto a buscar" />
-               {searchLoading ? <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-emerald-200 border-t-emerald-600" aria-label="Buscando" /> : (
-                 <span className="shrink-0 text-xs font-semibold tabular-nums text-slate-500" title={searchResult?.body || searchResult?.media_filename || undefined}>
-                   {searchQuery.trim().length < 2 ? '2+ caracteres' : searchTotal > 0 ? `${searchResultIndex + 1} de ${searchTotal}` : 'Sin resultados'}
-                 </span>
-               )}
-               <button type="button" onClick={() => void fetchSearchResult(searchQuery.trim(), searchResultIndex - 1)} disabled={searchLoading || searchResultIndex <= 0 || searchTotal === 0} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-30" aria-label="Resultado más reciente"><ChevronUp className="h-4 w-4" /></button>
-               <button type="button" onClick={() => void fetchSearchResult(searchQuery.trim(), searchResultIndex + 1)} disabled={searchLoading || searchResultIndex + 1 >= searchTotal} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-30" aria-label="Resultado anterior"><ChevronDown className="h-4 w-4" /></button>
+             <div className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1 focus-within:border-emerald-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-emerald-100 md:flex-nowrap">
+               <div className="flex min-h-11 min-w-0 flex-1 basis-[calc(100%-3rem)] items-center gap-2 px-2 md:basis-auto">
+                 <Search className="h-4 w-4 shrink-0 text-slate-400" />
+                 <input autoFocus type="search" value={searchQuery} onChange={event => setSearchQuery(event.target.value)} placeholder="Buscar mensajes…" className="min-w-0 flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400" aria-label="Texto a buscar" />
+               </div>
+               <div className="order-last flex min-h-11 w-full items-center justify-between border-t border-slate-200 px-1 pt-1 md:order-none md:w-auto md:gap-1 md:border-0 md:p-0">
+                 {searchLoading ? <span className="ml-2 h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-emerald-200 border-t-emerald-600" aria-label="Buscando" /> : (
+                   <span className="shrink-0 px-2 text-xs font-semibold tabular-nums text-slate-500" title={searchResult?.body || searchResult?.media_filename || undefined}>
+                     {searchQuery.trim().length < 2 ? '2+ caracteres' : searchTotal > 0 ? `${searchResultIndex + 1} de ${searchTotal}` : 'Sin resultados'}
+                   </span>
+                 )}
+                 <div className="flex items-center gap-1">
+                   <button type="button" onClick={() => void fetchSearchResult(searchQuery.trim(), searchResultIndex - 1)} disabled={searchLoading || searchResultIndex <= 0 || searchTotal === 0} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-30" aria-label="Resultado más reciente"><ChevronUp className="h-4 w-4" /></button>
+                   <button type="button" onClick={() => void fetchSearchResult(searchQuery.trim(), searchResultIndex + 1)} disabled={searchLoading || searchResultIndex + 1 >= searchTotal} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-30" aria-label="Resultado anterior"><ChevronDown className="h-4 w-4" /></button>
+                 </div>
+               </div>
                <button type="button" onClick={closeSearch} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar búsqueda"><X className="h-4 w-4" /></button>
 	             </div>
 	             {searchError ? (
@@ -1928,7 +2421,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
              <div
                 ref={messagesContainerRef}
                 onScroll={searchWindowMessages ? undefined : handleMessagesScroll}
-                className="relative flex-1 space-y-2 overflow-y-auto p-4"
+                className="relative flex-1 space-y-2 overflow-y-auto px-2 py-3 overscroll-contain sm:p-4"
                 style={{
                   backgroundColor: '#efeae2',
                   backgroundImage: "url('/whatsapp-chat-background.png')",
@@ -1987,108 +2480,39 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                               <MessageBubble
                                 message={msg}
                                 contactName={contactName}
-                                onMediaClick={(url) => setViewImage(url)}
-	                                onRetry={effectiveReadOnly ? undefined : () => handleRetrySend(msg)}
-	                                onReply={effectiveReadOnly ? undefined : (m) => setReplyingTo(m)}
-	                                onQuotedMessageClick={(messageId) => void revealQuotedMessage(messageId)}
-                                onForward={effectiveReadOnly ? undefined : (m) => setForwardingMsg(m)}
-                                onDelete={effectiveReadOnly ? undefined : async (m) => {
-                                  if (!deviceId || !chat) return
-                                  const token = localStorage.getItem('token')
-                                  try {
-                                    const res = await fetch('/api/messages/delete', {
-                                      method: 'POST',
-                                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                      body: JSON.stringify({
-                                        device_id: deviceId,
-                                        chat_jid: chat.jid,
-                                        sender_jid: m.from_jid || '',
-                                        message_id: m.message_id,
-                                        is_from_me: m.is_from_me
-                                      })
-                                    })
-                                    const data = await res.json()
-                                    if (data.success) {
-                                      updateMessages(prev => prev.map(msg =>
-                                        msg.message_id === m.message_id ? { ...msg, is_revoked: true, body: undefined } : msg
-                                      ))
-                                    }
-                                  } catch (err) {
-                                    console.error('Failed to delete message', err)
-                                  }
-                                }}
-                                onEdit={effectiveReadOnly ? undefined : (m) => {
-                                  setEditingMsg(m)
-                                  setMessageText(m.body || '')
-                                  requestAnimationFrame(() => {
-                                    inputRef.current?.focus()
-                                  })
-                                }}
-                                onToggleStickerFavorite={handleToggleSavedSticker}
+	                                onMediaClick={openMessageMedia}
+	                                onRetry={effectiveReadOnly ? undefined : retryMessage}
+	                                onReply={effectiveReadOnly ? undefined : beginReplyStable}
+	                                onQuotedMessageClick={revealQuotedMessageStable}
+	                                onForward={effectiveReadOnly ? undefined : beginForwardStable}
+	                                onDelete={canDeleteMessage(msg) ? deleteMessageStable : undefined}
+	                                onEdit={canEditMessage(msg) ? editMessageStable : undefined}
+	                                onInfo={msg.is_from_me && isCanonicalMessage(msg) ? openMessageInfoStable : undefined}
+	                                onCopy={(msg.body || msg.media_filename) ? copyMessageStable : undefined}
+                                compactSelection={compactActions}
+                                selected={Boolean(selectedMessage && hasSameMessageIdentity(msg, selectedMessage))}
+                                onSelect={selectMessage}
+	                                onToggleStickerFavorite={toggleSavedStickerStable}
                                 savedStickerUrls={savedStickerUrls}
                                 savingStickerUrls={savingStickerUrls}
-                                onReact={effectiveReadOnly ? undefined : async (m, emoji) => {
-                                  if (!deviceId || !chat) return
-                                  const token = localStorage.getItem('token')
-                                  const targetChatId = chat.id
-                                  const requestedEmoji = hasOwnReaction(m.reactions, emoji) ? '' : emoji
-                                  const previousReactions = dedupeReactions(m.reactions)
-                                  const requestSeq = (reactionRequestSeqRef.current.get(m.message_id) || 0) + 1
-                                  reactionRequestSeqRef.current.set(m.message_id, requestSeq)
-
-                                  const rollback = () => {
-                                    if (reactionRequestSeqRef.current.get(m.message_id) !== requestSeq) return
-                                    updateMessagesForChat(targetChatId, prev => prev.map(message =>
-                                      message.message_id === m.message_id
-                                        ? { ...message, reactions: previousReactions }
-                                        : message
-                                    ))
-                                    if (activeChatIdRef.current === targetChatId) {
-                                      setComposerFeedback({ kind: 'error', message: 'No se pudo actualizar la reacción.' })
-                                    }
-                                  }
-
-                                  try {
-                                    // Optimistically update UI
-                                    updateMessagesForChat(targetChatId, prev => prev.map(message => {
-                                      if (message.message_id !== m.message_id) return message
-                                      const reactions = applyReactionMutation(message.reactions, {
-                                        targetMessageId: m.message_id,
-                                        senderJid: SELF_REACTION_ACTOR,
-                                        senderName: 'Tú',
-                                        emoji: requestedEmoji,
-                                        isFromMe: true,
-                                        removed: requestedEmoji === '',
-                                      })
-                                      return { ...message, reactions }
-                                    }))
-                                    const res = await fetch('/api/messages/react', {
-                                      method: 'POST',
-                                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                      body: JSON.stringify({
-                                        device_id: deviceId,
-                                        to: chat.jid,
-                                        target_message_id: m.message_id,
-                                        target_from_me: !!m.is_from_me,
-                                        target_sender_jid: m.from_jid || '',
-                                        emoji: requestedEmoji
-                                      })
-                                    })
-                                    const data = await res.json().catch(() => ({}))
-                                    if (!res.ok || !data.success) {
-                                      console.error('Failed to send reaction:', data.error)
-                                      rollback()
-                                    }
-                                  } catch (err) {
-                                    console.error('Failed to send reaction', err)
-                                    rollback()
-                                  }
-                                }}
+	                                onReact={effectiveReadOnly ? undefined : reactToMessageStable}
                               />
                           </div>
                       )
                   })}
              </div>
+
+             {!searchWindowMessages && !isFollowingLatest && (
+               <button
+                 type="button"
+                 onClick={scrollToBottom}
+                 className="absolute bottom-3 right-3 z-20 inline-flex min-h-11 items-center gap-2 rounded-full border border-emerald-200 bg-white px-3 text-xs font-bold text-emerald-700 shadow-lg shadow-slate-900/10 transition hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                 aria-label={pendingLatestMessages > 0 ? `Ir al final, ${pendingLatestMessages} mensaje${pendingLatestMessages === 1 ? '' : 's'} nuevo${pendingLatestMessages === 1 ? '' : 's'}` : 'Ir al final de la conversación'}
+               >
+                 <ChevronDown className="h-4 w-4" />
+                 {pendingLatestMessages > 0 ? `${pendingLatestMessages} nuevo${pendingLatestMessages === 1 ? '' : 's'}` : 'Ir al final'}
+               </button>
+             )}
 
              {/* Right Panel (Contact/Search) - Overlay/Sidebar — only when NOT parent-controlled */}
              {showContactInfo && !onContactInfoToggle && (
@@ -2165,6 +2589,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                    })}
                    placeholder={attachmentDraft.type === 'document' ? 'Agregar descripción...' : 'Agregar pie de foto...'}
                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !sendingAttachment) { e.preventDefault(); void handleSendPendingMedia() } }}
+                   formatToolbarPlacement="outside"
                    singleLine
                    disabled={sendingAttachment}
                  />
@@ -2188,7 +2613,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
              <span className="text-sm font-medium text-amber-700">Solo lectura — {readOnlyReason}</span>
            </div>
          ) : (
-         <div className="px-3 py-2 bg-slate-50 border-t border-slate-200 flex items-end gap-2 relative z-30 shrink-0">
+         <div className="relative z-30 flex shrink-0 items-end gap-1 border-t border-slate-200 bg-slate-50 px-2 pt-2 sm:gap-2 sm:px-3" style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}>
               {editingMsg && (
                   <div className="absolute bottom-full left-0 right-0 bg-blue-50 p-2 border-t border-blue-400 flex justify-between items-center shadow-sm">
                       <div className="text-xs border-l-4 border-blue-500 pl-2">
@@ -2210,30 +2635,43 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
 
               {/* Attachments Menu */}
               {showAttachments && (
-                  <div className="absolute bottom-16 left-4 bg-white rounded-xl shadow-xl border border-slate-100 p-2 flex flex-col gap-2 animate-in slide-in-from-bottom-2 duration-200">
-                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700" onClick={() => { fileInputRef.current?.click(); setShowAttachments(false) }}>
+                <>
+                  <button type="button" className="app-viewport fixed inset-0 z-[80] bg-slate-950/25 sm:hidden" onClick={() => setShowAttachments(false)} aria-label="Cerrar opciones de adjuntos" />
+                  <div role="menu" className="absolute inset-x-2 bottom-full z-[90] mb-2 flex max-h-[min(calc(var(--app-height,100dvh)-8rem),28rem)] flex-col gap-1 overflow-y-auto rounded-2xl border border-slate-100 bg-white p-2 shadow-2xl animate-in slide-in-from-bottom-2 duration-200 sm:inset-x-auto sm:bottom-16 sm:left-4 sm:z-50 sm:mb-0 sm:w-56 sm:rounded-xl sm:shadow-xl">
+                      <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" onClick={() => { fileInputRef.current?.click(); setShowAttachments(false) }}>
                           <ImageIcon className="w-5 h-5 text-purple-500" /> Foto/Video
                       </button>
-                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700" onClick={() => { docFileInputRef.current?.click(); setShowAttachments(false) }}>
+                      <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" onClick={() => { docFileInputRef.current?.click(); setShowAttachments(false) }}>
                           <FileText className="w-5 h-5 text-blue-500" /> Documento
                       </button>
-                      <button className="flex items-center gap-3 p-2 hover:bg-slate-50 rounded-lg transition text-sm text-slate-700" onClick={() => { setShowContactPicker(true); setShowAttachments(false) }}>
+                      <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" onClick={() => { setShowContactPicker(true); setShowAttachments(false) }}>
                           <User className="w-5 h-5 text-emerald-500" /> Contacto
                       </button>
+                      <div className="my-1 border-t border-slate-100 sm:hidden" />
+                      <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:hidden" onClick={() => openMobileAccessory('emoji')}>
+                        <Smile className="h-5 w-5 text-amber-500" /> Emoji
+                      </button>
+                      {canSendStickers && (
+                        <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:hidden" onClick={() => openMobileAccessory('sticker')}>
+                          <Smile className="h-5 w-5 text-emerald-500" /> Sticker
+                        </button>
+                      )}
                   </div>
+                </>
               )}
               <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={e => handleFileSelect(e, 'media')} />
               <input type="file" ref={docFileInputRef} className="hidden" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar" onChange={e => handleFileSelect(e, 'document')} />
+              <input type="file" ref={cameraInputRef} className="hidden" accept="image/*" capture="environment" onChange={e => handleFileSelect(e, 'media')} />
 
-              <div className="flex gap-1 pb-1">
-                  <button type="button" onClick={() => setShowAttachments(!showAttachments)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Adjuntar archivo" aria-expanded={showAttachments}>
+              {!compactActions && <div className="flex shrink-0 gap-1 pb-0.5">
+                  <button type="button" onClick={() => { setActivePopup(null); setShowAttachments(value => !value) }} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Adjuntar archivo" aria-expanded={showAttachments}>
                       <Paperclip className="w-6 h-6" />
                   </button>
                   <EmojiPicker
                     onEmojiSelect={(emoji) => inputRef.current?.insertAtCaret(emoji)}
                     isOpen={activePopup === 'emoji'}
                     onToggle={() => setActivePopup(activePopup === 'emoji' ? null : 'emoji')}
-                    buttonClassName={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${activePopup === 'emoji' ? 'bg-emerald-50 text-emerald-600' : 'text-slate-500 hover:bg-slate-100 hover:text-emerald-600'}`}
+                    buttonClassName={`hidden h-11 w-11 items-center justify-center rounded-xl transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:inline-flex ${activePopup === 'emoji' ? 'bg-emerald-50 text-emerald-600' : 'text-slate-500 hover:bg-slate-100 hover:text-emerald-600'}`}
                   />
                   {canSendStickers ? <StickerPicker
                       onStickerSelect={handleSendSticker}
@@ -2246,14 +2684,32 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                       savedError={savedStickersError}
                       onToggleSavedSticker={handleToggleSavedSticker}
                       onRefreshSavedStickers={loadSavedStickers}
+                      triggerClassName="hidden sm:flex"
                   /> : (
-                    <button type="button" disabled className="inline-flex h-11 w-11 cursor-not-allowed items-center justify-center rounded-xl text-slate-300" aria-label="Stickers no disponibles para este dispositivo" title="Stickers no disponibles para este dispositivo">
+                    <button type="button" disabled className="hidden h-11 w-11 cursor-not-allowed items-center justify-center rounded-xl text-slate-300 sm:inline-flex" aria-label="Stickers no disponibles para este dispositivo" title="Stickers no disponibles para este dispositivo">
                       <Smile className="h-5 w-5" />
                     </button>
                   )}
-              </div>
+              </div>}
 
-              <div className="flex-1 relative">
+              {compactActions && (
+                <div className="shrink-0 pb-0.5">
+                  <button
+                    type="button"
+                    onClick={() => activePopup
+                      ? closeMobileAccessory({ restoreKeyboard: true, consumeHistory: false })
+                      : openMobileAccessory('emoji')}
+                    className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${activePopup ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-100 hover:text-emerald-600'}`}
+                    aria-label={activePopup ? 'Mostrar teclado' : 'Abrir selector de emojis'}
+                    aria-expanded={activePopup !== null}
+                    aria-controls={activePopup ? 'mobile-composer-accessory' : undefined}
+                  >
+                    {activePopup ? <Keyboard className="h-5 w-5" /> : <Smile className="h-5 w-5" />}
+                  </button>
+                </div>
+              )}
+
+              <div className="relative min-w-0 flex-1">
                     <QuickReplyPicker
                       replies={quickRepliesData}
                       isOpen={showQuickReply}
@@ -2265,14 +2721,48 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                       ref={inputRef}
                       value={messageText}
                       onChange={handleMessageChange}
-                      placeholder="Escribe un mensaje... ( / para respuestas rápidas)"
+                      placeholder="Escribe un mensaje…"
                       onKeyDown={handleKeyDown}
                       onPasteFiles={files => beginAttachmentDraft(files)}
+                      keyboardChromeTarget
+                      formatToolbarPlacement="outside"
                       singleLine
                     />
               </div>
 
-              {(messageText || forwardingMsg) && (
+              {compactActions && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activePopup) closeMobileAccessory({ consumeHistory: false })
+                    inputRef.current?.blur()
+                    setShowAttachments(value => !value)
+                  }}
+                  className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                  aria-label="Adjuntar archivo"
+                  aria-expanded={showAttachments}
+                >
+                  <Paperclip className="h-5 w-5" />
+                </button>
+              )}
+
+              {compactActions && !messageText.trim() && !forwardingMsg && !editingMsg && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activePopup) closeMobileAccessory({ consumeHistory: false })
+                    inputRef.current?.blur()
+                    setShowAttachments(false)
+                    cameraInputRef.current?.click()
+                  }}
+                  className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                  aria-label="Tomar una foto"
+                >
+                  <Camera className="h-5 w-5" />
+                </button>
+              )}
+
+              {(messageText.trim() || forwardingMsg) && (
                   <button
                     type="button"
                     onClick={handleSendMessage}
@@ -2286,9 +2776,33 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
          </div>
          )}
 
+         {!effectiveReadOnly && compactActions && activePopup && (
+           <MobileComposerAccessory
+             activeTab={activePopup}
+             ready={mobileAccessoryReady}
+             height={mobileAccessoryHeight}
+             canSendStickers={canSendStickers}
+             onTabChange={openMobileAccessory}
+             onClose={closeMobileAccessoryWithoutHistory}
+             onEmojiSelect={insertMobileEmoji}
+             onStickerSelect={sendStickerStable}
+             savedStickers={savedStickers}
+             savedStickerUrls={savedStickerUrls}
+             savingStickerUrls={savingStickerUrls}
+             savedLoading={savedStickersLoading}
+             savedError={savedStickersError}
+             onToggleSavedSticker={toggleSavedStickerStable}
+             onRefreshSavedStickers={loadSavedStickers}
+           />
+         )}
+
          {/* Image Viewer */}
          {viewImage && (
              <ImageViewer src={viewImage} isOpen={!!viewImage} onClose={() => setViewImage(null)} />
+         )}
+
+         {infoMessage && (
+           <MessageInfoDialog message={infoMessage} onClose={() => setInfoMessage(null)} />
          )}
 
          {/* Forward Modal */}

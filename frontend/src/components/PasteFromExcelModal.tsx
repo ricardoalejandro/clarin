@@ -201,12 +201,12 @@ export default function PasteFromExcelModal({ open, onClose, onSuccess }: Props)
   const validCount = rows.filter(r => r.phone.trim()).length
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="responsive-dialog-backdrop fixed inset-0 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} />
-      <div className="relative bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-5xl mx-4 flex flex-col max-h-[90vh]">
+      <div role="dialog" aria-modal="true" aria-label="Pegar contactos desde Excel" className="responsive-dialog-panel relative flex w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl sm:max-h-[90vh]">
 
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50 shrink-0">
+        <div className="safe-area-top flex shrink-0 items-center justify-between border-b border-slate-700/50 px-4 py-3 sm:px-6 sm:py-4">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-emerald-500/15 flex items-center justify-center">
               <ClipboardPaste className="w-4 h-4 text-emerald-400" />
@@ -218,7 +218,7 @@ export default function PasteFromExcelModal({ open, onClose, onSuccess }: Props)
           </div>
           <button
             onClick={handleClose}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-300 hover:bg-slate-800 transition-colors"
+            className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300 sm:h-8 sm:w-8 sm:rounded-lg"
           >
             <X className="w-4 h-4" />
           </button>
@@ -367,10 +367,10 @@ export default function PasteFromExcelModal({ open, onClose, onSuccess }: Props)
             </div>
 
             {/* Add row button */}
-            <div className="px-6 py-2 border-t border-slate-700/30 shrink-0">
+            <div className="shrink-0 border-t border-slate-700/30 px-4 py-2 sm:px-6">
               <button
                 onClick={addEmptyRow}
-                className="text-xs text-slate-500 hover:text-emerald-400 transition-colors"
+                className="min-h-11 rounded-lg px-2 text-xs text-slate-500 transition-colors hover:bg-slate-800 hover:text-emerald-400"
               >
                 + Agregar fila vacía
               </button>
@@ -380,7 +380,7 @@ export default function PasteFromExcelModal({ open, onClose, onSuccess }: Props)
 
         {/* Footer */}
         {rows.length > 0 && !result && (
-          <div className="px-6 py-4 border-t border-slate-700/50 flex items-center justify-between shrink-0">
+          <div className="safe-area-bottom flex shrink-0 flex-col gap-2 border-t border-slate-700/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-4">
             {pasteError && (
               <div className="flex items-center gap-2 text-red-400 text-xs">
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
@@ -391,14 +391,14 @@ export default function PasteFromExcelModal({ open, onClose, onSuccess }: Props)
             <div className="flex items-center gap-3">
               <button
                 onClick={handleClose}
-                className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
+                className="min-h-11 flex-1 rounded-lg px-4 py-2 text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 sm:flex-none"
               >
                 Cancelar
               </button>
               <button
                 onClick={handleImport}
                 disabled={loading || validCount === 0}
-                className="flex items-center gap-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+                className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
               >
                 {loading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
