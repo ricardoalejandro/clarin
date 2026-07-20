@@ -41,6 +41,14 @@ interface AvatarCandidate {
   expires_at: string
 }
 
+interface AvatarPreviewResponse {
+  success: boolean
+  available: boolean
+  candidate?: AvatarCandidate
+  code?: string
+  message?: string
+}
+
 interface ContactAvatarControlProps {
   contactId: string
   contextType: ContactAvatarContextType
@@ -99,6 +107,7 @@ export default function ContactAvatarControl({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [candidate, setCandidate] = useState<AvatarCandidate | null>(null)
+  const [previewEmpty, setPreviewEmpty] = useState<{ code?: string; message: string } | null>(null)
   const [selectedDevice, setSelectedDevice] = useState('')
   const [editorURL, setEditorURL] = useState('')
   const [editorImage, setEditorImage] = useState<HTMLImageElement | null>(null)
@@ -175,6 +184,7 @@ export default function ContactAvatarControl({
     updateBusy(false)
     setError('')
     setCandidate(null)
+    setPreviewEmpty(null)
     setSelectedDevice('')
     filePickerIdentityRef.current = ''
     setEditorImage(null)
@@ -277,6 +287,7 @@ export default function ContactAvatarControl({
     if (busyRef.current) return
     setDialog('none')
     setCandidate(null)
+    setPreviewEmpty(null)
     setError('')
     setDragging(false)
   }, [])
@@ -330,15 +341,29 @@ export default function ContactAvatarControl({
     const operation = beginOperation()
     updateBusy(true)
     setError('')
-    const result = await api<{ success: boolean; candidate: AvatarCandidate }>(`/api/contact-avatars/${contactId}/whatsapp-preview`, {
+    setCandidate(null)
+    setPreviewEmpty(null)
+    const result = await api<AvatarPreviewResponse>(`/api/contact-avatars/${contactId}/whatsapp-preview`, {
       method: 'POST',
       body: JSON.stringify({ context_type: contextType, context_id: contextId, device_id: deviceId || '' }),
       signal: operation.signal,
     })
     if (!operationIsCurrent(operation)) return
     updateBusy(false)
-    if (!result.success || !result.data?.candidate) {
+    if (!result.success || !result.data) {
       setError(result.error || 'No se pudo consultar la foto de WhatsApp')
+      return
+    }
+    if (!result.data.available) {
+      setPreviewEmpty({
+        code: result.data.code,
+        message: result.data.message || 'Este contacto no tiene una foto visible en WhatsApp.',
+      })
+      setDialog('preview')
+      return
+    }
+    if (!result.data.candidate) {
+      setError('WhatsApp no devolvió una previsualización válida')
       return
     }
     setCandidate(result.data.candidate)
@@ -350,6 +375,7 @@ export default function ContactAvatarControl({
     setMenuOpen(false)
     setMenuPosition(null)
     setError('')
+    setPreviewEmpty(null)
     if (devices.length > 1) {
       setSelectedDevice('')
       setDialog('device')
@@ -686,6 +712,14 @@ export default function ContactAvatarControl({
                     <div className="grid grid-cols-2 gap-4">
                       <AvatarComparison label="Foto actual" url={currentURL} initials={initials} />
                       <AvatarComparison label="Foto encontrada" url={candidate.data_url} initials={initials} highlight />
+                    </div>
+                  ) : previewEmpty ? (
+                    <div className="min-h-48 rounded-xl border border-slate-200 bg-slate-50 p-6 text-center">
+                      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-white text-slate-400 ring-1 ring-slate-200">
+                        <Camera className="h-5 w-5" />
+                      </div>
+                      <p className="mt-3 text-sm font-medium text-slate-700">No hay una foto visible</p>
+                      <p className="mt-1 text-sm leading-relaxed text-slate-500">{previewEmpty.message}</p>
                     </div>
                   ) : (
                     <div className="min-h-48 rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-500">No se pudo cargar una foto candidata.</div>

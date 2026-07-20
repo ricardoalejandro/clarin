@@ -2819,6 +2819,23 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_outbound_at TIMESTAMPTZ`,
 		`ALTER TABLE chats ADD COLUMN IF NOT EXISTS customer_service_window_expires_at TIMESTAMPTZ`,
 		`ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_message_provider VARCHAR(50) NOT NULL DEFAULT 'whatsapp_web'`,
+		// Chats predating Cloud API keep the historical account-wide WhatsApp Web
+		// identity. Each official Cloud number receives its own channel key so the
+		// same Contact can have one QR chat and one API chat without either row
+		// stealing the other's device_id.
+		`ALTER TABLE chats ADD COLUMN IF NOT EXISTS channel_key VARCHAR(150) NOT NULL DEFAULT 'whatsapp_web'`,
+		`UPDATE chats c
+		 SET channel_key = CASE
+		   WHEN d.provider = 'whatsapp_cloud_api' THEN 'whatsapp_cloud_api:' || d.id::text
+		   ELSE 'whatsapp_web'
+		 END
+		 FROM devices d
+		 WHERE c.device_id = d.id
+		   AND c.channel_key = 'whatsapp_web'
+		   AND d.provider = 'whatsapp_cloud_api'`,
+		`ALTER TABLE chats DROP CONSTRAINT IF EXISTS chats_account_id_jid_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_chats_account_channel_jid ON chats(account_id, channel_key, jid)`,
+		`CREATE INDEX IF NOT EXISTS idx_chats_account_channel_activity ON chats(account_id, channel_key, last_message_at DESC)`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS provider VARCHAR(50) NOT NULL DEFAULT 'whatsapp_web'`,
 		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name VARCHAR(255)`,
 		`CREATE INDEX IF NOT EXISTS idx_chats_service_window ON chats(account_id, customer_service_window_expires_at) WHERE customer_service_window_expires_at IS NOT NULL`,
@@ -2842,6 +2859,10 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_whatsapp_templates_account_status ON whatsapp_message_templates(account_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_whatsapp_templates_device ON whatsapp_message_templates(device_id) WHERE device_id IS NOT NULL`,
+		`ALTER TABLE whatsapp_message_templates DROP CONSTRAINT IF EXISTS whatsapp_message_templates_account_id_name_language_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_whatsapp_templates_channel_name_language
+		 ON whatsapp_message_templates(account_id, device_id, name, language)
+		 WHERE device_id IS NOT NULL`,
 
 		`CREATE TABLE IF NOT EXISTS whatsapp_webhook_events (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2858,6 +2879,44 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_whatsapp_webhook_events_account ON whatsapp_webhook_events(account_id, received_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_whatsapp_webhook_events_device ON whatsapp_webhook_events(device_id, received_at DESC) WHERE device_id IS NOT NULL`,
+
+		// One encrypted business token per official channel. The encryption key is
+		// runtime configuration and never stored in PostgreSQL.
+		`CREATE TABLE IF NOT EXISTS whatsapp_cloud_credentials (
+			device_id UUID PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			access_token_encrypted BYTEA NOT NULL,
+			token_expires_at TIMESTAMPTZ,
+			granted_scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT whatsapp_cloud_credentials_account_device_fkey
+				FOREIGN KEY (account_id, device_id) REFERENCES devices(account_id, id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_cloud_credentials_account ON whatsapp_cloud_credentials(account_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_devices_cloud_phone_number_id
+		 ON devices(phone_number_id)
+		 WHERE provider = 'whatsapp_cloud_api' AND phone_number_id IS NOT NULL`,
+
+		`CREATE TABLE IF NOT EXISTS whatsapp_opt_ins (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			contact_id UUID,
+			phone VARCHAR(30) NOT NULL,
+			source VARCHAR(50) NOT NULL,
+			proof_note TEXT NOT NULL DEFAULT '',
+			consented_at TIMESTAMPTZ NOT NULL,
+			revoked_at TIMESTAMPTZ,
+			created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT whatsapp_opt_ins_contact_fkey
+				FOREIGN KEY (account_id, contact_id)
+				REFERENCES contacts(account_id, id) ON DELETE SET NULL (contact_id),
+			UNIQUE(account_id, phone)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whatsapp_opt_ins_active
+		 ON whatsapp_opt_ins(account_id, phone) WHERE revoked_at IS NULL`,
 
 		`CREATE TABLE IF NOT EXISTS bot_flows (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

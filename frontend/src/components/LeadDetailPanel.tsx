@@ -213,6 +213,7 @@ export default function LeadDetailPanel({
   const [newObservation, setNewObservation] = useState('')
   const [newObservationType, setNewObservationType] = useState<'note' | 'call'>(defaultObservationType)
   const [savingObservation, setSavingObservation] = useState(false)
+  const [observationError, setObservationError] = useState('')
   const [obsDisplayCount, setObsDisplayCount] = useState(5)
 
   // History modal
@@ -370,6 +371,9 @@ export default function LeadDetailPanel({
     setObsDisplayCount(5)
     setActiveTab('general')
     setObservations([])
+    setNewObservation('')
+    setObservationError('')
+    setSavingObservation(false)
     setLeadTasks([])
     fetchObservations(lead.id, requestId)
     fetchTaskLists()
@@ -635,8 +639,12 @@ export default function LeadDetailPanel({
   }
 
   const handleAddObservation = async () => {
-    if (!newObservation.trim()) return
+    const observationText = newObservation.trim()
+    if (!observationText || savingObservation) return
+    const requestId = panelEntityRequestRef.current
+    const targetLeadId = lead.id
     setSavingObservation(true)
+    setObservationError('')
     const token = localStorage.getItem('token')
     try {
       const leadIdForObservation = eventMode
@@ -649,26 +657,29 @@ export default function LeadDetailPanel({
             contact_id: lead.contact_id,
             lead_id: leadIdForObservation,
             type: newObservationType,
-            notes: newObservation.trim(),
+            notes: observationText,
           }
         : contactMode && contactId
-        ? { contact_id: contactId, program_id: programContext?.programId, program_participant_id: programContext?.participantId, type: newObservationType, notes: newObservation.trim() }
-        : { lead_id: lead.id, type: newObservationType, notes: newObservation.trim() }
+        ? { contact_id: contactId, program_id: programContext?.programId, program_participant_id: programContext?.participantId, type: newObservationType, notes: observationText }
+        : { lead_id: targetLeadId, type: newObservationType, notes: observationText }
       const res = await fetch('/api/interactions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(payload),
       })
-      const data = await res.json()
-      if (data.success) {
-        setNewObservation('')
-        fetchObservations(lead.id)
-        onObservationChange?.(lead.id)
-      }
+      const data = await res.json().catch(() => null)
+      if (!res.ok || !data?.success) throw new Error(data?.error || 'No se pudo guardar la observación.')
+      if (requestId !== panelEntityRequestRef.current) return
+      setNewObservation('')
+      await fetchObservations(targetLeadId, requestId)
+      if (requestId === panelEntityRequestRef.current) onObservationChange?.(targetLeadId)
     } catch (err) {
       console.error('Failed to add observation:', err)
+      if (requestId === panelEntityRequestRef.current) {
+        setObservationError(err instanceof Error ? err.message : 'No se pudo guardar la observación.')
+      }
     } finally {
-      setSavingObservation(false)
+      if (requestId === panelEntityRequestRef.current) setSavingObservation(false)
     }
   }
 
@@ -1642,7 +1653,7 @@ export default function LeadDetailPanel({
           <div className="mb-3">
             <div className="flex items-center gap-1.5 mb-2">
               <button
-                onClick={() => setNewObservationType('note')}
+                onClick={() => { setNewObservationType('note'); setObservationError('') }}
                 className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg transition font-medium ${
                   newObservationType === 'note'
                     ? 'bg-yellow-100 text-yellow-700 ring-1 ring-yellow-300'
@@ -1653,7 +1664,7 @@ export default function LeadDetailPanel({
                 Nota
               </button>
               <button
-                onClick={() => setNewObservationType('call')}
+                onClick={() => { setNewObservationType('call'); setObservationError('') }}
                 className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg transition font-medium ${
                   newObservationType === 'call'
                     ? 'bg-blue-100 text-blue-700 ring-1 ring-blue-300'
@@ -1666,7 +1677,7 @@ export default function LeadDetailPanel({
             </div>
             <textarea
               value={newObservation}
-              onChange={(e) => setNewObservation(e.target.value)}
+              onChange={(e) => { setNewObservation(e.target.value); setObservationError('') }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && newObservation.trim() && !savingObservation) {
                   e.preventDefault()
@@ -1685,6 +1696,11 @@ export default function LeadDetailPanel({
               {savingObservation ? <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white" /> : <Plus className="w-3.5 h-3.5" />}
               Agregar {newObservationType === 'call' ? 'Llamada' : 'Nota'}
             </button>
+            {observationError && (
+              <div role="alert" className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700">
+                {observationError}
+              </div>
+            )}
           </div>
 
           {loadingObservations ? (

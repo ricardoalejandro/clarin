@@ -61,7 +61,8 @@ export default function NotificationProvider({ accountId, children }: Props) {
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string; data?: Record<string, unknown> }
-      if (msg.event === 'new_message' && !msg.data?.is_from_me) {
+      const nestedMessage = msg.data?.message as { is_from_me?: boolean } | undefined
+      if (msg.event === 'new_message' && !msg.data?.is_from_me && !nestedMessage?.is_from_me) {
         handleIncomingMessage(msg.data as Parameters<typeof handleIncomingMessage>[0])
       }
       if (msg.event === 'task_reminder') {
@@ -81,7 +82,7 @@ export default function NotificationProvider({ accountId, children }: Props) {
   const handleIncomingMessage = useCallback((data: {
     chat_id?: string
     sender_name?: string
-    message?: { body?: string }
+    message?: { body?: string; provider?: string }
     is_from_me?: boolean
   }) => {
     const s = settingsRef.current
@@ -102,7 +103,8 @@ export default function NotificationProvider({ accountId, children }: Props) {
       showBrowserNotification(senderName, body, () => {
         // Navigate to chat on click
         if (data.chat_id) {
-          window.location.href = `/dashboard/chats?open=${data.chat_id}`
+          const destination = data.message?.provider === 'whatsapp_cloud_api' ? '/dashboard/chat-api' : '/dashboard/chats'
+          window.location.href = `${destination}?open=${data.chat_id}`
         }
       })
     }

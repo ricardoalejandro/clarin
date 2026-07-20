@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,12 @@ import (
 
 const profilePictureTimeout = 12 * time.Second
 
+const (
+	ProfilePictureCodeNotSet      = "whatsapp_photo_not_set"
+	ProfilePictureCodePrivate     = "whatsapp_photo_private"
+	ProfilePictureCodeUnavailable = "whatsapp_photo_unavailable"
+)
+
 type ProfilePictureError struct {
 	Code string
 	Err  error
@@ -37,10 +44,30 @@ func profilePictureError(code, message string) error {
 }
 
 func ProfilePictureErrorCode(err error) string {
-	if typed, ok := err.(*ProfilePictureError); ok && typed.Code != "" {
+	var typed *ProfilePictureError
+	if errors.As(err, &typed) && typed.Code != "" {
 		return typed.Code
 	}
-	return "whatsapp_photo_unavailable"
+	return ProfilePictureCodeUnavailable
+}
+
+func IsProfilePictureEmptyCode(code string) bool {
+	return code == ProfilePictureCodeNotSet || code == ProfilePictureCodePrivate
+}
+
+func classifyProfilePictureLookup(picture *types.ProfilePictureInfo, err error) error {
+	switch {
+	case errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized):
+		return profilePictureError(ProfilePictureCodePrivate, "La privacidad de WhatsApp no permite ver la foto de este contacto")
+	case errors.Is(err, whatsmeow.ErrProfilePictureNotSet):
+		return profilePictureError(ProfilePictureCodeNotSet, "Este contacto no tiene una foto visible en WhatsApp")
+	case err != nil:
+		return profilePictureError(ProfilePictureCodeUnavailable, "No se pudo consultar la foto de WhatsApp")
+	case picture == nil || strings.TrimSpace(picture.URL) == "":
+		return profilePictureError(ProfilePictureCodeNotSet, "Este contacto no tiene una foto visible en WhatsApp")
+	default:
+		return nil
+	}
 }
 
 func (p *DevicePool) ConnectedAvatarDeviceIDs(accountID uuid.UUID) []uuid.UUID {
@@ -84,17 +111,17 @@ func (p *DevicePool) FetchProfilePicture(ctx context.Context, accountID, deviceI
 	fetchCtx, cancel := context.WithTimeout(ctx, profilePictureTimeout)
 	defer cancel()
 	picture, err := instance.Client.GetProfilePictureInfo(fetchCtx, jid, &whatsmeow.GetProfilePictureParams{})
-	if err != nil || picture == nil || strings.TrimSpace(picture.URL) == "" {
-		return nil, profilePictureError("whatsapp_photo_not_set", "WhatsApp no devolvió una foto visible para este contacto")
+	if lookupErr := classifyProfilePictureLookup(picture, err); lookupErr != nil {
+		return nil, lookupErr
 	}
 	pictureURL, err := url.Parse(strings.TrimSpace(picture.URL))
 	if err != nil || pictureURL.Scheme != "https" || pictureURL.Hostname() == "" {
-		return nil, profilePictureError("whatsapp_photo_unavailable", "WhatsApp devolvió una ubicación de foto inválida")
+		return nil, profilePictureError(ProfilePictureCodeUnavailable, "WhatsApp devolvió una ubicación de foto inválida")
 	}
 
 	request, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, pictureURL.String(), nil)
 	if err != nil {
-		return nil, profilePictureError("whatsapp_photo_unavailable", "No se pudo preparar la descarga de la foto")
+		return nil, profilePictureError(ProfilePictureCodeUnavailable, "No se pudo preparar la descarga de la foto")
 	}
 	client := &http.Client{
 		Timeout: profilePictureTimeout,
@@ -107,11 +134,11 @@ func (p *DevicePool) FetchProfilePicture(ctx context.Context, accountID, deviceI
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, profilePictureError("whatsapp_photo_unavailable", "No se pudo descargar la foto de WhatsApp")
+		return nil, profilePictureError(ProfilePictureCodeUnavailable, "No se pudo descargar la foto de WhatsApp")
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, profilePictureError("whatsapp_photo_unavailable", "WhatsApp rechazó la descarga de la foto")
+		return nil, profilePictureError(ProfilePictureCodeUnavailable, "WhatsApp rechazó la descarga de la foto")
 	}
 	if response.ContentLength > contactavatar.MaxInputBytes {
 		return nil, profilePictureError("whatsapp_photo_invalid", "La foto de WhatsApp supera el tamaño permitido")
@@ -119,7 +146,7 @@ func (p *DevicePool) FetchProfilePicture(ctx context.Context, accountID, deviceI
 	limited := io.LimitReader(response.Body, contactavatar.MaxInputBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil || len(data) == 0 {
-		return nil, profilePictureError("whatsapp_photo_unavailable", "La foto de WhatsApp no pudo leerse")
+		return nil, profilePictureError(ProfilePictureCodeUnavailable, "La foto de WhatsApp no pudo leerse")
 	}
 	if len(data) > contactavatar.MaxInputBytes {
 		return nil, profilePictureError("whatsapp_photo_invalid", "La foto de WhatsApp supera el tamaño permitido")

@@ -63,8 +63,16 @@ type Config struct {
 	GoogleClientID     string
 	GoogleClientSecret string
 	GoogleRedirectURI  string
-	// WhatsApp Cloud API webhook authentication
-	WhatsAppCloudAppSecret string
+	// WhatsApp Cloud API / Embedded Signup. Secrets are backend-only; the App
+	// ID and configuration ID are intentionally returned by the protected
+	// readiness endpoint so the browser can launch Meta's official flow.
+	WhatsAppCloudAppID              string
+	WhatsAppCloudAppSecret          string
+	WhatsAppCloudConfigID           string
+	WhatsAppCloudGraphVersion       string
+	WhatsAppCloudGraphBaseURL       string
+	WhatsAppCloudVerifyToken        string
+	WhatsAppCloudTokenEncryptionKey string
 	// Experimental WhatsApp Web ephemeral status publishing. Keep disabled in
 	// production until a real-device smoke test has passed.
 	WhatsAppStatusEnabled     bool
@@ -82,54 +90,60 @@ func Load() *Config {
 	}
 
 	return &Config{
-		DatabaseURL:               getEnv("DATABASE_URL", "postgres://clarin:clarin_secret_2026@localhost:5432/clarin?sslmode=disable"),
-		RedisURL:                  getEnv("REDIS_URL", "redis://localhost:6379"),
-		JWTSecret:                 getEnv("JWT_SECRET", "clarin_jwt_secret_change_in_production_2026"),
-		Port:                      getEnv("PORT", "8080"),
-		Env:                       getEnv("ENV", "development"),
-		AdminUser:                 getEnv("ADMIN_USER", "admin"),
-		AdminPassword:             getEnv("ADMIN_PASSWORD", "clarin123"),
-		AdminEmail:                getEnv("ADMIN_EMAIL", "admin@clarin.local"),
-		CORSOrigins:               origins,
-		MinioEndpoint:             getEnv("MINIO_ENDPOINT", "localhost:9000"),
-		MinioAccessKey:            getEnv("MINIO_ACCESS_KEY", "clarinadmin"),
-		MinioSecretKey:            getEnv("MINIO_SECRET_KEY", "clarinadmin"),
-		MinioBucket:               getEnv("MINIO_BUCKET", "clarin-media"),
-		MinioUseSSL:               getEnv("MINIO_USE_SSL", "false") == "true",
-		MinioPublicURL:            getEnv("MINIO_PUBLIC_URL", "http://localhost:9000"),
-		KommoSubdomain:            getEnv("KOMMO_SUBDOMAIN", ""),
-		KommoClientID:             getEnv("KOMMO_CLIENT_ID", ""),
-		KommoClientSecret:         getEnv("KOMMO_CLIENT_SECRET", ""),
-		KommoAccessToken:          getEnv("KOMMO_ACCESS_TOKEN", ""),
-		KommoRedirectURI:          getEnv("KOMMO_REDIRECT_URI", ""),
-		KommoWebhookSecret:        getEnv("KOMMO_WEBHOOK_SECRET", ""),
-		KommoProxyURL:             getEnv("KOMMO_PROXY_URL", getEnv("MEDIA_SOCKS5_PROXY", "")),
-		KommoOutboxEnabled:        getEnvBool("KOMMO_OUTBOX_ENABLED", true),
-		KommoOutboxBatchSize:      getEnvInt("KOMMO_OUTBOX_BATCH_SIZE", 250),
-		KommoOutboxFlushInterval:  getEnvDuration("KOMMO_OUTBOX_FLUSH_INTERVAL", 2*time.Second),
-		PublicURL:                 getEnv("PUBLIC_URL", ""),
-		GeminiAPIKey:              getEnv("GEMINI_API_KEY", ""),
-		GroqAPIKey:                getEnv("GROQ_API_KEY", ""),
-		ErosEnabled:               getEnvBool("EROS_ENABLED", true),
-		ErosProvider:              getEnv("EROS_PROVIDER", "codex_bridge"),
-		ErosCodexBridgeURL:        strings.TrimRight(getEnv("EROS_CODEX_BRIDGE_URL", ""), "/"),
-		ErosCodexBridgeToken:      getEnv("EROS_CODEX_BRIDGE_TOKEN", ""),
-		ErosCodexAuthMode:         getEnv("EROS_CODEX_AUTH_MODE", "chatgpt_subscription"),
-		ErosCodexModel:            getEnv("EROS_CODEX_MODEL", "gpt-5.4-mini"),
-		ErosCodexReasoning:        getEnv("EROS_CODEX_REASONING_EFFORT", "medium"),
-		ErosMCPBaseURL:            strings.TrimRight(getEnv("EROS_MCP_BASE_URL", ""), "/"),
-		ErosMCPAccessToken:        getEnv("EROS_MCP_ACCESS_TOKEN", ""),
-		ErosBridgeTimeout:         getEnvDuration("EROS_CODEX_BRIDGE_TIMEOUT", 195*time.Second),
-		SharedBrowserGatewayURL:   strings.TrimRight(getEnv("SHARED_BROWSER_GATEWAY_URL", "http://clarin-shared-browser:8791"), "/"),
-		SharedBrowserTimeout:      getEnvDuration("SHARED_BROWSER_TIMEOUT", 30*time.Second),
-		GoogleClientID:            getEnv("GOOGLE_CLIENT_ID", ""),
-		GoogleClientSecret:        getEnv("GOOGLE_CLIENT_SECRET", ""),
-		GoogleRedirectURI:         getEnv("GOOGLE_REDIRECT_URI", ""),
-		WhatsAppCloudAppSecret:    getEnv("WHATSAPP_CLOUD_APP_SECRET", ""),
-		WhatsAppStatusEnabled:     getEnvBool("WHATSAPP_STATUS_ENABLED", false),
-		WhatsAppStatusSyncEnabled: getEnvBool("WHATSAPP_STATUS_SYNC_ENABLED", false),
-		TurnstileSiteKey:          getEnv("TURNSTILE_SITE_KEY", getEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "")),
-		TurnstileSecretKey:        getEnv("TURNSTILE_SECRET_KEY", ""),
+		DatabaseURL:                     getEnv("DATABASE_URL", "postgres://clarin:clarin_secret_2026@localhost:5432/clarin?sslmode=disable"),
+		RedisURL:                        getEnv("REDIS_URL", "redis://localhost:6379"),
+		JWTSecret:                       getEnv("JWT_SECRET", "clarin_jwt_secret_change_in_production_2026"),
+		Port:                            getEnv("PORT", "8080"),
+		Env:                             getEnv("ENV", "development"),
+		AdminUser:                       getEnv("ADMIN_USER", "admin"),
+		AdminPassword:                   getEnv("ADMIN_PASSWORD", "clarin123"),
+		AdminEmail:                      getEnv("ADMIN_EMAIL", "admin@clarin.local"),
+		CORSOrigins:                     origins,
+		MinioEndpoint:                   getEnv("MINIO_ENDPOINT", "localhost:9000"),
+		MinioAccessKey:                  getEnv("MINIO_ACCESS_KEY", "clarinadmin"),
+		MinioSecretKey:                  getEnv("MINIO_SECRET_KEY", "clarinadmin"),
+		MinioBucket:                     getEnv("MINIO_BUCKET", "clarin-media"),
+		MinioUseSSL:                     getEnv("MINIO_USE_SSL", "false") == "true",
+		MinioPublicURL:                  getEnv("MINIO_PUBLIC_URL", "http://localhost:9000"),
+		KommoSubdomain:                  getEnv("KOMMO_SUBDOMAIN", ""),
+		KommoClientID:                   getEnv("KOMMO_CLIENT_ID", ""),
+		KommoClientSecret:               getEnv("KOMMO_CLIENT_SECRET", ""),
+		KommoAccessToken:                getEnv("KOMMO_ACCESS_TOKEN", ""),
+		KommoRedirectURI:                getEnv("KOMMO_REDIRECT_URI", ""),
+		KommoWebhookSecret:              getEnv("KOMMO_WEBHOOK_SECRET", ""),
+		KommoProxyURL:                   getEnv("KOMMO_PROXY_URL", getEnv("MEDIA_SOCKS5_PROXY", "")),
+		KommoOutboxEnabled:              getEnvBool("KOMMO_OUTBOX_ENABLED", true),
+		KommoOutboxBatchSize:            getEnvInt("KOMMO_OUTBOX_BATCH_SIZE", 250),
+		KommoOutboxFlushInterval:        getEnvDuration("KOMMO_OUTBOX_FLUSH_INTERVAL", 2*time.Second),
+		PublicURL:                       getEnv("PUBLIC_URL", ""),
+		GeminiAPIKey:                    getEnv("GEMINI_API_KEY", ""),
+		GroqAPIKey:                      getEnv("GROQ_API_KEY", ""),
+		ErosEnabled:                     getEnvBool("EROS_ENABLED", true),
+		ErosProvider:                    getEnv("EROS_PROVIDER", "codex_bridge"),
+		ErosCodexBridgeURL:              strings.TrimRight(getEnv("EROS_CODEX_BRIDGE_URL", ""), "/"),
+		ErosCodexBridgeToken:            getEnv("EROS_CODEX_BRIDGE_TOKEN", ""),
+		ErosCodexAuthMode:               getEnv("EROS_CODEX_AUTH_MODE", "chatgpt_subscription"),
+		ErosCodexModel:                  getEnv("EROS_CODEX_MODEL", "gpt-5.4-mini"),
+		ErosCodexReasoning:              getEnv("EROS_CODEX_REASONING_EFFORT", "medium"),
+		ErosMCPBaseURL:                  strings.TrimRight(getEnv("EROS_MCP_BASE_URL", ""), "/"),
+		ErosMCPAccessToken:              getEnv("EROS_MCP_ACCESS_TOKEN", ""),
+		ErosBridgeTimeout:               getEnvDuration("EROS_CODEX_BRIDGE_TIMEOUT", 195*time.Second),
+		SharedBrowserGatewayURL:         strings.TrimRight(getEnv("SHARED_BROWSER_GATEWAY_URL", "http://clarin-shared-browser:8791"), "/"),
+		SharedBrowserTimeout:            getEnvDuration("SHARED_BROWSER_TIMEOUT", 30*time.Second),
+		GoogleClientID:                  getEnv("GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret:              getEnv("GOOGLE_CLIENT_SECRET", ""),
+		GoogleRedirectURI:               getEnv("GOOGLE_REDIRECT_URI", ""),
+		WhatsAppCloudAppID:              getEnv("WHATSAPP_CLOUD_APP_ID", ""),
+		WhatsAppCloudAppSecret:          getEnv("WHATSAPP_CLOUD_APP_SECRET", ""),
+		WhatsAppCloudConfigID:           getEnv("WHATSAPP_CLOUD_CONFIG_ID", ""),
+		WhatsAppCloudGraphVersion:       getEnv("WHATSAPP_CLOUD_GRAPH_VERSION", "v23.0"),
+		WhatsAppCloudGraphBaseURL:       strings.TrimRight(getEnv("WHATSAPP_CLOUD_GRAPH_BASE_URL", "https://graph.facebook.com"), "/"),
+		WhatsAppCloudVerifyToken:        getEnv("WHATSAPP_CLOUD_VERIFY_TOKEN", ""),
+		WhatsAppCloudTokenEncryptionKey: getEnv("WHATSAPP_CLOUD_TOKEN_ENCRYPTION_KEY", ""),
+		WhatsAppStatusEnabled:           getEnvBool("WHATSAPP_STATUS_ENABLED", false),
+		WhatsAppStatusSyncEnabled:       getEnvBool("WHATSAPP_STATUS_SYNC_ENABLED", false),
+		TurnstileSiteKey:                getEnv("TURNSTILE_SITE_KEY", getEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "")),
+		TurnstileSecretKey:              getEnv("TURNSTILE_SECRET_KEY", ""),
 	}
 }
 

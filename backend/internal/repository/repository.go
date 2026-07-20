@@ -815,6 +815,10 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 	if strings.TrimSpace(jid) == "" {
 		return nil, fmt.Errorf("chat jid is required")
 	}
+	channelKey, err := r.channelKeyForDevice(ctx, accountID, deviceID)
+	if err != nil {
+		return nil, err
+	}
 	phone := phoneFromJID(jid)
 	isGroup := strings.HasSuffix(jid, "@g.us")
 	if !isGroup {
@@ -832,16 +836,16 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 			`, accountID, deviceID, name, phone, *aliasContactID)
 			chat := &domain.Chat{}
 			err := r.db.QueryRow(ctx, `
-				INSERT INTO chats (account_id, device_id, contact_id, jid, name)
-				VALUES ($1, $2, $3, $4, $5)
-				ON CONFLICT (account_id, jid) DO UPDATE SET
+				INSERT INTO chats (account_id, device_id, contact_id, jid, name, channel_key)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT (account_id, channel_key, jid) DO UPDATE SET
 					device_id = EXCLUDED.device_id,
 					contact_id = EXCLUDED.contact_id,
 					name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name IS NOT NULL THEN EXCLUDED.name ELSE chats.name END,
 					updated_at = NOW()
 				RETURNING id, account_id, device_id, contact_id, jid, name, last_message, last_message_at,
 				          unread_count, is_archived, is_pinned, created_at, updated_at
-			`, accountID, deviceID, *aliasContactID, jid, name).Scan(
+			`, accountID, deviceID, *aliasContactID, jid, name, channelKey).Scan(
 				&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 				&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
 				&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
@@ -855,7 +859,7 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 		}
 	}
 	chat := &domain.Chat{}
-	err := r.db.QueryRow(ctx, `
+	err = r.db.QueryRow(ctx, `
 		WITH contact AS (
 			INSERT INTO contacts (account_id, device_id, jid, phone, name, push_name, is_group)
 			VALUES ($1, $2, $3, $5, $4, $4, $6)
@@ -867,9 +871,9 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 				updated_at = NOW()
 			RETURNING id, (xmax = 0) AS created
 		), upserted_chat AS (
-			INSERT INTO chats (account_id, device_id, contact_id, jid, name)
-			SELECT $1, $2, contact.id, $3, $4 FROM contact
-			ON CONFLICT (account_id, jid) DO UPDATE SET
+			INSERT INTO chats (account_id, device_id, contact_id, jid, name, channel_key)
+			SELECT $1, $2, contact.id, $3, $4, $7 FROM contact
+			ON CONFLICT (account_id, channel_key, jid) DO UPDATE SET
 				device_id = EXCLUDED.device_id,
 				contact_id = COALESCE(chats.contact_id, EXCLUDED.contact_id),
 				name = CASE WHEN EXCLUDED.name != '' AND EXCLUDED.name IS NOT NULL THEN EXCLUDED.name ELSE chats.name END
@@ -884,7 +888,7 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 		       contact.created
 		FROM upserted_chat
 		CROSS JOIN contact
-	`, accountID, deviceID, jid, name, phone, isGroup).Scan(
+	`, accountID, deviceID, jid, name, phone, isGroup, channelKey).Scan(
 		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
 		&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt, &chat.ContactCreated,
@@ -895,6 +899,21 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 		}
 	}
 	return chat, err
+}
+
+func (r *ChatRepository) channelKeyForDevice(ctx context.Context, accountID, deviceID uuid.UUID) (string, error) {
+	var provider string
+	if err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(provider, ''), $3)
+		FROM devices
+		WHERE account_id = $1 AND id = $2
+	`, accountID, deviceID, domain.DeviceProviderWhatsAppWeb).Scan(&provider); err != nil {
+		return "", err
+	}
+	if provider == domain.DeviceProviderWhatsAppCloudAPI {
+		return domain.DeviceProviderWhatsAppCloudAPI + ":" + deviceID.String(), nil
+	}
+	return domain.DeviceProviderWhatsAppWeb, nil
 }
 
 // GetOrCreateForContact creates the canonical WhatsApp chat while preserving an
@@ -919,12 +938,16 @@ func (r *ChatRepository) GetOrCreateForContact(ctx context.Context, accountID, d
 	if !contactExists {
 		return nil, pgx.ErrNoRows
 	}
-	var deviceExists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM devices WHERE id=$1 AND account_id=$2)`, deviceID, accountID).Scan(&deviceExists); err != nil {
+	var provider string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(provider, ''), $3)
+		FROM devices WHERE id=$1 AND account_id=$2
+	`, deviceID, accountID, domain.DeviceProviderWhatsAppWeb).Scan(&provider); err != nil {
 		return nil, err
 	}
-	if !deviceExists {
-		return nil, pgx.ErrNoRows
+	channelKey := domain.DeviceProviderWhatsAppWeb
+	if provider == domain.DeviceProviderWhatsAppCloudAPI {
+		channelKey = domain.DeviceProviderWhatsAppCloudAPI + ":" + deviceID.String()
 	}
 
 	aliases := []struct {
@@ -963,16 +986,16 @@ func (r *ChatRepository) GetOrCreateForContact(ctx context.Context, accountID, d
 
 	chat := &domain.Chat{}
 	err = tx.QueryRow(ctx, `
-		INSERT INTO chats (account_id, device_id, contact_id, jid, name)
-		VALUES ($1,$2,$3,$4,NULLIF($5,''))
-		ON CONFLICT (account_id, jid) DO UPDATE SET
+		INSERT INTO chats (account_id, device_id, contact_id, jid, name, channel_key)
+		VALUES ($1,$2,$3,$4,NULLIF($5,''),$6)
+		ON CONFLICT (account_id, channel_key, jid) DO UPDATE SET
 			device_id=EXCLUDED.device_id,
 			contact_id=COALESCE(chats.contact_id, EXCLUDED.contact_id),
 			name=COALESCE(NULLIF(EXCLUDED.name,''), chats.name),
 			updated_at=NOW()
 		RETURNING id, account_id, device_id, contact_id, jid, name, last_message, last_message_at,
 		          unread_count, is_archived, is_pinned, created_at, updated_at
-	`, accountID, deviceID, contactID, jid, name).Scan(
+	`, accountID, deviceID, contactID, jid, name, channelKey).Scan(
 		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
 		&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
@@ -1282,7 +1305,7 @@ func (r *ChatRepository) FindByJID(ctx context.Context, accountID uuid.UUID, jid
 		       d.name, d.phone, d.status
 		FROM chats c
 		LEFT JOIN devices d ON c.device_id = d.id
-		WHERE c.account_id = $1 AND c.jid = $2
+		WHERE c.account_id = $1 AND c.jid = $2 AND c.channel_key = 'whatsapp_web'
 	`, accountID, jid).Scan(
 		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
@@ -1368,6 +1391,16 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	args := []interface{}{accountID}
 	argNum := 2
 
+	// Provider separation is based on the durable channel identity rather than
+	// the current device row, which keeps historical chats correctly scoped if
+	// a device is later removed.
+	switch filter.Provider {
+	case domain.DeviceProviderWhatsAppCloudAPI:
+		baseQuery += " AND c.channel_key LIKE 'whatsapp_cloud_api:%'"
+	case domain.DeviceProviderWhatsAppWeb:
+		baseQuery += " AND c.channel_key = 'whatsapp_web'"
+	}
+
 	// Device filter
 	if len(filter.DeviceIDs) > 0 {
 		baseQuery += fmt.Sprintf(" AND c.device_id = ANY($%d)", argNum)
@@ -1437,7 +1470,9 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	selectQuery := `
 		SELECT DISTINCT ON (c.is_pinned, c.last_message_at, c.id)
 		       c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
-		       c.unread_count, c.is_archived, c.is_pinned, c.created_at, c.updated_at,
+		       c.unread_count, c.is_archived, c.is_pinned,
+		       c.last_inbound_at, c.last_outbound_at, c.customer_service_window_expires_at, c.last_message_provider,
+		       c.created_at, c.updated_at,
 		       d.name, d.phone,
 		       ctc.phone, ctc.avatar_url, ctc.custom_name, ctc.name,
 		       COALESCE(l.is_blocked, false)
@@ -1463,7 +1498,9 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		if err := rows.Scan(
 			&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 			&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
-			&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
+			&chat.IsPinned, &chat.LastInboundAt, &chat.LastOutboundAt,
+			&chat.CustomerServiceWindowExpiresAt, &chat.LastMessageProvider,
+			&chat.CreatedAt, &chat.UpdatedAt,
 			&chat.DeviceName, &chat.DevicePhone,
 			&chat.ContactPhone, &chat.ContactAvatarURL, &chat.ContactCustomName, &chat.ContactName,
 			&chat.LeadIsBlocked,
@@ -7360,7 +7397,7 @@ func (r *InteractionRepository) Create(ctx context.Context, i *domain.Interactio
 	i.CreatedAt = time.Now()
 	return r.db.QueryRow(ctx, `
 		INSERT INTO interactions (id, account_id, contact_id, lead_id, event_id, participant_id, type, direction, outcome, notes, next_action, next_action_date, created_by, created_at, program_id, program_session_id, program_participant_id, source_label)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NULLIF($18,''))
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::text)
 		RETURNING id
 	`, i.ID, i.AccountID, i.ContactID, i.LeadID, i.EventID, i.ParticipantID, i.Type, i.Direction, i.Outcome, i.Notes, i.NextAction, i.NextActionDate, i.CreatedBy, i.CreatedAt, i.ProgramID, i.ProgramSessionID, i.ProgramParticipantID, i.SourceLabel).Scan(&i.ID)
 }

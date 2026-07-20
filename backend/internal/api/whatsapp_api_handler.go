@@ -7,9 +7,9 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +42,7 @@ type cloudWebhookValue struct {
 	Metadata         cloudWebhookMetadata     `json:"metadata"`
 	Contacts         []cloudWebhookContact    `json:"contacts"`
 	Messages         []cloudWebhookMessage    `json:"messages"`
+	MessageEchoes    []cloudWebhookMessage    `json:"message_echoes"`
 	Statuses         []cloudWebhookStatus     `json:"statuses"`
 	Errors           []map[string]interface{} `json:"errors"`
 }
@@ -61,6 +62,7 @@ type cloudWebhookContact struct {
 type cloudWebhookMessage struct {
 	ID        string `json:"id"`
 	From      string `json:"from"`
+	To        string `json:"to"`
 	Timestamp string `json:"timestamp"`
 	Type      string `json:"type"`
 	Text      *struct {
@@ -101,7 +103,10 @@ func (s *Server) handleWhatsAppCloudVerify(c *fiber.Ctx) error {
 	mode := c.Query("hub.mode")
 	token := c.Query("hub.verify_token")
 	challenge := c.Query("hub.challenge")
-	expected := strings.TrimSpace(os.Getenv("WHATSAPP_CLOUD_VERIFY_TOKEN"))
+	expected := ""
+	if s.cfg != nil {
+		expected = strings.TrimSpace(s.cfg.WhatsAppCloudVerifyToken)
+	}
 	if expected == "" {
 		return c.Status(fiber.StatusForbidden).SendString("verify token is not configured")
 	}
@@ -195,7 +200,7 @@ func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudW
 				contactNames[contact.WAID] = contact.Profile.Name
 			}
 
-			if len(change.Value.Messages) == 0 && len(change.Value.Statuses) == 0 {
+			if len(change.Value.Messages) == 0 && len(change.Value.MessageEchoes) == 0 && len(change.Value.Statuses) == 0 {
 				event := &domain.WhatsAppWebhookEvent{
 					AccountID:     accountID,
 					DeviceID:      deviceID,
@@ -252,6 +257,38 @@ func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudW
 				}
 			}
 
+			for _, message := range change.Value.MessageEchoes {
+				event := &domain.WhatsAppWebhookEvent{
+					AccountID:     accountID,
+					DeviceID:      deviceID,
+					PhoneNumberID: phoneNumberID,
+					EventID:       cloudEchoEventID(phoneNumberID, message),
+					EventType:     "message_echoed",
+					Payload:       changePayload,
+				}
+				claimed, err := s.repos.WhatsAppAPI.ClaimWebhookEvent(ctx, event)
+				if err != nil {
+					return err
+				}
+				if !claimed {
+					continue
+				}
+				markWebhookReceiving()
+				if device == nil {
+					event.ErrorMessage = strPtr("Cloud API channel not configured for phone_number_id")
+				} else if !device.ReceiveMessages {
+					event.Processed = true
+					event.ErrorMessage = strPtr("receive_messages disabled for channel")
+				} else if err := s.processCloudAPIMessageEcho(ctx, device, message); err != nil {
+					event.ErrorMessage = strPtr(err.Error())
+				} else {
+					event.Processed = true
+				}
+				if err := s.repos.WhatsAppAPI.CompleteWebhookEvent(ctx, event.ID, event.Processed, event.ErrorMessage); err != nil {
+					return err
+				}
+			}
+
 			for _, status := range change.Value.Statuses {
 				eventType := "message_status"
 				if status.Status != "" {
@@ -276,6 +313,18 @@ func (s *Server) processWhatsAppCloudWebhook(ctx context.Context, payload cloudW
 				event.Processed = device != nil
 				if device == nil {
 					event.ErrorMessage = strPtr("Cloud API channel not configured for phone_number_id")
+				} else {
+					statusAt := parseCloudTimestamp(status.Timestamp)
+					if err := s.repos.WhatsAppAPI.UpdateCloudMessageStatus(ctx, device.AccountID, device.ID, status.ID, status.Status, statusAt); err != nil {
+						event.Processed = false
+						event.ErrorMessage = strPtr(err.Error())
+					} else if s.hub != nil {
+						s.hub.BroadcastToAccountWithPermission(device.AccountID, domain.PermChats, ws.EventMessageStatus, map[string]interface{}{
+							"message_id": status.ID,
+							"status":     status.Status,
+							"timestamp":  statusAt,
+						})
+					}
 				}
 				if err := s.repos.WhatsAppAPI.CompleteWebhookEvent(ctx, event.ID, event.Processed, event.ErrorMessage); err != nil {
 					return err
@@ -304,6 +353,13 @@ func cloudStatusEventID(phoneNumberID string, status cloudWebhookStatus) string 
 		return fmt.Sprintf("%s:%s", strings.TrimSpace(status.ID), defaultString(status.Status, "status"))
 	}
 	return cloudFallbackEventID("status", phoneNumberID, status.RecipientID, status.Timestamp, status.Status)
+}
+
+func cloudEchoEventID(phoneNumberID string, message cloudWebhookMessage) string {
+	if strings.TrimSpace(message.ID) != "" {
+		return "echo:" + strings.TrimSpace(message.ID)
+	}
+	return cloudFallbackEventID("echo", phoneNumberID, message.From, message.To, message.Timestamp, message.Type)
 }
 
 func cloudFallbackEventID(kind string, parts ...string) string {
@@ -342,6 +398,13 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 
 	body, msgType, mediaMimetype, mediaFilename := cloudMessageBody(message)
 	timestamp := parseCloudTimestamp(message.Timestamp)
+	contactID := chat.ContactID
+	if contactID == nil && contact != nil {
+		contactID = &contact.ID
+	}
+	if err := s.repos.WhatsAppAPI.RecordInboundOptIn(ctx, device.AccountID, contactID, phone, "Mensaje iniciado por el contacto: "+message.ID, timestamp); err != nil {
+		return fmt.Errorf("failed to record inbound opt-in: %w", err)
+	}
 	provider := domain.DeviceProviderWhatsAppCloudAPI
 	status := "received"
 	dbMessage := &domain.Message{
@@ -368,10 +431,6 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 
 	lead, _ := s.repos.Lead.GetByJID(ctx, device.AccountID, jid)
 	if lead == nil {
-		contactID := chat.ContactID
-		if contactID == nil && contact != nil {
-			contactID = &contact.ID
-		}
 		if contactID == nil {
 			return fmt.Errorf("failed to ensure contact for lead: %s", jid)
 		}
@@ -395,13 +454,71 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 
 	s.invalidateChatsCache(device.AccountID)
 	if s.hub != nil {
-		s.hub.BroadcastToAccount(device.AccountID, ws.EventNewMessage, map[string]interface{}{
+		s.hub.BroadcastToAccountWithPermission(device.AccountID, domain.PermChats, ws.EventNewMessage, map[string]interface{}{
 			"chat_id": chat.ID.String(),
 			"message": dbMessage,
 		})
-		s.hub.BroadcastToAccount(device.AccountID, ws.EventChatUpdate, map[string]interface{}{
+		s.hub.BroadcastToAccountWithPermission(device.AccountID, domain.PermChats, ws.EventChatUpdate, map[string]interface{}{
 			"chat_id": chat.ID.String(),
 		})
+	}
+	return nil
+}
+
+func (s *Server) processCloudAPIMessageEcho(ctx context.Context, device *domain.Device, message cloudWebhookMessage) error {
+	if message.Type == "edit" || message.Type == "revoke" {
+		return fmt.Errorf("message echo type %s is audited but not reconciled in this release", message.Type)
+	}
+	phone := normalizeWhatsAppPhone(message.To)
+	if phone == "" {
+		return errors.New("message echo has no customer phone")
+	}
+	jid := phone + "@s.whatsapp.net"
+	contact, err := s.repos.Contact.GetOrCreate(ctx, device.AccountID, &device.ID, jid, phone, phone, phone, false)
+	if err != nil {
+		return fmt.Errorf("failed to get/create echo contact: %w", err)
+	}
+	if contact != nil {
+		_ = s.repos.Contact.SyncToLead(ctx, contact)
+	}
+	chat, err := s.repos.Chat.GetOrCreate(ctx, device.AccountID, device.ID, jid, phone)
+	if err != nil {
+		return fmt.Errorf("failed to get/create echo chat: %w", err)
+	}
+	body, msgType, mediaMimetype, mediaFilename := cloudMessageBody(message)
+	timestamp := parseCloudTimestamp(message.Timestamp)
+	provider := domain.DeviceProviderWhatsAppCloudAPI
+	status := "sent"
+	dbMessage := &domain.Message{
+		AccountID:     device.AccountID,
+		DeviceID:      &device.ID,
+		ChatID:        chat.ID,
+		MessageID:     message.ID,
+		FromJID:       device.JID,
+		FromName:      device.Name,
+		Body:          strPtr(body),
+		MessageType:   strPtr(msgType),
+		MediaMimetype: mediaMimetype,
+		MediaFilename: mediaFilename,
+		IsFromMe:      true,
+		IsRead:        true,
+		Status:        &status,
+		Provider:      &provider,
+		Timestamp:     timestamp,
+	}
+	if err := s.repos.Message.Create(ctx, dbMessage); err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("failed to save echoed message: %w", err)
+	}
+	_ = s.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, timestamp, false)
+	_ = s.repos.WhatsAppAPI.UpdateChatServiceWindow(ctx, chat.ID, provider, false, timestamp)
+	s.invalidateChatCaches(device.AccountID, &chat.ID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(device.AccountID, domain.PermChats, ws.EventNewMessage, map[string]interface{}{
+			"chat_id":    chat.ID.String(),
+			"is_from_me": true,
+			"message":    dbMessage,
+		})
+		s.hub.BroadcastToAccountWithPermission(device.AccountID, domain.PermChats, ws.EventChatUpdate, map[string]interface{}{"chat_id": chat.ID.String()})
 	}
 	return nil
 }
@@ -447,6 +564,12 @@ func (s *Server) handleCreateWhatsAppTemplate(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device_id"})
 	}
+	if deviceID != nil {
+		device, err := s.services.Device.GetByID(c.Context(), *deviceID)
+		if err != nil || device == nil || device.AccountID != accountID {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+		}
+	}
 	components := marshalJSONDefault(req.Components, "[]")
 	template := &domain.WhatsAppMessageTemplate{
 		AccountID:  accountID,
@@ -473,6 +596,9 @@ func (s *Server) handleUpdateWhatsAppTemplate(c *fiber.Ctx) error {
 	if err != nil || existing == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Template not found"})
 	}
+	if existing.MetaTemplateID != nil && strings.TrimSpace(*existing.MetaTemplateID) != "" {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Las plantillas sincronizadas solo se modifican en Meta"})
+	}
 	var req struct {
 		DeviceID   *string     `json:"device_id"`
 		Name       string      `json:"name"`
@@ -487,6 +613,12 @@ func (s *Server) handleUpdateWhatsAppTemplate(c *fiber.Ctx) error {
 	deviceID, err := parseOptionalUUID(req.DeviceID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device_id"})
+	}
+	if deviceID != nil {
+		device, err := s.services.Device.GetByID(c.Context(), *deviceID)
+		if err != nil || device == nil || device.AccountID != accountID {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+		}
 	}
 	existing.DeviceID = deviceID
 	existing.Name = strings.TrimSpace(req.Name)
@@ -508,6 +640,13 @@ func (s *Server) handleDeleteWhatsAppTemplate(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid template ID"})
+	}
+	template, err := s.repos.WhatsAppAPI.GetTemplateByID(c.Context(), id, accountID)
+	if err != nil || template == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Template not found"})
+	}
+	if template.MetaTemplateID != nil && strings.TrimSpace(*template.MetaTemplateID) != "" {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Las plantillas sincronizadas solo se eliminan en Meta"})
 	}
 	if err := s.repos.WhatsAppAPI.DeleteTemplate(c.Context(), id, accountID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})

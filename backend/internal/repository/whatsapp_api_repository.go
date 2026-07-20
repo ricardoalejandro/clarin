@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,259 @@ type WhatsAppAPIOverview struct {
 	ApprovedTemplates int `json:"approved_templates"`
 	WebhookEventCount int `json:"webhook_event_count"`
 	OpenWindowCount   int `json:"open_window_count"`
+}
+
+var ErrCloudChannelOwnedByAnotherAccount = errors.New("WhatsApp Cloud channel belongs to another account")
+
+type WhatsAppCloudCredential struct {
+	DeviceID             uuid.UUID
+	AccountID            uuid.UUID
+	AccessTokenEncrypted []byte
+	TokenExpiresAt       *time.Time
+	GrantedScopes        []string
+}
+
+func (r *WhatsAppAPIRepository) UpsertCloudDevice(ctx context.Context, device *domain.Device) (*domain.Device, error) {
+	if device.ID == uuid.Nil {
+		device.ID = uuid.New()
+	}
+	result := &domain.Device{}
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO devices (
+			id, account_id, name, phone, jid, status, qr_code, receive_messages, provider,
+			waba_id, phone_number_id, api_display_phone, api_webhook_status, api_billing_status,
+			api_sending_enabled, api_templates_enabled, capabilities, last_seen_at
+		)
+		VALUES (
+			$1, $2, $3, $4, $5, 'connecting', NULL, TRUE, $6,
+			$7, $8, $9, 'pending', 'customer_managed', FALSE, FALSE,
+			'["cloud_api","embedded_signup","coexistence"]'::jsonb, NOW()
+		)
+		ON CONFLICT (phone_number_id)
+			WHERE provider = 'whatsapp_cloud_api' AND phone_number_id IS NOT NULL
+		DO UPDATE SET
+			name = EXCLUDED.name,
+			phone = EXCLUDED.phone,
+			jid = EXCLUDED.jid,
+			status = 'connecting',
+			waba_id = EXCLUDED.waba_id,
+			api_display_phone = EXCLUDED.api_display_phone,
+			api_webhook_status = 'pending',
+			api_billing_status = 'customer_managed',
+			api_sending_enabled = FALSE,
+			api_templates_enabled = FALSE,
+			capabilities = EXCLUDED.capabilities,
+			last_seen_at = NOW(),
+			updated_at = NOW()
+		WHERE devices.account_id = EXCLUDED.account_id
+		RETURNING id, account_id, name, phone, jid, status, qr_code, receive_messages, provider, waba_id,
+			phone_number_id, api_display_phone, api_webhook_status, api_billing_status, api_sending_enabled,
+			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at
+	`, device.ID, device.AccountID, device.Name, device.Phone, device.JID,
+		domain.DeviceProviderWhatsAppCloudAPI, device.WABAID, device.PhoneNumberID, device.APIDisplayPhone).Scan(
+		&result.ID, &result.AccountID, &result.Name, &result.Phone, &result.JID,
+		&result.Status, &result.QRCode, &result.ReceiveMessages, &result.Provider, &result.WABAID,
+		&result.PhoneNumberID, &result.APIDisplayPhone, &result.APIWebhookStatus, &result.APIBillingStatus,
+		&result.APISendingEnabled, &result.APITemplatesEnabled, &result.Capabilities, &result.LastSeenAt,
+		&result.CreatedAt, &result.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, ErrCloudChannelOwnedByAnotherAccount
+	}
+	return result, err
+}
+
+func (r *WhatsAppAPIRepository) UpsertCloudCredential(ctx context.Context, credential *WhatsAppCloudCredential) error {
+	command, err := r.db.Exec(ctx, `
+		INSERT INTO whatsapp_cloud_credentials
+			(device_id, account_id, access_token_encrypted, token_expires_at, granted_scopes)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (device_id) DO UPDATE SET
+			access_token_encrypted = EXCLUDED.access_token_encrypted,
+			token_expires_at = EXCLUDED.token_expires_at,
+			granted_scopes = EXCLUDED.granted_scopes,
+			updated_at = NOW()
+		WHERE whatsapp_cloud_credentials.account_id = EXCLUDED.account_id
+	`, credential.DeviceID, credential.AccountID, credential.AccessTokenEncrypted,
+		credential.TokenExpiresAt, credential.GrantedScopes)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrCloudChannelOwnedByAnotherAccount
+	}
+	return nil
+}
+
+func (r *WhatsAppAPIRepository) GetCloudCredential(ctx context.Context, accountID, deviceID uuid.UUID) (*WhatsAppCloudCredential, error) {
+	credential := &WhatsAppCloudCredential{}
+	err := r.db.QueryRow(ctx, `
+		SELECT device_id, account_id, access_token_encrypted, token_expires_at, granted_scopes
+		FROM whatsapp_cloud_credentials
+		WHERE account_id = $1 AND device_id = $2
+	`, accountID, deviceID).Scan(
+		&credential.DeviceID, &credential.AccountID, &credential.AccessTokenEncrypted,
+		&credential.TokenExpiresAt, &credential.GrantedScopes,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return credential, err
+}
+
+func (r *WhatsAppAPIRepository) ActivateCloudDevice(ctx context.Context, accountID, deviceID uuid.UUID, webhookStatus string, templatesEnabled bool) error {
+	command, err := r.db.Exec(ctx, `
+		UPDATE devices
+		SET status = $1,
+		    api_webhook_status = $2,
+		    api_sending_enabled = TRUE,
+		    api_templates_enabled = $6,
+		    last_seen_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $3 AND account_id = $4 AND provider = $5
+	`, domain.DeviceStatusConnected, webhookStatus, deviceID, accountID, domain.DeviceProviderWhatsAppCloudAPI, templatesEnabled)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (r *WhatsAppAPIRepository) MarkCloudDeviceError(ctx context.Context, accountID, deviceID uuid.UUID, webhookStatus string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE devices
+		SET status = $1, api_webhook_status = $2, api_sending_enabled = FALSE,
+		    api_templates_enabled = FALSE, updated_at = NOW()
+		WHERE id = $3 AND account_id = $4 AND provider = $5
+	`, domain.DeviceStatusDisconnected, webhookStatus, deviceID, accountID, domain.DeviceProviderWhatsAppCloudAPI)
+	return err
+}
+
+func (r *WhatsAppAPIRepository) CanSendFreeform(ctx context.Context, accountID, chatID uuid.UUID) (bool, *time.Time, error) {
+	var expiresAt *time.Time
+	var canSend bool
+	err := r.db.QueryRow(ctx, `
+		SELECT customer_service_window_expires_at,
+		       COALESCE(customer_service_window_expires_at > NOW(), FALSE)
+		FROM chats
+		WHERE id = $1 AND account_id = $2 AND channel_key LIKE 'whatsapp_cloud_api:%'
+	`, chatID, accountID).Scan(&expiresAt, &canSend)
+	if err == pgx.ErrNoRows {
+		return false, nil, nil
+	}
+	return canSend, expiresAt, err
+}
+
+func (r *WhatsAppAPIRepository) RecordOptIn(ctx context.Context, accountID uuid.UUID, contactID *uuid.UUID, phone, source, proofNote string, consentedAt time.Time, createdBy *uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO whatsapp_opt_ins
+			(account_id, contact_id, phone, source, proof_note, consented_at, revoked_at, created_by)
+		VALUES ($1,$2,$3,$4,$5,$6,NULL,$7)
+		ON CONFLICT (account_id, phone) DO UPDATE SET
+			contact_id = COALESCE(EXCLUDED.contact_id, whatsapp_opt_ins.contact_id),
+			source = EXCLUDED.source,
+			proof_note = EXCLUDED.proof_note,
+			consented_at = EXCLUDED.consented_at,
+			revoked_at = NULL,
+			created_by = EXCLUDED.created_by,
+			updated_at = NOW()
+	`, accountID, contactID, phone, source, proofNote, consentedAt, createdBy)
+	return err
+}
+
+func (r *WhatsAppAPIRepository) RecordInboundOptIn(ctx context.Context, accountID uuid.UUID, contactID *uuid.UUID, phone, proofNote string, consentedAt time.Time) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO whatsapp_opt_ins
+			(account_id, contact_id, phone, source, proof_note, consented_at, revoked_at, created_by)
+		VALUES ($1,$2,$3,'whatsapp_inbound',$4,$5,NULL,NULL)
+		ON CONFLICT (account_id, phone) DO NOTHING
+	`, accountID, contactID, phone, proofNote, consentedAt)
+	return err
+}
+
+func (r *WhatsAppAPIRepository) HasActiveOptIn(ctx context.Context, accountID uuid.UUID, phone string) (bool, error) {
+	var active bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM whatsapp_opt_ins
+			WHERE account_id = $1 AND phone = $2 AND revoked_at IS NULL
+		)
+	`, accountID, phone).Scan(&active)
+	return active, err
+}
+
+func (r *WhatsAppAPIRepository) LatestInboundCloudMessageID(ctx context.Context, accountID, deviceID, chatID uuid.UUID) (string, error) {
+	var messageID string
+	err := r.db.QueryRow(ctx, `
+		SELECT message_id
+		FROM messages
+		WHERE account_id = $1 AND device_id = $2 AND chat_id = $3
+		  AND provider = $4 AND is_from_me = FALSE
+		ORDER BY timestamp DESC, created_at DESC
+		LIMIT 1
+	`, accountID, deviceID, chatID, domain.DeviceProviderWhatsAppCloudAPI).Scan(&messageID)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	return messageID, err
+}
+
+func (r *WhatsAppAPIRepository) UpsertSyncedTemplate(ctx context.Context, template *domain.WhatsAppMessageTemplate) error {
+	if template.DeviceID == nil {
+		return errors.New("synced template requires a Cloud device")
+	}
+	components := template.Components
+	if len(components) == 0 {
+		components = json.RawMessage("[]")
+	}
+	return r.db.QueryRow(ctx, `
+		INSERT INTO whatsapp_message_templates
+			(account_id, device_id, name, language, category, status, components,
+			 meta_template_id, rejection_reason, last_synced_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+		ON CONFLICT (account_id, device_id, name, language)
+			WHERE device_id IS NOT NULL
+		DO UPDATE SET
+			category = EXCLUDED.category,
+			status = EXCLUDED.status,
+			components = EXCLUDED.components,
+			meta_template_id = EXCLUDED.meta_template_id,
+			rejection_reason = EXCLUDED.rejection_reason,
+			last_synced_at = NOW(),
+			updated_at = NOW()
+		RETURNING id, created_at, updated_at, last_synced_at
+	`, template.AccountID, template.DeviceID, template.Name, template.Language,
+		template.Category, template.Status, components, template.MetaTemplateID,
+		template.RejectionReason).Scan(&template.ID, &template.CreatedAt, &template.UpdatedAt, &template.LastSyncedAt)
+}
+
+func (r *WhatsAppAPIRepository) DeleteStaleSyncedTemplates(ctx context.Context, accountID, deviceID uuid.UUID, activeMetaIDs []string) error {
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM whatsapp_message_templates
+		WHERE account_id = $1 AND device_id = $2 AND meta_template_id IS NOT NULL
+		  AND NOT (meta_template_id = ANY($3::text[]))
+	`, accountID, deviceID, activeMetaIDs)
+	return err
+}
+
+func (r *WhatsAppAPIRepository) UpdateCloudMessageStatus(ctx context.Context, accountID, deviceID uuid.UUID, messageID, status string, at time.Time) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE messages
+		SET status = CASE
+		      WHEN $4 = 'failed' THEN 'failed'
+		      WHEN $4 = 'read' AND status <> 'failed' THEN 'read'
+		      WHEN $4 = 'delivered' AND status NOT IN ('read','failed') THEN 'delivered'
+		      WHEN $4 = 'sent' AND status NOT IN ('read','delivered','failed') THEN 'sent'
+		      ELSE status
+		    END,
+		    delivered_at = CASE WHEN $4 = 'delivered' AND status <> 'failed' THEN COALESCE(delivered_at, $5) ELSE delivered_at END,
+		    read_at = CASE WHEN $4 = 'read' AND status <> 'failed' THEN COALESCE(read_at, $5) ELSE read_at END
+		WHERE account_id = $1 AND device_id = $2 AND message_id = $3
+		  AND provider = $6 AND is_from_me = TRUE
+	`, accountID, deviceID, messageID, status, at, domain.DeviceProviderWhatsAppCloudAPI)
+	return err
 }
 
 func (r *WhatsAppAPIRepository) GetCloudDeviceByPhoneNumberID(ctx context.Context, phoneNumberID string) (*domain.Device, error) {
@@ -70,7 +324,7 @@ func (r *WhatsAppAPIRepository) GetOverview(ctx context.Context, accountID uuid.
 			(SELECT COUNT(*) FROM whatsapp_message_templates WHERE account_id = $1),
 			(SELECT COUNT(*) FROM whatsapp_message_templates WHERE account_id = $1 AND status = 'approved'),
 			(SELECT COUNT(*) FROM whatsapp_webhook_events WHERE account_id = $1),
-			(SELECT COUNT(*) FROM chats WHERE account_id = $1 AND customer_service_window_expires_at > NOW())
+			(SELECT COUNT(*) FROM chats WHERE account_id = $1 AND channel_key LIKE 'whatsapp_cloud_api:%' AND customer_service_window_expires_at > NOW())
 	`, accountID).Scan(&overview.CloudChannelCount, &overview.TemplateCount, &overview.ApprovedTemplates, &overview.WebhookEventCount, &overview.OpenWindowCount)
 	return overview, err
 }
@@ -172,7 +426,16 @@ func (r *WhatsAppAPIRepository) ClaimWebhookEvent(ctx context.Context, event *do
 		INSERT INTO whatsapp_webhook_events
 			(account_id, device_id, phone_number_id, event_id, event_type, payload, processed, error_message)
 		VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7)
-		ON CONFLICT (event_id) DO NOTHING
+		ON CONFLICT (event_id) DO UPDATE SET
+			account_id = COALESCE(whatsapp_webhook_events.account_id, EXCLUDED.account_id),
+			device_id = COALESCE(whatsapp_webhook_events.device_id, EXCLUDED.device_id),
+			phone_number_id = EXCLUDED.phone_number_id,
+			payload = EXCLUDED.payload,
+			error_message = NULL,
+			received_at = NOW()
+		WHERE whatsapp_webhook_events.processed = FALSE
+		  AND (whatsapp_webhook_events.error_message IS NOT NULL
+		       OR whatsapp_webhook_events.received_at < NOW() - INTERVAL '5 minutes')
 		RETURNING id, received_at
 	`, event.AccountID, event.DeviceID, event.PhoneNumberID, event.EventID, event.EventType, payload, event.ErrorMessage).
 		Scan(&event.ID, &event.ReceivedAt)

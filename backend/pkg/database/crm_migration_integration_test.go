@@ -102,6 +102,30 @@ func TestCRMMigrationDirtyAndIdempotent(t *testing.T) {
 	`, accountID, repairContactID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO whatsapp_opt_ins (account_id,contact_id,phone,source,consented_at)
+		VALUES ($1,$2,'51999900070','whatsapp_inbound',NOW())
+	`, accountID, repairContactID); err != nil {
+		t.Fatalf("insert valid account-scoped WhatsApp opt-in: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO whatsapp_opt_ins (account_id,contact_id,phone,source,consented_at)
+		VALUES ($1,$2,'51999900071','whatsapp_inbound',NOW())
+	`, accountID, otherContactID); err == nil {
+		t.Fatal("cross-account WhatsApp opt-in contact was accepted")
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO whatsapp_cloud_credentials (device_id,account_id,access_token_encrypted)
+		VALUES ($1,$2,decode('01','hex'))
+	`, deviceID, accountID); err != nil {
+		t.Fatalf("insert valid account-scoped Cloud credential: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO whatsapp_cloud_credentials (device_id,account_id,access_token_encrypted)
+		VALUES ($1,$2,decode('01','hex'))
+	`, otherDeviceID, accountID); err == nil {
+		t.Fatal("cross-account Cloud credential was accepted")
+	}
 	if _, err := db.Exec(ctx, `ALTER TABLE chats DROP CONSTRAINT chats_account_contact_fkey`); err != nil {
 		t.Fatal(err)
 	}
@@ -381,6 +405,34 @@ func TestCRMMigrationDirtyAndIdempotent(t *testing.T) {
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO contacts (id,account_id,jid,phone,name) VALUES ($1,$2,'51999900001@s.whatsapp.net','51999900001','Persona')`, contactID, accountID); err != nil {
 		t.Fatal(err)
+	}
+	interactionRepos := repository.NewRepositories(db)
+	for _, testCase := range []struct {
+		interactionType string
+		sourceLabel     string
+	}{
+		{interactionType: domain.InteractionTypeNote, sourceLabel: ""},
+		{interactionType: domain.InteractionTypeCall, sourceLabel: ""},
+		{interactionType: domain.InteractionTypeNote, sourceLabel: "Programa · Prueba"},
+	} {
+		notes := "regresión de persistencia"
+		interaction := &domain.Interaction{
+			AccountID:   accountID,
+			ContactID:   &contactID,
+			Type:        testCase.interactionType,
+			Notes:       &notes,
+			SourceLabel: testCase.sourceLabel,
+		}
+		if err := interactionRepos.Interaction.Create(ctx, interaction); err != nil {
+			t.Fatalf("create %s interaction with source label %q: %v", testCase.interactionType, testCase.sourceLabel, err)
+		}
+		var storedLabel string
+		if err := db.QueryRow(ctx, `SELECT source_label FROM interactions WHERE id=$1 AND account_id=$2`, interaction.ID, accountID).Scan(&storedLabel); err != nil {
+			t.Fatalf("read persisted interaction source label: %v", err)
+		}
+		if storedLabel != testCase.sourceLabel {
+			t.Fatalf("stored source label = %q, want %q", storedLabel, testCase.sourceLabel)
+		}
 	}
 	if _, err := db.Exec(ctx, `
 		INSERT INTO chats (account_id,device_id,contact_id,jid,name)

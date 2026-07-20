@@ -535,6 +535,7 @@ type Chat struct {
 // ChatFilter defines filter options for listing chats
 type ChatFilter struct {
 	DeviceIDs  []uuid.UUID
+	Provider   string
 	TagIDs     []uuid.UUID
 	UnreadOnly bool
 	Archived   bool

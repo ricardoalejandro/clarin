@@ -40,6 +40,7 @@ import {
   Smartphone,
   Monitor,
   BarChart3,
+  CloudCog,
 } from 'lucide-react'
 
 interface User {
@@ -389,6 +390,7 @@ export default function DashboardLayout({
 
   // Module permission map: route prefix → permission key
   const MODULE_PERMS: Record<string, string> = {
+	'/dashboard/chat-api': 'chats',
     '/dashboard/chats': 'chats',
     '/dashboard/contacts': 'contacts',
     '/dashboard/programs': 'programs',
@@ -422,6 +424,7 @@ export default function DashboardLayout({
     { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', desc: 'Panel principal' },
     { href: '/dashboard/reports', icon: BarChart3, label: 'Reportería', desc: 'Centro de reportes' },
     { href: '/dashboard/chats', icon: MessageSquare, label: 'Chats', desc: 'Conversaciones WhatsApp' },
+    { href: '/dashboard/chat-api', icon: CloudCog, label: 'Chat API', desc: 'Canal oficial de Meta' },
     { href: '/dashboard/contacts', icon: Contact, label: 'Contactos', desc: 'Directorio de contactos' },
     { href: '/dashboard/programs', icon: BookOpenCheck, label: 'Programas', desc: 'Programas educativos' },
     { href: '/dashboard/automations', icon: Workflow, label: 'Automatizaciones', desc: 'Flujos automáticos' },
@@ -772,7 +775,7 @@ export default function DashboardLayout({
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          pathname === '/dashboard/chats' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
+          pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
         } ${(chatComposerKeyboardOpen || chatComposerAccessoryOpen) && !updateAvailable ? 'pt-[env(safe-area-inset-top)]' : ''}`}>
           {children}
         </main>

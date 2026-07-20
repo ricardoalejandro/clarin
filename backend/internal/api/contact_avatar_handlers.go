@@ -293,6 +293,15 @@ func (s *Server) handlePreviewContactAvatarFromWhatsApp(c *fiber.Ctx) error {
 	if err != nil {
 		code := whatsapp.ProfilePictureErrorCode(err)
 		_ = s.repos.ContactAvatar.MarkWhatsAppCheck(c.Context(), accountID, contactID, code)
+		if whatsapp.IsProfilePictureEmptyCode(code) {
+			return c.JSON(fiber.Map{
+				"success":   true,
+				"available": false,
+				"code":      code,
+				"message":   err.Error(),
+				"devices":   devices,
+			})
+		}
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": err.Error(), "code": code, "devices": devices})
 	}
 	normalized, err := contactavatar.Normalize(raw)
@@ -310,7 +319,8 @@ func (s *Server) handlePreviewContactAvatarFromWhatsApp(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo preparar la previsualización"})
 	}
 	return c.JSON(fiber.Map{
-		"success": true,
+		"success":   true,
+		"available": true,
 		"candidate": fiber.Map{
 			"data_url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(normalized),
 			"token":    token, "device_id": deviceID, "expires_at": time.Unix(claims.ExpiresAt, 0),

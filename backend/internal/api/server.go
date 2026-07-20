@@ -387,6 +387,17 @@ func (s *Server) setupRoutes() {
 	chats.Post("/:id/sync-history", s.handleRequestHistorySync)
 	chats.Delete("/:id", s.handleDeleteChat)
 
+	// Official Cloud API inbox. It intentionally has its own route surface so
+	// provider capabilities cannot leak into the legacy WhatsApp Web controls.
+	chatAPI := protected.Group("/chat-api", s.requirePermission(domain.PermChats))
+	chatAPI.Get("/channels", s.handleListChatAPIChannels)
+	chatAPI.Get("/templates", s.handleListChatAPITemplates)
+	chatAPI.Get("/chats", s.handleGetChatAPIChats)
+	chatAPI.Get("/chats/:id", s.requireChatAPIConversation, s.handleGetChatDetails)
+	chatAPI.Get("/chats/:id/messages", s.requireChatAPIConversation, s.handleGetMessages)
+	chatAPI.Post("/chats/:id/read", s.requireChatAPIConversation, s.handleMarkChatAPIRead)
+	chatAPI.Post("/messages/send", s.handleSendWhatsAppCloudMessage)
+
 	// Message routes
 	messages := protected.Group("/messages", s.requirePermission(domain.PermChats))
 	messages.Post("/send", s.handleSendMessage)
@@ -723,9 +734,14 @@ func (s *Server) setupRoutes() {
 	googleContacts.Post("/batch/sync-from-leads", s.handleGoogleBatchSyncFromLeads)
 	googleContacts.Post("/batch/desync-from-leads", s.handleGoogleBatchDesyncFromLeads)
 
-	// WhatsApp Cloud API administration (configuration/audit only; outbound is guarded)
+	// Direct Meta Tech Provider administration and Embedded Signup.
 	whatsappAPI := protected.Group("/whatsapp-api", s.requirePermission(domain.PermIntegrations))
+	whatsappAPI.Get("/configuration", s.handleWhatsAppCloudConfiguration)
 	whatsappAPI.Get("/overview", s.handleWhatsAppAPIOverview)
+	whatsappAPI.Get("/connections", s.handleListChatAPIChannels)
+	whatsappAPI.Post("/embedded-signup/complete", s.handleCompleteWhatsAppEmbeddedSignup)
+	whatsappAPI.Post("/connections/:id/refresh", s.handleRefreshWhatsAppCloudConnection)
+	whatsappAPI.Post("/connections/:id/templates/sync", s.handleSyncWhatsAppCloudTemplates)
 	whatsappAPI.Get("/templates", s.handleListWhatsAppTemplates)
 	whatsappAPI.Post("/templates", s.handleCreateWhatsAppTemplate)
 	whatsappAPI.Put("/templates/:id", s.handleUpdateWhatsAppTemplate)
@@ -1599,30 +1615,11 @@ func (s *Server) handleChangePassword(c *fiber.Ctx) error {
 
 // --- Device Handlers ---
 
-func cleanDeviceString(value *string) *string {
-	if value == nil {
-		return nil
-	}
-	trimmed := strings.TrimSpace(*value)
-	if trimmed == "" {
-		return nil
-	}
-	return &trimmed
-}
-
 func stringValueOrEmpty(value *string) string {
 	if value == nil {
 		return ""
 	}
 	return *value
-}
-
-func cleanDeviceStringDefault(value *string, fallback string) *string {
-	cleaned := cleanDeviceString(value)
-	if cleaned != nil {
-		return cleaned
-	}
-	return &fallback
 }
 
 func getDeviceProvider(device *domain.Device) string {
@@ -1672,15 +1669,8 @@ func (s *Server) handleGetDevices(c *fiber.Ctx) error {
 
 func (s *Server) handleCreateDevice(c *fiber.Ctx) error {
 	var req struct {
-		Name                string  `json:"name"`
-		Provider            string  `json:"provider"`
-		WABAID              *string `json:"waba_id"`
-		PhoneNumberID       *string `json:"phone_number_id"`
-		APIDisplayPhone     *string `json:"api_display_phone"`
-		APIWebhookStatus    *string `json:"api_webhook_status"`
-		APIBillingStatus    *string `json:"api_billing_status"`
-		APISendingEnabled   bool    `json:"api_sending_enabled"`
-		APITemplatesEnabled bool    `json:"api_templates_enabled"`
+		Name     string `json:"name"`
+		Provider string `json:"provider"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -1694,46 +1684,23 @@ func (s *Server) handleCreateDevice(c *fiber.Ctx) error {
 	if provider == "" {
 		provider = domain.DeviceProviderWhatsAppWeb
 	}
+	if provider == domain.DeviceProviderWhatsAppCloudAPI {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"error":   "Los canales oficiales se crean únicamente con Conectar con Meta en Configuración → WhatsApp API",
+			"code":    "embedded_signup_required",
+		})
+	}
+	if provider != domain.DeviceProviderWhatsAppWeb {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Proveedor de WhatsApp no soportado"})
+	}
 
 	accountID := c.Locals("account_id").(uuid.UUID)
 	if err := s.enforcePlanLimit(c.Context(), accountID, "max_devices", 1); err != nil {
 		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_devices"})
 	}
-	if provider == domain.DeviceProviderWhatsAppWeb {
-		device, err := s.services.Device.Create(c.Context(), accountID, req.Name)
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-		}
-		return c.Status(201).JSON(fiber.Map{"success": true, "device": device})
-	}
-
-	if provider != domain.DeviceProviderWhatsAppCloudAPI {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Proveedor de WhatsApp no soportado"})
-	}
-	if req.APISendingEnabled || req.APITemplatesEnabled {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El envío por WhatsApp API Oficial aún está bloqueado en esta fase"})
-	}
-
-	status := domain.DeviceStatusDisconnected
-	webhookStatus := "not_configured"
-	billingStatus := "not_configured"
-	displayPhone := cleanDeviceString(req.APIDisplayPhone)
-	device := &domain.Device{
-		AccountID:           accountID,
-		Name:                &req.Name,
-		Phone:               displayPhone,
-		Status:              &status,
-		Provider:            &provider,
-		WABAID:              cleanDeviceString(req.WABAID),
-		PhoneNumberID:       cleanDeviceString(req.PhoneNumberID),
-		APIDisplayPhone:     displayPhone,
-		APIWebhookStatus:    cleanDeviceStringDefault(req.APIWebhookStatus, webhookStatus),
-		APIBillingStatus:    cleanDeviceStringDefault(req.APIBillingStatus, billingStatus),
-		APISendingEnabled:   false,
-		APITemplatesEnabled: false,
-		Capabilities:        json.RawMessage(`["cloud_api_config"]`),
-	}
-	if err := s.repos.Device.Create(c.Context(), device); err != nil {
+	device, err := s.services.Device.Create(c.Context(), accountID, req.Name)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "device": device})
@@ -1831,15 +1798,16 @@ func (s *Server) handleDeleteDevice(c *fiber.Ctx) error {
 	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
-
-	var deleteErr error
 	if isCloudAPIDevice(dev) {
-		deleteErr = s.repos.Device.Delete(c.Context(), deviceID)
-	} else {
-		deleteErr = s.services.Device.Delete(c.Context(), deviceID)
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"error":   "La baja de un canal oficial debe desuscribir Meta y todavía no está disponible; el canal no fue eliminado",
+			"code":    "cloud_disconnect_not_implemented",
+		})
 	}
-	if deleteErr != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": deleteErr.Error()})
+
+	if err := s.services.Device.Delete(c.Context(), deviceID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Device deleted"})
@@ -1869,45 +1837,20 @@ func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if isCloudAPIDevice(dev) && (req.WABAID != nil || req.PhoneNumberID != nil || req.APIDisplayPhone != nil ||
+		req.APIWebhookStatus != nil || req.APIBillingStatus != nil || req.APISendingEnabled != nil || req.APITemplatesEnabled != nil) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"error":   "La identidad y las capacidades del canal oficial solo se actualizan verificando la conexión con Meta",
+			"code":    "cloud_channel_managed_by_meta",
+		})
+	}
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "El nombre del dispositivo es obligatorio"})
 		}
 		if err := s.repos.Device.UpdateName(c.Context(), deviceID, name); err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-		}
-	}
-	if isCloudAPIDevice(dev) {
-		if req.APISendingEnabled != nil && *req.APISendingEnabled {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": "El envío por WhatsApp API Oficial aún está bloqueado en esta fase"})
-		}
-		if req.APITemplatesEnabled != nil && *req.APITemplatesEnabled {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Las plantillas de WhatsApp API Oficial aún están bloqueadas en esta fase"})
-		}
-		apiConfig := *dev
-		if req.WABAID != nil {
-			apiConfig.WABAID = cleanDeviceString(req.WABAID)
-		}
-		if req.PhoneNumberID != nil {
-			apiConfig.PhoneNumberID = cleanDeviceString(req.PhoneNumberID)
-		}
-		if req.APIDisplayPhone != nil {
-			apiConfig.APIDisplayPhone = cleanDeviceString(req.APIDisplayPhone)
-			apiConfig.Phone = apiConfig.APIDisplayPhone
-		}
-		if req.APIWebhookStatus != nil {
-			apiConfig.APIWebhookStatus = cleanDeviceStringDefault(req.APIWebhookStatus, "not_configured")
-		}
-		if req.APIBillingStatus != nil {
-			apiConfig.APIBillingStatus = cleanDeviceStringDefault(req.APIBillingStatus, "not_configured")
-		}
-		apiConfig.APISendingEnabled = false
-		apiConfig.APITemplatesEnabled = false
-		if len(apiConfig.Capabilities) == 0 {
-			apiConfig.Capabilities = json.RawMessage(`["cloud_api_config"]`)
-		}
-		if err := s.repos.Device.UpdateCloudAPIConfig(c.Context(), deviceID, &apiConfig); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
 	}
@@ -1927,10 +1870,19 @@ func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
 // --- Chat Handlers ---
 
 func (s *Server) handleGetChats(c *fiber.Ctx) error {
+	return s.handleGetChatsForProvider(c, domain.DeviceProviderWhatsAppWeb)
+}
+
+func (s *Server) handleGetChatAPIChats(c *fiber.Ctx) error {
+	return s.handleGetChatsForProvider(c, domain.DeviceProviderWhatsAppCloudAPI)
+}
+
+func (s *Server) handleGetChatsForProvider(c *fiber.Ctx, provider string) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
 	// Parse filters
 	filter := domain.ChatFilter{
+		Provider:   provider,
 		UnreadOnly: c.QueryBool("unread_only", false),
 		Archived:   c.QueryBool("archived", false),
 		Search:     c.Query("search", ""),
@@ -2004,7 +1956,7 @@ func (s *Server) handleGetChats(c *fiber.Ctx) error {
 	isDefaultLoad := filter.Search == "" && !filter.UnreadOnly && !filter.Archived && len(filter.DeviceIDs) == 0 && len(filter.TagIDs) == 0 && !filter.HasReaction && filter.Offset == 0
 	cacheKey := ""
 	if isDefaultLoad && s.cache != nil {
-		cacheKey = fmt.Sprintf("chats:%s:%d", accountID.String(), filter.Limit)
+		cacheKey = fmt.Sprintf("chats:%s:%s:%d", accountID.String(), provider, filter.Limit)
 		if cached, err := s.cache.Get(c.Context(), cacheKey); err == nil && cached != nil {
 			c.Set("Content-Type", "application/json")
 			return c.Send(cached)
@@ -14857,7 +14809,12 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Interaction.LogInteraction(c.Context(), interaction); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		log.Printf("[INTERACTION] create failed account_id=%s contact_id=%v lead_id=%v event_id=%v participant_id=%v: %v", accountID, interaction.ContactID, interaction.LeadID, interaction.EventID, interaction.ParticipantID, err)
+		return c.Status(500).JSON(fiber.Map{
+			"success": false,
+			"error":   "No se pudo guardar la observación. Inténtalo nuevamente.",
+			"code":    "interaction_create_failed",
+		})
 	}
 
 	// Invalidate lead detail + interactions cache

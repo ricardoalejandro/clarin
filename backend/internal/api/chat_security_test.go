@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -173,6 +174,39 @@ func TestCloudWebhookEventIDsAreStable(t *testing.T) {
 	status := cloudWebhookStatus{ID: "wamid.123", Status: "delivered"}
 	if got := cloudStatusEventID("phone", status); got != "wamid.123:delivered" {
 		t.Fatalf("historical status event ID format changed: %q", got)
+	}
+}
+
+func TestCloudWebhookPayloadParsesCoexistenceMessageEcho(t *testing.T) {
+	raw := []byte(`{
+		"object":"whatsapp_business_account",
+		"entry":[{"id":"waba-1","changes":[{"field":"smb_message_echoes","value":{
+			"messaging_product":"whatsapp",
+			"metadata":{"phone_number_id":"phone-1"},
+			"message_echoes":[{"id":"wamid.echo-1","from":"15550001111","to":"51999999999","timestamp":"1710000000","type":"text","text":{"body":"Enviado desde la app"}}]
+		}}]}]
+	}`)
+
+	var payload cloudWebhookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal coexistence echo: %v", err)
+	}
+	if len(payload.Entry) != 1 || len(payload.Entry[0].Changes) != 1 {
+		t.Fatalf("unexpected payload shape: %+v", payload)
+	}
+	change := payload.Entry[0].Changes[0]
+	if change.Field != "smb_message_echoes" || len(change.Value.MessageEchoes) != 1 {
+		t.Fatalf("coexistence echoes were not decoded: %+v", change)
+	}
+	echo := change.Value.MessageEchoes[0]
+	if echo.To != "51999999999" || echo.Text == nil || echo.Text.Body != "Enviado desde la app" {
+		t.Fatalf("unexpected echo content: %+v", echo)
+	}
+	if got := cloudEchoEventID(change.Value.Metadata.PhoneNumberID, echo); got != "echo:wamid.echo-1" {
+		t.Fatalf("unexpected echo event ID: %q", got)
+	}
+	if cloudEchoEventID(change.Value.Metadata.PhoneNumberID, echo) == cloudMessageEventID(change.Value.Metadata.PhoneNumberID, echo) {
+		t.Fatal("echo and inbound message events must have separate idempotency keys")
 	}
 }
 

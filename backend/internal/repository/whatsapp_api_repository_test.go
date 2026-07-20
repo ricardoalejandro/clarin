@@ -73,7 +73,11 @@ func TestClaimWebhookEventClaimsBeforeProcessing(t *testing.T) {
 	if event.ID != claimedID || !event.ReceivedAt.Equal(receivedAt) {
 		t.Fatalf("claim metadata not returned: id=%s received_at=%s", event.ID, event.ReceivedAt)
 	}
-	if !strings.Contains(db.queryRowSQL, "ON CONFLICT (event_id) DO NOTHING") || !strings.Contains(db.queryRowSQL, "RETURNING id, received_at") {
+	if !strings.Contains(db.queryRowSQL, "ON CONFLICT (event_id) DO UPDATE") ||
+		!strings.Contains(db.queryRowSQL, "whatsapp_webhook_events.processed = FALSE") ||
+		!strings.Contains(db.queryRowSQL, "whatsapp_webhook_events.error_message IS NOT NULL") ||
+		!strings.Contains(db.queryRowSQL, "INTERVAL '5 minutes'") ||
+		!strings.Contains(db.queryRowSQL, "RETURNING id, received_at") {
 		t.Fatalf("claim query is not atomic: %s", db.queryRowSQL)
 	}
 	if len(db.queryRowArgs) < 4 || db.queryRowArgs[3] != event.EventID {
