@@ -1,15 +1,18 @@
 "use client";
 
-import { useState, useEffect, useCallback } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import Link from 'next/link';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { Survey, SurveyQuestion, SurveyQuestionConfig, SurveyLogicRule, SurveyAnalytics, SurveyResponse, SurveyBranding, QUESTION_TYPE_LABELS, QuestionType, FONT_OPTIONS, TITLE_SIZE_OPTIONS, BUTTON_STYLE_OPTIONS } from '@/types/survey';
+import type { SurveyInstanceSummary, SurveyTemplate, SurveyTemplateQuestion } from '@/types/survey-template';
 import {
   ArrowLeft, Save, Plus, Trash2, GripVertical, Eye, Share2, BarChart3,
   Type, AlignLeft, CircleDot, CheckSquare, Star, SlidersHorizontal,
   Calendar, Mail, Phone, Paperclip, ChevronDown, ChevronUp, Copy,
   ExternalLink, CheckCircle2, XCircle, PenLine, Settings2, Loader2,
-  Download, FileText, Hash, Clock, TrendingUp, Users, Palette, PieChart, Radar
+  Download, FileText, Hash, Clock, TrendingUp, Users, Palette, PieChart, Radar,
+  Layers3
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -39,6 +42,33 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; i
 
 type Tab = 'builder' | 'design' | 'share' | 'analytics';
 
+type SurveyResultsState = {
+  ownerSurveyId: string;
+  analytics: SurveyAnalytics | null;
+  responses: SurveyResponse[];
+  responsesTotal: number;
+  loadingAnalytics: boolean;
+  selectedResponse: SurveyResponse | null;
+  responsePage: number;
+};
+
+function emptySurveyResultsState(ownerSurveyId: string): SurveyResultsState {
+  return {
+    ownerSurveyId,
+    analytics: null,
+    responses: [],
+    responsesTotal: 0,
+    loadingAnalytics: false,
+    selectedResponse: null,
+    responsePage: 0,
+  };
+}
+
+function isImmutableSurveyApplication(survey: Survey | null): boolean {
+  if (!survey) return false;
+  return survey.status !== 'draft' || (!survey.legacy_instance && Boolean(survey.template_id));
+}
+
 function emptyQuestion(type: QuestionType = 'short_text'): SurveyQuestion {
   return {
     id: crypto.randomUUID(),
@@ -55,15 +85,310 @@ function emptyQuestion(type: QuestionType = 'short_text'): SurveyQuestion {
   };
 }
 
-export default function SurveyBuilderPage() {
+function validateForwardLogicForEditor(questions: SurveyQuestion[]): string | null {
+  const positions = new Map(questions.map((question, index) => [question.id, index]));
+  for (let sourceIndex = 0; sourceIndex < questions.length; sourceIndex += 1) {
+    for (const rule of questions[sourceIndex].logic_rules || []) {
+      const targetIndex = positions.get(rule.jump_to);
+      if (targetIndex === undefined || targetIndex <= sourceIndex) {
+        return `La lógica de la pregunta ${sourceIndex + 1} debe dirigir a una pregunta posterior.`;
+      }
+    }
+  }
+  return null;
+}
+
+export default function SurveyDetailPage() {
+	const params = useParams();
+	const searchParams = useSearchParams();
+	const id = params.id as string;
+	if (searchParams.get('mode') === 'template') {
+		return <SurveyTemplateEditorPage templateId={id} />;
+	}
+	const requestedTab = searchParams.get('tab');
+	return <SurveyBuilderPage requestedTab={requestedTab === 'analytics' || requestedTab === 'share' || requestedTab === 'design' || requestedTab === 'builder' ? requestedTab : undefined} />;
+}
+
+type TemplateTab = 'builder' | 'design' | 'instances';
+
+function templateQuestionToEditor(question: SurveyTemplateQuestion): SurveyQuestion {
+  return {
+    id: question.id,
+    survey_id: question.template_id,
+    order_index: question.order_index,
+    type: question.type,
+    title: question.title,
+    description: question.description,
+    required: question.required,
+    config: question.config || {},
+    logic_rules: question.logic_rules || [],
+    created_at: question.created_at,
+    updated_at: question.updated_at,
+  };
+}
+
+function templateAsSurvey(template: SurveyTemplate): Survey {
+  return {
+    id: template.id,
+    account_id: template.account_id,
+    name: template.name,
+    description: template.description,
+    slug: '',
+    status: template.status === 'active' ? 'active' : 'closed',
+    welcome_title: template.welcome_title,
+    welcome_description: template.welcome_description,
+    thank_you_title: template.thank_you_title,
+    thank_you_message: template.thank_you_message,
+    thank_you_redirect_url: template.thank_you_redirect_url,
+    branding: template.branding || {},
+    is_template: true,
+    created_by: template.created_by,
+    created_at: template.created_at,
+    updated_at: template.updated_at,
+    question_count: template.question_count,
+    response_count: template.response_count,
+  };
+}
+
+function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
+  const router = useRouter();
+  const [template, setTemplate] = useState<SurveyTemplate | null>(null);
+  const [questions, setQuestions] = useState<SurveyQuestion[]>([]);
+  const [activeTab, setActiveTab] = useState<TemplateTab>('builder');
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [selectedQ, setSelectedQ] = useState(0);
+  const [hasChanges, setHasChanges] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [instances, setInstances] = useState<SurveyInstanceSummary[]>([]);
+  const [instancesLoading, setInstancesLoading] = useState(false);
+  const [instancesLoaded, setInstancesLoaded] = useState(false);
+  const [createInstanceOpen, setCreateInstanceOpen] = useState(false);
+
+  const loadTemplate = useCallback(async () => {
+    setLoading(true);
+    setLoadError('');
+    try {
+      const [templateResponse, questionsResponse] = await Promise.all([
+        api<SurveyTemplate>(`/api/survey-templates/${templateId}`),
+        api<SurveyTemplateQuestion[]>(`/api/survey-templates/${templateId}/questions`),
+      ]);
+      if (!templateResponse.success || !templateResponse.data) {
+        throw new Error(templateResponse.error || 'No se pudo cargar la plantilla.');
+      }
+      if (!questionsResponse.success) {
+        throw new Error(questionsResponse.error || 'No se pudieron cargar las preguntas.');
+      }
+      setTemplate(templateResponse.data);
+      setQuestions((questionsResponse.data || []).map(templateQuestionToEditor));
+      setSelectedQ(0);
+      setHasChanges(false);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'No se pudo cargar la plantilla.');
+    } finally {
+      setLoading(false);
+    }
+  }, [templateId]);
+
+  useEffect(() => { void loadTemplate(); }, [loadTemplate]);
+
+  const loadInstances = useCallback(async () => {
+    setInstancesLoading(true);
+    try {
+      const response = await api<SurveyInstanceSummary[]>(`/api/survey-templates/${templateId}/instances`);
+      if (!response.success) throw new Error(response.error || 'No se pudo cargar el historial.');
+      setInstances(response.data || []);
+      setInstancesLoaded(true);
+    } catch (error) {
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'No se pudo cargar el historial.' });
+    } finally {
+      setInstancesLoading(false);
+    }
+  }, [templateId]);
+
+  useEffect(() => {
+    if (activeTab === 'instances' && !instancesLoaded) void loadInstances();
+  }, [activeTab, instancesLoaded, loadInstances]);
+
+  const updateQuestion = (idx: number, updates: Partial<SurveyQuestion>) => {
+    setQuestions(current => current.map((question, index) => index === idx ? { ...question, ...updates } : question));
+    setHasChanges(true);
+  };
+  const addQuestion = (type: QuestionType) => {
+    const next = [...questions, { ...emptyQuestion(type), survey_id: templateId }];
+    setQuestions(next);
+    setSelectedQ(next.length - 1);
+    setHasChanges(true);
+  };
+  const removeQuestion = (idx: number) => {
+    const next = questions.filter((_, index) => index !== idx);
+    setQuestions(next);
+    setSelectedQ(current => Math.min(current, Math.max(0, next.length - 1)));
+    setHasChanges(true);
+  };
+  const moveQuestion = (idx: number, direction: -1 | 1) => {
+    const nextIndex = idx + direction;
+    if (nextIndex < 0 || nextIndex >= questions.length) return;
+    const next = [...questions];
+    [next[idx], next[nextIndex]] = [next[nextIndex], next[idx]];
+    setQuestions(next);
+    setSelectedQ(nextIndex);
+    setHasChanges(true);
+  };
+
+  const saveQuestions = async () => {
+    const emptyIndex = questions.findIndex(question => !question.title.trim());
+    if (emptyIndex >= 0) {
+      setSelectedQ(emptyIndex);
+      setMessage({ type: 'error', text: `La pregunta ${emptyIndex + 1} necesita un título.` });
+      return;
+    }
+    const logicError = validateForwardLogicForEditor(questions);
+    if (logicError) {
+      setMessage({ type: 'error', text: logicError });
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      const response = await api<{ questions: SurveyTemplateQuestion[]; revision: number }>(`/api/survey-templates/${templateId}/questions`, {
+        method: 'PUT',
+        body: JSON.stringify(questions.map((question, index) => ({
+          id: question.id,
+          order_index: index,
+          type: question.type,
+          title: question.title.trim(),
+          description: question.description,
+          required: question.required,
+          config: question.config,
+          logic_rules: question.logic_rules || [],
+        }))),
+      });
+      if (!response.success || !response.data) throw new Error(response.error || 'No se pudieron guardar las preguntas.');
+      setQuestions((response.data.questions || []).map(templateQuestionToEditor));
+      setTemplate(current => current ? { ...current, revision: response.data!.revision, question_count: response.data!.questions.length, updated_at: new Date().toISOString() } : current);
+      setHasChanges(false);
+      setMessage({ type: 'success', text: 'Plantilla guardada. Las aplicaciones existentes no cambiaron.' });
+    } catch (error) {
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'No se pudieron guardar las preguntas.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const updateTemplate = async (changes: Partial<SurveyTemplate>, successText: string) => {
+    if (!template) return false;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const response = await api<SurveyTemplate>(`/api/survey-templates/${templateId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(changes),
+      });
+      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo guardar la plantilla.');
+      setTemplate(response.data);
+      setMessage({ type: 'success', text: successText });
+      return true;
+    } catch (error) {
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'No se pudo guardar la plantilla.' });
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-emerald-600" /></div>;
+  if (loadError || !template) return <div className="flex h-full items-center justify-center p-6"><div className="max-w-md rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center text-sm text-rose-700"><p>{loadError || 'Plantilla no encontrada.'}</p><button type="button" onClick={() => void loadTemplate()} className="mt-3 min-h-11 font-semibold underline">Reintentar</button></div></div>;
+
+  const editorSurvey = templateAsSurvey(template);
+  const templateTabs: [TemplateTab, React.ElementType, string][] = [
+    ['builder', PenLine, 'Preguntas'], ['design', Palette, 'Diseño'], ['instances', Layers3, 'Aplicaciones'],
+  ];
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-slate-50">
+      <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-3 sm:px-4">
+        <div className="flex items-center gap-2 sm:gap-3">
+          <button type="button" onClick={() => router.push('/dashboard/surveys')} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" aria-label="Volver a plantillas"><ArrowLeft className="h-5 w-5" /></button>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2"><h1 className="truncate text-sm font-semibold text-slate-900 sm:text-base">{template.name}</h1><span className="hidden rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700 sm:inline">Plantilla v{template.revision}</span></div>
+            <p className="truncate text-xs text-slate-500">No recibe respuestas directamente · {template.instance_count} aplicaciones</p>
+          </div>
+          <button type="button" onClick={() => setShowSettings(true)} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50" aria-label="Configurar plantilla"><Settings2 className="h-4 w-4" /></button>
+          {activeTab === 'builder' && <button type="button" onClick={() => void saveQuestions()} disabled={saving || !hasChanges} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-3 text-sm font-semibold text-white disabled:opacity-50 sm:px-4">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}<span className="hidden sm:inline">Guardar</span></button>}
+        </div>
+        <nav className="mt-3 flex min-h-11 gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1" aria-label="Secciones de la plantilla">
+          {templateTabs.map(([tab, Icon, label]) => <button key={tab} type="button" onClick={() => setActiveTab(tab)} className={`inline-flex min-h-9 min-w-max flex-1 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors ${activeTab === tab ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Icon className="h-4 w-4" />{label}</button>)}
+        </nav>
+      </header>
+
+      <main className="min-h-0 flex-1 overflow-hidden">
+        {activeTab === 'builder' && <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />}
+        {activeTab === 'design' && <DesignTab survey={editorSurvey} onSave={branding => void updateTemplate({ branding }, 'Diseño de plantilla guardado.')} saving={saving} />}
+        {activeTab === 'instances' && <TemplateInstancesTab template={template} instances={instances} loading={instancesLoading} onRefresh={() => void loadInstances()} onCreate={() => setCreateInstanceOpen(true)} />}
+      </main>
+
+      {message && <div className={`fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 z-[100] flex w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 items-center gap-2 rounded-xl px-4 py-3 text-sm font-medium text-white shadow-xl ${message.type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'}`} role="status">{message.type === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <XCircle className="h-4 w-4 shrink-0" />}<span className="min-w-0 flex-1">{message.text}</span><button type="button" onClick={() => setMessage(null)} className="min-h-8 min-w-8" aria-label="Cerrar mensaje">×</button></div>}
+      {showSettings && <TemplateSettingsDialog template={template} saving={saving} onClose={() => setShowSettings(false)} onSave={async changes => { const saved = await updateTemplate(changes, 'Configuración de plantilla guardada.'); if (saved) setShowSettings(false); }} />}
+      {createInstanceOpen && <StandaloneApplicationDialog template={template} onClose={() => setCreateInstanceOpen(false)} onCreated={instance => { setInstances(current => [instance, ...current]); setInstancesLoaded(true); setTemplate(current => current ? { ...current, instance_count: current.instance_count + 1 } : current); setCreateInstanceOpen(false); setMessage({ type: 'success', text: 'Aplicación creada. Ya puedes compartir su enlace.' }); }} />}
+    </div>
+  );
+}
+
+function TemplateSettingsDialog({ template, saving, onClose, onSave }: { template: SurveyTemplate; saving: boolean; onClose: () => void; onSave: (changes: Partial<SurveyTemplate>) => Promise<void> }) {
+  const [form, setForm] = useState({
+    name: template.name, description: template.description, status: template.status,
+    welcome_title: template.welcome_title, welcome_description: template.welcome_description,
+    thank_you_title: template.thank_you_title, thank_you_message: template.thank_you_message,
+    thank_you_redirect_url: template.thank_you_redirect_url,
+  });
+  return <div className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="template-settings-title"><div className="flex max-h-[100dvh] w-full flex-col bg-white shadow-2xl sm:max-h-[90vh] sm:max-w-xl sm:rounded-2xl"><header className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-3.5"><div><h2 id="template-settings-title" className="font-semibold text-slate-900">Configuración de plantilla</h2><p className="text-xs text-slate-500">Los cambios solo afectarán futuras aplicaciones.</p></div><button type="button" onClick={onClose} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-slate-500" aria-label="Cerrar"><XCircle className="h-5 w-5" /></button></header><div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+    <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre</span><input value={form.name} onChange={event => setForm(current => ({ ...current, name: event.target.value }))} maxLength={180} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500" /></label>
+    <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Descripción</span><textarea value={form.description} onChange={event => setForm(current => ({ ...current, description: event.target.value }))} rows={3} className="w-full resize-none rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-emerald-500" /></label>
+    <div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Título de bienvenida</span><input value={form.welcome_title} onChange={event => setForm(current => ({ ...current, welcome_title: event.target.value }))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Título de agradecimiento</span><input value={form.thank_you_title} onChange={event => setForm(current => ({ ...current, thank_you_title: event.target.value }))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label></div>
+    <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Mensaje de bienvenida</span><textarea value={form.welcome_description} onChange={event => setForm(current => ({ ...current, welcome_description: event.target.value }))} rows={2} className="w-full resize-none rounded-xl border border-slate-200 p-3 text-sm" /></label>
+    <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Mensaje de agradecimiento</span><textarea value={form.thank_you_message} onChange={event => setForm(current => ({ ...current, thank_you_message: event.target.value }))} rows={2} className="w-full resize-none rounded-xl border border-slate-200 p-3 text-sm" /></label>
+    <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Redirección al finalizar <span className="font-normal text-slate-400">(opcional)</span></span><input value={form.thank_you_redirect_url} onChange={event => setForm(current => ({ ...current, thank_you_redirect_url: event.target.value }))} placeholder="https://" className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label>
+    <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Estado</span><select value={form.status} onChange={event => setForm(current => ({ ...current, status: event.target.value as SurveyTemplate['status'] }))} className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"><option value="active">Activa</option><option value="archived">Archivada</option></select></label>
+  </div><footer className="flex shrink-0 gap-3 border-t border-slate-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:rounded-b-2xl"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={() => void onSave(form)} disabled={saving || !form.name.trim()} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white disabled:opacity-50">{saving && <Loader2 className="h-4 w-4 animate-spin" />}Guardar</button></footer></div></div>;
+}
+
+function TemplateInstancesTab({ template, instances, loading, onRefresh, onCreate }: { template: SurveyTemplate; instances: SurveyInstanceSummary[]; loading: boolean; onRefresh: () => void; onCreate: () => void }) {
+  return <div className="h-full overflow-y-auto p-4 sm:p-6"><div className="mx-auto max-w-5xl"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold text-slate-900">Aplicaciones e historial</h2><p className="text-sm text-slate-500">Cada aplicación conserva la versión exacta que se publicó.</p></div><button type="button" onClick={onCreate} disabled={template.status === 'archived' || template.question_count === 0} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-50"><Plus className="h-4 w-4" />Aplicar plantilla</button></div>
+    <div className="mt-5 grid grid-cols-3 gap-2 sm:gap-3"><div className="rounded-2xl border border-slate-200 bg-white p-3 text-center sm:p-4"><p className="text-xl font-bold text-slate-900">{template.instance_count}</p><p className="text-xs text-slate-500">Aplicaciones</p></div><div className="rounded-2xl border border-slate-200 bg-white p-3 text-center sm:p-4"><p className="text-xl font-bold text-slate-900">{template.response_count}</p><p className="text-xs text-slate-500">Respuestas</p></div><div className="rounded-2xl border border-slate-200 bg-white p-3 text-center sm:p-4"><p className="text-xl font-bold text-slate-900">v{template.revision}</p><p className="text-xs text-slate-500">Versión actual</p></div></div>
+    {loading ? <div className="flex min-h-56 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : instances.length === 0 ? <div className="mt-5 flex min-h-56 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-center"><Layers3 className="mb-3 h-9 w-9 text-slate-300" /><p className="font-medium text-slate-700">Todavía no hay aplicaciones</p><p className="mt-1 max-w-md text-sm text-slate-500">Aplícala desde un programa para crear enlaces individuales, o crea una aplicación pública independiente.</p><button type="button" onClick={onRefresh} className="mt-4 min-h-11 text-sm font-semibold text-emerald-700">Actualizar</button></div> : <div className="mt-5 space-y-3">{instances.map(instance => <article key={instance.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-start gap-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${instance.status === 'active' ? 'bg-emerald-500' : instance.status === 'draft' ? 'bg-amber-400' : 'bg-slate-300'}`} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-900">{instance.name}</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">v{instance.template_revision}</span></div><p className="mt-1 text-sm text-slate-500">{instance.origin_label} · {instance.response_count} respuestas{instance.recipient_count > 0 ? ` de ${instance.recipient_count} destinatarios` : ''}</p><p className="mt-1 text-xs text-slate-400">Creada {format(new Date(instance.created_at), "d MMM yyyy, HH:mm", { locale: es })}</p></div><Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50" aria-label={`Ver resultados de ${instance.name}`}><BarChart3 className="h-4 w-4" /></Link></div>{instance.audience_mode === 'public' && instance.status === 'active' && <div className="mt-3 flex items-center gap-2 border-t border-slate-100 pt-3"><code className="min-w-0 flex-1 truncate rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">/f/{instance.slug}</code><a href={`/f/${instance.slug}`} target="_blank" rel="noreferrer" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label="Abrir aplicación"><ExternalLink className="h-4 w-4" /></a></div>}</article>)}</div>}
+  </div></div>;
+}
+
+function StandaloneApplicationDialog({ template, onClose, onCreated }: { template: SurveyTemplate; onClose: () => void; onCreated: (instance: SurveyInstanceSummary) => void }) {
+  const [name, setName] = useState(template.name);
+  const [opensAt, setOpensAt] = useState('');
+  const [closesAt, setClosesAt] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState('');
+  const create = async () => {
+    setCreating(true); setError('');
+    try {
+      const response = await api<SurveyInstanceSummary>(`/api/survey-templates/${template.id}/instances`, { method: 'POST', body: JSON.stringify({ name: name.trim(), status: 'active', audience_mode: 'public', opens_at: opensAt ? new Date(opensAt).toISOString() : null, closes_at: closesAt ? new Date(closesAt).toISOString() : null }) });
+      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo crear la aplicación.');
+      onCreated(response.data);
+    } catch (creationError) { setError(creationError instanceof Error ? creationError.message : 'No se pudo crear la aplicación.'); } finally { setCreating(false); }
+  };
+  return <div className="fixed inset-0 z-[95] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="standalone-survey-title"><div className="w-full bg-white shadow-2xl sm:max-w-lg sm:rounded-2xl"><header className="flex items-center justify-between border-b border-slate-200 px-4 py-3.5"><div><h2 id="standalone-survey-title" className="font-semibold text-slate-900">Aplicación pública</h2><p className="text-xs text-slate-500">Creará una copia inmutable de la plantilla v{template.revision}.</p></div><button type="button" onClick={onClose} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-slate-500" aria-label="Cerrar"><XCircle className="h-5 w-5" /></button></header><div className="space-y-4 p-4 sm:p-5"><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre de esta aplicación</span><input autoFocus value={name} onChange={event => setName(event.target.value)} maxLength={180} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Apertura <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={opensAt} onChange={event => setOpensAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Cierre <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={closesAt} onChange={event => setClosesAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label></div>{error && <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}</div><footer className="flex gap-3 border-t border-slate-200 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={() => void create()} disabled={creating || !name.trim()} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white disabled:opacity-50">{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Layers3 className="h-4 w-4" />}Crear aplicación</button></footer></div></div>;
+}
+
+function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
   const params = useParams();
   const router = useRouter();
   const surveyId = params.id as string;
 
   const [survey, setSurvey] = useState<Survey | null>(null);
   const [questions, setQuestions] = useState<SurveyQuestion[]>([]);
-  const [activeTab, setActiveTab] = useState<Tab>('builder');
+  const [activeTab, setActiveTab] = useState<Tab>(requestedTab || 'builder');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [saving, setSaving] = useState(false);
   const [selectedQ, setSelectedQ] = useState<number>(0);
   const [hasChanges, setHasChanges] = useState(false);
@@ -74,13 +399,21 @@ export default function SurveyBuilderPage() {
   const [slugAvailable, setSlugAvailable] = useState<boolean | null>(null);
 
   // Analytics tab
-  const [analytics, setAnalytics] = useState<SurveyAnalytics | null>(null);
-  const [responses, setResponses] = useState<SurveyResponse[]>([]);
-  const [responsesTotal, setResponsesTotal] = useState(0);
-  const [loadingAnalytics, setLoadingAnalytics] = useState(false);
-  const [selectedResponse, setSelectedResponse] = useState<SurveyResponse | null>(null);
-  const [responsePage, setResponsePage] = useState(0);
-  const [deletingResponse, setDeletingResponse] = useState<string | null>(null);
+  const [resultsState, setResultsState] = useState<SurveyResultsState>(() => emptySurveyResultsState(surveyId));
+  const surveyRequestSequence = useRef(0);
+  const surveyRequestRef = useRef<AbortController | null>(null);
+  const analyticsRequestSequence = useRef(0);
+  const responsesRequestSequence = useRef(0);
+  const responseDetailRequestSequence = useRef(0);
+  const responseDetailRequestRef = useRef<AbortController | null>(null);
+  const {
+    analytics,
+    responses,
+    responsesTotal,
+    loadingAnalytics,
+    selectedResponse,
+    responsePage,
+  } = resultsState;
 
   // Settings panel
   const [showSettings, setShowSettings] = useState(false);
@@ -88,83 +421,156 @@ export default function SurveyBuilderPage() {
     name: '', description: '', welcome_title: '', welcome_description: '',
     thank_you_title: '', thank_you_message: '', thank_you_redirect_url: '',
   });
+  const immutableInstance = isImmutableSurveyApplication(survey);
+  const effectiveActiveTab: Tab = immutableInstance && activeTab === 'design' ? 'builder' : activeTab;
 
   useEffect(() => {
-    fetchSurvey();
+    void fetchSurvey(true);
+    return () => surveyRequestRef.current?.abort();
   }, [surveyId]);
 
   useEffect(() => {
-    if (activeTab === 'analytics') {
-      fetchAnalytics();
-      fetchResponses();
-    }
-  }, [activeTab]);
+    analyticsRequestSequence.current += 1;
+    responsesRequestSequence.current += 1;
+    responseDetailRequestRef.current?.abort();
+    responseDetailRequestSequence.current += 1;
+    setResultsState(emptySurveyResultsState(surveyId));
 
-  const fetchSurvey = async () => {
+    return () => {
+      responseDetailRequestRef.current?.abort();
+      responseDetailRequestSequence.current += 1;
+    };
+  }, [surveyId]);
+
+  useEffect(() => {
+    setActiveTab(requestedTab || 'builder');
+  }, [requestedTab, surveyId]);
+
+  useEffect(() => {
+    if (immutableInstance && activeTab === 'design') {
+      setActiveTab('builder');
+    }
+  }, [activeTab, immutableInstance]);
+
+  useEffect(() => {
+    if (effectiveActiveTab !== 'analytics' || resultsState.ownerSurveyId !== surveyId) return;
+
+    const controller = new AbortController();
+    const requestSequence = ++analyticsRequestSequence.current;
+    setResultsState(current => current.ownerSurveyId === surveyId
+      ? { ...current, loadingAnalytics: true }
+      : current);
+
+    void (async () => {
+      try {
+        const response = await api<SurveyAnalytics>(`/api/surveys/${surveyId}/analytics`, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || requestSequence !== analyticsRequestSequence.current) return;
+        if (response.success) {
+          setResultsState(current => current.ownerSurveyId === surveyId
+            ? { ...current, analytics: response.data || null }
+            : current);
+        }
+      } finally {
+        if (!controller.signal.aborted && requestSequence === analyticsRequestSequence.current) {
+          setResultsState(current => current.ownerSurveyId === surveyId
+            ? { ...current, loadingAnalytics: false }
+            : current);
+        }
+      }
+    })();
+
+    return () => controller.abort();
+  }, [effectiveActiveTab, resultsState.ownerSurveyId, surveyId]);
+
+  useEffect(() => {
+    if (effectiveActiveTab !== 'analytics' || resultsState.ownerSurveyId !== surveyId) return;
+
+    const controller = new AbortController();
+    const requestSequence = ++responsesRequestSequence.current;
+    const requestedPage = resultsState.responsePage;
+
+    void (async () => {
+      const response = await api<{ responses: SurveyResponse[]; total: number }>(
+        `/api/surveys/${surveyId}/responses?limit=50&offset=${requestedPage * 50}`,
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || requestSequence !== responsesRequestSequence.current) return;
+      if (response.success && response.data) {
+        setResultsState(current => current.ownerSurveyId === surveyId && current.responsePage === requestedPage
+          ? {
+              ...current,
+              responses: response.data?.responses || [],
+              responsesTotal: response.data?.total || 0,
+            }
+          : current);
+      }
+    })();
+
+    return () => controller.abort();
+  }, [effectiveActiveTab, resultsState.ownerSurveyId, resultsState.responsePage, surveyId]);
+
+  const fetchSurvey = async (resetForSurveyChange = false) => {
+    surveyRequestRef.current?.abort();
+    const controller = new AbortController();
+    surveyRequestRef.current = controller;
+    const requestSequence = ++surveyRequestSequence.current;
     try {
       setLoading(true);
+      setLoadError('');
+      if (resetForSurveyChange) {
+        setSurvey(null);
+        setQuestions([]);
+        setHasChanges(false);
+        setSelectedQ(0);
+      }
       const [surveyRes, questionsRes] = await Promise.all([
-        api<Survey>(`/api/surveys/${surveyId}`),
-        api<SurveyQuestion[]>(`/api/surveys/${surveyId}/questions`),
+        api<Survey>(`/api/surveys/${surveyId}`, { signal: controller.signal }),
+        api<SurveyQuestion[]>(`/api/surveys/${surveyId}/questions`, { signal: controller.signal }),
       ]);
-      if (surveyRes.success && surveyRes.data) {
-        setSurvey(surveyRes.data);
-        setSlugInput(surveyRes.data.slug);
-        setSurveyForm({
-          name: surveyRes.data.name,
-          description: surveyRes.data.description,
-          welcome_title: surveyRes.data.welcome_title,
-          welcome_description: surveyRes.data.welcome_description,
-          thank_you_title: surveyRes.data.thank_you_title,
-          thank_you_message: surveyRes.data.thank_you_message,
-          thank_you_redirect_url: surveyRes.data.thank_you_redirect_url,
-        });
+      if (controller.signal.aborted || requestSequence !== surveyRequestSequence.current) return;
+      if (!surveyRes.success || !surveyRes.data) {
+        setLoadError(surveyRes.error || 'No se pudo cargar la encuesta.');
+        return;
       }
-      if (questionsRes.success) {
-        setQuestions(questionsRes.data || []);
+      if (!questionsRes.success || !Array.isArray(questionsRes.data)) {
+        setLoadError(questionsRes.error || 'No se pudieron cargar las preguntas. No habilitamos la edición para proteger la encuesta.');
+        return;
       }
+
+      // Publish the editable snapshot only when the survey and its complete
+      // question collection belong to the same successful load. This prevents
+      // a transient /questions failure from looking like an empty survey.
+      setSurvey(surveyRes.data);
+      setQuestions(questionsRes.data);
+      setSlugInput(surveyRes.data.slug);
+      setSurveyForm({
+        name: surveyRes.data.name,
+        description: surveyRes.data.description,
+        welcome_title: surveyRes.data.welcome_title,
+        welcome_description: surveyRes.data.welcome_description,
+        thank_you_title: surveyRes.data.thank_you_title,
+        thank_you_message: surveyRes.data.thank_you_message,
+        thank_you_redirect_url: surveyRes.data.thank_you_redirect_url,
+      });
+      setLoadError('');
     } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchAnalytics = async () => {
-    setLoadingAnalytics(true);
-    try {
-      const res = await api<SurveyAnalytics>(`/api/surveys/${surveyId}/analytics`);
-      if (res.success) setAnalytics(res.data || null);
-    } finally {
-      setLoadingAnalytics(false);
-    }
-  };
-
-  const fetchResponses = async (page = responsePage) => {
-    const res = await api<{ responses: SurveyResponse[]; total: number }>(`/api/surveys/${surveyId}/responses?limit=50&offset=${page * 50}`);
-    if (res.success && res.data) {
-      setResponses(res.data.responses || []);
-      setResponsesTotal(res.data.total);
-    }
-  };
-
-  const handleDeleteResponse = async (rid: string) => {
-    try {
-      const res = await api(`/api/surveys/${surveyId}/responses/${rid}`, { method: 'DELETE' });
-      if (res.success) {
-        setDeletingResponse(null);
-        fetchResponses(responsePage);
-        fetchAnalytics();
+      if (!controller.signal.aborted && requestSequence === surveyRequestSequence.current) {
+        setLoading(false);
       }
-    } catch (e) {
-      console.error(e);
+      if (surveyRequestRef.current === controller) surveyRequestRef.current = null;
     }
   };
 
-  const handleResponsePageChange = (newPage: number) => {
-    setResponsePage(newPage);
-    fetchResponses(newPage);
-  };
+  const handleResponsePageChange = useCallback((newPage: number) => {
+    setResultsState(current => current.ownerSurveyId === surveyId
+      ? { ...current, responsePage: Math.max(0, newPage), responses: [], selectedResponse: null }
+      : current);
+  }, [surveyId]);
 
   const handleSaveQuestions = async () => {
+    if (!survey || loading || loadError) return;
     setSaveMessage(null);
     // Client-side validation
     const emptyIdx = questions.findIndex(q => !q.title.trim());
@@ -173,9 +579,15 @@ export default function SurveyBuilderPage() {
       setSaveMessage({ type: 'error', text: `La pregunta ${emptyIdx + 1} necesita un título` });
       return;
     }
+    const logicError = validateForwardLogicForEditor(questions);
+    if (logicError) {
+      setSaveMessage({ type: 'error', text: logicError });
+      return;
+    }
     setSaving(true);
     try {
       const payload = questions.map((q, i) => ({
+        id: q.id,
         type: q.type,
         title: q.title,
         description: q.description,
@@ -256,7 +668,7 @@ export default function SurveyBuilderPage() {
         method: 'PATCH',
         body: JSON.stringify({ status: newStatus }),
       });
-      fetchSurvey();
+      void fetchSurvey();
     } catch (e) {
       console.error(e);
     }
@@ -306,15 +718,56 @@ export default function SurveyBuilderPage() {
     window.open(`/api/surveys/${surveyId}/export`, '_blank');
   };
 
-  const handleViewResponse = async (rid: string) => {
-    const res = await api<SurveyResponse>(`/api/surveys/${surveyId}/responses/${rid}`);
-    if (res.success && res.data) setSelectedResponse(res.data);
-  };
+  const setSelectedResponse = useCallback((response: SurveyResponse | null) => {
+    if (!response) {
+      responseDetailRequestRef.current?.abort();
+      responseDetailRequestSequence.current += 1;
+    }
+    setResultsState(current => current.ownerSurveyId === surveyId
+      ? { ...current, selectedResponse: response }
+      : current);
+  }, [surveyId]);
+
+  const handleViewResponse = useCallback(async (responseId: string) => {
+    responseDetailRequestRef.current?.abort();
+    const controller = new AbortController();
+    responseDetailRequestRef.current = controller;
+    const requestSequence = ++responseDetailRequestSequence.current;
+    setResultsState(current => current.ownerSurveyId === surveyId
+      ? { ...current, selectedResponse: null }
+      : current);
+
+    const response = await api<SurveyResponse>(`/api/surveys/${surveyId}/responses/${responseId}`, {
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted || requestSequence !== responseDetailRequestSequence.current) return;
+    if (response.success && response.data) {
+      setResultsState(current => current.ownerSurveyId === surveyId
+        ? { ...current, selectedResponse: response.data || null }
+        : current);
+    }
+  }, [surveyId]);
 
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center">
         <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" />
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="flex h-full items-center justify-center bg-slate-50 p-4 sm:p-6">
+        <div role="alert" className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-5 text-center shadow-sm">
+          <XCircle className="mx-auto h-9 w-9 text-rose-500" />
+          <h1 className="mt-3 font-semibold text-slate-900">No pudimos cargar la encuesta completa</h1>
+          <p className="mt-1 text-sm leading-6 text-slate-600">{loadError}</p>
+          <p className="mt-2 text-xs leading-5 text-slate-500">La edición permanece bloqueada hasta recuperar también todas las preguntas.</p>
+          <button type="button" onClick={() => void fetchSurvey(true)} className="mt-4 min-h-11 rounded-xl bg-emerald-600 px-5 text-sm font-semibold text-white hover:bg-emerald-700">
+            Reintentar
+          </button>
+        </div>
       </div>
     );
   }
@@ -329,42 +782,45 @@ export default function SurveyBuilderPage() {
 
   const statusCfg = STATUS_CONFIG[survey.status] || STATUS_CONFIG.draft;
   const publicUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/f/${survey.slug}`;
+  const availableTabs: [Tab, React.ElementType, string][] = immutableInstance
+    ? [['builder', Eye, 'Vista'], ['share', Share2, 'Compartir'], ['analytics', BarChart3, 'Resultados']]
+    : [['builder', PenLine, 'Editor'], ['design', Palette, 'Diseño'], ['share', Share2, 'Compartir'], ['analytics', BarChart3, 'Analíticas']];
 
   return (
     <div className="h-full flex flex-col bg-slate-50">
       {/* Top bar */}
-      <div className="flex-shrink-0 bg-white border-b border-slate-200 px-4 py-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button onClick={() => router.push('/dashboard/surveys')} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500">
+      <div className="flex-shrink-0 border-b border-slate-200 bg-white px-3 py-3 sm:px-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
+            <button onClick={() => router.push('/dashboard/surveys')} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100">
               <ArrowLeft className="w-5 h-5" />
             </button>
-            <div>
-              <h1 className="font-semibold text-slate-900 text-sm">{survey.name}</h1>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-semibold text-slate-900">{survey.name}</h1>
               <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusCfg.bg} ${statusCfg.text}`}>
                 {statusCfg.icon} {statusCfg.label}
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
             {/* Tab buttons */}
-            <div className="flex items-center bg-slate-100 rounded-lg p-0.5 mr-2">
-              {([['builder', PenLine, 'Editor'], ['design', Palette, 'Diseño'], ['share', Share2, 'Compartir'], ['analytics', BarChart3, 'Analíticas']] as [Tab, React.ElementType, string][]).map(([tab, Icon, label]) => (
+            <div className="mr-auto flex min-w-max items-center rounded-lg bg-slate-100 p-0.5 sm:mr-2">
+              {availableTabs.map(([tab, Icon, label]) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                    activeTab === tab ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                    effectiveActiveTab === tab ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
                   }`}
                 >
                   <Icon className="w-3.5 h-3.5" /> {label}
                 </button>
               ))}
             </div>
-            <button onClick={() => setShowSettings(true)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500">
+            {!immutableInstance && <button onClick={() => setShowSettings(true)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500">
               <Settings2 className="w-4 h-4" />
-            </button>
-            {activeTab === 'builder' && (
+            </button>}
+            {effectiveActiveTab === 'builder' && !immutableInstance && (
               <button
                 onClick={handleSaveQuestions}
                 disabled={saving || !hasChanges}
@@ -380,10 +836,10 @@ export default function SurveyBuilderPage() {
 
       {/* Content area */}
       <div className="flex-1 overflow-hidden">
-        {activeTab === 'builder' && <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />}
-        {activeTab === 'design' && <DesignTab survey={survey} onSave={(branding) => handleSaveBranding(branding)} saving={saving} />}
-        {activeTab === 'share' && <ShareTab survey={survey} publicUrl={publicUrl} slugInput={slugInput} setSlugInput={setSlugInput} slugAvailable={slugAvailable} checkSlug={checkSlug} handleStatusChange={handleStatusChange} handleSaveSurvey={handleSaveSurvey} saving={saving} />}
-        {activeTab === 'analytics' && <AnalyticsTab analytics={analytics} responses={responses} responsesTotal={responsesTotal} loading={loadingAnalytics} selectedResponse={selectedResponse} setSelectedResponse={setSelectedResponse} handleViewResponse={handleViewResponse} handleExportCSV={handleExportCSV} questions={questions} deletingResponse={deletingResponse} setDeletingResponse={setDeletingResponse} handleDeleteResponse={handleDeleteResponse} responsePage={responsePage} handleResponsePageChange={handleResponsePageChange} />}
+        {effectiveActiveTab === 'builder' && (immutableInstance ? <PublishedQuestionsView survey={survey} questions={questions} /> : <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />)}
+        {effectiveActiveTab === 'design' && <DesignTab survey={survey} onSave={(branding) => handleSaveBranding(branding)} saving={saving} />}
+        {effectiveActiveTab === 'share' && <ShareTab survey={survey} publicUrl={publicUrl} slugInput={slugInput} setSlugInput={setSlugInput} slugAvailable={slugAvailable} checkSlug={checkSlug} handleStatusChange={handleStatusChange} handleSaveSurvey={handleSaveSurvey} saving={saving} />}
+        {effectiveActiveTab === 'analytics' && <AnalyticsTab analytics={analytics} responses={responses} responsesTotal={responsesTotal} programAudience={survey.audience_mode === 'program_participants'} loading={loadingAnalytics} selectedResponse={selectedResponse} setSelectedResponse={setSelectedResponse} handleViewResponse={handleViewResponse} handleExportCSV={handleExportCSV} questions={questions} responsePage={responsePage} handleResponsePageChange={handleResponsePageChange} />}
       </div>
 
       {/* Save message toast */}
@@ -451,6 +907,11 @@ export default function SurveyBuilderPage() {
   );
 }
 
+function PublishedQuestionsView({ survey, questions }: { survey: Survey; questions: SurveyQuestion[] }) {
+  const fromTemplate = Boolean(survey.template_id);
+  return <div className="h-full overflow-y-auto p-4 sm:p-6"><div className="mx-auto max-w-3xl"><div className="rounded-2xl border border-violet-200 bg-violet-50 p-4"><div className="flex items-start gap-3"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-700"><Layers3 className="h-4 w-4" /></span><div><h2 className="font-semibold text-violet-950">{fromTemplate ? `Aplicación de plantilla · v${survey.template_revision || 1}` : 'Encuesta publicada'}</h2><p className="mt-1 text-sm text-violet-800">{fromTemplate ? 'El contenido quedó congelado al crear esta aplicación, incluso mientras sea borrador. Para cambiar preguntas, edita la plantilla y crea una nueva aplicación.' : 'Las preguntas quedaron congeladas al publicar esta encuesta para proteger la consistencia de sus respuestas.'}</p></div></div></div>{questions.length === 0 ? <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-center text-sm text-slate-500">Esta aplicación no contiene preguntas.</div> : <div className="mt-4 space-y-3">{questions.map((question, index) => <article key={question.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5"><div className="flex items-start gap-3"><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-sm font-semibold text-slate-600">{index + 1}</span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-start gap-2"><h3 className="font-medium text-slate-900">{question.title}</h3>{question.required && <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-600">Obligatoria</span>}</div>{question.description && <p className="mt-1 text-sm text-slate-500">{question.description}</p>}<p className="mt-3 text-xs font-medium uppercase tracking-wide text-slate-400">{QUESTION_TYPE_LABELS[question.type]}</p>{question.config.options && question.config.options.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{question.config.options.map(option => <span key={option} className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600">{option}</span>)}</div>}</div></div></article>)}</div>}</div></div>;
+}
+
 // ─── Builder Tab ────────────────────────────────────────────────────────────
 
 function BuilderTab({
@@ -469,9 +930,9 @@ function BuilderTab({
   const current = questions[selectedQ];
 
   return (
-    <div className="h-full flex">
+    <div className="flex h-full min-h-0 flex-col md:flex-row">
       {/* Question list sidebar */}
-      <div className="w-72 bg-white border-r border-slate-200 flex flex-col">
+      <div className="flex max-h-52 w-full shrink-0 flex-col border-b border-slate-200 bg-white md:max-h-none md:w-72 md:border-b-0 md:border-r">
         <div className="p-3 border-b border-slate-100 flex items-center justify-between">
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Preguntas ({questions.length})</span>
           <div className="relative">
@@ -502,7 +963,7 @@ function BuilderTab({
             )}
           </div>
         </div>
-        <div className="flex-1 overflow-auto p-2 space-y-1">
+        <div className="flex min-h-0 flex-1 gap-2 overflow-auto p-2 md:block md:space-y-1">
           {questions.length === 0 ? (
             <div className="text-center py-10">
               <p className="text-sm text-slate-400 mb-2">Sin preguntas aún</p>
@@ -516,7 +977,7 @@ function BuilderTab({
               <button
                 key={q.id}
                 onClick={() => setSelectedQ(i)}
-                className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-left text-sm transition-colors ${
+                className={`flex min-h-11 min-w-[13rem] items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-colors md:min-w-0 md:w-full ${
                   selectedQ === i ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'hover:bg-slate-50 text-slate-700'
                 }`}
               >
@@ -531,12 +992,12 @@ function BuilderTab({
       </div>
 
       {/* Question editor */}
-      <div className="flex-1 overflow-auto p-8">
+      <div className="min-h-0 flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
         {current ? (
           <div className="max-w-2xl mx-auto">
             {/* Question header */}
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-2">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 sm:mb-6">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-medium text-slate-400">Pregunta {selectedQ + 1} de {questions.length}</span>
                 <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600`}>
                   {QUESTION_TYPE_LABELS[current.type]}
@@ -549,7 +1010,7 @@ function BuilderTab({
               </div>
             </div>
 
-            <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-5">
+            <div className="space-y-5 rounded-xl border border-slate-200 bg-white p-4 sm:p-6">
               {/* Title */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">Título de la pregunta</label>
@@ -672,7 +1133,7 @@ function QuestionConfig({ question, idx, updateQuestion }: { question: SurveyQue
               ))}
             </select>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className="block text-xs font-medium text-slate-500 mb-1">Etiqueta mínima</label>
               <input value={config.likert_min || ''} onChange={(e) => updateConfig({ likert_min: e.target.value })} placeholder="Muy en desacuerdo" className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500" />
@@ -712,12 +1173,15 @@ function LogicRulesEditor({ question, idx, updateQuestion, allQuestions }: {
   allQuestions: SurveyQuestion[];
 }) {
   const rules = question.logic_rules || [];
-  const otherQuestions = allQuestions.filter((_, i) => i !== idx);
+  const forwardQuestions = allQuestions
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(({ index }) => index > idx);
   const hasOptions = question.type === 'single_choice' || question.type === 'multiple_choice';
   const options = hasOptions ? (question.config.options || []) : [];
 
   const addRule = () => {
-    updateQuestion(idx, { logic_rules: [...rules, { value: hasOptions && options.length > 0 ? options[0] : '', operator: 'eq', jump_to: otherQuestions[0]?.id || '' }] });
+    if (forwardQuestions.length === 0) return;
+    updateQuestion(idx, { logic_rules: [...rules, { value: hasOptions && options.length > 0 ? options[0] : '', operator: 'eq', jump_to: forwardQuestions[0].candidate.id }] });
   };
 
   const updateRule = (ri: number, updates: Partial<SurveyLogicRule>) => {
@@ -741,14 +1205,14 @@ function LogicRulesEditor({ question, idx, updateQuestion, allQuestions }: {
     <div className="border-t border-slate-100 pt-4">
       <div className="flex items-center justify-between mb-2">
         <label className="text-sm font-medium text-slate-700">Lógica condicional</label>
-        <button onClick={addRule} className="text-xs text-emerald-600 hover:text-emerald-700 font-medium">+ Regla</button>
+        <button onClick={addRule} disabled={forwardQuestions.length === 0} className="text-xs text-emerald-600 hover:text-emerald-700 font-medium disabled:cursor-not-allowed disabled:text-slate-300">+ Regla</button>
       </div>
       {rules.length === 0 ? (
         <p className="text-xs text-slate-400">No hay reglas. Las respuestas seguirán el orden normal.</p>
       ) : (
         <div className="space-y-2">
           {rules.map((rule, ri) => (
-            <div key={ri} className="flex items-center gap-2 p-2 bg-slate-50 rounded-lg text-xs">
+            <div key={ri} className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-2 text-xs">
               <span className="text-slate-500 flex-shrink-0">Si</span>
               <select value={rule.operator || 'eq'} onChange={(e) => updateRule(ri, { operator: e.target.value })} className="px-2 py-1 border border-slate-200 rounded text-xs bg-white">
                 {operatorOptions.map((op) => (
@@ -765,9 +1229,10 @@ function LogicRulesEditor({ question, idx, updateQuestion, allQuestions }: {
                 <input value={rule.value} onChange={(e) => updateRule(ri, { value: e.target.value })} placeholder="valor" className="w-24 px-2 py-1 border border-slate-200 rounded text-xs" />
               )}
               <span className="text-slate-500 flex-shrink-0">→</span>
-              <select value={rule.jump_to} onChange={(e) => updateRule(ri, { jump_to: e.target.value })} className="flex-1 px-2 py-1 border border-slate-200 rounded text-xs bg-white">
-                {otherQuestions.map((q, qi) => (
-                  <option key={q.id} value={q.id}>{qi + 1}. {q.title || 'Sin título'}</option>
+              <select value={rule.jump_to} onChange={(e) => updateRule(ri, { jump_to: e.target.value })} className="min-w-36 flex-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs">
+                {!forwardQuestions.some(({ candidate }) => candidate.id === rule.jump_to) && <option value="">Selecciona una pregunta posterior</option>}
+                {forwardQuestions.map(({ candidate, index }) => (
+                  <option key={candidate.id} value={candidate.id}>{index + 1}. {candidate.title || 'Sin título'}</option>
                 ))}
               </select>
               <button onClick={() => removeRule(ri)} className="p-1 text-slate-400 hover:text-red-500"><Trash2 className="w-3 h-3" /></button>
@@ -814,9 +1279,9 @@ function DesignTab({ survey, onSave, saving }: {
 
   return (
     <div className="h-full overflow-auto">
-      <div className="flex h-full">
+      <div className="flex min-h-full flex-col lg:h-full lg:flex-row">
         {/* Controls panel */}
-        <div className="w-80 bg-white border-r border-slate-200 overflow-y-auto p-5 space-y-6 flex-shrink-0">
+        <div className="w-full shrink-0 space-y-6 border-b border-slate-200 bg-white p-4 sm:p-5 lg:w-80 lg:overflow-y-auto lg:border-b-0 lg:border-r">
           <div className="flex items-center justify-between">
             <h3 className="font-bold text-slate-900">Diseño</h3>
             <button
@@ -1021,7 +1486,7 @@ function DesignTab({ survey, onSave, saving }: {
         </div>
 
         {/* Live Preview */}
-        <div className="flex-1 overflow-auto flex items-center justify-center p-8" style={{ backgroundColor: '#f1f5f9' }}>
+        <div className="flex flex-1 items-center justify-center overflow-auto p-4 sm:p-8" style={{ backgroundColor: '#f1f5f9' }}>
           <link href={fontUrl} rel="stylesheet" />
           <div
             className="w-full max-w-md rounded-2xl shadow-2xl overflow-hidden border border-slate-200"
@@ -1087,14 +1552,17 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, c
   slugAvailable: boolean | null; checkSlug: (s: string) => void;
   handleStatusChange: (s: string) => void; handleSaveSurvey: () => void; saving: boolean;
 }) {
+  const immutableInstance = isImmutableSurveyApplication(survey);
+  const programAudience = survey.audience_mode === 'program_participants';
+  const availableStatuses = survey.status === 'draft' ? ['draft', 'active', 'closed'] : ['active', 'closed'];
   return (
-    <div className="h-full overflow-auto p-8">
+    <div className="h-full overflow-auto p-4 sm:p-8">
       <div className="max-w-xl mx-auto space-y-6">
         {/* Status control */}
         <div className="bg-white rounded-xl border border-slate-200 p-6">
           <h3 className="font-semibold text-slate-900 mb-3">Estado de la encuesta</h3>
           <div className="flex items-center gap-3">
-            {['draft', 'active', 'closed'].map((s) => {
+            {availableStatuses.map((s) => {
               const cfg = STATUS_CONFIG[s];
               return (
                 <button
@@ -1116,82 +1584,104 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, c
           )}
         </div>
 
-        {/* Public URL */}
-        <div className="bg-white rounded-xl border border-slate-200 p-6">
-          <h3 className="font-semibold text-slate-900 mb-3">Enlace público</h3>
-          <div className="flex items-center gap-2 bg-slate-50 rounded-lg p-3 mb-3">
-            <span className="text-sm text-slate-400 flex-shrink-0">{typeof window !== 'undefined' ? window.location.origin : ''}/f/</span>
-            <input
-              value={slugInput}
-              onChange={(e) => { setSlugInput(e.target.value); checkSlug(e.target.value); }}
-              className="flex-1 bg-transparent text-sm font-medium text-slate-900 focus:outline-none"
-            />
-            {slugAvailable !== null && (
-              slugAvailable
-                ? <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                : <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
-            )}
-          </div>
-          {slugInput !== survey.slug && (
-            <button onClick={handleSaveSurvey} disabled={saving || slugAvailable === false} className="text-sm text-emerald-600 hover:text-emerald-700 font-medium disabled:opacity-50">
-              {saving ? 'Guardando...' : 'Guardar nuevo slug'}
-            </button>
-          )}
-          <div className="flex items-center gap-2 mt-3">
-            <button
-              onClick={() => navigator.clipboard.writeText(publicUrl)}
-              className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 rounded-lg text-sm text-slate-700 hover:bg-slate-200 transition-colors"
-            >
-              <Copy className="w-3.5 h-3.5" /> Copiar enlace
-            </button>
-            {survey.status === 'active' && (
-              <a href={`/f/${survey.slug}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 transition-colors">
-                <ExternalLink className="w-3.5 h-3.5" /> Abrir
-              </a>
-            )}
-          </div>
-        </div>
-
-        {/* QR Code */}
-        <div className="bg-white rounded-xl border border-slate-200 p-6">
-          <h3 className="font-semibold text-slate-900 mb-3">Código QR</h3>
-          <p className="text-sm text-slate-500 mb-4">Escanea este código para abrir la encuesta directamente.</p>
-          <div className="flex flex-col items-center gap-4">
-            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-              <QRCodeSVG value={publicUrl} size={200} level="M" />
+        {programAudience ? (
+          <div className="rounded-xl border border-emerald-200 bg-white p-5 sm:p-6">
+            <div className="flex items-start gap-3">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700"><Users className="h-5 w-5" /></span>
+              <div className="min-w-0 flex-1">
+                <h3 className="font-semibold text-slate-900">Enlaces individuales por participante</h3>
+                <p className="mt-1 text-sm leading-6 text-slate-600">Esta aplicación está restringida a los participantes del programa. Cada persona tiene un enlace único; no existe un enlace o QR general.</p>
+                <p className="mt-2 text-xs leading-5 text-slate-500">Administra y copia esos enlaces desde el programa, en Encuestas → Enlaces por participante.</p>
+                {survey.program_id && (
+                  <Link href={`/dashboard/programs/${survey.program_id}`} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700">
+                    <ExternalLink className="h-4 w-4" /> Ir al programa
+                  </Link>
+                )}
+              </div>
             </div>
-            <button
-              onClick={() => {
-                const svg = document.querySelector('.qr-download-area svg');
-                if (!svg) return;
-                const svgData = new XMLSerializer().serializeToString(svg);
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                const img = new Image();
-                img.onload = () => {
-                  canvas.width = img.width * 2;
-                  canvas.height = img.height * 2;
-                  if (ctx) {
-                    ctx.fillStyle = '#ffffff';
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                  }
-                  const a = document.createElement('a');
-                  a.download = `qr-${survey.slug}.png`;
-                  a.href = canvas.toDataURL('image/png');
-                  a.click();
-                };
-                img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
-              }}
-              className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 rounded-lg text-sm text-slate-700 hover:bg-slate-200 transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" /> Descargar PNG
-            </button>
           </div>
-          <div className="qr-download-area hidden">
-            <QRCodeSVG value={publicUrl} size={400} level="M" />
-          </div>
-        </div>
+        ) : (
+          <>
+            {/* Public URL */}
+            <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-6">
+              <h3 className="font-semibold text-slate-900 mb-3">Enlace público</h3>
+              <div className="flex items-center gap-2 bg-slate-50 rounded-lg p-3 mb-3">
+                <span className="text-sm text-slate-400 flex-shrink-0">{typeof window !== 'undefined' ? window.location.origin : ''}/f/</span>
+                <input
+                  value={slugInput}
+                  onChange={(e) => { setSlugInput(e.target.value); checkSlug(e.target.value); }}
+                  disabled={immutableInstance}
+                  aria-label={immutableInstance ? 'Enlace congelado en esta aplicación' : 'Identificador del enlace público'}
+                  className="min-w-0 flex-1 bg-transparent text-sm font-medium text-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:text-slate-500"
+                />
+                {slugAvailable !== null && (
+                  slugAvailable
+                    ? <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                    : <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                )}
+              </div>
+              {!immutableInstance && slugInput !== survey.slug && (
+                <button onClick={handleSaveSurvey} disabled={saving || slugAvailable === false} className="text-sm text-emerald-600 hover:text-emerald-700 font-medium disabled:opacity-50">
+                  {saving ? 'Guardando...' : 'Guardar nuevo slug'}
+                </button>
+              )}
+              <div className="flex flex-wrap items-center gap-2 mt-3">
+                <button
+                  onClick={() => navigator.clipboard.writeText(publicUrl)}
+                  className="flex min-h-11 items-center gap-1.5 rounded-lg bg-slate-100 px-3 text-sm text-slate-700 transition-colors hover:bg-slate-200"
+                >
+                  <Copy className="w-3.5 h-3.5" /> Copiar enlace
+                </button>
+                {survey.status === 'active' && (
+                  <a href={`/f/${survey.slug}`} target="_blank" rel="noopener noreferrer" className="flex min-h-11 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-sm text-white transition-colors hover:bg-emerald-700">
+                    <ExternalLink className="w-3.5 h-3.5" /> Abrir
+                  </a>
+                )}
+              </div>
+            </div>
+
+            {/* QR Code */}
+            <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-6">
+              <h3 className="font-semibold text-slate-900 mb-3">Código QR</h3>
+              <p className="text-sm text-slate-500 mb-4">Escanea este código para abrir la encuesta directamente.</p>
+              <div className="flex flex-col items-center gap-4">
+                <div className="max-w-full bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                  <QRCodeSVG value={publicUrl} size={200} level="M" className="h-auto max-w-full" />
+                </div>
+                <button
+                  onClick={() => {
+                    const svg = document.querySelector('.qr-download-area svg');
+                    if (!svg) return;
+                    const svgData = new XMLSerializer().serializeToString(svg);
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    const img = new Image();
+                    img.onload = () => {
+                      canvas.width = img.width * 2;
+                      canvas.height = img.height * 2;
+                      if (ctx) {
+                        ctx.fillStyle = '#ffffff';
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                      }
+                      const a = document.createElement('a');
+                      a.download = `qr-${survey.slug}.png`;
+                      a.href = canvas.toDataURL('image/png');
+                      a.click();
+                    };
+                    img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+                  }}
+                  className="flex min-h-11 items-center gap-1.5 rounded-lg bg-slate-100 px-3 text-sm text-slate-700 transition-colors hover:bg-slate-200"
+                >
+                  <Download className="w-3.5 h-3.5" /> Descargar PNG
+                </button>
+              </div>
+              <div className="qr-download-area hidden">
+                <QRCodeSVG value={publicUrl} size={400} level="M" />
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1309,11 +1799,11 @@ function QuestionChart({ stat, chartType }: { stat: { question_id: string; quest
   );
 }
 
-function AnalyticsTab({ analytics, responses, responsesTotal, loading, selectedResponse, setSelectedResponse, handleViewResponse, handleExportCSV, questions, deletingResponse, setDeletingResponse, handleDeleteResponse, responsePage, handleResponsePageChange }: {
+function AnalyticsTab({ analytics, responses, responsesTotal, programAudience, loading, selectedResponse, setSelectedResponse, handleViewResponse, handleExportCSV, questions, responsePage, handleResponsePageChange }: {
   analytics: SurveyAnalytics | null; responses: SurveyResponse[]; responsesTotal: number;
+  programAudience: boolean;
   loading: boolean; selectedResponse: SurveyResponse | null; setSelectedResponse: (r: SurveyResponse | null) => void;
   handleViewResponse: (rid: string) => void; handleExportCSV: () => void; questions: SurveyQuestion[];
-  deletingResponse: string | null; setDeletingResponse: (id: string | null) => void; handleDeleteResponse: (rid: string) => void;
   responsePage: number; handleResponsePageChange: (page: number) => void;
 }) {
   const [chartTypes, setChartTypes] = useState<Record<string, ChartType>>({});
@@ -1329,11 +1819,11 @@ function AnalyticsTab({ analytics, responses, responsesTotal, loading, selectedR
   };
 
   return (
-    <div className="h-full overflow-auto p-8">
+    <div className="h-full overflow-auto p-3 sm:p-8">
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Summary cards */}
         {analytics && (
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
             <div className="bg-white rounded-xl border border-slate-200 p-5">
               <div className="flex items-center gap-2 text-slate-500 mb-2">
                 <Users className="w-4 h-4" />
@@ -1431,8 +1921,8 @@ function AnalyticsTab({ analytics, responses, responsesTotal, loading, selectedR
         )}
 
         {/* Responses list */}
-        <div className="bg-white rounded-xl border border-slate-200 p-6">
-          <div className="flex items-center justify-between mb-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-6">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <h3 className="font-semibold text-slate-900">Respuestas individuales ({responsesTotal})</h3>
             <button onClick={handleExportCSV} className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 rounded-lg text-sm text-slate-700 hover:bg-slate-200 transition-colors">
               <Download className="w-3.5 h-3.5" /> Exportar CSV
@@ -1443,31 +1933,24 @@ function AnalyticsTab({ analytics, responses, responsesTotal, loading, selectedR
           ) : (
             <div className="divide-y divide-slate-100">
               {responses.map((r) => (
-                <div key={r.id} className="flex items-center justify-between py-3">
-                  <div>
-                    <p className="text-sm text-slate-700 font-mono">{r.respondent_token.substring(0, 12)}...</p>
+                <div key={r.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-700">
+                      {programAudience ? (r.contact_name || 'Participante sin identidad disponible') : 'Respuesta anónima'}
+                    </p>
+                    {programAudience && r.contact_phone && <p className="truncate text-xs text-slate-500">{r.contact_phone}</p>}
                     <p className="text-xs text-slate-400">
                       {r.completed_at && format(new Date(r.completed_at), "d MMM yyyy HH:mm", { locale: es })}
                       {r.source && <span className="ml-2 text-slate-300">via {r.source}</span>}
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2 self-end sm:self-auto">
                     <button
                       onClick={() => handleViewResponse(r.id)}
                       className="text-xs text-emerald-600 hover:text-emerald-700 font-medium"
                     >
                       Ver detalle
                     </button>
-                    {deletingResponse === r.id ? (
-                      <div className="flex items-center gap-1">
-                        <button onClick={() => handleDeleteResponse(r.id)} className="text-xs text-red-600 hover:text-red-700 font-medium px-2 py-1 bg-red-50 rounded">Confirmar</button>
-                        <button onClick={() => setDeletingResponse(null)} className="text-xs text-slate-500 hover:text-slate-700 font-medium px-2 py-1">Cancelar</button>
-                      </div>
-                    ) : (
-                      <button onClick={() => setDeletingResponse(r.id)} className="p-1 text-slate-300 hover:text-red-500 transition-colors">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    )}
                   </div>
                 </div>
               ))}
@@ -1513,6 +1996,13 @@ function AnalyticsTab({ analytics, responses, responsesTotal, loading, selectedR
                 <button onClick={() => setSelectedResponse(null)} className="p-1 rounded-lg hover:bg-slate-100 text-slate-400">
                   <XCircle className="w-5 h-5" />
                 </button>
+              </div>
+              <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-sm font-semibold text-slate-800">
+                  {programAudience ? (selectedResponse.contact_name || 'Participante sin identidad disponible') : 'Respuesta anónima'}
+                </p>
+                {programAudience && selectedResponse.contact_phone && <p className="mt-0.5 text-xs text-slate-500">{selectedResponse.contact_phone}</p>}
+                {selectedResponse.completed_at && <p className="mt-1 text-xs text-slate-400">Respondida {format(new Date(selectedResponse.completed_at), "d MMM yyyy HH:mm", { locale: es })}</p>}
               </div>
               <div className="space-y-3">
                 {selectedResponse.answers?.map((a) => {

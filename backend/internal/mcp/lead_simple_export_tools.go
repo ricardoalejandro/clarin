@@ -245,11 +245,11 @@ func (f mcpSimpleLeadFilters) sqlWhere() (string, []any) {
 
 	if f.Query != "" {
 		where += fmt.Sprintf(` AND (
-			COALESCE(l.name, '') ILIKE $%d OR COALESCE(l.last_name, '') ILIKE $%d OR
-			COALESCE(c.name, '') ILIKE $%d OR COALESCE(c.custom_name, '') ILIKE $%d OR
-			COALESCE(c.push_name, '') ILIKE $%d OR COALESCE(l.phone, c.phone, '') ILIKE $%d OR
-			COALESCE(l.email, c.email, '') ILIKE $%d
-		)`, argN, argN, argN, argN, argN, argN, argN)
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.last_name,'') ELSE COALESCE(c.last_name,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END ILIKE $%d
+		)`, argN, argN, argN, argN)
 		args = append(args, "%"+f.Query+"%")
 		argN++
 	}
@@ -357,14 +357,12 @@ func (s *MCPServer) querySimpleLeads(ctx context.Context, filters mcpSimpleLeadF
 	rows, err := s.repos.DB().Query(ctx, `
 		SELECT
 			l.id,
-			COALESCE(
-				NULLIF(c.custom_name, ''),
-				NULLIF(TRIM(CONCAT_WS(' ', NULLIF(c.name, ''), NULLIF(c.last_name, ''))), ''),
-				NULLIF(TRIM(CONCAT_WS(' ', NULLIF(l.name, ''), NULLIF(l.last_name, ''))), ''),
-				''
-			) AS lead_name,
-			COALESCE(NULLIF(c.phone, ''), NULLIF(l.phone, ''), '') AS raw_phone,
-			COALESCE(NULLIF(c.email, ''), NULLIF(l.email, ''), '') AS email,
+			CASE WHEN l.contact_id IS NULL
+				THEN COALESCE(NULLIF(TRIM(CONCAT_WS(' ',NULLIF(l.name,''),NULLIF(l.last_name,''))),''),'')
+				ELSE COALESCE(NULLIF(c.custom_name,''),NULLIF(TRIM(CONCAT_WS(' ',NULLIF(c.name,''),NULLIF(c.last_name,''))),''),NULLIF(c.push_name,''),'')
+			END AS lead_name,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.phone,'') ELSE NULLIF(c.phone,'') END,'') AS raw_phone,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.email,'') ELSE NULLIF(c.email,'') END,'') AS email,
 			COALESCE(ps.name, '') AS stage,
 			COALESCE(NULLIF(l.source, ''), NULLIF(c.source, ''), '') AS source,
 			COALESCE(l.status, '') AS status,

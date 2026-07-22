@@ -13,12 +13,19 @@ description: Use when modifying Clarin backend Go/Fiber handlers, services, repo
 - `Contact` is the parent entity. `Lead` and `Chat` are parallel children. Creating a lead or chat must ensure a same-account contact exists first.
 - Deleting a lead must not delete its contact or chat. Deleting a chat must not delete its contact or lead. Contact deletion must be an explicit account-scoped transaction.
 - Kommo API is dormant unless the user explicitly asks to reactivate it.
+- Preserve the canonical Contact profile contract across Contactos, Leads, Chats, Eventos and Programas. Identity updates must keep compatibility projections synchronized without making snapshots a read fallback for linked rows.
+- Treat `program_participants.enrolled_at` as the real, editable start of participation. Default it automatically when adding a participant, validate explicit corrections in the program/account context, and never derive it silently from attendance.
+- Count participant attendance only within the inclusive participation window; return real out-of-window attendance separately as history and use language that distinguishes "no sessions in the period" from "no attendance exists".
+- Keep Program participation lifecycle contextual to `program_participant_id`: current rosters exclude retired/completed rows, historical metrics preserve eligible past slots, and a normal withdrawal never hard-deletes attendance or notes.
+- Keep event creation in the Eventos module; Programas is for class groups and must not grow a second partial event workflow.
+- Treat survey templates as non-answerable definitions and survey instances as immutable applications. Scope Program survey recipients to both Contact and `program_participant_id`, and never mutate answered instance questions through template edits.
 
 ## Go And API Patterns
 
 - Use context-aware pgx calls and parameterized SQL only.
 - Avoid N+1 queries; batch, join, aggregate, or prefetch when lists need related data.
 - Select only needed columns and paginate large lists.
+- For large shared catalogs such as tags, expose bounded account-scoped search instead of returning the full catalog with every detail response. Creating global tags must still require `PermTags`.
 - Add indexes for new high-cardinality filters, joins, ordering, or lookup paths.
 - Keep route registration, request/response DTOs, repository methods, and domain structs consistent.
 - Add WebSocket broadcasts only when the frontend needs real-time visibility of the changed data.

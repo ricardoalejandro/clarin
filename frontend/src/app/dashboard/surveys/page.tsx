@@ -1,372 +1,116 @@
 "use client";
 
-import { useState, useEffect } from 'react';
-import { Plus, Search, ClipboardList, Trash2, Copy, ExternalLink, BarChart3, FileText, CheckCircle2, PenLine, XCircle, MoreVertical, Eye } from 'lucide-react';
-import { api } from '@/lib/api';
-import { Survey } from '@/types/survey';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { format } from 'date-fns';
-import { es } from 'date-fns/locale';
+import { useRouter } from 'next/navigation';
+import {
+  Archive, BarChart3, ChevronDown, ChevronRight, ClipboardList, FileText,
+  Layers3, Loader2, Plus, RotateCcw, Search, X,
+} from 'lucide-react';
+import { api } from '@/lib/api';
+import type { SurveyInstanceSummary, SurveyTemplate } from '@/types/survey-template';
 
-const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: React.ReactNode }> = {
-  draft:  { label: 'Borrador', bg: 'bg-slate-100',   text: 'text-slate-600',   icon: <PenLine className="w-3 h-3" /> },
-  active: { label: 'Activa',   bg: 'bg-emerald-50',  text: 'text-emerald-700', icon: <CheckCircle2 className="w-3 h-3" /> },
-  closed: { label: 'Cerrada',  bg: 'bg-red-50',      text: 'text-red-600',     icon: <XCircle className="w-3 h-3" /> },
-};
-
-export default function SurveysPage() {
-  const [surveys, setSurveys] = useState<Survey[]>([]);
+export default function SurveyTemplatesPage() {
+  const router = useRouter();
+  const [templates, setTemplates] = useState<SurveyTemplate[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [newSurvey, setNewSurvey] = useState({ name: '', description: '' });
+  const [error, setError] = useState('');
+  const [query, setQuery] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
   const [creating, setCreating] = useState(false);
-  const [menuOpen, setMenuOpen] = useState<string | null>(null);
+  const [createError, setCreateError] = useState('');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [instancesByTemplate, setInstancesByTemplate] = useState<Record<string, SurveyInstanceSummary[]>>({});
+  const [instancesLoading, setInstancesLoading] = useState('');
 
-  useEffect(() => {
-    fetchSurveys();
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const response = await api<SurveyTemplate[]>('/api/survey-templates?include_archived=true');
+      if (!response.success) throw new Error(response.error || 'No se pudieron cargar las plantillas.');
+      setTemplates(response.data || []);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'No se pudieron cargar las plantillas.');
+    } finally { setLoading(false); }
   }, []);
+  useEffect(() => { void load(); }, [load]);
 
-  const fetchSurveys = async () => {
+  const filtered = useMemo(() => templates.filter(template => {
+    if ((template.status === 'archived') !== showArchived) return false;
+    const normalized = query.trim().toLocaleLowerCase('es');
+    return !normalized || `${template.name} ${template.description}`.toLocaleLowerCase('es').includes(normalized);
+  }), [query, showArchived, templates]);
+
+  const create = async () => {
+    if (!name.trim()) return;
+    setCreating(true); setCreateError('');
     try {
-      setLoading(true);
-      const response = await api<Survey[]>('/api/surveys');
-      if (response.success) {
-        setSurveys(response.data || []);
-      }
-    } catch (error) {
-      console.error('Error fetching surveys:', error);
-    } finally {
-      setLoading(false);
-    }
+      const response = await api<SurveyTemplate>('/api/survey-templates', { method: 'POST', body: JSON.stringify({ name: name.trim(), description: description.trim() }) });
+      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo crear la plantilla.');
+      setCreateOpen(false); setName(''); setDescription('');
+      router.push(`/dashboard/surveys/${response.data.id}?mode=template`);
+    } catch (createFailure) {
+      setCreateError(createFailure instanceof Error ? createFailure.message : 'No se pudo crear la plantilla.');
+    } finally { setCreating(false); }
   };
 
-  const handleCreateSurvey = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newSurvey.name.trim()) return;
-    setCreating(true);
+  const toggleArchived = async (template: SurveyTemplate) => {
+    const status = template.status === 'archived' ? 'active' : 'archived';
+    const response = await api<SurveyTemplate>(`/api/survey-templates/${template.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+    if (response.success && response.data) setTemplates(current => current.map(item => item.id === template.id ? response.data! : item));
+  };
+
+  const toggleInstances = async (templateId: string) => {
+    if (expandedId === templateId) { setExpandedId(null); return; }
+    setExpandedId(templateId);
+    if (instancesByTemplate[templateId]) return;
+    setInstancesLoading(templateId);
     try {
-      const response = await api<Survey>('/api/surveys', {
-        method: 'POST',
-        body: JSON.stringify(newSurvey),
-      });
-      if (response.success && response.data) {
-        setIsCreateModalOpen(false);
-        setNewSurvey({ name: '', description: '' });
-        // Navigate to builder
-        window.location.href = `/dashboard/surveys/${response.data.id}`;
-      }
-    } catch (error) {
-      console.error('Error creating survey:', error);
-    } finally {
-      setCreating(false);
-    }
+      const response = await api<SurveyInstanceSummary[]>(`/api/survey-templates/${templateId}/instances`);
+      setInstancesByTemplate(current => ({ ...current, [templateId]: response.success ? response.data || [] : [] }));
+    } finally { setInstancesLoading(''); }
   };
-
-  const handleDeleteSurvey = async (id: string) => {
-    if (!confirm('¿Estás seguro de eliminar esta encuesta? Se eliminarán todas las preguntas y respuestas.')) return;
-    try {
-      await api(`/api/surveys/${id}`, { method: 'DELETE' });
-      fetchSurveys();
-    } catch (error) {
-      console.error('Error deleting survey:', error);
-    }
-    setMenuOpen(null);
-  };
-
-  const handleDuplicate = async (id: string) => {
-    try {
-      const res = await api<Survey>(`/api/surveys/${id}/duplicate`, { method: 'POST' });
-      if (res.success) {
-        fetchSurveys();
-      }
-    } catch (error) {
-      console.error('Error duplicating survey:', error);
-    }
-    setMenuOpen(null);
-  };
-
-  const handleToggleStatus = async (survey: Survey) => {
-    const newStatus = survey.status === 'active' ? 'closed' : 'active';
-    try {
-      await api(`/api/surveys/${survey.id}/status`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status: newStatus }),
-      });
-      fetchSurveys();
-    } catch (error) {
-      console.error('Error updating status:', error);
-    }
-    setMenuOpen(null);
-  };
-
-  const copyLink = (slug: string) => {
-    const url = `${window.location.origin}/f/${slug}`;
-    navigator.clipboard.writeText(url);
-    setMenuOpen(null);
-  };
-
-  const filteredSurveys = surveys.filter(s => {
-    if (statusFilter !== 'all' && s.status !== statusFilter) return false;
-    if (searchQuery && !s.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-    return true;
-  });
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Header */}
-      <div className="flex-shrink-0 p-6 border-b border-slate-200 bg-white">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center">
-              <ClipboardList className="w-5 h-5 text-emerald-600" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-slate-900">Encuestas</h1>
-              <p className="text-sm text-slate-500">{surveys.length} encuesta{surveys.length !== 1 ? 's' : ''}</p>
-            </div>
+    <div className="flex h-full min-h-0 flex-col bg-slate-50">
+      <header className="shrink-0 border-b border-slate-200 bg-white px-4 py-4 sm:px-6">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700"><ClipboardList className="h-5 w-5" /></span>
+            <div className="min-w-0"><h1 className="truncate text-lg font-bold text-slate-900 sm:text-xl">Plantillas de encuesta</h1><p className="text-sm text-slate-500">Diseña una vez y aplícala desde cada origen.</p></div>
           </div>
-          <button
-            onClick={() => setIsCreateModalOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm font-medium"
-          >
-            <Plus className="w-4 h-4" />
-            Nueva encuesta
-          </button>
+          <button type="button" onClick={() => setCreateOpen(true)} className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-xl bg-emerald-600 px-3.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700"><Plus className="h-4 w-4" /><span className="hidden sm:inline">Nueva plantilla</span><span className="sm:hidden">Nueva</span></button>
         </div>
-
-        {/* Filters */}
-        <div className="flex items-center gap-3">
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Buscar encuestas..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-            />
-          </div>
-          <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
-            {['all', 'draft', 'active', 'closed'].map((s) => (
-              <button
-                key={s}
-                onClick={() => setStatusFilter(s)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  statusFilter === s ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                {s === 'all' ? 'Todas' : STATUS_CONFIG[s]?.label || s}
-              </button>
-            ))}
-          </div>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+          <div className="relative min-w-0 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar plantilla" className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-3 text-sm outline-none focus:border-emerald-500 focus:bg-white" /></div>
+          <div className="grid min-h-11 grid-cols-2 rounded-xl bg-slate-100 p-1 sm:w-64"><button type="button" onClick={() => setShowArchived(false)} className={`rounded-lg text-sm font-medium ${!showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Activas</button><button type="button" onClick={() => setShowArchived(true)} className={`rounded-lg text-sm font-medium ${showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Archivadas</button></div>
         </div>
-      </div>
+      </header>
 
-      {/* Content */}
-      <div className="flex-1 overflow-auto p-6">
-        {loading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="bg-white rounded-xl border border-slate-200 p-5 animate-pulse">
-                <div className="h-5 bg-slate-200 rounded w-3/4 mb-3" />
-                <div className="h-3 bg-slate-100 rounded w-1/2 mb-4" />
-                <div className="flex gap-4">
-                  <div className="h-3 bg-slate-100 rounded w-16" />
-                  <div className="h-3 bg-slate-100 rounded w-16" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : filteredSurveys.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 text-center">
-            <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center mb-4">
-              <ClipboardList className="w-8 h-8 text-slate-400" />
+      <main className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        {loading ? <TemplateSkeleton /> : error ? <div className="mx-auto max-w-xl rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center text-sm text-rose-700"><p>{error}</p><button type="button" onClick={() => void load()} className="mt-3 min-h-11 font-semibold underline">Reintentar</button></div> : filtered.length === 0 ? (
+          <div className="mx-auto flex min-h-72 max-w-lg flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-center"><Layers3 className="mb-4 h-10 w-10 text-slate-300" /><h2 className="font-semibold text-slate-800">{query ? 'No hay coincidencias' : showArchived ? 'No hay plantillas archivadas' : 'Crea tu primera plantilla'}</h2><p className="mt-1 text-sm text-slate-500">Las aplicaciones y sus respuestas permanecerán separadas por programa.</p>{!query && !showArchived && <button type="button" onClick={() => setCreateOpen(true)} className="mt-5 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white">Nueva plantilla</button>}</div>
+        ) : <div className="mx-auto grid max-w-6xl grid-cols-1 gap-4 lg:grid-cols-2">{filtered.map(template => {
+          const expanded = expandedId === template.id;
+          const instances = instancesByTemplate[template.id] || [];
+          return <article key={template.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="p-4 sm:p-5">
+              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><h2 className="truncate font-semibold text-slate-900">{template.name}</h2>{template.system_key && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">Inicial</span>}</div><p className="mt-1 line-clamp-2 min-h-10 text-sm text-slate-500">{template.description || 'Sin descripción'}</p></div><Link href={`/dashboard/surveys/${template.id}?mode=template`} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50" aria-label={`Editar ${template.name}`}><ChevronRight className="h-5 w-5" /></Link></div>
+              <div className="mt-4 grid grid-cols-3 gap-2"><Stat icon={FileText} value={template.question_count} label="Preguntas" /><Stat icon={Layers3} value={template.instance_count} label="Aplicaciones" /><Stat icon={BarChart3} value={template.response_count} label="Respuestas" /></div>
+              <div className="mt-4 flex items-center gap-2 border-t border-slate-100 pt-3"><button type="button" onClick={() => void toggleInstances(template.id)} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-slate-100 text-sm font-semibold text-slate-700 hover:bg-slate-200">Historial <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} /></button><button type="button" onClick={() => void toggleArchived(template)} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500" aria-label={template.status === 'archived' ? 'Restaurar plantilla' : 'Archivar plantilla'}>{template.status === 'archived' ? <RotateCcw className="h-4 w-4" /> : <Archive className="h-4 w-4" />}</button></div>
             </div>
-            <h3 className="text-lg font-semibold text-slate-700 mb-1">
-              {searchQuery || statusFilter !== 'all' ? 'Sin resultados' : 'No hay encuestas'}
-            </h3>
-            <p className="text-sm text-slate-500 mb-4">
-              {searchQuery || statusFilter !== 'all'
-                ? 'Intenta con otros filtros'
-                : 'Crea tu primera encuesta para empezar a recopilar datos'}
-            </p>
-            {!searchQuery && statusFilter === 'all' && (
-              <button
-                onClick={() => setIsCreateModalOpen(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm"
-              >
-                <Plus className="w-4 h-4" />
-                Crear encuesta
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredSurveys.map((survey) => {
-              const statusCfg = STATUS_CONFIG[survey.status] || STATUS_CONFIG.draft;
-              return (
-                <Link key={survey.id} href={`/dashboard/surveys/${survey.id}`}>
-                  <div className="bg-white rounded-xl border border-slate-200 p-5 hover:shadow-md hover:border-emerald-200 transition-all cursor-pointer group relative">
-                    {/* Menu */}
-                    <div className="absolute top-3 right-3">
-                      <button
-                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setMenuOpen(menuOpen === survey.id ? null : survey.id); }}
-                        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <MoreVertical className="w-4 h-4" />
-                      </button>
-                      {menuOpen === survey.id && (
-                        <div className="absolute right-0 top-9 bg-white border border-slate-200 rounded-lg shadow-lg py-1 w-48 z-20">
-                          {survey.status === 'active' && (
-                            <button
-                              onClick={(e) => { e.preventDefault(); e.stopPropagation(); copyLink(survey.slug); }}
-                              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                            >
-                              <ExternalLink className="w-4 h-4" /> Copiar enlace
-                            </button>
-                          )}
-                          {survey.status === 'active' && (
-                            <a
-                              href={`/f/${survey.slug}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                            >
-                              <Eye className="w-4 h-4" /> Ver formulario
-                            </a>
-                          )}
-                          <button
-                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleToggleStatus(survey); }}
-                            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                          >
-                            {survey.status === 'active' ? <XCircle className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
-                            {survey.status === 'active' ? 'Cerrar' : 'Activar'}
-                          </button>
-                          <button
-                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDuplicate(survey.id); }}
-                            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                          >
-                            <Copy className="w-4 h-4" /> Duplicar
-                          </button>
-                          {!survey.is_template && (
-                            <>
-                              <hr className="my-1 border-slate-100" />
-                              <button
-                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteSurvey(survey.id); }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-                              >
-                                <Trash2 className="w-4 h-4" /> Eliminar
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
+            {expanded && <div className="border-t border-slate-100 bg-slate-50 p-3">{instancesLoading === template.id ? <div className="flex min-h-20 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-emerald-600" /></div> : instances.length === 0 ? <p className="p-4 text-center text-sm text-slate-500">Todavía no se ha aplicado esta plantilla.</p> : <div className="space-y-2">{instances.slice(0, 6).map(instance => <Link key={instance.id} href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="flex min-h-14 items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 hover:border-emerald-200"><span className={`h-2.5 w-2.5 rounded-full ${instance.status === 'active' ? 'bg-emerald-500' : 'bg-slate-300'}`} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-800">{instance.name}</span><span className="block truncate text-xs text-slate-500">{instance.origin_label} · {instance.response_count} respuestas</span></span><ChevronRight className="h-4 w-4 text-slate-400" /></Link>)}</div>}</div>}
+          </article>;
+        })}</div>}
+      </main>
 
-                    {/* Status badge */}
-                    <div className="flex items-center gap-2 mb-3">
-                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusCfg.bg} ${statusCfg.text}`}>
-                        {statusCfg.icon} {statusCfg.label}
-                      </span>
-                      {survey.is_template && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
-                          ★ Modelo
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Title */}
-                    <h3 className="font-semibold text-slate-900 mb-1 line-clamp-1 pr-8">{survey.name}</h3>
-                    {survey.description && (
-                      <p className="text-sm text-slate-500 line-clamp-2 mb-3">{survey.description}</p>
-                    )}
-
-                    {/* Stats */}
-                    <div className="flex items-center gap-4 text-xs text-slate-500">
-                      <span className="flex items-center gap-1">
-                        <FileText className="w-3.5 h-3.5" />
-                        {survey.question_count || 0} preguntas
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <BarChart3 className="w-3.5 h-3.5" />
-                        {survey.response_count || 0} respuestas
-                      </span>
-                    </div>
-
-                    {/* Footer */}
-                    <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between">
-                      <span className="text-xs text-slate-400">
-                        {format(new Date(survey.created_at), "d MMM yyyy", { locale: es })}
-                      </span>
-                      <span className="text-xs text-slate-400 font-mono">/{survey.slug}</span>
-                    </div>
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Create Modal */}
-      {isCreateModalOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setIsCreateModalOpen(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
-            <div className="p-6">
-              <h2 className="text-lg font-bold text-slate-900 mb-4">Nueva encuesta</h2>
-              <form onSubmit={handleCreateSurvey}>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Nombre</label>
-                    <input
-                      autoFocus
-                      type="text"
-                      value={newSurvey.name}
-                      onChange={(e) => setNewSurvey({ ...newSurvey, name: e.target.value })}
-                      placeholder="Ej: Encuesta de satisfacción"
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Descripción (opcional)</label>
-                    <textarea
-                      value={newSurvey.description}
-                      onChange={(e) => setNewSurvey({ ...newSurvey, description: e.target.value })}
-                      placeholder="¿De qué trata esta encuesta?"
-                      rows={3}
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 resize-none"
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center justify-end gap-3 mt-6">
-                  <button
-                    type="button"
-                    onClick={() => setIsCreateModalOpen(false)}
-                    className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800"
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={!newSurvey.name.trim() || creating}
-                    className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {creating ? 'Creando...' : 'Crear encuesta'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Close menu on click outside */}
-      {menuOpen && (
-        <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(null)} />
-      )}
+      {createOpen && <div className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="new-survey-template-title"><div className="flex max-h-[100dvh] w-full flex-col bg-white shadow-2xl sm:max-w-md sm:rounded-2xl"><header className="flex items-center justify-between border-b border-slate-200 px-4 py-3.5"><div><h2 id="new-survey-template-title" className="font-semibold text-slate-900">Nueva plantilla</h2><p className="text-xs text-slate-500">Todavía no será pública ni recibirá respuestas.</p></div><button type="button" onClick={() => setCreateOpen(false)} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-slate-500" aria-label="Cerrar"><X className="h-5 w-5" /></button></header><div className="space-y-4 overflow-y-auto p-4"><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre</span><input autoFocus value={name} onChange={event => setName(event.target.value)} maxLength={180} placeholder="Ej. Satisfacción del programa" className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Descripción <span className="font-normal text-slate-400">(opcional)</span></span><textarea value={description} onChange={event => setDescription(event.target.value)} rows={3} className="w-full resize-none rounded-xl border border-slate-200 p-3 text-sm outline-none focus:border-emerald-500" /></label>{createError && <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{createError}</p>}</div><footer className="flex gap-3 border-t border-slate-200 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><button type="button" onClick={() => setCreateOpen(false)} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={() => void create()} disabled={!name.trim() || creating} className="inline-flex min-h-11 flex-[1.3] items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white disabled:opacity-50">{creating && <Loader2 className="h-4 w-4 animate-spin" />}Crear y editar</button></footer></div></div>}
     </div>
   );
 }
+
+function Stat({ icon: Icon, value, label }: { icon: typeof FileText; value: number; label: string }) { return <div className="rounded-xl bg-slate-50 px-2 py-2.5 text-center"><Icon className="mx-auto h-4 w-4 text-slate-400" /><p className="mt-1 text-sm font-semibold text-slate-800">{value}</p><p className="text-[11px] text-slate-500">{label}</p></div>; }
+function TemplateSkeleton() { return <div className="mx-auto grid max-w-6xl grid-cols-1 gap-4 lg:grid-cols-2">{[1, 2, 3, 4].map(item => <div key={item} className="h-60 animate-pulse rounded-2xl border border-slate-200 bg-white p-5"><div className="h-5 w-2/3 rounded bg-slate-200" /><div className="mt-3 h-4 w-full rounded bg-slate-100" /><div className="mt-2 h-4 w-4/5 rounded bg-slate-100" /></div>)}</div>; }

@@ -24,6 +24,15 @@ description: Use when changing Clarin PostgreSQL schema, migrations, indexes, co
 - Do not create new flows that allow leads or chats without a valid contact.
 - Before tightening constraints, repair existing same-account orphan rows by normalized phone or safely quarantine/delete only with clear criteria.
 
+## Program Participation Integrity
+
+- `program_participants.enrolled_at` is the real participation start, not an immutable row-created timestamp. Keep automatic defaults, but support explicit account-scoped updates without rewriting attendance.
+- Attendance eligibility uses session calendar dates inside the inclusive range from `enrolled_at` through the earliest non-null `dropped_at`/`completed_at`. Keep recorded attendance outside that range as historical data.
+- Never backfill or infer `enrolled_at` from the earliest attendance automatically. Ambiguous historical corrections require an explicit user action.
+- Preserve withdrawn/completed Program participation rows and dependent attendance/notes. Physical annulment is allowed only after a same-account transaction proves that no historical activity exists.
+- Survey schema migrations must preserve legacy slugs, questions, responses and answers. Template revisions and answerable instances are separate account-scoped records; editing a template cannot cascade into historical answers.
+- Index account/program/participant/date paths used by attendance summaries and verify period-boundary queries against PostgreSQL.
+
 ## Required Code Updates
 
 - Update `backend/internal/domain/entities.go` when persisted fields change.

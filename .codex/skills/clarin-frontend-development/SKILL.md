@@ -24,6 +24,12 @@ description: Use when modifying Clarin frontend Next.js, React, TypeScript, dash
 - Base dense workspace breakpoints on a measured container, including sidebar and Eros consumption. Do not infer available room from `window.innerWidth` or zoom percentage alone.
 - Keep a single vertical scroll owner per drawer/panel unless a deliberately bounded child (for example a picker list) requires its own scroll.
 - Preserve exact requested/historical visual assets locally; centralize their CSS and provide a plain-color fallback.
+- Keep the canonical Contact detail ordered and shared across modules. Module context follows the contact profile/history and must not introduce a second identity editor.
+- In contact editing, show assigned tags as removable chips and search a bounded remote catalog on demand; never map the entire account tag catalog into the form. Show tag creation only when the API reports permission.
+- Make contact observation history independently expandable and lazy-loaded. Its collapsed header must retain the count and `Añadir observación`; opening the composer must not force the history list open.
+- In Programas, create participation dates automatically but allow an explicit correction from participant detail. Explain attendance states in terms of the participation window and keep out-of-window records visible without including them in percentages.
+- Default Program participant lists to active membership and place retired/completed memberships in an explicit history surface. Do not expose a normal hard-delete action for a participation with real activity.
+- Show Program survey templates only as choices for creating an application. Sharing, opening/closing and results belong to the created application, not to the template itself.
 
 ## State And Data Safety
 

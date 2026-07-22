@@ -488,6 +488,7 @@ func Migrate(db *pgxpool.Pool) error {
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			program_id UUID NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
 			date DATE NOT NULL,
+			title VARCHAR(255),
 			topic VARCHAR(255),
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -1968,24 +1969,9 @@ func Migrate(db *pgxpool.Pool) error {
 		   AND leads.account_id = c.account_id
 		   AND leads.jid = c.jid`,
 
-		// Merge personal data from leads into contacts (fill missing contact fields from lead)
-		`UPDATE contacts SET
-		   name = COALESCE(contacts.name, l.name),
-		   last_name = COALESCE(contacts.last_name, l.last_name),
-		   short_name = COALESCE(contacts.short_name, l.short_name),
-		   phone = COALESCE(contacts.phone, l.phone),
-		   email = COALESCE(contacts.email, l.email),
-		   company = COALESCE(contacts.company, l.company),
-		   age = COALESCE(contacts.age, l.age),
-		   dni = COALESCE(contacts.dni, l.dni),
-		   birth_date = COALESCE(contacts.birth_date, l.birth_date),
-		   address = COALESCE(contacts.address, l.address),
-		   distrito = COALESCE(NULLIF(contacts.distrito, ''), NULLIF(l.distrito, '')),
-		   ocupacion = COALESCE(NULLIF(contacts.ocupacion, ''), NULLIF(l.ocupacion, '')),
-		   updated_at = NOW()
-		 FROM leads l
-		 WHERE contacts.id = l.contact_id
-		   AND l.contact_id IS NOT NULL`,
+		// Personal lead snapshots are promoted by the conflict-aware canonical
+		// backfill at the end of this migration list. Do not select an arbitrary
+		// Lead here before Event snapshots have also been compared.
 
 		// (lead_tags migration removed — table dropped, data already in contact_tags)
 
@@ -2023,13 +2009,9 @@ func Migrate(db *pgxpool.Pool) error {
 		// Drop obsolete lead_tags table (all tags now in contact_tags)
 		`DROP TABLE IF EXISTS lead_tags`,
 
-		// NULL out personal data in leads (Contact is source of truth via COALESCE)
-		`UPDATE leads SET
-		   name = NULL, last_name = NULL, short_name = NULL,
-		   phone = NULL, email = NULL, company = NULL,
-		   age = NULL, dni = NULL, birth_date = NULL, address = NULL,
-		   distrito = NULL, ocupacion = NULL
-		 WHERE contact_id IS NOT NULL`,
+		// Linked Lead snapshots are cleared only after the conflict-aware Contact
+		// promotion below, so they can participate in comparison but never remain
+		// as a second profile source afterward.
 
 		// Program folders – organise programs in folders
 		`CREATE TABLE IF NOT EXISTS program_folders (
@@ -2720,15 +2702,207 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// ─── Programs: course health, goals, transfer and bitacora ─────────
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS dropped_at TIMESTAMPTZ`,
+		`ALTER TABLE program_participants ALTER COLUMN status SET DEFAULT 'active'`,
+		`UPDATE program_participants SET status = 'active' WHERE status IS NULL OR status IN ('', 'enrolled')`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS drop_reason TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS drop_notes TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS transferred_to_level TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS transferred_at TIMESTAMPTZ`,
 		`CREATE INDEX IF NOT EXISTS idx_program_participants_status ON program_participants(program_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_participants_roster_window ON program_participants(program_id, status, enrolled_at, dropped_at, completed_at, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_program_participants_transfer ON program_participants(program_id) WHERE transferred_to_level <> ''`,
 		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS session_type TEXT NOT NULL DEFAULT 'regular'`,
 		`CREATE INDEX IF NOT EXISTS idx_program_sessions_type ON program_sessions(program_id, session_type)`,
+
+		// ─── Programs: reusable class plans, ordered topics and instructors ──
+		// Every association carries account_id and uses composite foreign keys so
+		// globally valid IDs can never be joined across cuentas.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_programs_account_id ON programs(account_id, id)`,
+		`CREATE TABLE IF NOT EXISTS courses (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			description TEXT,
+			status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_courses_account_id ON courses(account_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_courses_account_status_name ON courses(account_id, status, name)`,
+		`CREATE TABLE IF NOT EXISTS course_topics (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			course_id UUID NOT NULL,
+			title VARCHAR(255) NOT NULL,
+			description TEXT,
+			status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+			position INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT course_topics_account_course_fkey FOREIGN KEY (account_id, course_id)
+				REFERENCES courses(account_id, id) ON DELETE CASCADE
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_course_topics_account_id ON course_topics(account_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_course_topics_account_course_id ON course_topics(account_id, course_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_course_topics_course_order ON course_topics(account_id, course_id, status, position)`,
+		`CREATE TABLE IF NOT EXISTS program_courses (
+			account_id UUID NOT NULL,
+			program_id UUID NOT NULL,
+			course_id UUID NOT NULL,
+			position INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (account_id, program_id, course_id),
+			CONSTRAINT program_courses_account_program_fkey FOREIGN KEY (account_id, program_id)
+				REFERENCES programs(account_id, id) ON DELETE CASCADE,
+			CONSTRAINT program_courses_account_course_fkey FOREIGN KEY (account_id, course_id)
+				REFERENCES courses(account_id, id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_courses_program_order ON program_courses(account_id, program_id, position)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_courses_course ON program_courses(account_id, course_id)`,
+		`CREATE TABLE IF NOT EXISTS program_instructors (
+			account_id UUID NOT NULL,
+			program_id UUID NOT NULL,
+			contact_id UUID NOT NULL,
+			position INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (account_id, program_id, contact_id),
+			CONSTRAINT program_instructors_account_program_fkey FOREIGN KEY (account_id, program_id)
+				REFERENCES programs(account_id, id) ON DELETE CASCADE,
+			CONSTRAINT program_instructors_account_contact_fkey FOREIGN KEY (account_id, contact_id)
+				REFERENCES contacts(account_id, id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_instructors_program_order ON program_instructors(account_id, program_id, position)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_instructors_contact ON program_instructors(account_id, contact_id)`,
+		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS account_id UUID`,
+		`UPDATE program_sessions ps
+		 SET account_id = p.account_id
+		 FROM programs p
+		 WHERE ps.program_id = p.id AND ps.account_id IS NULL`,
+		`ALTER TABLE program_sessions ALTER COLUMN account_id SET NOT NULL`,
+		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS course_topic_id UUID`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'program_sessions_account_program_fkey'
+				  AND conrelid = 'program_sessions'::regclass
+			) THEN
+				ALTER TABLE program_sessions
+					ADD CONSTRAINT program_sessions_account_program_fkey
+					FOREIGN KEY (account_id, program_id) REFERENCES programs(account_id, id) ON DELETE CASCADE;
+			END IF;
+		END $$`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'program_sessions_course_topic_fkey'
+				  AND conrelid = 'program_sessions'::regclass
+				  AND pg_get_constraintdef(oid) NOT LIKE 'FOREIGN KEY (account_id, course_topic_id)%'
+			) THEN
+				ALTER TABLE program_sessions DROP CONSTRAINT program_sessions_course_topic_fkey;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'program_sessions_course_topic_fkey'
+				  AND conrelid = 'program_sessions'::regclass
+			) THEN
+				ALTER TABLE program_sessions
+					ADD CONSTRAINT program_sessions_course_topic_fkey
+					FOREIGN KEY (account_id, course_topic_id) REFERENCES course_topics(account_id, id)
+					ON DELETE SET NULL (course_topic_id);
+			END IF;
+		END $$`,
+		`CREATE INDEX IF NOT EXISTS idx_program_sessions_course_topic ON program_sessions(course_topic_id, account_id) WHERE course_topic_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_program_sessions_account_program_date ON program_sessions(account_id, program_id, date, start_time, created_at, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_program_sessions_account_id ON program_sessions(account_id, id)`,
+		`CREATE TABLE IF NOT EXISTS program_session_topics (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			session_id UUID NOT NULL,
+			kind TEXT NOT NULL CHECK (kind IN ('course', 'free')),
+			course_id UUID,
+			course_topic_id UUID,
+			course_name_snapshot TEXT,
+			topic_title_snapshot VARCHAR(255) NOT NULL,
+			position INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT program_session_topics_shape_check CHECK (
+				(kind = 'course' AND course_id IS NOT NULL AND course_topic_id IS NOT NULL)
+				OR (kind = 'free' AND course_id IS NULL AND course_topic_id IS NULL)
+			),
+			CONSTRAINT program_session_topics_account_session_fkey
+				FOREIGN KEY (account_id, session_id) REFERENCES program_sessions(account_id, id) ON DELETE CASCADE,
+			CONSTRAINT program_session_topics_account_course_fkey
+				FOREIGN KEY (account_id, course_id) REFERENCES courses(account_id, id),
+			CONSTRAINT program_session_topics_account_course_topic_fkey
+				FOREIGN KEY (account_id, course_id, course_topic_id)
+				REFERENCES course_topics(account_id, course_id, id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_program_session_topics_course ON program_session_topics(account_id, session_id, course_id) WHERE kind = 'course'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_program_session_topics_free ON program_session_topics(account_id, session_id) WHERE kind = 'free'`,
+		`CREATE INDEX IF NOT EXISTS idx_program_session_topics_topic ON program_session_topics(account_id, course_topic_id) WHERE course_topic_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_program_session_topics_session_order ON program_session_topics(account_id, session_id, position)`,
+		`INSERT INTO program_session_topics (
+			account_id, session_id, kind, course_id, course_topic_id,
+			course_name_snapshot, topic_title_snapshot, position, created_at
+		)
+		SELECT ps.account_id, ps.id,
+		       CASE WHEN ps.course_topic_id IS NULL THEN 'free' ELSE 'course' END,
+		       ct.course_id, ps.course_topic_id, c.name,
+		       COALESCE(NULLIF(BTRIM(ps.topic), ''), ct.title), 0, ps.created_at
+		FROM program_sessions ps
+		LEFT JOIN course_topics ct ON ct.account_id = ps.account_id AND ct.id = ps.course_topic_id
+		LEFT JOIN courses c ON c.account_id = ps.account_id AND c.id = ct.course_id
+		WHERE COALESCE(NULLIF(BTRIM(ps.topic), ''), ct.title) IS NOT NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM program_session_topics existing
+			WHERE existing.account_id = ps.account_id AND existing.session_id = ps.id
+		  )
+		ON CONFLICT DO NOTHING`,
+		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS title VARCHAR(255)`,
+		`WITH ranked_sessions AS (
+			SELECT id,
+			       ROW_NUMBER() OVER (
+				PARTITION BY program_id
+				ORDER BY date ASC,
+				         NULLIF(BTRIM(start_time), '') ASC NULLS LAST,
+				         created_at ASC NULLS LAST,
+				         id ASC
+			       ) AS ordinal
+			FROM program_sessions
+		)
+		UPDATE program_sessions ps
+		SET title = LEFT(
+			COALESCE(
+				NULLIF(BTRIM((
+					SELECT pst.topic_title_snapshot
+					FROM program_session_topics pst
+					WHERE pst.account_id = ps.account_id
+					  AND pst.session_id = ps.id
+					  AND pst.position = 0
+					ORDER BY pst.created_at ASC, pst.id ASC
+					LIMIT 1
+				)), ''),
+				NULLIF(BTRIM(ps.topic), ''),
+				'Sesión ' || ranked.ordinal::text
+			),
+			255
+		)
+		FROM ranked_sessions ranked
+		WHERE ranked.id = ps.id
+		  AND (ps.title IS NULL OR BTRIM(ps.title) = '')`,
+		`ALTER TABLE program_sessions ALTER COLUMN title SET NOT NULL`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'program_sessions_title_length_check'
+				  AND conrelid = 'program_sessions'::regclass
+			) THEN
+				ALTER TABLE program_sessions
+					ADD CONSTRAINT program_sessions_title_length_check
+					CHECK (char_length(BTRIM(title)) BETWEEN 1 AND 255);
+			END IF;
+		END $$`,
 		`ALTER TABLE program_attendance ADD COLUMN IF NOT EXISTS instructor_status TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE program_attendance ADD COLUMN IF NOT EXISTS instructor_notes TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_program_attendance_status ON program_attendance(session_id, status)`,
@@ -2779,18 +2953,37 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS program_session_id UUID REFERENCES program_sessions(id) ON DELETE SET NULL`,
 		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS program_participant_id UUID REFERENCES program_participants(id) ON DELETE SET NULL`,
 		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS source_label TEXT NOT NULL DEFAULT ''`,
-		`CREATE INDEX IF NOT EXISTS idx_interactions_program_source ON interactions(account_id, program_id, program_session_id, program_participant_id) WHERE type = 'attendance'`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_interactions_program_attendance ON interactions(program_session_id, program_participant_id) WHERE type = 'attendance' AND program_session_id IS NOT NULL AND program_participant_id IS NOT NULL`,
+		`DROP INDEX IF EXISTS uq_interactions_program_attendance`,
+		`DROP INDEX IF EXISTS idx_interactions_program_source`,
+		`CREATE INDEX IF NOT EXISTS idx_interactions_program_source ON interactions(account_id, program_id, program_session_id, program_participant_id, created_at DESC) WHERE type = 'attendance'`,
 		`INSERT INTO interactions (account_id, contact_id, type, notes, program_id, program_session_id, program_participant_id, source_label, created_at)
 		 SELECT p.account_id, pp.contact_id, 'attendance', BTRIM(pa.notes), p.id, ps.id, pp.id,
-		        CONCAT(p.name, ' · ', COALESCE(NULLIF(ps.topic, ''), 'Sesión'), ' · ', TO_CHAR(ps.date, 'DD/MM/YYYY')),
+		        CONCAT(p.name, ' · ', ps.title, ' · ', TO_CHAR(ps.date, 'DD/MM/YYYY')),
 		        COALESCE(pa.updated_at, pa.created_at, NOW())
 		 FROM program_attendance pa
 		 JOIN program_sessions ps ON ps.id = pa.session_id
-		 JOIN programs p ON p.id = ps.program_id
+		 JOIN programs p ON p.id = ps.program_id AND p.account_id = ps.account_id
 		 JOIN program_participants pp ON pp.id = pa.participant_id AND pp.program_id = p.id
 		 WHERE BTRIM(COALESCE(pa.notes, '')) <> ''
-		 ON CONFLICT DO NOTHING`,
+		   AND NOT EXISTS (
+			SELECT 1 FROM interactions existing
+			WHERE existing.account_id = p.account_id
+			  AND existing.type = 'attendance'
+			  AND existing.program_session_id = ps.id
+			  AND existing.program_participant_id = pp.id
+		   )`,
+		`UPDATE program_attendance SET status = 'absent' WHERE status = 'excused'`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'program_attendance_status_check'
+				  AND conrelid = 'program_attendance'::regclass
+			) THEN
+				ALTER TABLE program_attendance
+					ADD CONSTRAINT program_attendance_status_check
+					CHECK (status IS NULL OR status IN ('present', 'absent', 'late'));
+			END IF;
+		END $$`,
 
 		// ─── Kommo Push Outbox: batched, coalesced push worker ─────────────
 		// Enables bulk PATCH to Kommo (up to 250 items/req) with coalescing
@@ -3318,7 +3511,244 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_crm_audit_account_created ON crm_audit_events(account_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_crm_audit_event_created ON crm_audit_events(event_id, created_at DESC) WHERE event_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_crm_audit_contact_created ON crm_audit_events(contact_id, created_at DESC) WHERE contact_id IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS contact_profile_migration_conflicts (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL,
+			contact_id UUID NOT NULL,
+			field_name TEXT NOT NULL CHECK (field_name IN ('name','last_name','short_name','phone','email','company','age','dni','birth_date','address','distrito','ocupacion')),
+			candidate_values JSONB NOT NULL DEFAULT '[]'::jsonb,
+			first_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			resolved_at TIMESTAMPTZ,
+			CONSTRAINT contact_profile_migration_conflicts_contact_fkey
+				FOREIGN KEY (account_id,contact_id) REFERENCES contacts(account_id,id) ON DELETE CASCADE,
+			UNIQUE (account_id,contact_id,field_name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_contact_profile_migration_conflicts_open
+			ON contact_profile_migration_conflicts(account_id,contact_id,field_name) WHERE resolved_at IS NULL`,
+
+		// Contact is the canonical identity owner. Promote a historical value only
+		// when all same-account snapshots agree; never choose between conflicts.
+		`WITH historical AS (
+			SELECT l.account_id,l.contact_id,
+			       NULLIF(BTRIM(l.name::text),'') AS name,NULLIF(BTRIM(l.last_name::text),'') AS last_name,
+			       NULLIF(BTRIM(l.short_name::text),'') AS short_name,NULLIF(BTRIM(l.phone::text),'') AS phone,
+			       NULLIF(BTRIM(l.email::text),'') AS email,NULLIF(BTRIM(l.company::text),'') AS company,
+			       l.age,NULLIF(BTRIM(l.dni::text),'') AS dni,l.birth_date,
+			       NULLIF(BTRIM(l.address::text),'') AS address,NULLIF(BTRIM(l.distrito::text),'') AS distrito,
+			       NULLIF(BTRIM(l.ocupacion::text),'') AS ocupacion
+			FROM leads l JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
+			WHERE l.contact_id IS NOT NULL
+			UNION ALL
+			SELECT e.account_id,COALESCE(ep.contact_id,l.contact_id),
+			       NULLIF(BTRIM(ep.name::text),''),NULLIF(BTRIM(ep.last_name::text),''),
+			       NULLIF(BTRIM(ep.short_name::text),''),NULLIF(BTRIM(ep.phone::text),''),
+			       NULLIF(BTRIM(ep.email::text),''),NULLIF(BTRIM(ep.company::text),''),
+			       ep.age,NULLIF(BTRIM(ep.dni::text),''),ep.birth_date,
+			       NULLIF(BTRIM(ep.address::text),''),NULLIF(BTRIM(ep.distrito::text),''),
+			       NULLIF(BTRIM(ep.ocupacion::text),'')
+			FROM event_participants ep
+			JOIN events e ON e.id=ep.event_id
+			LEFT JOIN leads l ON l.id=ep.lead_id AND l.account_id=e.account_id
+			JOIN contacts c ON c.id=COALESCE(ep.contact_id,l.contact_id) AND c.account_id=e.account_id
+			WHERE COALESCE(ep.contact_id,l.contact_id) IS NOT NULL
+		), field_values AS (
+			SELECT h.account_id,h.contact_id,field.key AS field_name,field.value
+			FROM historical h
+			CROSS JOIN LATERAL jsonb_each_text(jsonb_strip_nulls(jsonb_build_object(
+				'name',h.name,'last_name',h.last_name,'short_name',h.short_name,'phone',h.phone,
+				'email',h.email,'company',h.company,'age',h.age,'dni',h.dni,'birth_date',h.birth_date,
+				'address',h.address,'distrito',h.distrito,'ocupacion',h.ocupacion
+			))) field
+			UNION ALL
+			SELECT c.account_id,c.id,field.key,field.value
+			FROM contacts c
+			CROSS JOIN LATERAL jsonb_each_text(jsonb_strip_nulls(jsonb_build_object(
+				'name',COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),'')),
+				'last_name',NULLIF(BTRIM(c.last_name),''),'short_name',NULLIF(BTRIM(c.short_name),''),
+				'phone',NULLIF(BTRIM(c.phone),''),'email',NULLIF(BTRIM(c.email),''),
+				'company',NULLIF(BTRIM(c.company),''),'age',c.age,'dni',NULLIF(BTRIM(c.dni),''),
+				'birth_date',c.birth_date,'address',NULLIF(BTRIM(c.address),''),
+				'distrito',NULLIF(BTRIM(c.distrito),''),'ocupacion',NULLIF(BTRIM(c.ocupacion),'')
+			))) field
+			WHERE EXISTS (
+				SELECT 1 FROM historical h WHERE h.account_id=c.account_id AND h.contact_id=c.id
+			)
+		), distinct_field_values AS (
+			SELECT DISTINCT account_id,contact_id,field_name,value FROM field_values
+		), conflicts AS (
+			SELECT account_id,contact_id,field_name,
+			       jsonb_agg(to_jsonb(value) ORDER BY value) AS candidate_values
+			FROM distinct_field_values
+			GROUP BY account_id,contact_id,field_name
+			HAVING COUNT(*) > 1
+		), recorded_conflicts AS (
+			INSERT INTO contact_profile_migration_conflicts (
+				account_id,contact_id,field_name,candidate_values,first_detected_at,last_detected_at,resolved_at
+			)
+			SELECT account_id,contact_id,field_name,candidate_values,NOW(),NOW(),NULL FROM conflicts
+			ON CONFLICT (account_id,contact_id,field_name) DO UPDATE SET
+				candidate_values=EXCLUDED.candidate_values,last_detected_at=NOW(),resolved_at=NULL
+			RETURNING 1
+		), candidates AS (
+			SELECT account_id,contact_id,
+			       MIN(name) AS name_value,COUNT(DISTINCT name) AS name_count,
+			       MIN(last_name) AS last_name_value,COUNT(DISTINCT last_name) AS last_name_count,
+			       MIN(short_name) AS short_name_value,COUNT(DISTINCT short_name) AS short_name_count,
+			       MIN(phone) AS phone_value,COUNT(DISTINCT phone) AS phone_count,
+			       MIN(email) AS email_value,COUNT(DISTINCT email) AS email_count,
+			       MIN(company) AS company_value,COUNT(DISTINCT company) AS company_count,
+			       MIN(age) AS age_value,COUNT(DISTINCT age) AS age_count,
+			       MIN(dni) AS dni_value,COUNT(DISTINCT dni) AS dni_count,
+			       MIN(birth_date) AS birth_date_value,COUNT(DISTINCT birth_date) AS birth_date_count,
+			       MIN(address) AS address_value,COUNT(DISTINCT address) AS address_count,
+			       MIN(distrito) AS distrito_value,COUNT(DISTINCT distrito) AS distrito_count,
+			       MIN(ocupacion) AS ocupacion_value,COUNT(DISTINCT ocupacion) AS ocupacion_count
+			FROM historical GROUP BY account_id,contact_id
+		)
+		UPDATE contacts c SET
+			custom_name=CASE WHEN NULLIF(BTRIM(COALESCE(c.custom_name,'')),'') IS NULL AND NULLIF(BTRIM(COALESCE(c.name,'')),'') IS NULL AND x.name_count=1 THEN x.name_value ELSE c.custom_name END,
+			last_name=CASE WHEN NULLIF(BTRIM(COALESCE(c.last_name,'')),'') IS NULL AND x.last_name_count=1 THEN x.last_name_value ELSE c.last_name END,
+			short_name=CASE WHEN NULLIF(BTRIM(COALESCE(c.short_name,'')),'') IS NULL AND x.short_name_count=1 THEN x.short_name_value ELSE c.short_name END,
+			phone=CASE WHEN NULLIF(BTRIM(COALESCE(c.phone,'')),'') IS NULL AND x.phone_count=1 THEN x.phone_value ELSE c.phone END,
+			email=CASE WHEN NULLIF(BTRIM(COALESCE(c.email,'')),'') IS NULL AND x.email_count=1 THEN x.email_value ELSE c.email END,
+			company=CASE WHEN NULLIF(BTRIM(COALESCE(c.company,'')),'') IS NULL AND x.company_count=1 THEN x.company_value ELSE c.company END,
+			age=CASE WHEN c.age IS NULL AND x.age_count=1 THEN x.age_value ELSE c.age END,
+			dni=CASE WHEN NULLIF(BTRIM(COALESCE(c.dni,'')),'') IS NULL AND x.dni_count=1 THEN x.dni_value ELSE c.dni END,
+			birth_date=CASE WHEN c.birth_date IS NULL AND x.birth_date_count=1 THEN x.birth_date_value ELSE c.birth_date END,
+			address=CASE WHEN NULLIF(BTRIM(COALESCE(c.address,'')),'') IS NULL AND x.address_count=1 THEN x.address_value ELSE c.address END,
+			distrito=CASE WHEN NULLIF(BTRIM(COALESCE(c.distrito,'')),'') IS NULL AND x.distrito_count=1 THEN x.distrito_value ELSE c.distrito END,
+			ocupacion=CASE WHEN NULLIF(BTRIM(COALESCE(c.ocupacion,'')),'') IS NULL AND x.ocupacion_count=1 THEN x.ocupacion_value ELSE c.ocupacion END,
+			updated_at=NOW()
+		FROM candidates x
+		WHERE c.account_id=x.account_id AND c.id=x.contact_id AND (
+			(NULLIF(BTRIM(COALESCE(c.custom_name,'')),'') IS NULL AND NULLIF(BTRIM(COALESCE(c.name,'')),'') IS NULL AND x.name_count=1) OR
+			(NULLIF(BTRIM(COALESCE(c.last_name,'')),'') IS NULL AND x.last_name_count=1) OR
+			(NULLIF(BTRIM(COALESCE(c.short_name,'')),'') IS NULL AND x.short_name_count=1) OR
+			(NULLIF(BTRIM(COALESCE(c.phone,'')),'') IS NULL AND x.phone_count=1) OR
+			(NULLIF(BTRIM(COALESCE(c.email,'')),'') IS NULL AND x.email_count=1) OR
+			(NULLIF(BTRIM(COALESCE(c.company,'')),'') IS NULL AND x.company_count=1) OR
+			(c.age IS NULL AND x.age_count=1) OR (NULLIF(BTRIM(COALESCE(c.dni,'')),'') IS NULL AND x.dni_count=1) OR
+			(c.birth_date IS NULL AND x.birth_date_count=1) OR
+			(NULLIF(BTRIM(COALESCE(c.address,'')),'') IS NULL AND x.address_count=1) OR
+			(NULLIF(BTRIM(COALESCE(c.distrito,'')),'') IS NULL AND x.distrito_count=1) OR
+			(NULLIF(BTRIM(COALESCE(c.ocupacion,'')),'') IS NULL AND x.ocupacion_count=1)
+		)`,
+		`WITH canonical AS (
+			SELECT ep.id AS participant_id,
+			       COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid) AS display_name,
+			       c.last_name,c.short_name,c.phone,c.email,c.age,c.company,c.dni,c.birth_date,c.address,c.distrito,c.ocupacion
+			FROM event_participants ep
+			JOIN events e ON e.id=ep.event_id
+			LEFT JOIN leads l ON l.id=ep.lead_id AND l.account_id=e.account_id
+			JOIN contacts c ON c.id=COALESCE(ep.contact_id,l.contact_id) AND c.account_id=e.account_id
+		)
+		UPDATE event_participants ep SET
+			name=x.display_name,last_name=x.last_name,short_name=x.short_name,
+			phone=x.phone,email=x.email,age=x.age,company=x.company,dni=x.dni,birth_date=x.birth_date,
+			address=x.address,distrito=x.distrito,ocupacion=x.ocupacion,updated_at=NOW()
+		FROM canonical x
+		WHERE ep.id=x.participant_id AND ROW(ep.name,ep.last_name,ep.short_name,ep.phone,ep.email,ep.age,ep.company,ep.dni,ep.birth_date,ep.address,ep.distrito,ep.ocupacion)
+		IS DISTINCT FROM ROW(x.display_name,x.last_name,x.short_name,x.phone,x.email,x.age,x.company,x.dni,x.birth_date,x.address,x.distrito,x.ocupacion)`,
+		`UPDATE campaign_recipients cr SET
+			name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid),
+			phone=c.phone,jid=COALESCE(NULLIF(c.jid,''),cr.jid)
+		FROM campaigns campaign,contacts c
+		WHERE campaign.id=cr.campaign_id AND c.id=cr.contact_id AND c.account_id=campaign.account_id
+		AND ROW(cr.name,cr.phone,cr.jid) IS DISTINCT FROM ROW(
+			COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid),
+			c.phone,COALESCE(NULLIF(c.jid,''),cr.jid)
+		)`,
+		`UPDATE leads l SET
+			name=NULL,last_name=NULL,short_name=NULL,phone=NULL,email=NULL,company=NULL,age=NULL,
+			dni=NULL,birth_date=NULL,address=NULL,distrito=NULL,ocupacion=NULL,
+			updated_at=NOW()
+		FROM contacts c
+		WHERE l.account_id=c.account_id AND l.contact_id=c.id AND (
+			l.name IS NOT NULL OR l.last_name IS NOT NULL OR l.short_name IS NOT NULL OR l.phone IS NOT NULL OR
+			l.email IS NOT NULL OR l.company IS NOT NULL OR l.age IS NOT NULL OR l.dni IS NOT NULL OR
+			l.birth_date IS NOT NULL OR l.address IS NOT NULL OR l.distrito IS NOT NULL OR l.ocupacion IS NOT NULL
+		)`,
+
+		// Keep compatibility projections synchronized after every canonical Contact
+		// identity mutation, including direct WhatsApp/Google repository writes.
+		// The trigger runs in the writer's transaction, scopes every projection by
+		// account, and updates all matching rows set-wise (including Event rows that
+		// still expose their Contact through a legacy Lead link).
+		`CREATE OR REPLACE FUNCTION sync_contact_identity_snapshots()
+		RETURNS TRIGGER
+		LANGUAGE plpgsql
+		AS $$
+		DECLARE
+			canonical_name TEXT;
+		BEGIN
+			canonical_name := COALESCE(
+				NULLIF(BTRIM(NEW.custom_name),''),
+				NULLIF(BTRIM(NEW.name),''),
+				NULLIF(BTRIM(NEW.push_name),''),
+				NULLIF(BTRIM(NEW.phone),''),
+				NEW.jid
+			);
+
+			UPDATE event_participants ep SET
+				name=canonical_name,last_name=NEW.last_name,short_name=NEW.short_name,
+				phone=NEW.phone,email=NEW.email,age=NEW.age,company=NEW.company,
+				dni=NEW.dni,birth_date=NEW.birth_date,address=NEW.address,
+				distrito=NEW.distrito,ocupacion=NEW.ocupacion,updated_at=NOW()
+			FROM events e
+			WHERE e.id=ep.event_id AND e.account_id=NEW.account_id
+			  AND (
+				ep.contact_id=NEW.id OR EXISTS (
+					SELECT 1 FROM leads l
+					WHERE l.account_id=NEW.account_id AND l.id=ep.lead_id AND l.contact_id=NEW.id
+				)
+			  )
+			  AND ROW(ep.name,ep.last_name,ep.short_name,ep.phone,ep.email,ep.age,ep.company,
+			          ep.dni,ep.birth_date,ep.address,ep.distrito,ep.ocupacion)
+			      IS DISTINCT FROM
+			      ROW(canonical_name,NEW.last_name,NEW.short_name,NEW.phone,NEW.email,NEW.age,NEW.company,
+			          NEW.dni,NEW.birth_date,NEW.address,NEW.distrito,NEW.ocupacion);
+
+			UPDATE campaign_recipients cr SET
+				name=canonical_name,
+				phone=NEW.phone,
+				jid=COALESCE(NULLIF(NEW.jid,''),cr.jid)
+			FROM campaigns campaign
+			WHERE campaign.id=cr.campaign_id AND campaign.account_id=NEW.account_id
+			  AND cr.contact_id=NEW.id
+			  AND ROW(cr.name,cr.phone,cr.jid) IS DISTINCT FROM
+			      ROW(canonical_name,NEW.phone,COALESCE(NULLIF(NEW.jid,''),cr.jid));
+
+			UPDATE leads l SET
+				name=NULL,last_name=NULL,short_name=NULL,phone=NULL,email=NULL,company=NULL,age=NULL,
+				dni=NULL,birth_date=NULL,address=NULL,distrito=NULL,ocupacion=NULL,updated_at=NOW()
+			WHERE l.account_id=NEW.account_id AND l.contact_id=NEW.id AND (
+				l.name IS NOT NULL OR l.last_name IS NOT NULL OR l.short_name IS NOT NULL OR
+				l.phone IS NOT NULL OR l.email IS NOT NULL OR l.company IS NOT NULL OR l.age IS NOT NULL OR
+				l.dni IS NOT NULL OR l.birth_date IS NOT NULL OR l.address IS NOT NULL OR
+				l.distrito IS NOT NULL OR l.ocupacion IS NOT NULL
+			);
+
+			RETURN NEW;
+		END
+		$$`,
+		`CREATE OR REPLACE TRIGGER trg_contacts_sync_identity_snapshots
+		AFTER UPDATE OF jid,phone,name,last_name,short_name,custom_name,push_name,email,company,age,dni,birth_date,address,distrito,ocupacion
+		ON contacts
+		FOR EACH ROW
+		WHEN (
+			OLD.jid IS DISTINCT FROM NEW.jid OR OLD.phone IS DISTINCT FROM NEW.phone OR
+			OLD.name IS DISTINCT FROM NEW.name OR OLD.last_name IS DISTINCT FROM NEW.last_name OR
+			OLD.short_name IS DISTINCT FROM NEW.short_name OR OLD.custom_name IS DISTINCT FROM NEW.custom_name OR
+			OLD.push_name IS DISTINCT FROM NEW.push_name OR OLD.email IS DISTINCT FROM NEW.email OR
+			OLD.company IS DISTINCT FROM NEW.company OR OLD.age IS DISTINCT FROM NEW.age OR
+			OLD.dni IS DISTINCT FROM NEW.dni OR OLD.birth_date IS DISTINCT FROM NEW.birth_date OR
+			OLD.address IS DISTINCT FROM NEW.address OR OLD.distrito IS DISTINCT FROM NEW.distrito OR
+			OLD.ocupacion IS DISTINCT FROM NEW.ocupacion
+		)
+			EXECUTE FUNCTION sync_contact_identity_snapshots()`,
 	}
+	migrations = append(migrations, surveyTemplateInstanceMigrations()...)
 
 	var dataTx pgx.Tx
 	skipDataMigration := false
@@ -3375,6 +3805,9 @@ func Migrate(db *pgxpool.Pool) error {
 	if dataTx != nil {
 		_ = dataTx.Rollback(ctx)
 		return fmt.Errorf("event/contact data migration was not closed")
+	}
+	if err := migrateLegacyProgramEvents(ctx, db); err != nil {
+		return fmt.Errorf("program event retirement migration failed: %w", err)
 	}
 
 	return nil
@@ -3881,8 +4314,8 @@ func MigrateEventPipelines(db *pgxpool.Pool) error {
 	return nil
 }
 
-// SeedTemplateSurveys ensures all accounts have the 3 template surveys.
-// Safe to call on every startup — idempotent via slug checks.
+// SeedTemplateSurveys ensures all accounts have the three canonical built-in
+// templates. It is safe on every startup and never creates an answerable survey.
 func SeedTemplateSurveys(db *pgxpool.Pool) error {
 	ctx := context.Background()
 
@@ -3915,29 +4348,7 @@ func SeedTemplateSurveysForAccount(db *pgxpool.Pool, accountID string) error {
 }
 
 func seedTemplateSurveysForAccount(ctx context.Context, db *pgxpool.Pool, accountID string) error {
-	short := accountID[:8]
-
-	type tplQuestion struct {
-		orderIdx int
-		qtype    string
-		title    string
-		desc     string
-		required bool
-		config   string
-	}
-	type tplSurvey struct {
-		slugSuffix  string
-		name        string
-		description string
-		welcomeT    string
-		welcomeD    string
-		thankT      string
-		thankM      string
-		branding    string
-		questions   []tplQuestion
-	}
-
-	templates := []tplSurvey{
+	templates := []builtInSurveyTemplateSeed{
 		{
 			slugSuffix:  "motivaciones",
 			name:        "Motivaciones para Estudiar en Nueva Acrópolis",
@@ -3947,7 +4358,7 @@ func seedTemplateSurveysForAccount(ctx context.Context, db *pgxpool.Pool, accoun
 			thankT:      "¡Gracias por compartir tu experiencia!",
 			thankM:      "Tu historia nos inspira a seguir creando espacios de crecimiento. Cada respuesta nos ayuda a mejorar y llegar a más personas que buscan lo mismo que tú encontraste aquí.",
 			branding:    `{"bg_color":"#0f172a","accent_color":"#f59e0b","font_family":"Playfair Display","title_size":"lg","text_color":"#f8fafc","button_style":"pill","bg_overlay":"0","question_align":"center"}`,
-			questions: []tplQuestion{
+			questions: []builtInSurveyQuestionSeed{
 				{0, "single_choice", "¿Cómo conociste Nueva Acrópolis?", "Selecciona la opción que mejor describa cómo llegaste a nosotros.", true, `{"options":["Recomendación de un amigo o familiar","Redes sociales (Facebook, Instagram, TikTok)","Búsqueda en internet","Pasé por la sede y me llamó la atención","Un evento o charla abierta","Publicidad (volantes, afiches, anuncios)","Otro"]}`},
 				{1, "multiple_choice", "¿Qué te motivó a inscribirte por primera vez?", "Puedes seleccionar más de una opción.", true, `{"options":["Interés por la filosofía y el autoconocimiento","Buscar un propósito o sentido de vida","Desarrollar habilidades de liderazgo","Conocer personas con intereses similares","Superar una etapa difícil en mi vida","Curiosidad por las culturas antiguas","Crecimiento personal y espiritual","El voluntariado y la acción social"]}`},
 				{2, "likert", "¿Qué tan importante fue cada factor en tu decisión de inscribirte?", "Valora del 1 (nada importante) al 5 (muy importante).", true, `{"likert_scale":5,"likert_min":"Nada importante","likert_max":"Muy importante"}`},
@@ -3967,7 +4378,7 @@ func seedTemplateSurveysForAccount(ctx context.Context, db *pgxpool.Pool, accoun
 			thankT:      "¡Tu voz cuenta!",
 			thankM:      "Gracias por tomarte el tiempo de responder. Con esta información diseñaremos experiencias más significativas para ti y para quienes vendrán después.",
 			branding:    `{"bg_color":"#1e293b","accent_color":"#10b981","font_family":"Poppins","title_size":"lg","text_color":"#e2e8f0","button_style":"rounded","bg_overlay":"0","question_align":"center"}`,
-			questions: []tplQuestion{
+			questions: []builtInSurveyQuestionSeed{
 				{0, "single_choice", "¿En qué rango de edad te encuentras?", "", true, `{"options":["15 a 20 años","21 a 25 años","26 a 30 años","31 a 40 años","41 a 50 años","51 a 60 años","Más de 60 años"]}`},
 				{1, "single_choice", "¿Cuál es tu ocupación principal?", "", true, `{"options":["Estudiante universitario","Profesional independiente","Empleado en empresa privada","Funcionario público","Emprendedor / empresario","Jubilado / retirado","Ama de casa","Artista / creativo","Otro"]}`},
 				{2, "multiple_choice", "¿Cuáles de estos temas te interesan más?", "Selecciona todos los que despierten tu curiosidad.", true, `{"options":["Filosofía práctica y ética","Psicología y autoconocimiento","Historia de las civilizaciones antiguas","Liderazgo y trabajo en equipo","Meditación y vida interior","Ecología y cuidado del planeta","Arte y expresión creativa","Ciencia y cosmovisión","Oratoria y comunicación","Artes marciales y disciplina corporal"]}`},
@@ -3988,7 +4399,7 @@ func seedTemplateSurveysForAccount(ctx context.Context, db *pgxpool.Pool, accoun
 			thankT:      "¡Gracias por ayudarnos a crecer!",
 			thankM:      "Con tus respuestas podremos llevar nuestro mensaje a más personas que buscan filosofía, crecimiento y comunidad. Eres parte fundamental de este esfuerzo.",
 			branding:    `{"bg_color":"#0c0a09","accent_color":"#8b5cf6","font_family":"Space Grotesk","title_size":"lg","text_color":"#fafaf9","button_style":"pill","bg_overlay":"0","question_align":"center"}`,
-			questions: []tplQuestion{
+			questions: []builtInSurveyQuestionSeed{
 				{0, "multiple_choice", "¿Qué redes sociales usas con más frecuencia?", "Selecciona todas las que uses al menos una vez por semana.", true, `{"options":["Instagram","Facebook","TikTok","YouTube","X (Twitter)","LinkedIn","WhatsApp (grupos y canales)","Telegram","Pinterest","Reddit","Ninguna"]}`},
 				{1, "single_choice", "¿Cuántas horas al día pasas en redes sociales?", "", true, `{"options":["Menos de 1 hora","1 a 2 horas","2 a 3 horas","3 a 5 horas","Más de 5 horas"]}`},
 				{2, "multiple_choice", "¿Qué tipo de contenido consumes principalmente en internet?", "Selecciona todos los que apliquen.", true, `{"options":["Noticias y actualidad","Entretenimiento y humor","Desarrollo personal y motivación","Educación y cursos online","Filosofía y espiritualidad","Ciencia y tecnología","Podcasts y entrevistas","Música y arte","Fitness y salud","Viajes y cultura"]}`},
@@ -4003,36 +4414,5 @@ func seedTemplateSurveysForAccount(ctx context.Context, db *pgxpool.Pool, accoun
 		},
 	}
 
-	for _, tpl := range templates {
-		slug := fmt.Sprintf("tpl-%s-%s", tpl.slugSuffix, short)
-
-		// Check if this template already exists for this account
-		var exists bool
-		_ = db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM surveys WHERE slug = $1)`, slug).Scan(&exists)
-		if exists {
-			continue
-		}
-
-		var surveyID string
-		err := db.QueryRow(ctx, `
-			INSERT INTO surveys (account_id, name, description, slug, status, welcome_title, welcome_description, thank_you_title, thank_you_message, branding, is_template)
-			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9::jsonb, TRUE)
-			RETURNING id
-		`, accountID, tpl.name, tpl.description, slug, tpl.welcomeT, tpl.welcomeD, tpl.thankT, tpl.thankM, tpl.branding).Scan(&surveyID)
-		if err != nil {
-			return fmt.Errorf("failed to insert survey %s: %w", slug, err)
-		}
-
-		for _, q := range tpl.questions {
-			_, err := db.Exec(ctx, `
-				INSERT INTO survey_questions (survey_id, order_index, type, title, description, required, config)
-				VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-			`, surveyID, q.orderIdx, q.qtype, q.title, q.desc, q.required, q.config)
-			if err != nil {
-				return fmt.Errorf("failed to insert question for %s: %w", slug, err)
-			}
-		}
-		log.Printf("[SEED] Created template survey '%s' for account %s", tpl.name, short)
-	}
-	return nil
+	return seedCanonicalSurveyTemplatesForAccount(ctx, db, accountID, templates)
 }

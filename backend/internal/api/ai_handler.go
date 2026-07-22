@@ -264,18 +264,20 @@ func (s *Server) toolSearchLeads(ctx context.Context, args map[string]interface{
 	}
 
 	rows, err := s.repos.DB().Query(ctx, `
-SELECT COALESCE(c.name, l.name), COALESCE(c.phone, l.phone, ''), COALESCE(c.email, l.email, ''),
+SELECT CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END,
+CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END,
 COALESCE(ps.name, 'Sin etapa'),
 TO_CHAR(l.created_at, 'DD/MM/YYYY'),
 COALESCE((SELECT STRING_AGG(t.name, ', ' ORDER BY t.name)
 FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.contact_id = l.contact_id), '')
 FROM leads l
-LEFT JOIN contacts c ON c.id = l.contact_id
+LEFT JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
 LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 WHERE l.account_id = $1
-AND (COALESCE(c.name, l.name) ILIKE '%' || $2 || '%'
-OR COALESCE(c.phone, l.phone) ILIKE '%' || $2 || '%'
-OR COALESCE(c.email, l.email) ILIKE '%' || $2 || '%'
+AND (CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ILIKE '%' || $2 || '%'
+OR CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END ILIKE '%' || $2 || '%'
+OR CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END ILIKE '%' || $2 || '%'
 OR EXISTS (SELECT 1 FROM contact_tags ct2 JOIN tags t2 ON t2.id = ct2.tag_id
 WHERE ct2.contact_id = l.contact_id AND t2.name ILIKE '%' || $2 || '%'))
 ORDER BY l.created_at DESC
@@ -303,16 +305,19 @@ func (s *Server) toolGetLeadDetails(ctx context.Context, args map[string]interfa
 	query := getStringArg(args, "query")
 
 	row := s.repos.DB().QueryRow(ctx, `
-SELECT l.id, COALESCE(c.name, l.name), COALESCE(c.phone, l.phone, ''), COALESCE(c.email, l.email, ''),
+SELECT l.id, CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END,
+CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END,
 COALESCE(ps.name, 'Sin etapa'),
 TO_CHAR(l.created_at, 'DD/MM/YYYY'),
 COALESCE((SELECT STRING_AGG(t.name, ', ' ORDER BY t.name)
 FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.contact_id = l.contact_id), '')
 FROM leads l
-LEFT JOIN contacts c ON c.id = l.contact_id
+LEFT JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
 LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 WHERE l.account_id = $1
-AND (COALESCE(c.name, l.name) ILIKE '%' || $2 || '%' OR COALESCE(c.phone, l.phone) ILIKE '%' || $2 || '%')
+AND (CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ILIKE '%' || $2 || '%'
+OR CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END ILIKE '%' || $2 || '%')
 ORDER BY l.created_at DESC
 LIMIT 1
 `, accountID, query)
@@ -577,11 +582,12 @@ func (s *Server) toolGetUnansweredLeads(ctx context.Context, args map[string]int
 	}
 
 	rows, err := s.repos.DB().Query(ctx, `
-SELECT DISTINCT COALESCE(c.name, l.name), COALESCE(c.phone, l.phone, ''),
+SELECT DISTINCT CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END,
 COALESCE(ps.name, 'Sin etapa'),
 TO_CHAR(l.created_at, 'DD/MM/YYYY')
 FROM leads l
-LEFT JOIN contacts c ON c.id = l.contact_id
+LEFT JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
 LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 JOIN chats ch ON ch.jid = l.jid AND ch.account_id = $1
 WHERE l.account_id = $1
@@ -700,18 +706,23 @@ ORDER BY lb.date ASC
 
 	// Get participants with stage info and tags
 	pRows, err := db.Query(ctx, `
-SELECT ep.id, COALESCE(ep.name, ''), COALESCE(ep.phone, ''),
+SELECT ep.id,
+COALESCE(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.name ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid) END,''),
+COALESCE(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.phone ELSE contact.phone END,''),
 COALESCE(eps.name, 'Sin etapa'), COALESCE(eps.color, '#6b7280'),
 COALESCE(ep.notes, ''),
 COALESCE((
 SELECT string_agg(t.name, ', ')
 FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id
-WHERE ct.contact_id = ep.contact_id
+WHERE ct.contact_id = COALESCE(ep.contact_id,participant_lead.contact_id)
 ), '')
 FROM event_participants ep
+JOIN events participant_event ON participant_event.id=ep.event_id
+LEFT JOIN leads participant_lead ON participant_lead.id=ep.lead_id AND participant_lead.account_id=participant_event.account_id
+LEFT JOIN contacts contact ON contact.id=COALESCE(ep.contact_id,participant_lead.contact_id) AND contact.account_id=participant_event.account_id
 LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
 WHERE ep.event_id = $1 AND ep.membership_state='active'
-ORDER BY eps.position, ep.name
+ORDER BY eps.position, CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.name ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid) END
 LIMIT 50
 `, eid)
 	if err != nil {
@@ -738,10 +749,13 @@ LIMIT 50
 	// Get logbook entries for this event (latest logbook)
 	logbookEntries := make(map[string]string)
 	lbRows, err := db.Query(ctx, `
-SELECT COALESCE(ep.phone, ''), COALESCE(le.notes, '')
+SELECT COALESCE(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.phone ELSE contact.phone END,''), COALESCE(le.notes, '')
 FROM event_logbook_entries le
 JOIN event_logbooks lb ON lb.id = le.logbook_id
 JOIN event_participants ep ON ep.id = le.participant_id
+JOIN events participant_event ON participant_event.id=ep.event_id
+LEFT JOIN leads participant_lead ON participant_lead.id=ep.lead_id AND participant_lead.account_id=participant_event.account_id
+LEFT JOIN contacts contact ON contact.id=COALESCE(ep.contact_id,participant_lead.contact_id) AND contact.account_id=participant_event.account_id
 WHERE lb.event_id = $1
 ORDER BY lb.date DESC
 `, eid)
@@ -808,11 +822,17 @@ ORDER BY m.timestamp DESC LIMIT 3
 	if targetLogbookID != "" {
 		var sessionAttendance []map[string]interface{}
 		saRows, saErr := db.Query(ctx, `
-SELECT COALESCE(ep.name, ''), COALESCE(ep.phone, ''), le.stage_name, COALESCE(le.notes, '')
+SELECT
+COALESCE(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.name ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid) END,''),
+COALESCE(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.phone ELSE contact.phone END,''),
+le.stage_name, COALESCE(le.notes, '')
 FROM event_logbook_entries le
 JOIN event_participants ep ON ep.id = le.participant_id
+JOIN events participant_event ON participant_event.id=ep.event_id
+LEFT JOIN leads participant_lead ON participant_lead.id=ep.lead_id AND participant_lead.account_id=participant_event.account_id
+LEFT JOIN contacts contact ON contact.id=COALESCE(ep.contact_id,participant_lead.contact_id) AND contact.account_id=participant_event.account_id
 WHERE le.logbook_id = $1
-ORDER BY le.stage_name, ep.name
+ORDER BY le.stage_name, CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.name ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid) END
 `, targetLogbookID)
 		if saErr == nil {
 			defer saRows.Close()
@@ -1346,7 +1366,7 @@ campaign_recipients(id uuid PK, campaign_id uuid, name text, phone text, status 
 interactions(id uuid PK, account_id uuid, contact_id uuid, event_id uuid, participant_id uuid, type text, direction text, outcome text, notes text, lead_id uuid, created_at timestamptz)
 
 programs(id uuid PK, account_id uuid, name text, status text)
-program_sessions(id uuid PK, program_id uuid, date date, topic text, location text)
+program_sessions(id uuid PK, program_id uuid, date date, title varchar, topic text legacy, location text)
 program_participants(id uuid PK, program_id uuid, contact_id uuid, status text, lead_id uuid)
 program_attendance(id uuid PK, session_id uuid, participant_id uuid, status text, notes text)
 
@@ -1363,11 +1383,16 @@ RELACIONES CLAVE:
 
 EJEMPLOS SQL (usando PK):
 -- Asistentes de una sesión por UUID (FORMA CORRECTA — siempre incluye $1 via JOIN a events):
-SELECT ep.phone, ep.name, le.notes, ep.age
+SELECT CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.phone ELSE contact.phone END AS phone,
+       CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN COALESCE(ep.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END AS name,
+       le.notes,
+       CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.age ELSE contact.age END AS age
 FROM event_logbook_entries le
 JOIN event_participants ep ON ep.id = le.participant_id
 JOIN event_logbooks lb ON lb.id = le.logbook_id
 JOIN events e ON e.id = lb.event_id
+LEFT JOIN leads participant_lead ON participant_lead.id=ep.lead_id AND participant_lead.account_id=e.account_id
+LEFT JOIN contacts contact ON contact.id=COALESCE(ep.contact_id,participant_lead.contact_id) AND contact.account_id=e.account_id
 WHERE e.account_id = $1 AND le.logbook_id = 'UUID_DE_SESION' AND le.stage_name = 'Asistieron'
 LIMIT 100
 
@@ -1388,23 +1413,30 @@ ORDER BY lb.date
 
 -- Leads por etapa con CTE:
 WITH lead_data AS (
-  SELECT l.id, COALESCE(c.name, l.name) AS name, COALESCE(c.phone, l.phone) AS phone, ps.name AS etapa
+  SELECT l.id,
+         CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END AS name,
+         CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END AS phone,
+         ps.name AS etapa
   FROM leads l
-  LEFT JOIN contacts c ON c.id = l.contact_id
+  LEFT JOIN contacts c ON c.id = l.contact_id AND c.account_id=l.account_id
   LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
   WHERE l.account_id = $1
 )
 SELECT etapa, COUNT(*) AS total FROM lead_data GROUP BY etapa ORDER BY total DESC
 
 -- Buscar lead con tags:
-SELECT COALESCE(c.name, l.name) AS name, COALESCE(c.phone, l.phone) AS phone, COALESCE(c.email, l.email) AS email, COALESCE(ps.name,'') AS etapa, STRING_AGG(t.name, ', ') AS tags
+SELECT CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END AS name,
+       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END AS phone,
+       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END AS email,
+       COALESCE(ps.name,'') AS etapa, STRING_AGG(t.name, ', ') AS tags
 FROM leads l
-LEFT JOIN contacts c ON c.id = l.contact_id
+LEFT JOIN contacts c ON c.id = l.contact_id AND c.account_id=l.account_id
 LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 LEFT JOIN contact_tags ct ON ct.contact_id = l.contact_id
 LEFT JOIN tags t ON t.id = ct.tag_id
-WHERE l.account_id = $1 AND COALESCE(c.name, l.name) ILIKE '%juan%'
-GROUP BY l.id, c.name, l.name, c.phone, l.phone, c.email, l.email, ps.name LIMIT 50
+WHERE l.account_id = $1
+  AND CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ILIKE '%juan%'
+GROUP BY l.id,c.custom_name,c.name,c.push_name,l.name,c.phone,l.phone,c.email,l.email,ps.name LIMIT 50
 
 -- Mensajes recientes:
 SELECT m.body, m.is_from_me, TO_CHAR(m.timestamp, 'DD/MM/YYYY HH24:MI') AS fecha
@@ -1425,11 +1457,15 @@ WHERE i.account_id = $1 AND EXISTS(SELECT 1 FROM contacts c WHERE c.id = i.conta
 ORDER BY i.created_at DESC LIMIT 50
 
 -- Registrados entre fechas:
-SELECT le.stage_name, COUNT(*) AS total, STRING_AGG(ep.name, ', ' ORDER BY ep.name) AS nombres
+SELECT le.stage_name,COUNT(*) AS total,
+       STRING_AGG(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN COALESCE(ep.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END,', '
+         ORDER BY CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN COALESCE(ep.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END) AS nombres
 FROM event_logbook_entries le
 JOIN event_participants ep ON ep.id = le.participant_id
 JOIN event_logbooks lb ON lb.id = le.logbook_id
 JOIN events e ON e.id = lb.event_id
+LEFT JOIN leads participant_lead ON participant_lead.id=ep.lead_id AND participant_lead.account_id=e.account_id
+LEFT JOIN contacts contact ON contact.id=COALESCE(ep.contact_id,participant_lead.contact_id) AND contact.account_id=e.account_id
 WHERE e.account_id = $1 AND lb.date BETWEEN '2026-03-01' AND '2026-03-15'
 GROUP BY le.stage_name ORDER BY total DESC
 

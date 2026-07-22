@@ -14,9 +14,11 @@ import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import { useRouter } from 'next/navigation'
 import { api, subscribeWebSocket } from '@/lib/api'
+import { contactIdFromRealtimeEvent } from '@/lib/contactProfileEvents'
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
+import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
@@ -24,6 +26,7 @@ import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { Chat } from '@/types/chat'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
+import type { ContactProfileContact, ContactProfileResponse } from '@/types/contact-profile'
 import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
 
 interface Device {
@@ -55,6 +58,27 @@ interface TagInfo {
   name: string
   color: string
   count: number
+}
+
+function mergeContactProfileIntoLead(lead: Lead, contact: ContactProfileContact): Lead {
+  if (lead.contact_id !== contact.id) return lead
+  return {
+    ...lead,
+    name: contact.custom_name || contact.name || contact.push_name || contact.short_name || contact.phone || 'Sin nombre',
+    last_name: contact.last_name ?? null,
+    short_name: contact.short_name ?? null,
+    phone: contact.phone || '',
+    email: contact.email || '',
+    company: contact.company ?? null,
+    age: contact.age ?? null,
+    dni: contact.dni ?? null,
+    birth_date: contact.birth_date ?? null,
+    address: contact.address ?? null,
+    distrito: contact.distrito ?? null,
+    ocupacion: contact.ocupacion ?? null,
+    tags: contact.structured_tags.map(tag => tag.name),
+    structured_tags: contact.structured_tags,
+  }
 }
 
 // --- Memoized LeadCard component (avoids re-rendering all cards on any state change) ---
@@ -540,6 +564,8 @@ export default function LeadsPage() {
   const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
   const whatsappRequestRef = useRef(0)
   const activeLeadIdRef = useRef<string | null>(null)
+  const loadedLeadContextByContactRef = useRef(new Map<string, string>())
+  const contactRefreshSequenceRef = useRef(new Map<string, number>())
 
   const closeDuplicateConfirmation = useCallback(() => setDuplicateConfirmation(null), [])
   useAccessibleDialog(Boolean(duplicateConfirmation), duplicateDialogRef, closeDuplicateConfirmation, duplicateCancelRef)
@@ -954,6 +980,19 @@ export default function LeadsPage() {
     setListLeads(prev => prev.map(l => l.id === leadId ? updater(l) : l))
   }, [])
 
+  const reconcileContactProfile = useCallback((contact: ContactProfileContact) => {
+    setStageData(current => current.map(stage => ({
+      ...stage,
+      leads: stage.leads.map(lead => mergeContactProfileIntoLead(lead, contact)),
+    })))
+    setUnassignedData(current => ({
+      ...current,
+      leads: current.leads.map(lead => mergeContactProfileIntoLead(lead, contact)),
+    }))
+    setListLeads(current => current.map(lead => mergeContactProfileIntoLead(lead, contact)))
+    setDetailLead(current => current ? mergeContactProfileIntoLead(current, contact) : current)
+  }, [])
+
   // Helper: remove lead from all stage data
   const removeLeadFromStages = useCallback((leadId: string) => {
     setStageData(prev => prev.map(stage => ({
@@ -976,6 +1015,24 @@ export default function LeadsPage() {
     all.push(...(unassignedData.leads || []))
     return all
   }, [stageData, unassignedData])
+
+  useEffect(() => {
+    const contexts = new Map<string, string>()
+    ;[...allLoadedLeads, ...listLeads, ...(detailLead ? [detailLead] : [])].forEach(lead => {
+      if (lead.contact_id && !contexts.has(lead.contact_id)) contexts.set(lead.contact_id, lead.id)
+    })
+    loadedLeadContextByContactRef.current = contexts
+  }, [allLoadedLeads, detailLead, listLeads])
+
+  const refreshLoadedContact = useCallback(async (contactId: string) => {
+    const leadId = loadedLeadContextByContactRef.current.get(contactId)
+    if (!leadId) return
+    const sequence = (contactRefreshSequenceRef.current.get(contactId) || 0) + 1
+    contactRefreshSequenceRef.current.set(contactId, sequence)
+    const result = await api<ContactProfileResponse>(`/api/contact-profiles/${contactId}?context_type=lead&context_id=${leadId}`)
+    if (contactRefreshSequenceRef.current.get(contactId) !== sequence) return
+    if (result.success && result.data?.success && result.data.contact) reconcileContactProfile(result.data.contact)
+  }, [reconcileContactProfile])
 
   // Find lead by ID across all loaded data
   const findLeadById = useCallback((leadId: string): Lead | undefined => {
@@ -1094,6 +1151,10 @@ export default function LeadsPage() {
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string; action?: string; lead?: Lead; lead_id?: string; stage_id?: string }
+      if (msg.event === 'contact_update') {
+        const contactId = contactIdFromRealtimeEvent(data)
+        if (contactId) void refreshLoadedContact(contactId)
+      }
       if (msg.event === 'lead_update') {
         if (msg.action === 'created' && msg.lead) {
           const lead = msg.lead!
@@ -1205,7 +1266,7 @@ export default function LeadsPage() {
       }
     })
     return () => unsubscribe()
-  }, [fetchLeadsPaginated, updateLeadInStages, removeLeadFromStages, detailLead, activePipeline, viewMode])
+  }, [fetchLeadsPaginated, updateLeadInStages, removeLeadFromStages, detailLead, activePipeline, refreshLoadedContact, viewMode])
 
   // Custom field column toggle
   const toggleCfColumn = useCallback((fieldId: string) => {
@@ -4227,7 +4288,7 @@ export default function LeadsPage() {
             className="absolute inset-0 bg-black/30"
             onClick={() => { setShowDetailPanel(false); resetInlineChatState(); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
           />
-          <div className={`relative flex h-full w-full border-l border-slate-200 bg-white shadow-2xl transition-all duration-300 ${showInlineChat ? 'lg:w-[85vw] lg:max-w-6xl' : 'max-w-md'}`}>
+          <div className={`relative flex h-full w-full border-l border-slate-200 bg-white shadow-2xl transition-all duration-200 motion-reduce:transition-none ${showInlineChat ? 'lg:w-[85vw] lg:max-w-6xl' : 'max-w-md'}`}>
 
             {/* Chat Panel - Left Side */}
             {showInlineChat && inlineChatId && (
@@ -4246,48 +4307,91 @@ export default function LeadsPage() {
 
             {/* Lead Details - Right Side */}
             <div className={`${showInlineChat ? 'hidden lg:flex lg:w-[360px] lg:shrink-0' : 'flex w-full'} h-full flex-col bg-white`}>
-              <LeadDetailPanel
-                lead={detailLead}
-                scrollToTasks={scrollToTasks}
-                onLeadChange={(updatedLead: Lead) => {
-                  setDetailLead(updatedLead as any)
-                  updateLeadInStages(updatedLead.id, () => updatedLead as any)
-                }}
-                onStageChangeRequest={(lead, stage) => requestLeadStageChange(lead, stage)}
-                onLifecycleAction={requestLifecycleAction}
-                onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
-                onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-                onObservationChange={(leadId: string) => {
-                  if (viewMode === 'list') {
-                    setListObservations(prev => { const next = new Map(prev); next.delete(leadId); return next })
-                    setLoadingListObs(prev => { const next = new Set(prev); next.delete(leadId); return next })
-                    fetchBatchObservations([leadId])
-                  }
-                }}
-                onDelete={(leadId: string) => {
-                  removeLeadFromStages(leadId)
-                  setShowDetailPanel(false)
-                  resetInlineChatState()
-                }}
-                hideWhatsApp={showInlineChat}
-                onArchive={(leadId: string, archive: boolean) => {
-                  if (archive) {
-                    openArchiveModal(leadId, false)
-                  } else {
-                    handleArchiveLead(leadId, false)
-                    setShowDetailPanel(false)
-                    resetInlineChatState()
-                  }
-                }}
-                onBlock={(leadId: string) => {
-                  openBlockModal(leadId, false)
-                }}
-                onUnblock={(leadId: string) => {
-                  handleBlockLead(leadId, false)
-                  setShowDetailPanel(false)
-                  resetInlineChatState()
-                }}
-              />
+              {(() => {
+                const hasCanonicalContact = Boolean(detailLead.contact_id)
+                const opportunityPanel = (
+                  <LeadDetailPanel
+                    lead={detailLead}
+                    scrollToTasks={scrollToTasks}
+                    onLeadChange={(updatedLead: Lead) => {
+                      setDetailLead(updatedLead as any)
+                      updateLeadInStages(updatedLead.id, () => updatedLead as any)
+                    }}
+                    onStageChangeRequest={(lead, stage) => requestLeadStageChange(lead, stage)}
+                    onLifecycleAction={requestLifecycleAction}
+                    onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
+                    onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                    onDelete={(leadId: string) => {
+                      removeLeadFromStages(leadId)
+                      setShowDetailPanel(false)
+                      resetInlineChatState()
+                    }}
+                    hideWhatsApp={showInlineChat}
+                    onArchive={(leadId: string, archive: boolean) => {
+                      if (archive) {
+                        openArchiveModal(leadId, false)
+                      } else {
+                        handleArchiveLead(leadId, false)
+                        setShowDetailPanel(false)
+                        resetInlineChatState()
+                      }
+                    }}
+                    onBlock={(leadId: string) => {
+                      openBlockModal(leadId, false)
+                    }}
+                    onUnblock={(leadId: string) => {
+                      handleBlockLead(leadId, false)
+                      setShowDetailPanel(false)
+                      resetInlineChatState()
+                    }}
+                    hideHeader={hasCanonicalContact}
+                    hideIdentity={hasCanonicalContact}
+                    commercialOnly={hasCanonicalContact}
+                    parentOwnsScroll={hasCanonicalContact}
+                    hideTabs={hasCanonicalContact}
+                    hideCustomFields={hasCanonicalContact}
+                    hideObservations={hasCanonicalContact}
+                  />
+                )
+                if (!detailLead.contact_id) return opportunityPanel
+                return (
+                  <ContactDetailSurface
+                    contactId={detailLead.contact_id}
+                    context={{ type: 'lead', id: detailLead.id }}
+                    initialContact={{
+                      id: detailLead.contact_id,
+                      jid: detailLead.jid,
+                      name: detailLead.name,
+                      last_name: detailLead.last_name,
+                      short_name: detailLead.short_name,
+                      phone: detailLead.phone,
+                      email: detailLead.email,
+                      company: detailLead.company,
+                      age: detailLead.age,
+                      dni: detailLead.dni,
+                      birth_date: detailLead.birth_date,
+                      address: detailLead.address,
+                      distrito: detailLead.distrito,
+                      ocupacion: detailLead.ocupacion,
+                      structured_tags: [],
+                      extra_phones: [],
+                      custom_field_values: [],
+                    }}
+                    title="Detalles"
+                    subtitle="Contacto y oportunidad"
+                    onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
+                    onContactChange={reconcileContactProfile}
+                    onObservationChange={() => {
+                      if (viewMode === 'list') {
+                        setListObservations(current => { const next = new Map(current); next.delete(detailLead.id); return next })
+                        setLoadingListObs(current => { const next = new Set(current); next.delete(detailLead.id); return next })
+                        fetchBatchObservations([detailLead.id])
+                      }
+                    }}
+                    contextContent={opportunityPanel}
+                  />
+                )
+              })()}
 
             </div>
           </div>

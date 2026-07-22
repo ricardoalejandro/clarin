@@ -9,9 +9,23 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/ws"
 )
+
+func (s *Server) validateTaskProgramMutation(c *fiber.Ctx, accountID, programID uuid.UUID) (bool, error) {
+	var belongs bool
+	if err := s.repos.DB().QueryRow(c.Context(), `
+		SELECT EXISTS(SELECT 1 FROM programs WHERE account_id=$1 AND id=$2)
+	`, accountID, programID).Scan(&belongs); err != nil {
+		return true, c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo validar el programa"})
+	}
+	if !belongs {
+		return true, c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "El programa no pertenece a esta cuenta"})
+	}
+	return s.rejectMigratedProgramMutation(c, accountID, programID)
+}
 
 // handleCreateTask creates a new task
 func (s *Server) handleCreateTask(c *fiber.Ctx) error {
@@ -19,21 +33,21 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(uuid.UUID)
 
 	var req struct {
-		Title           string     `json:"title"`
-		Description     string     `json:"description"`
-		Type            string     `json:"type"`
-		DueAt           string     `json:"due_at"`
-		DueEndAt        *string    `json:"due_end_at"`
-		Priority        string     `json:"priority"`
-		AssignedTo      string     `json:"assigned_to"`
-		LeadID          *string    `json:"lead_id"`
-		EventID         *string    `json:"event_id"`
-		ProgramID       *string    `json:"program_id"`
-		ContactID       *string    `json:"contact_id"`
-		ListID          *string    `json:"list_id"`
-		RecurrenceRule  string     `json:"recurrence_rule"`
-		ReminderMinutes *int       `json:"reminder_minutes"`
-		Notes           string     `json:"notes"`
+		Title           string  `json:"title"`
+		Description     string  `json:"description"`
+		Type            string  `json:"type"`
+		DueAt           string  `json:"due_at"`
+		DueEndAt        *string `json:"due_end_at"`
+		Priority        string  `json:"priority"`
+		AssignedTo      string  `json:"assigned_to"`
+		LeadID          *string `json:"lead_id"`
+		EventID         *string `json:"event_id"`
+		ProgramID       *string `json:"program_id"`
+		ContactID       *string `json:"contact_id"`
+		ListID          *string `json:"list_id"`
+		RecurrenceRule  string  `json:"recurrence_rule"`
+		ReminderMinutes *int    `json:"reminder_minutes"`
+		Notes           string  `json:"notes"`
 	}
 
 	if err := c.BodyParser(&req); err != nil {
@@ -62,18 +76,18 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	}
 
 	task := &domain.Task{
-		AccountID:      accountID,
-		CreatedBy:      userID,
-		AssignedTo:     assignedTo,
-		Title:          req.Title,
-		Description:    req.Description,
-		Type:           req.Type,
-		DueAt:          dueAt,
-		Priority:       req.Priority,
-		Status:         domain.TaskStatusPending,
-		RecurrenceRule: req.RecurrenceRule,
+		AccountID:       accountID,
+		CreatedBy:       userID,
+		AssignedTo:      assignedTo,
+		Title:           req.Title,
+		Description:     req.Description,
+		Type:            req.Type,
+		DueAt:           dueAt,
+		Priority:        req.Priority,
+		Status:          domain.TaskStatusPending,
+		RecurrenceRule:  req.RecurrenceRule,
 		ReminderMinutes: req.ReminderMinutes,
-		Notes:          req.Notes,
+		Notes:           req.Notes,
 	}
 
 	if req.Type == "" {
@@ -99,7 +113,10 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		task.EventID = &id
 	}
 	if req.ProgramID != nil && *req.ProgramID != "" {
-		id, _ := uuid.Parse(*req.ProgramID)
+		id, err := uuid.Parse(*req.ProgramID)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+		}
 		task.ProgramID = &id
 	}
 	if req.ContactID != nil && *req.ContactID != "" {
@@ -121,6 +138,11 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	if task.ContactID != nil && task.LeadID == nil {
 		if lead, err := s.repos.Lead.GetByContactID(c.Context(), *task.ContactID); err == nil && lead != nil {
 			task.LeadID = &lead.ID
+		}
+	}
+	if task.ProgramID != nil {
+		if handled, guardErr := s.validateTaskProgramMutation(c, accountID, *task.ProgramID); handled {
+			return guardErr
 		}
 	}
 
@@ -267,6 +289,11 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Task not found"})
 	}
+	if existing.ProgramID != nil {
+		if handled, guardErr := s.validateTaskProgramMutation(c, accountID, *existing.ProgramID); handled {
+			return guardErr
+		}
+	}
 
 	var req struct {
 		Title           *string `json:"title"`
@@ -363,7 +390,10 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		if *req.ProgramID == "" {
 			existing.ProgramID = nil
 		} else {
-			id, _ := uuid.Parse(*req.ProgramID)
+			id, err := uuid.Parse(*req.ProgramID)
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
+			}
 			existing.ProgramID = &id
 		}
 	}
@@ -395,6 +425,11 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 			existing.LeadID = &lead.ID
 		}
 	}
+	if existing.ProgramID != nil {
+		if handled, guardErr := s.validateTaskProgramMutation(c, accountID, *existing.ProgramID); handled {
+			return guardErr
+		}
+	}
 
 	if err := s.services.Task.Update(c.Context(), existing); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update task"})
@@ -417,6 +452,15 @@ func (s *Server) handleDeleteTask(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid task ID"})
 	}
+	existing, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Task not found"})
+	}
+	if existing.ProgramID != nil {
+		if handled, guardErr := s.validateTaskProgramMutation(c, accountID, *existing.ProgramID); handled {
+			return guardErr
+		}
+	}
 
 	if err := s.services.Task.Delete(c.Context(), taskID, accountID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to delete task"})
@@ -433,6 +477,15 @@ func (s *Server) handleCompleteTask(c *fiber.Ctx) error {
 	taskID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid task ID"})
+	}
+	existing, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Task not found"})
+	}
+	if existing.ProgramID != nil {
+		if handled, guardErr := s.validateTaskProgramMutation(c, accountID, *existing.ProgramID); handled {
+			return guardErr
+		}
 	}
 
 	if err := s.services.Task.Complete(c.Context(), taskID, accountID, userID); err != nil {
@@ -810,6 +863,21 @@ func (s *Server) handleReorderTasks(c *fiber.Ctx) error {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid task ID: " + id})
 		}
 		uuids = append(uuids, parsed)
+	}
+	var migratedEventID *uuid.UUID
+	err := s.repos.DB().QueryRow(c.Context(), `
+		SELECT retirement.event_id
+		FROM tasks task
+		JOIN program_event_retirements retirement
+		  ON retirement.account_id=task.account_id AND retirement.program_id=task.program_id
+		WHERE task.account_id=$1 AND task.id=ANY($2::uuid[]) AND retirement.status='migrated'
+		LIMIT 1
+	`, accountID, uuids).Scan(&migratedEventID)
+	if err == nil {
+		return c.Status(fiber.StatusConflict).JSON(migratedProgramConflictPayload(migratedEventID))
+	}
+	if err != nil && err != pgx.ErrNoRows {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo validar las tareas"})
 	}
 
 	if err := s.repos.Task.ReorderTasks(c.Context(), accountID, uuids); err != nil {

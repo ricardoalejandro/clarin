@@ -24,7 +24,7 @@ const taskSelectFields = `
 	t.notes, t.created_at, t.updated_at,
 	COALESCE(ua.display_name, ua.username, '') AS assigned_to_name,
 	COALESCE(uc.display_name, uc.username, '') AS created_by_name,
-	COALESCE(lc.custom_name, lc.name, l.name, '') AS lead_name,
+	CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(lc.custom_name,lc.name,lc.push_name,'') END AS lead_name,
 	COALESCE(e.name, '') AS event_name,
 	COALESCE(p.name, '') AS program_name,
 	COALESCE(ct.custom_name, ct.name, ct.push_name, '') AS contact_name,
@@ -36,15 +36,17 @@ const taskSelectFields = `
 const taskJoins = `
 	LEFT JOIN users ua ON ua.id = t.assigned_to
 	LEFT JOIN users uc ON uc.id = t.created_by
-	LEFT JOIN leads l ON l.id = t.lead_id
-	LEFT JOIN contacts lc ON lc.id = l.contact_id
-	LEFT JOIN events e ON e.id = t.event_id
-	LEFT JOIN programs p ON p.id = t.program_id
-	LEFT JOIN contacts ct ON ct.id = t.contact_id
+	LEFT JOIN leads l ON l.id=t.lead_id AND l.account_id=t.account_id
+	LEFT JOIN contacts lc ON lc.id=l.contact_id AND lc.account_id=t.account_id
+	LEFT JOIN events e ON e.id=t.event_id AND e.account_id=t.account_id
+	LEFT JOIN programs p ON p.id=t.program_id AND p.account_id=t.account_id
+	LEFT JOIN contacts ct ON ct.id=t.contact_id AND ct.account_id=t.account_id
 	LEFT JOIN task_lists tl ON tl.id = t.list_id
 `
 
-func (r *TaskRepository) scanTask(row interface{ Scan(dest ...interface{}) error }) (*domain.Task, error) {
+func (r *TaskRepository) scanTask(row interface {
+	Scan(dest ...interface{}) error
+}) (*domain.Task, error) {
 	t := &domain.Task{}
 	err := row.Scan(
 		&t.ID, &t.AccountID, &t.CreatedBy, &t.AssignedTo, &t.Title, &t.Description, &t.Type,

@@ -67,9 +67,9 @@ var operationalInteractionTypes = map[string]struct{}{
 var operationalLeadFieldExpressions = map[string]string{
 	"id":                  "l.id",
 	"contact_id":          "l.contact_id",
-	"name":                "COALESCE(NULLIF(c.custom_name, ''), NULLIF(TRIM(CONCAT_WS(' ', c.name, c.last_name)), ''), NULLIF(TRIM(CONCAT_WS(' ', l.name, l.last_name)), ''), '')",
-	"phone":               "COALESCE(NULLIF(c.phone, ''), NULLIF(l.phone, ''), '')",
-	"email":               "COALESCE(NULLIF(c.email, ''), NULLIF(l.email, ''), '')",
+	"name":                "CASE WHEN l.contact_id IS NULL THEN COALESCE(NULLIF(TRIM(CONCAT_WS(' ',l.name,l.last_name)),''),'') ELSE COALESCE(NULLIF(c.custom_name,''),NULLIF(TRIM(CONCAT_WS(' ',c.name,c.last_name)),''),NULLIF(c.push_name,''),'') END",
+	"phone":               "COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.phone,'') ELSE NULLIF(c.phone,'') END,'')",
+	"email":               "COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.email,'') ELSE NULLIF(c.email,'') END,'')",
 	"title":               "l.title",
 	"status":              "l.status",
 	"pipeline_id":         "l.pipeline_id",
@@ -91,9 +91,9 @@ var operationalLeadFieldExpressions = map[string]string{
 	"next_task_due_at":    "task_stats.next_task_due_at",
 	"last_activity_at":    "activity_stats.last_activity_at",
 	"is_archived":         "l.is_archived",
-	"is_blocked":          "COALESCE(c.do_not_contact, false)",
+	"is_blocked":          "CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(c.do_not_contact,false) END",
 	"is_deleted":          "(l.deleted_at IS NOT NULL)",
-	"contactable":         "NOT COALESCE(c.do_not_contact, false)",
+	"contactable":         "NOT (CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(c.do_not_contact,false) END)",
 }
 
 var operationalLeadDefaultFields = []string{
@@ -365,7 +365,7 @@ func (b *operationalSQLBuilder) addArg(value any) string {
 
 func buildOperationalLeadBaseSQL(filters OperationalLeadFilters, cursor *operationalLeadCursor) (string, []any, map[string]bool) {
 	b := &operationalSQLBuilder{}
-	b.where = append(b.where, "l.account_id = "+b.addArg(filters.AccountID), "l.contact_id IS NOT NULL")
+	b.where = append(b.where, "l.account_id = "+b.addArg(filters.AccountID))
 	required := requiredOperationalJoins(filters)
 	if len(filters.IDs) > 0 {
 		b.where = append(b.where, "l.id = ANY("+b.addArg(filters.IDs)+")")
@@ -373,7 +373,7 @@ func buildOperationalLeadBaseSQL(filters OperationalLeadFilters, cursor *operati
 
 	if value := strings.TrimSpace(filters.Search); value != "" {
 		arg := b.addArg("%" + value + "%")
-		b.where = append(b.where, "(COALESCE(c.custom_name, '') ILIKE "+arg+" OR COALESCE(c.name, '') ILIKE "+arg+" OR COALESCE(c.last_name, '') ILIKE "+arg+" OR COALESCE(l.name, '') ILIKE "+arg+" OR COALESCE(l.last_name, '') ILIKE "+arg+" OR COALESCE(c.phone, l.phone, '') ILIKE "+arg+" OR COALESCE(c.email, l.email, '') ILIKE "+arg+")")
+		b.where = append(b.where, "(CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ILIKE "+arg+" OR CASE WHEN l.contact_id IS NULL THEN COALESCE(l.last_name,'') ELSE COALESCE(c.last_name,'') END ILIKE "+arg+" OR CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END ILIKE "+arg+" OR CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END ILIKE "+arg+")")
 	}
 	if value := strings.TrimSpace(filters.Pipeline); value != "" {
 		if value == "__no_pipeline__" {
@@ -405,7 +405,7 @@ func buildOperationalLeadBaseSQL(filters OperationalLeadFilters, cursor *operati
 		b.where = append(b.where, "l.is_archived = "+b.addArg(*filters.Archived))
 	}
 	if filters.Blocked != nil {
-		b.where = append(b.where, "COALESCE(c.do_not_contact, false) = "+b.addArg(*filters.Blocked))
+		b.where = append(b.where, "CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(c.do_not_contact,false) END = "+b.addArg(*filters.Blocked))
 	}
 	if filters.Deleted != nil {
 		if *filters.Deleted {
@@ -415,7 +415,7 @@ func buildOperationalLeadBaseSQL(filters OperationalLeadFilters, cursor *operati
 		}
 	}
 	if filters.Contactable != nil {
-		b.where = append(b.where, "COALESCE(c.do_not_contact, false) = "+b.addArg(!*filters.Contactable))
+		b.where = append(b.where, "CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(c.do_not_contact,false) END = "+b.addArg(!*filters.Contactable))
 	}
 	if filters.CreatedFrom != nil {
 		b.where = append(b.where, "l.created_at >= "+b.addArg(*filters.CreatedFrom))
@@ -475,7 +475,7 @@ func buildOperationalLeadBaseSQL(filters OperationalLeadFilters, cursor *operati
 
 	from := `
 		FROM leads l
-		JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipelines p ON p.id = l.pipeline_id AND p.account_id = l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id AND ps.pipeline_id = l.pipeline_id
 	`

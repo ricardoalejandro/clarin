@@ -1,5 +1,21 @@
 # Changelog — Clarin CRM
 
+## 2026-07-22
+
+### Build 3 — Google Sync vuelve a la ficha única
+- 🐛 La ficha canónica recupera la sincronización individual con Google Contacts en Contactos, Leads, Chats, Eventos y Programas.
+- ✨ El estado sincronizado, la actualización y la desvinculación confirmada se muestran de forma coherente en móvil y escritorio.
+- 🔄 Los cambios de contacto y los errores de conexión se aíslan para evitar estados cruzados entre fichas.
+
+### Build 2 — Programas académicos, ficha única y encuestas reutilizables
+- ✨ Programas administra planes de clase, varios temas por sesión, instructores, participantes y asistencia P/F/T desde móvil y escritorio.
+- ✨ Cada participante conserva una participación independiente por programa, con incorporación corregible, padrón activo, historial de retiros y seguimiento individual.
+- ✨ Contactos, Leads, Chats, Eventos y Programas comparten una ficha canónica sin duplicar ni contradecir la identidad del contacto.
+- ✨ Las encuestas se separan en plantillas reutilizables e instancias con destinatarios, resultados e historial propios por programa.
+- 🔄 Los antiguos programas de tipo evento se trasladan de forma idempotente al módulo Eventos, conservando participantes y trazabilidad.
+- 🔒 Se refuerzan el aislamiento por cuenta, la inmutabilidad de instancias publicadas, las cargas de archivos y las migraciones sin pérdida de historial.
+- 💄 La experiencia móvil incorpora acordeones, búsquedas con espera inteligente, exportaciones coherentes y superficies responsivas de edición y observaciones.
+
 ## 2026-07-13
 
 ### Build 4 — Inicio y reintento confiables de Eros

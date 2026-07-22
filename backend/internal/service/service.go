@@ -30,6 +30,7 @@ type Services struct {
 	Device           *DeviceService
 	Chat             *ChatService
 	Contact          *ContactService
+	ContactProfile   *ContactProfileService
 	Lead             *LeadService
 	Pipeline         *PipelineService
 	Tag              *TagService
@@ -41,6 +42,7 @@ type Services struct {
 	Role             *RoleService
 	Automation       *AutomationService
 	Survey           *SurveyService
+	SurveyTemplate   *SurveyTemplateService
 	Task             *TaskService
 	DocumentTemplate *DocumentTemplateService
 	Report           *ReportService
@@ -54,6 +56,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Device:           &DeviceService{repos: repos, pool: pool, hub: hub},
 		Chat:             &ChatService{repos: repos, pool: pool},
 		Contact:          &ContactService{repos: repos, pool: pool},
+		ContactProfile:   NewContactProfileService(repos),
 		Lead:             &LeadService{repos: repos},
 		Pipeline:         &PipelineService{repos: repos},
 		Tag:              &TagService{repos: repos},
@@ -65,6 +68,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Role:             &RoleService{repos: repos},
 		Automation:       NewAutomationService(repos, pool, hub, nil), // cache injected after Init
 		Survey:           NewSurveyService(repos),
+		SurveyTemplate:   NewSurveyTemplateService(repos),
 		Task:             NewTaskService(repos, hub),
 		DocumentTemplate: NewDocumentTemplateService(repos),
 		Report:           NewReportService(repos, pool),

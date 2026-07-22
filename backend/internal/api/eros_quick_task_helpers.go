@@ -33,14 +33,14 @@ func (s *Server) quickLeadDataQualityScoped(ctx context.Context, accountID uuid.
 	result := map[string]any{"as_of": time.Now().UTC(), "pipeline": strings.TrimSpace(fmt.Sprint(values["pipeline"]))}
 	var missingPhone, missingEmail, missingContact, duplicateGroups int
 	err := s.repos.DB().QueryRow(ctx, `SELECT
-		COUNT(*) FILTER (WHERE NULLIF(BTRIM(COALESCE(c.phone,l.phone,'')),'') IS NULL),
-		COUNT(*) FILTER (WHERE NULLIF(BTRIM(COALESCE(c.email,l.email,'')),'') IS NULL),
+		COUNT(*) FILTER (WHERE NULLIF(BTRIM(CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END),'') IS NULL),
+		COUNT(*) FILTER (WHERE NULLIF(BTRIM(CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END),'') IS NULL),
 		COUNT(*) FILTER (WHERE l.contact_id IS NULL),
 		(SELECT COUNT(*) FROM (
-			SELECT regexp_replace(COALESCE(dc.phone,dl.phone,''),'\D','','g') normalized_phone
+			SELECT regexp_replace(COALESCE(dc.phone,''),'\D','','g') normalized_phone
 			FROM leads dl JOIN contacts dc ON dc.id=dl.contact_id AND dc.account_id=dl.account_id
 			WHERE dl.account_id=$1 AND dl.deleted_at IS NULL`+duplicateWhere+`
-			  AND NULLIF(regexp_replace(COALESCE(dc.phone,dl.phone,''),'\D','','g'),'') IS NOT NULL
+			  AND NULLIF(regexp_replace(COALESCE(dc.phone,''),'\D','','g'),'') IS NOT NULL
 			GROUP BY normalized_phone HAVING COUNT(DISTINCT dc.id)>1
 		) duplicates)
 		FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
@@ -97,8 +97,11 @@ func (s *Server) quickFollowupPriority(ctx context.Context, accountID uuid.UUID,
 	args = append(args, limit)
 	rows, err := s.repos.DB().Query(ctx, `
 		SELECT l.id,
-		       COALESCE(NULLIF(c.custom_name,''), NULLIF(TRIM(CONCAT_WS(' ',c.name,c.last_name)),''), NULLIF(TRIM(CONCAT_WS(' ',l.name,l.last_name)),''), '') AS name,
-		       COALESCE(NULLIF(c.phone,''),NULLIF(l.phone,''),'') AS phone,
+		       CASE WHEN l.contact_id IS NULL
+		         THEN COALESCE(NULLIF(TRIM(CONCAT_WS(' ',l.name,l.last_name)),''),'')
+		         ELSE COALESCE(NULLIF(c.custom_name,''),NULLIF(TRIM(CONCAT_WS(' ',c.name,c.last_name)),''),NULLIF(c.push_name,''),'')
+		       END AS name,
+		       COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.phone,'') ELSE NULLIF(c.phone,'') END,'') AS phone,
 		       COALESCE(p.name,'') AS pipeline, COALESCE(ps.name,'') AS stage,
 		       COALESCE(task_stats.overdue_count,0) AS overdue_task_count,
 		       task_stats.next_due_at,
@@ -114,7 +117,7 @@ func (s *Server) quickFollowupPriority(ctx context.Context, accountID uuid.UUID,
 		        + LEAST(30, GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW()-COALESCE(GREATEST(chat_stats.last_message_at,interaction_stats.last_interaction_at),l.created_at)))/86400)))::int
 		       ) AS priority_score
 		FROM leads l
-		JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipelines p ON p.id=l.pipeline_id AND p.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id=l.stage_id AND ps.pipeline_id=l.pipeline_id
 		LEFT JOIN LATERAL (

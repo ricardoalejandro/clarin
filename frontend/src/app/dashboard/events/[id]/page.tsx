@@ -18,10 +18,12 @@ import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCamp
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
+import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import FormulaEditor from '@/components/FormulaEditor'
 import { Chat } from '@/types/chat'
+import type { ContactProfileContact } from '@/types/contact-profile'
 import { exportToExcel, exportToCSV } from '@/utils/eventExport'
 import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/eventWordReport'
 import { subscribeWebSocket } from '@/lib/api'
@@ -214,6 +216,49 @@ function participantToLead(p: Participant): any {
     updated_at: '',
     is_archived: p.is_archived || false,
     is_blocked: p.is_blocked || false,
+  }
+}
+
+function mergeContactProfileIntoParticipant(participant: Participant, contact: ContactProfileContact): Participant {
+  if (participant.contact_id !== contact.id) return participant
+  return {
+    ...participant,
+    name: contact.custom_name || contact.name || contact.push_name || contact.short_name || contact.phone || 'Sin nombre',
+    last_name: contact.last_name || undefined,
+    short_name: contact.short_name || undefined,
+    phone: contact.phone || undefined,
+    email: contact.email || undefined,
+    age: contact.age || undefined,
+    dni: contact.dni || undefined,
+    birth_date: contact.birth_date || undefined,
+    company: contact.company || undefined,
+    address: contact.address || undefined,
+    distrito: contact.distrito || undefined,
+    ocupacion: contact.ocupacion || undefined,
+    tags: contact.structured_tags.map(tag => ({ ...tag, created_at: '' })),
+  }
+}
+
+function mergeLegacyLeadIntoParticipant(participant: Participant, updatedLead: any): Participant {
+  return {
+    ...participant,
+    name: updatedLead.name ?? participant.name,
+    last_name: updatedLead.last_name ?? participant.last_name,
+    short_name: updatedLead.short_name ?? participant.short_name,
+    phone: updatedLead.phone ?? participant.phone,
+    email: updatedLead.email ?? participant.email,
+    age: updatedLead.age ?? participant.age,
+    dni: updatedLead.dni ?? participant.dni,
+    birth_date: updatedLead.birth_date ?? participant.birth_date,
+    company: updatedLead.company ?? participant.company,
+    address: updatedLead.address ?? participant.address,
+    distrito: updatedLead.distrito ?? participant.distrito,
+    ocupacion: updatedLead.ocupacion ?? participant.ocupacion,
+    notes: updatedLead.notes ?? participant.notes,
+    stage_id: updatedLead.stage_id || participant.stage_id,
+    stage_name: updatedLead.stage_name || participant.stage_name,
+    stage_color: updatedLead.stage_color || participant.stage_color,
+    tags: updatedLead.structured_tags?.map((tag: any) => ({ id: tag.id, account_id: tag.account_id || '', name: tag.name, color: tag.color, created_at: '' })),
   }
 }
 
@@ -4256,7 +4301,7 @@ export default function EventDetailPage() {
             aria-modal="true"
             aria-label="Detalle del participante"
             tabIndex={-1}
-            className={`relative bg-white shadow-2xl flex transition-all duration-300 border-l border-slate-200 outline-none ${isSingleSurfaceLayout ? 'h-[var(--app-height)] w-full max-w-none border-l-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]' : showInlineChat ? 'h-full w-[85vw] max-w-6xl' : 'h-full w-full max-w-md'}`}
+            className={`relative bg-white shadow-2xl flex transition-all duration-200 motion-reduce:transition-none border-l border-slate-200 outline-none ${isSingleSurfaceLayout ? 'h-[var(--app-height)] w-full max-w-none border-l-0' : showInlineChat ? 'h-full w-[85vw] max-w-6xl' : 'h-full w-full max-w-md'} ${isSingleSurfaceLayout && showInlineChat ? 'pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]' : ''}`}
           >
             {showInlineChat && inlineChatId && (
               <div className={`${isSingleSurfaceLayout ? 'w-full border-r-0' : 'flex-1 border-r'} min-w-0 border-slate-200 flex flex-col h-full bg-slate-50/50`}>
@@ -4271,6 +4316,43 @@ export default function EventDetailPage() {
               </div>
             )}
             <div className={`${isSingleSurfaceLayout && showInlineChat ? 'hidden' : 'flex'} ${showInlineChat && !isSingleSurfaceLayout ? 'w-[360px] shrink-0' : 'w-full'} flex-col h-full bg-white min-w-0`}>
+              {detailParticipant.contact_id ? (
+              <ContactDetailSurface
+                contactId={detailParticipant.contact_id}
+                context={{ type: 'event_participant', id: detailParticipant.id }}
+                initialContact={{
+                  id: detailParticipant.contact_id,
+                  name: detailParticipant.name,
+                  last_name: detailParticipant.last_name,
+                  short_name: detailParticipant.short_name,
+                  phone: detailParticipant.phone,
+                  email: detailParticipant.email,
+                  age: detailParticipant.age,
+                  dni: detailParticipant.dni,
+                  birth_date: detailParticipant.birth_date,
+                  company: detailParticipant.company,
+                  address: detailParticipant.address,
+                  distrito: detailParticipant.distrito,
+                  ocupacion: detailParticipant.ocupacion,
+                  structured_tags: detailParticipant.tags || [],
+                  extra_phones: [],
+                  custom_field_values: [],
+                }}
+                title="Detalles"
+                subtitle="Contacto y participación en el evento"
+                readOnly={eventIsReadOnly}
+                onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
+                onContactChange={(contact) => {
+                  updateParticipantInStages(detailParticipant.id, participant => mergeContactProfileIntoParticipant(participant, contact))
+                  setDetailParticipant(current => current ? mergeContactProfileIntoParticipant(current, contact) : current)
+                }}
+                onObservationChange={() => {
+                  if (viewMode === 'list') {
+                    setListObservations(new Map())
+                    setLoadingListObs(new Set())
+                  }
+                }}
+                contextContent={(
               <LeadDetailPanel
                 lead={participantToLead(detailParticipant)}
                 eventMode={true}
@@ -4291,48 +4373,8 @@ export default function EventDetailPage() {
                 readOnly={eventIsReadOnly}
                 hideDelete={eventIsReadOnly}
                 onLeadChange={(updatedLead: any) => {
-                  // Map back from Lead shape to Participant update
-                  updateParticipantInStages(detailParticipant.id, p => ({
-                    ...p,
-                    name: updatedLead.name ?? p.name,
-                    last_name: updatedLead.last_name ?? p.last_name,
-                    short_name: updatedLead.short_name ?? p.short_name,
-                    phone: updatedLead.phone ?? p.phone,
-                    email: updatedLead.email ?? p.email,
-                    age: updatedLead.age ?? p.age,
-                    dni: updatedLead.dni ?? p.dni,
-                    birth_date: updatedLead.birth_date ?? p.birth_date,
-                    company: updatedLead.company ?? p.company,
-                    address: updatedLead.address ?? p.address,
-                    distrito: updatedLead.distrito ?? p.distrito,
-                    ocupacion: updatedLead.ocupacion ?? p.ocupacion,
-                    notes: updatedLead.notes ?? p.notes,
-                    stage_id: updatedLead.stage_id || p.stage_id,
-                    stage_name: updatedLead.stage_name || p.stage_name,
-                    stage_color: updatedLead.stage_color || p.stage_color,
-                    structured_tags: updatedLead.structured_tags,
-                    tags: updatedLead.structured_tags?.map((t: any) => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color, created_at: '' })),
-                  }))
-                  setDetailParticipant(prev => prev ? {
-                    ...prev,
-                    name: updatedLead.name ?? prev.name,
-                    last_name: updatedLead.last_name ?? prev.last_name,
-                    short_name: updatedLead.short_name ?? prev.short_name,
-                    phone: updatedLead.phone ?? prev.phone,
-                    email: updatedLead.email ?? prev.email,
-                    age: updatedLead.age ?? prev.age,
-                    dni: updatedLead.dni ?? prev.dni,
-                    birth_date: updatedLead.birth_date ?? prev.birth_date,
-                    company: updatedLead.company ?? prev.company,
-                    address: updatedLead.address ?? prev.address,
-                    distrito: updatedLead.distrito ?? prev.distrito,
-                    ocupacion: updatedLead.ocupacion ?? prev.ocupacion,
-                    notes: updatedLead.notes ?? prev.notes,
-                    stage_id: updatedLead.stage_id || prev.stage_id,
-                    stage_name: updatedLead.stage_name || prev.stage_name,
-                    stage_color: updatedLead.stage_color || prev.stage_color,
-                    tags: updatedLead.structured_tags?.map((t: any) => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color, created_at: '' })),
-                  } : null)
+                  updateParticipantInStages(detailParticipant.id, participant => mergeLegacyLeadIntoParticipant(participant, updatedLead))
+                  setDetailParticipant(current => current ? mergeLegacyLeadIntoParticipant(current, updatedLead) : null)
                 }}
                 onStageChange={(stageId: string, stageName: string, stageColor: string) => {
                   // Optimistic kanban move — LeadDetailPanel already sent the PATCH
@@ -4394,7 +4436,58 @@ export default function EventDetailPage() {
                   fetchEvent()
                 }}
                 hideWhatsApp={showInlineChat}
+                hideHeader
+                hideIdentity
+                commercialOnly
+                parentOwnsScroll
+                hideTabs
+                hideCustomFields
+                hideObservations
               />
+                )}
+              />
+              ) : (
+                <LeadDetailPanel
+                  lead={participantToLead(detailParticipant)}
+                  eventMode
+                  eventId={eventId}
+                  eventStages={displayStages.map(stage => ({ id: stage.id, pipeline_id: stage.pipeline_id || '', name: stage.name, color: stage.color, position: stage.position, lead_count: 0 }))}
+                  participantId={detailParticipant.id}
+                  relatedLeads={detailParticipant.related_leads || []}
+                  relatedLeadsLoading={detailParticipantLoading}
+                  relatedLeadsError={detailParticipantError}
+                  onRetryRelatedLeads={() => openDetailPanel(detailParticipant)}
+                  eventMembership={{
+                    state: detailParticipant.membership_state,
+                    source: detailParticipant.membership_source,
+                    reason: detailParticipant.membership_reason,
+                    autoTagSync: detailParticipant.auto_tag_sync,
+                    changedAt: detailParticipant.membership_changed_at,
+                  }}
+                  readOnly={eventIsReadOnly}
+                  hideDelete={eventIsReadOnly}
+                  onLeadChange={(updatedLead: any) => {
+                    updateParticipantInStages(detailParticipant.id, participant => mergeLegacyLeadIntoParticipant(participant, updatedLead))
+                    setDetailParticipant(current => current ? mergeLegacyLeadIntoParticipant(current, updatedLead) : null)
+                  }}
+                  onStageChange={() => { void fetchParticipantsPaginated(); void fetchEvent() }}
+                  onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
+                  onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
+                  onObservationChange={() => {
+                    if (viewMode === 'list') {
+                      setListObservations(new Map())
+                      setLoadingListObs(new Set())
+                    }
+                  }}
+                  onDelete={() => {
+                    removeParticipantFromStages(detailParticipant.id)
+                    setShowDetailPanel(false)
+                    setShowInlineChat(false)
+                    void fetchEvent()
+                  }}
+                  hideWhatsApp={showInlineChat}
+                />
+              )}
             </div>
           </div>
         </div>

@@ -1483,7 +1483,7 @@ type Program struct {
 	ID          uuid.UUID  `json:"id"`
 	AccountID   uuid.UUID  `json:"account_id"`
 	FolderID    *uuid.UUID `json:"folder_id,omitempty"`
-	Type        string     `json:"type"` // course (default) | event
+	Type        string     `json:"type"` // course; event is read-only legacy compatibility
 	Name        string     `json:"name"`
 	Description *string    `json:"description,omitempty"`
 	Status      string     `json:"status"` // active, completed, archived
@@ -1499,7 +1499,8 @@ type Program struct {
 	ScheduleStartTime *string    `json:"schedule_start_time,omitempty"` // "HH:MM" format
 	ScheduleEndTime   *string    `json:"schedule_end_time,omitempty"`   // "HH:MM" format
 
-	// Event-type fields (only used when Type == "event")
+	// Legacy event-type fields are retained only for audited migration and
+	// compatibility redirects into the independent Events module.
 	PipelineID     *uuid.UUID `json:"pipeline_id,omitempty"`
 	TagFormula     string     `json:"tag_formula,omitempty"`
 	TagFormulaMode string     `json:"tag_formula_mode,omitempty"` // OR, AND
@@ -1509,10 +1510,13 @@ type Program struct {
 	Location       *string    `json:"location,omitempty"`
 
 	// Populated on demand
-	ParticipantCount int            `json:"participant_count"`
-	SessionCount     int            `json:"session_count"`
-	PipelineName     *string        `json:"pipeline_name,omitempty"`
-	StageCounts      map[string]int `json:"stage_counts,omitempty"`
+	ParticipantCount      int            `json:"participant_count"`
+	SessionCount          int            `json:"session_count"`
+	PipelineName          *string        `json:"pipeline_name,omitempty"`
+	StageCounts           map[string]int `json:"stage_counts,omitempty"`
+	MigratedEventID       *uuid.UUID     `json:"migrated_event_id,omitempty"`
+	EventRetirementStatus *string        `json:"event_retirement_status,omitempty"`
+	EventRetirementReason *string        `json:"event_retirement_reason,omitempty"`
 }
 
 // ProgramParticipant represents a contact enrolled in a program
@@ -1543,36 +1547,176 @@ type ProgramParticipant struct {
 	StageColor     *string `json:"stage_color,omitempty"`
 }
 
-// ProgramSession represents a single class or session within a program
-type ProgramSession struct {
+// Course is a reusable class plan that can be assigned to one or more
+// course-type programs. Position is populated when the course is returned as
+// part of a program's academic configuration.
+type Course struct {
+	ID               uuid.UUID `json:"id"`
+	AccountID        uuid.UUID `json:"account_id"`
+	Name             string    `json:"name"`
+	Description      *string   `json:"description"`
+	Status           string    `json:"status"` // active | archived
+	Position         int       `json:"position"`
+	UsageCount       int       `json:"usage_count"`
+	TopicCount       int       `json:"topic_count"`
+	ActiveTopicCount int       `json:"active_topic_count"`
+	TopicPreview     []string  `json:"topic_preview"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	// ExpectedUpdatedAt is supplied only by update commands so concurrent
+	// editors cannot replace a newer aggregate with stale topics.
+	ExpectedUpdatedAt *time.Time     `json:"-"`
+	Topics            []*CourseTopic `json:"topics"`
+}
+
+// CourseTopic is an ordered topic within a reusable Course plan.
+type CourseTopic struct {
 	ID          uuid.UUID `json:"id"`
-	ProgramID   uuid.UUID `json:"program_id"`
-	Date        time.Time `json:"date"`
-	Topic       *string   `json:"topic,omitempty"`
-	SessionType string    `json:"session_type"`         // regular | recovery
-	StartTime   *string   `json:"start_time,omitempty"` // "HH:MM" format
-	EndTime     *string   `json:"end_time,omitempty"`   // "HH:MM" format
-	Location    *string   `json:"location,omitempty"`
+	AccountID   uuid.UUID `json:"account_id"`
+	CourseID    uuid.UUID `json:"course_id"`
+	Title       string    `json:"title"`
+	Description *string   `json:"description"`
+	Status      string    `json:"status"` // active | archived
+	Position    int       `json:"position"`
+	UsageCount  int       `json:"usage_count"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ProgramInstructor links a Contact to a course-type program as an
+// instructor. Contact remains the single identity source of truth.
+type ProgramInstructor struct {
+	ContactID      uuid.UUID `json:"contact_id"`
+	ContactName    string    `json:"contact_name"`
+	ContactPhone   *string   `json:"contact_phone"`
+	AvatarURL      *string   `json:"avatar_url"`
+	AvatarRevision int64     `json:"avatar_revision"`
+	Position       int       `json:"position"`
+}
+
+// ProgramAcademicConfig contains the reusable class plans and instructor
+// Contacts assigned to a course-type program.
+type ProgramAcademicConfig struct {
+	ProgramID   uuid.UUID            `json:"program_id"`
+	UpdatedAt   time.Time            `json:"updated_at"`
+	Courses     []*Course            `json:"courses"`
+	Instructors []*ProgramInstructor `json:"instructors"`
+}
+
+// ProgramSession represents a single class or session within a program
+type ProgramSession struct {
+	ID               uuid.UUID              `json:"id"`
+	ProgramID        uuid.UUID              `json:"program_id"`
+	Date             time.Time              `json:"date"`
+	Title            string                 `json:"title"`
+	TitleProvided    bool                   `json:"-"`
+	Topic            *string                `json:"topic,omitempty"`
+	CourseTopicID    *uuid.UUID             `json:"course_topic_id"`
+	SessionType      string                 `json:"session_type"`         // regular | recovery
+	StartTime        *string                `json:"start_time,omitempty"` // "HH:MM" format
+	EndTime          *string                `json:"end_time,omitempty"`   // "HH:MM" format
+	Location         *string                `json:"location,omitempty"`
+	CreatedAt        time.Time              `json:"created_at"`
+	UpdatedAt        time.Time              `json:"updated_at"`
+	CourseID         *uuid.UUID             `json:"course_id"`
+	CourseName       *string                `json:"course_name"`
+	CourseTopicTitle *string                `json:"course_topic_title"`
+	Topics           []*ProgramSessionTopic `json:"topics"`
 
 	// Populated on demand
 	AttendanceStats map[string]int `json:"attendance_stats,omitempty"`
 }
 
+// ProgramSessionTopic is the immutable topic snapshot attached to a session.
+// A session either contains one free topic or one course topic per course.
+type ProgramSessionTopic struct {
+	ID                 uuid.UUID  `json:"id"`
+	AccountID          uuid.UUID  `json:"-"`
+	SessionID          uuid.UUID  `json:"session_id"`
+	Kind               string     `json:"kind"` // course | free
+	CourseID           *uuid.UUID `json:"course_id,omitempty"`
+	CourseTopicID      *uuid.UUID `json:"course_topic_id,omitempty"`
+	CourseNameSnapshot *string    `json:"course_name,omitempty"`
+	TopicTitleSnapshot string     `json:"title"`
+	Position           int        `json:"position"`
+	CreatedAt          time.Time  `json:"created_at"`
+}
+
 // ProgramAttendance represents a participant's attendance record for a session
 type ProgramAttendance struct {
-	ID            uuid.UUID `json:"id"`
-	SessionID     uuid.UUID `json:"session_id"`
-	ParticipantID uuid.UUID `json:"participant_id"`
-	Status        string    `json:"status"` // present, absent, late, excused
-	Notes         *string   `json:"notes,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID                 uuid.UUID                       `json:"id"`
+	SessionID          uuid.UUID                       `json:"session_id"`
+	ParticipantID      uuid.UUID                       `json:"participant_id"`
+	Status             string                          `json:"status"` // present, absent, late
+	Notes              *string                         `json:"notes,omitempty"`
+	ObservationCount   int                             `json:"observation_count"`
+	ObservationPreview []*ProgramAttendanceObservation `json:"observation_preview"`
+	CreatedAt          time.Time                       `json:"created_at"`
+	UpdatedAt          time.Time                       `json:"updated_at"`
 
 	// Populated on demand
 	ParticipantName  string  `json:"participant_name,omitempty"`
 	ParticipantPhone *string `json:"participant_phone,omitempty"`
+}
+
+// ProgramAttendanceObservation is an account-scoped, session-specific note
+// that also appears in the Contact interaction history.
+type ProgramAttendanceObservation struct {
+	ID            uuid.UUID  `json:"id"`
+	Notes         string     `json:"notes"`
+	CreatedBy     *uuid.UUID `json:"created_by,omitempty"`
+	CreatedByName *string    `json:"created_by_name,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	SourceLabel   string     `json:"source_label"`
+}
+
+// ProgramParticipantAttendanceHistorySummary describes attendance only for
+// sessions held while the Contact was enrolled in this program. An unmarked
+// eligible session is pending; it is never silently treated as an absence.
+type ProgramParticipantAttendanceHistorySummary struct {
+	GoalPercent      int      `json:"goal_percent"`
+	EligibleSessions int      `json:"eligible_sessions"`
+	MarkedSessions   int      `json:"marked_sessions"`
+	Pending          int      `json:"pending"`
+	Present          int      `json:"present"`
+	Absent           int      `json:"absent"`
+	Late             int      `json:"late"`
+	AttendanceRate   *float64 `json:"attendance_rate"`
+	PunctualityRate  *float64 `json:"punctuality_rate"`
+	Health           string   `json:"health"` // green | amber | red | no_data
+}
+
+// ProgramParticipantAttendanceHistorySession is one held session in a
+// participant's timeline. Historical is internal routing metadata used to
+// separate real records outside the enrollment window from eligible sessions.
+type ProgramParticipantAttendanceHistorySession struct {
+	Ordinal            int                           `json:"ordinal"`
+	SessionID          uuid.UUID                     `json:"session_id"`
+	Title              string                        `json:"title"`
+	Date               string                        `json:"date"`
+	StartTime          *string                       `json:"start_time,omitempty"`
+	EndTime            *string                       `json:"end_time,omitempty"`
+	SessionType        string                        `json:"session_type"`
+	Topics             []*ProgramSessionTopic        `json:"topics"`
+	Status             *string                       `json:"status"`
+	ObservationCount   int                           `json:"observation_count"`
+	ObservationPreview *ProgramAttendanceObservation `json:"observation_preview,omitempty"`
+
+	// Cursor fields are never serialized. They make keyset pagination stable
+	// even when several sessions share a date and start time.
+	CursorDate      time.Time `json:"-"`
+	CursorStartTime string    `json:"-"`
+	CursorCreatedAt time.Time `json:"-"`
+	Historical      bool      `json:"-"`
+}
+
+// ProgramParticipantAttendanceHistory is the canonical paginated response
+// rendered at the end of a participant's Program detail.
+type ProgramParticipantAttendanceHistory struct {
+	Summary            ProgramParticipantAttendanceHistorySummary    `json:"summary"`
+	Sessions           []*ProgramParticipantAttendanceHistorySession `json:"sessions"`
+	HistoricalSessions []*ProgramParticipantAttendanceHistorySession `json:"historical_sessions"`
+	NextCursor         string                                        `json:"next_cursor,omitempty"`
 }
 
 // Attendance status constants
@@ -1580,7 +1724,6 @@ const (
 	AttendanceStatusPresent = "present"
 	AttendanceStatusAbsent  = "absent"
 	AttendanceStatusLate    = "late"
-	AttendanceStatusExcused = "excused"
 )
 
 // ProgramGoal stores attendance and transfer targets for a cuenta or one group.
@@ -1628,6 +1771,9 @@ type ProgramHealthParticipant struct {
 	Late               int        `json:"late"`
 	Absent             int        `json:"absent"`
 	Excused            int        `json:"excused"`
+	EligibleSessions   int        `json:"eligible_sessions"`
+	MarkedSessions     int        `json:"marked_sessions"`
+	Pending            int        `json:"pending"`
 	RecoverySessions   int        `json:"recovery_sessions"`
 	NotesCount         int        `json:"notes_count"`
 	LastNoteAt         *time.Time `json:"last_note_at,omitempty"`
@@ -1637,6 +1783,7 @@ type ProgramHealthParticipant struct {
 
 type ProgramSessionAttendanceStat struct {
 	SessionID uuid.UUID `json:"session_id"`
+	Title     string    `json:"title"`
 	Topic     string    `json:"topic"`
 	Date      string    `json:"date"`
 	Present   int       `json:"present"`
@@ -1646,14 +1793,16 @@ type ProgramSessionAttendanceStat struct {
 }
 
 type ProgramParticipantAttendanceStat struct {
-	ParticipantID uuid.UUID `json:"participant_id"`
-	Name          string    `json:"name"`
-	Present       int       `json:"present"`
-	Absent        int       `json:"absent"`
-	Late          int       `json:"late"`
-	Excused       int       `json:"excused"`
-	TotalSessions int       `json:"total_sessions"`
-	Rate          float64   `json:"rate"`
+	ParticipantID  uuid.UUID `json:"participant_id"`
+	Name           string    `json:"name"`
+	Present        int       `json:"present"`
+	Absent         int       `json:"absent"`
+	Late           int       `json:"late"`
+	Excused        int       `json:"excused"`
+	TotalSessions  int       `json:"total_sessions"`
+	MarkedSessions int       `json:"marked_sessions"`
+	Pending        int       `json:"pending"`
+	Rate           float64   `json:"rate"`
 }
 
 type ProgramHealthSummary struct {
@@ -2215,6 +2364,15 @@ type Survey struct {
 	ThankYouRedirectURL string         `json:"thank_you_redirect_url"`
 	Branding            SurveyBranding `json:"branding"`
 	IsTemplate          bool           `json:"is_template"`
+	TemplateID          *uuid.UUID     `json:"template_id,omitempty"`
+	TemplateRevision    int            `json:"template_revision"`
+	OriginType          string         `json:"origin_type,omitempty"`
+	ProgramID           *uuid.UUID     `json:"program_id,omitempty"`
+	OriginLabel         string         `json:"origin_label,omitempty"`
+	AudienceMode        string         `json:"audience_mode,omitempty"`
+	OpensAt             *time.Time     `json:"opens_at,omitempty"`
+	ClosesAt            *time.Time     `json:"closes_at,omitempty"`
+	LegacyInstance      bool           `json:"legacy_instance"`
 	CreatedBy           *uuid.UUID     `json:"created_by,omitempty"`
 	CreatedAt           time.Time      `json:"created_at"`
 	UpdatedAt           time.Time      `json:"updated_at"`
@@ -2259,29 +2417,44 @@ type SurveyQuestion struct {
 
 // SurveyResponse represents a complete submission by one respondent
 type SurveyResponse struct {
-	ID              uuid.UUID  `json:"id"`
-	SurveyID        uuid.UUID  `json:"survey_id"`
-	AccountID       uuid.UUID  `json:"account_id"`
-	RespondentToken string     `json:"respondent_token"`
-	LeadID          *uuid.UUID `json:"lead_id,omitempty"`
-	Source          string     `json:"source,omitempty"` // direct, ws, ig, email, qr
-	IPAddress       string     `json:"-"`
-	UserAgent       string     `json:"-"`
-	StartedAt       time.Time  `json:"started_at"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID                   uuid.UUID  `json:"id"`
+	SurveyID             uuid.UUID  `json:"survey_id"`
+	AccountID            uuid.UUID  `json:"account_id"`
+	RespondentToken      string     `json:"respondent_token"`
+	LeadID               *uuid.UUID `json:"lead_id,omitempty"`
+	RecipientID          *uuid.UUID `json:"recipient_id,omitempty"`
+	ContactID            *uuid.UUID `json:"contact_id,omitempty"`
+	ProgramID            *uuid.UUID `json:"program_id,omitempty"`
+	ProgramParticipantID *uuid.UUID `json:"program_participant_id,omitempty"`
+	ContactName          string     `json:"contact_name,omitempty"`
+	ContactPhone         string     `json:"contact_phone,omitempty"`
+	Source               string     `json:"source,omitempty"` // direct, ws, ig, email, qr
+	IPAddress            string     `json:"-"`
+	UserAgent            string     `json:"-"`
+	StartedAt            time.Time  `json:"started_at"`
+	CompletedAt          *time.Time `json:"completed_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
 	// Populated on demand
 	Answers []SurveyAnswer `json:"answers,omitempty"`
 }
 
+// SurveyExportData is the deterministic, tabular representation used by CSV
+// exports. Headers and row cells share the same positional contract so
+// repeated question titles cannot overwrite one another.
+type SurveyExportData struct {
+	Headers []string
+	Rows    [][]string
+}
+
 // SurveyAnswer represents the answer to a single question within a response
 type SurveyAnswer struct {
-	ID         uuid.UUID `json:"id"`
-	ResponseID uuid.UUID `json:"response_id"`
-	QuestionID uuid.UUID `json:"question_id"`
-	Value      string    `json:"value"`
-	FileURL    string    `json:"file_url,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         uuid.UUID  `json:"id"`
+	ResponseID uuid.UUID  `json:"response_id"`
+	QuestionID uuid.UUID  `json:"question_id"`
+	Value      string     `json:"value"`
+	FileURL    string     `json:"file_url,omitempty"`
+	UploadID   *uuid.UUID `json:"upload_id,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 // SurveyAnalytics holds aggregated data for a survey's results

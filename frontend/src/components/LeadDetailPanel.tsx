@@ -60,6 +60,12 @@ interface LeadDetailPanelProps {
   commercialOnly?: boolean
   /** Let an embedding panel own the vertical scroll instead of creating a nested viewport. */
   parentOwnsScroll?: boolean
+  /** Canonical ContactDetailSurface already owns navigation and Contact fields. */
+  hideTabs?: boolean
+  hideCustomFields?: boolean
+  hideNotes?: boolean
+  hideTasks?: boolean
+  hideObservations?: boolean
   /** Optional: hide delete button */
   hideDelete?: boolean
   /** Optional: hide WhatsApp button */
@@ -137,6 +143,11 @@ export default function LeadDetailPanel({
   hideIdentity = false,
   commercialOnly = false,
   parentOwnsScroll = false,
+  hideTabs = false,
+  hideCustomFields = false,
+  hideNotes = false,
+  hideTasks = false,
+  hideObservations = false,
   hideDelete = false,
   hideWhatsApp = false,
   readOnly = false,
@@ -326,6 +337,7 @@ export default function LeadDetailPanel({
 
   // ─── Fetch custom field definitions + values ───────────────
   useEffect(() => {
+    if (hideCustomFields) { setCfDefs([]); setCfValues([]); setCfLoading(false); return }
     const cid = contactMode ? contactId : lead.contact_id
     if (!cid) { setCfDefs([]); setCfValues([]); setCfLoading(false); return }
     let active = true
@@ -341,7 +353,7 @@ export default function LeadDetailPanel({
       if (valsData.success) setCfValues(valsData.values || [])
     }).catch(() => {}).finally(() => { if (active) setCfLoading(false) })
     return () => { active = false }
-  }, [leadProp.id, contactMode, contactId, lead.contact_id])
+  }, [leadProp.id, contactMode, contactId, lead.contact_id, hideCustomFields])
 
   const handleSaveCustomField = useCallback(async (fieldId: string, payload: any) => {
     const cid = contactMode ? contactId : lead.contact_id
@@ -375,16 +387,18 @@ export default function LeadDetailPanel({
     setObservationError('')
     setSavingObservation(false)
     setLeadTasks([])
-    fetchObservations(lead.id, requestId)
+    if (!hideObservations) fetchObservations(lead.id, requestId)
     fetchTaskLists()
-    if (eventMode && eventId && lead.contact_id) {
+    if (hideTasks) {
+      setLeadTasks([])
+    } else if (eventMode && eventId && lead.contact_id) {
       fetchContactTasks(lead.contact_id, eventId, requestId)
     } else if (!contactMode) {
       fetchLeadTasks(lead.id, requestId)
     } else if (contactId) {
       fetchContactTasks(contactId, undefined, requestId)
     }
-  }, [leadProp.id, participantId, contactId])
+  }, [leadProp.id, participantId, contactId, hideObservations, hideTasks])
 
   // Auto-scroll to tasks section when scrollToTasks prop is set
   useEffect(() => {
@@ -812,7 +826,7 @@ export default function LeadDetailPanel({
       )}
 
       {/* Tab Bar */}
-      <div className="flex border-b border-slate-200 shrink-0 bg-white px-2">
+      {!hideTabs && <div className="flex border-b border-slate-200 shrink-0 bg-white px-2">
         <button
           onClick={() => setActiveTab('general')}
           className={`flex min-h-11 items-center gap-1.5 px-4 text-xs font-medium transition-colors whitespace-nowrap ${
@@ -844,7 +858,7 @@ export default function LeadDetailPanel({
             </span>
           )}
         </button>
-      </div>
+      </div>}
 
       {readOnly && eventMode && (
         <div className="mx-4 mt-4 flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-600">
@@ -1478,7 +1492,7 @@ export default function LeadDetailPanel({
         )}
 
         {/* Notes */}
-        {!eventMode && (
+        {!eventMode && !hideNotes && (
         <div className="border-t border-slate-100 pt-4">
           <div className="flex items-center justify-between mb-3">
             <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Notas</h5>
@@ -1577,7 +1591,7 @@ export default function LeadDetailPanel({
         </div>
 
         {/* ─── Tasks Section ─── */}
-        {(!contactMode || (contactMode && contactId)) && (
+        {!hideTasks && (!contactMode || (contactMode && contactId)) && (
           <div id="tasks-section">
             <div className="flex items-center justify-between mb-2">
               <h4 className="text-xs font-semibold text-slate-500 flex items-center gap-2">
@@ -1637,7 +1651,7 @@ export default function LeadDetailPanel({
         )}
 
         {/* Observations / History */}
-        <div>
+        {!hideObservations && <div>
           <div className="flex items-center justify-between mb-3">
             <h4 className="text-xs font-semibold text-slate-500 flex items-center gap-2">
               <FileText className="w-3.5 h-3.5" />
@@ -1739,7 +1753,7 @@ export default function LeadDetailPanel({
               )}
             </div>
           )}
-        </div>
+        </div>}
 
         {!eventMode && lead.created_at && lead.updated_at && (
           <div className="text-[10px] text-slate-400 space-y-0.5">
@@ -1750,7 +1764,7 @@ export default function LeadDetailPanel({
       </div>
 
       {/* Custom Fields Tab */}
-      <div className={`${parentOwnsScroll ? 'p-4 sm:p-5' : 'flex-1 overflow-y-auto p-6'} space-y-6 ${activeTab !== 'campos' ? 'hidden' : ''}`}>
+      {!hideCustomFields && <div className={`${parentOwnsScroll ? 'p-4 sm:p-5' : 'flex-1 overflow-y-auto p-6'} space-y-6 ${activeTab !== 'campos' ? 'hidden' : ''}`}>
         {(contactMode ? contactId : lead.contact_id) ? (
           cfLoading ? (
             <div className="space-y-3">
@@ -1781,10 +1795,10 @@ export default function LeadDetailPanel({
             <p className="text-xs text-slate-400 mt-1">Vincule un contacto para ver campos personalizados</p>
           </div>
         )}
-      </div>
+      </div>}
 
       {/* Full History Modal */}
-      <ObservationHistoryModal
+      {!hideObservations && <ObservationHistoryModal
         isOpen={showHistoryModal}
         onClose={() => setShowHistoryModal(false)}
         leadId={lead.id}
@@ -1797,10 +1811,10 @@ export default function LeadDetailPanel({
         name={lead.name || 'Sin nombre'}
         observations={observations}
         onObservationChange={() => { fetchObservations(lead.id); onObservationChange?.(lead.id) }}
-      />
+      />}
 
       {/* Task Form Modal (lead/contact-linked) */}
-      {(!contactMode || (contactMode && contactId)) && (
+      {!hideTasks && (!contactMode || (contactMode && contactId)) && (
         <TaskFormModal
           isOpen={showTaskModal}
           onClose={() => { setShowTaskModal(false); setEditingTask(null) }}

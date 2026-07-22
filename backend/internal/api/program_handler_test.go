@@ -17,3 +17,23 @@ func TestParseAttendanceStatsMonths(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveSessionTitlePrefixSupportsLegacyAlias(t *testing.T) {
+	tests := []struct {
+		name        string
+		titlePrefix string
+		topicPrefix string
+		want        string
+	}{
+		{name: "new field wins", titlePrefix: "  Clase  ", topicPrefix: "Tema", want: "Clase"},
+		{name: "legacy alias", topicPrefix: "  Encuentro  ", want: "Encuentro"},
+		{name: "default", want: "Sesión"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resolveSessionTitlePrefix(test.titlePrefix, test.topicPrefix); got != test.want {
+				t.Fatalf("resolveSessionTitlePrefix() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

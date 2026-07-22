@@ -27,6 +27,7 @@ type Repositories struct {
 	Chat               *ChatRepository
 	Message            *MessageRepository
 	Contact            *ContactRepository
+	ContactProfile     *ContactProfileRepository
 	ContactAvatar      *ContactAvatarRepository
 	ContactDeviceName  *ContactDeviceNameRepository
 	Lead               *LeadRepository
@@ -57,6 +58,7 @@ type Repositories struct {
 	AIToken            *AITokenRepository
 	Automation         *AutomationRepository
 	Survey             *SurveyRepository
+	SurveyTemplate     *SurveyTemplateRepository
 	Dynamic            *DynamicRepository
 	Task               *TaskRepository
 	DocumentTemplate   *DocumentTemplateRepository
@@ -81,6 +83,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Chat:               &ChatRepository{db: db},
 		Message:            &MessageRepository{db: db},
 		Contact:            &ContactRepository{db: db},
+		ContactProfile:     NewContactProfileRepository(db),
 		ContactAvatar:      NewContactAvatarRepository(db),
 		ContactDeviceName:  &ContactDeviceNameRepository{db: db},
 		Lead:               &LeadRepository{db: db},
@@ -111,6 +114,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		AIToken:            &AITokenRepository{db: db},
 		Automation:         &AutomationRepository{db: db},
 		Survey:             &SurveyRepository{db: db},
+		SurveyTemplate:     NewSurveyTemplateRepository(db),
 		Dynamic:            &DynamicRepository{db: db},
 		Task:               &TaskRepository{db: db},
 		DocumentTemplate:   &DocumentTemplateRepository{db: db},
@@ -1977,7 +1981,11 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 	return contact, err
 }
 
-func applyDurableSuppressionToContact(ctx context.Context, db *pgxpool.Pool, accountID, contactID uuid.UUID) (bool, error) {
+type contactCommandExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func applyDurableSuppressionToContact(ctx context.Context, db contactCommandExecutor, accountID, contactID uuid.UUID) (bool, error) {
 	tag, err := db.Exec(ctx, `
 		UPDATE contacts c SET
 			do_not_contact=TRUE,
@@ -2481,8 +2489,8 @@ func (r *ContactRepository) SyncToLead(ctx context.Context, contact *domain.Cont
 			company=NULL, age=NULL, dni=NULL, birth_date=NULL, address=NULL,
 			distrito=NULL, ocupacion=NULL,
 			updated_at = NOW()
-		WHERE contact_id = $1
-	`, contact.ID)
+		WHERE contact_id = $1 AND account_id = $2
+	`, contact.ID, contact.AccountID)
 	if err != nil {
 		log.Printf("[SYNC] Error syncing contact %s to leads: %v", contact.ID, err)
 	}
@@ -2980,7 +2988,7 @@ func scanContactMap(rows pgx.Rows) (map[uuid.UUID]*domain.Contact, error) {
 
 func (r *ContactRepository) getMergeLeadPreview(ctx context.Context, accountID uuid.UUID, contactIDs []uuid.UUID) ([]domain.ContactMergeLeadPreview, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT l.id, l.contact_id, COALESCE(c.custom_name, c.name, l.name), COALESCE(c.phone, l.phone),
+		SELECT l.id, l.contact_id, COALESCE(c.custom_name,c.name,c.push_name), c.phone,
 		       pp.name, ps.name, l.is_archived, l.is_blocked, l.created_at
 		FROM leads l
 		JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
@@ -3422,16 +3430,253 @@ func (r *ContactRepository) mergeEventParticipants(ctx context.Context, tx pgx.T
 	return err
 }
 
+// mergeSurveyProgramParticipantReferences preserves the immutable survey
+// audience and every submitted answer while duplicate contacts are collapsed.
+// The destination enrollment owns at most one active recipient per survey;
+// additional duplicate responses remain historical rows linked to the same
+// enrollment, with recipient_id cleared only when the unique recipient slot is
+// already in use. Old recipient rows become token aliases to that survivor, so
+// invitation URLs remain valid. Upload inventory is moved to the survivor
+// before an alias releases its participant identity.
+func (r *ContactRepository) mergeSurveyProgramParticipantReferences(ctx context.Context, tx pgx.Tx, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
+	lockRows, err := tx.Query(ctx, `
+		SELECT p.id,pp.id
+		FROM program_participants pp
+		JOIN programs p ON p.id=pp.program_id AND p.account_id=$1
+		WHERE pp.contact_id=$2 OR pp.contact_id=ANY($3::uuid[])
+		ORDER BY p.id,pp.id
+		FOR UPDATE OF p,pp
+	`, accountID, keepID, mergeIDs)
+	if err != nil {
+		return err
+	}
+	for lockRows.Next() {
+		var programID, participantID uuid.UUID
+		if err := lockRows.Scan(&programID, &participantID); err != nil {
+			lockRows.Close()
+			return err
+		}
+	}
+	if err := lockRows.Err(); err != nil {
+		lockRows.Close()
+		return err
+	}
+	lockRows.Close()
+
+	if _, err := tx.Exec(ctx, `
+		CREATE TEMP TABLE contact_merge_survey_recipient_map ON COMMIT DROP AS
+		WITH ranked_participants AS (
+			SELECT participant.id,participant.program_id,
+				ROW_NUMBER() OVER (
+					PARTITION BY participant.program_id
+					ORDER BY (participant.contact_id=$2) DESC,participant.id
+				) AS participant_rank
+			FROM program_participants participant
+			JOIN programs program ON program.id=participant.program_id AND program.account_id=$1
+			WHERE participant.contact_id=$2 OR participant.contact_id=ANY($3::uuid[])
+		), pairs AS (
+			SELECT source.id AS source_participant_id,
+				destination.id AS destination_participant_id,source.program_id
+			FROM ranked_participants source
+			JOIN ranked_participants destination
+			  ON destination.program_id=source.program_id AND destination.participant_rank=1
+			WHERE source.participant_rank>1
+		), source_recipients AS (
+			SELECT recipient.id AS source_recipient_id,recipient.survey_id,
+				pairs.program_id,pairs.source_participant_id,pairs.destination_participant_id
+			FROM pairs
+			JOIN survey_instance_recipients recipient
+			  ON recipient.account_id=$1
+			 AND recipient.program_id=pairs.program_id
+			 AND recipient.program_participant_id=pairs.source_participant_id
+		), survivors AS (
+			SELECT source.survey_id,source.program_id,source.destination_participant_id,
+				COALESCE(
+					(
+						SELECT destination.id
+						FROM survey_instance_recipients destination
+						WHERE destination.account_id=$1
+						  AND destination.survey_id=source.survey_id
+						  AND destination.program_id=source.program_id
+						  AND destination.program_participant_id=source.destination_participant_id
+						ORDER BY destination.id LIMIT 1
+					),
+					(ARRAY_AGG(source.source_recipient_id ORDER BY source.source_recipient_id))[1]
+				) AS survivor_recipient_id
+			FROM source_recipients source
+			GROUP BY source.survey_id,source.program_id,source.destination_participant_id
+		)
+		SELECT source.source_recipient_id,survivor.survivor_recipient_id,
+			source.survey_id,source.program_id,source.source_participant_id,
+			source.destination_participant_id
+		FROM source_recipients source
+		JOIN survivors survivor
+		  ON survivor.survey_id=source.survey_id
+		 AND survivor.program_id=source.program_id
+		 AND survivor.destination_participant_id=source.destination_participant_id
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `CREATE UNIQUE INDEX ON contact_merge_survey_recipient_map(source_recipient_id)`); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		WITH rollup AS (
+			SELECT mapping.survivor_recipient_id,
+				BOOL_OR(source.status='completed') AS has_completed,
+				BOOL_OR(source.status='opened') AS has_opened,
+				MIN(source.invited_at) AS invited_at,
+				MIN(source.opened_at) AS opened_at,
+				MIN(source.completed_at) AS completed_at
+			FROM contact_merge_survey_recipient_map mapping
+			JOIN survey_instance_recipients source
+			  ON source.account_id=$1 AND source.id=mapping.source_recipient_id
+			GROUP BY mapping.survivor_recipient_id
+		)
+		UPDATE survey_instance_recipients destination SET
+			status=CASE
+				WHEN destination.status='completed' OR rollup.has_completed THEN 'completed'
+				WHEN destination.status='opened' OR rollup.has_opened THEN 'opened'
+				ELSE 'pending'
+			END,
+			invited_at=CASE WHEN destination.invited_at IS NULL THEN rollup.invited_at
+				WHEN rollup.invited_at IS NULL THEN destination.invited_at
+				ELSE LEAST(destination.invited_at,rollup.invited_at) END,
+			opened_at=CASE WHEN destination.opened_at IS NULL THEN rollup.opened_at
+				WHEN rollup.opened_at IS NULL THEN destination.opened_at
+				ELSE LEAST(destination.opened_at,rollup.opened_at) END,
+			completed_at=CASE WHEN destination.completed_at IS NULL THEN rollup.completed_at
+				WHEN rollup.completed_at IS NULL THEN destination.completed_at
+				ELSE LEAST(destination.completed_at,rollup.completed_at) END,
+			updated_at=NOW()
+		FROM rollup
+		WHERE destination.account_id=$1 AND destination.id=rollup.survivor_recipient_id
+	`, accountID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE survey_file_uploads upload SET recipient_id=mapping.survivor_recipient_id,updated_at=NOW()
+		FROM contact_merge_survey_recipient_map mapping
+		WHERE upload.account_id=$1 AND upload.survey_id=mapping.survey_id
+		  AND upload.recipient_id=mapping.source_recipient_id
+		  AND mapping.source_recipient_id<>mapping.survivor_recipient_id
+	`, accountID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		WITH candidates AS (
+			SELECT DISTINCT response.id,response.recipient_id,mapping.survivor_recipient_id,
+				mapping.destination_participant_id,mapping.program_id
+			FROM survey_responses response
+			JOIN contact_merge_survey_recipient_map mapping
+			  ON response.recipient_id=mapping.source_recipient_id
+			  OR response.recipient_id=mapping.survivor_recipient_id
+			WHERE response.account_id=$1 AND response.survey_id=mapping.survey_id
+		), ranked AS (
+			SELECT candidates.*,
+				ROW_NUMBER() OVER (
+					PARTITION BY survivor_recipient_id
+					ORDER BY (recipient_id=survivor_recipient_id) DESC,id
+				) AS recipient_rank
+			FROM candidates
+		)
+		UPDATE survey_responses response SET
+			recipient_id=CASE WHEN ranked.recipient_rank=1 THEN ranked.survivor_recipient_id ELSE NULL END,
+			contact_id=$2,program_id=ranked.program_id,
+			program_participant_id=ranked.destination_participant_id
+		FROM ranked
+		WHERE response.account_id=$1 AND response.id=ranked.id
+	`, accountID, keepID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE survey_instance_recipients recipient SET
+			program_id=NULL,program_participant_id=NULL,contact_id=NULL,
+			merged_into_recipient_id=mapping.survivor_recipient_id,
+			updated_at=NOW()
+		FROM contact_merge_survey_recipient_map mapping
+		WHERE recipient.account_id=$1 AND recipient.id=mapping.source_recipient_id
+		  AND mapping.source_recipient_id<>mapping.survivor_recipient_id
+	`, accountID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE survey_instance_recipients recipient SET
+			program_participant_id=mapping.destination_participant_id,
+			contact_id=$2,updated_at=NOW()
+		FROM (
+			SELECT DISTINCT survivor_recipient_id,destination_participant_id
+			FROM contact_merge_survey_recipient_map
+		) mapping
+		WHERE recipient.account_id=$1 AND recipient.id=mapping.survivor_recipient_id
+		  AND recipient.program_participant_id<>mapping.destination_participant_id
+	`, accountID, keepID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		WITH ranked_participants AS (
+			SELECT participant.id,participant.program_id,
+				ROW_NUMBER() OVER (
+					PARTITION BY participant.program_id
+					ORDER BY (participant.contact_id=$2) DESC,participant.id
+				) AS participant_rank
+			FROM program_participants participant
+			JOIN programs program ON program.id=participant.program_id AND program.account_id=$1
+			WHERE participant.contact_id=$2 OR participant.contact_id=ANY($3::uuid[])
+		), pairs AS (
+			SELECT source.id AS source_participant_id,
+				destination.id AS destination_participant_id,source.program_id
+			FROM ranked_participants source
+			JOIN ranked_participants destination
+			  ON destination.program_id=source.program_id AND destination.participant_rank=1
+			WHERE source.participant_rank>1
+		)
+		UPDATE survey_responses response SET contact_id=$2,
+			program_participant_id=pairs.destination_participant_id
+		FROM pairs
+		WHERE response.account_id=$1 AND response.program_id=pairs.program_id
+		  AND response.program_participant_id=pairs.source_participant_id
+	`, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
+
+	// Responses without a live recipient still retain canonical identity after
+	// the source Contact is deleted.
+	_, err = tx.Exec(ctx, `
+		UPDATE survey_responses SET contact_id=$2
+		WHERE account_id=$1 AND contact_id=ANY($3::uuid[])
+	`, accountID, keepID, mergeIDs)
+	return err
+}
+
 func (r *ContactRepository) mergeProgramParticipants(ctx context.Context, tx pgx.Tx, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) error {
 	pairs := `
-		WITH pairs AS (
-			SELECT src.id AS src_id, dst.id AS dst_id
-			FROM program_participants src
-			JOIN programs p ON p.id = src.program_id AND p.account_id = $1
-			JOIN program_participants dst ON dst.program_id = src.program_id AND dst.contact_id = $2::uuid
-			WHERE src.contact_id = ANY($3::uuid[])
+		WITH ranked_participants AS (
+			SELECT participant.id,participant.program_id,
+				ROW_NUMBER() OVER (
+					PARTITION BY participant.program_id
+					ORDER BY (participant.contact_id=$2::uuid) DESC,participant.id
+				) AS participant_rank
+			FROM program_participants participant
+			JOIN programs program ON program.id=participant.program_id AND program.account_id=$1
+			WHERE participant.contact_id=$2::uuid OR participant.contact_id=ANY($3::uuid[])
+		), pairs AS (
+			SELECT source.id AS src_id,destination.id AS dst_id
+			FROM ranked_participants source
+			JOIN ranked_participants destination
+			  ON destination.program_id=source.program_id AND destination.participant_rank=1
+			WHERE source.participant_rank>1
 		)
-	`
+		`
+	if err := r.mergeSurveyProgramParticipantReferences(ctx, tx, accountID, keepID, mergeIDs); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, pairs+`
 		UPDATE program_participant_notes pn
 		SET participant_id = pairs.dst_id, contact_id = $2::uuid, updated_at = NOW()
@@ -3510,6 +3755,8 @@ func (r *ContactRepository) relinkContactReferences(ctx context.Context, tx pgx.
 		`UPDATE dynamic_link_registrations dlr SET contact_id = $2::uuid FROM dynamic_links dl JOIN dynamics d ON d.id = dl.dynamic_id WHERE dl.id = dlr.link_id AND d.account_id = $1 AND dlr.contact_id = ANY($3::uuid[])`,
 		`UPDATE bot_sessions SET contact_id = $2::uuid, updated_at = NOW() WHERE account_id = $1 AND contact_id = ANY($3::uuid[])`,
 		`UPDATE campaign_recipients cr SET contact_id = $2::uuid FROM campaigns ca WHERE ca.id = cr.campaign_id AND ca.account_id = $1 AND cr.contact_id = ANY($3::uuid[])`,
+		`UPDATE survey_instance_recipients SET contact_id=$2::uuid,updated_at=NOW() WHERE account_id=$1 AND contact_id=ANY($3::uuid[])`,
+		`UPDATE survey_responses SET contact_id=$2::uuid WHERE account_id=$1 AND contact_id=ANY($3::uuid[])`,
 	}
 	for _, stmt := range statements {
 		if _, err := tx.Exec(ctx, stmt, accountID, keepID, mergeIDs); err != nil {
@@ -3665,17 +3912,28 @@ func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 func (r *LeadRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Lead, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT l.id, l.account_id, l.contact_id, l.jid,
-		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
-		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
-		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+		       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+		       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END,
+		       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+		       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END,
+		       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END,
+		       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END,
+		       CASE WHEN l.contact_id IS NULL THEN NULLIF(l.distrito,'') ELSE NULLIF(c.distrito,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN NULLIF(l.ocupacion,'') ELSE NULLIF(c.ocupacion,'') END,
 		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position, l.kommo_id,
-		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.is_archived,l.archived_at,
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END,
+		       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END,
+		       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END,l.kommo_deleted_at,
 		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 		FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.account_id = $1 AND l.deleted_at IS NULL ORDER BY l.created_at DESC
 	`, accountID)
@@ -3706,17 +3964,28 @@ func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid 
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
 		SELECT l.id, l.account_id, l.contact_id, l.jid,
-		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
-		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
-		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+		       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+		       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END,
+		       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+		       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END,
+		       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END,
+		       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END,
+		       CASE WHEN l.contact_id IS NULL THEN NULLIF(l.distrito,'') ELSE NULLIF(c.distrito,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN NULLIF(l.ocupacion,'') ELSE NULLIF(c.ocupacion,'') END,
 		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position, l.kommo_id,
-		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.is_archived,l.archived_at,
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END,
+		       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END,
+		       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END,l.kommo_deleted_at,
 		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 		FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.account_id = $1 AND l.jid = $2
 		ORDER BY (l.deleted_at IS NULL) DESC, (l.status = 'open') DESC, l.updated_at DESC, l.id LIMIT 1
@@ -3743,17 +4012,28 @@ func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lea
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
 		SELECT l.id, l.account_id, l.contact_id, l.jid,
-		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
-		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
-		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+		       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+		       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END,
+		       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+		       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END,
+		       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END,
+		       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END,
+		       CASE WHEN l.contact_id IS NULL THEN NULLIF(l.distrito,'') ELSE NULLIF(c.distrito,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN NULLIF(l.ocupacion,'') ELSE NULLIF(c.ocupacion,'') END,
 		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position, l.kommo_id,
-		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.is_archived,l.archived_at,
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END,
+		       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END,
+		       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END,l.kommo_deleted_at,
 		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 		FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.id = $1
 	`, id).Scan(
@@ -3803,6 +4083,16 @@ func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
 		return err
 	}
 	if contactID != nil && len(lead.PersonalFieldChanges) > 0 {
+		if lead.PersonalFieldChanges["phone"] && lead.Phone != nil {
+			normalized, err := normalizeContactProfilePhone(*lead.Phone)
+			if err != nil {
+				return err
+			}
+			lead.Phone = &normalized
+			if err := ensureContactProfilePhoneOwnershipTx(ctx, tx, lead.AccountID, *contactID, []string{normalized}); err != nil {
+				return err
+			}
+		}
 		result, err := tx.Exec(ctx, `
 			UPDATE contacts SET
 				custom_name=CASE WHEN $15 THEN NULLIF(BTRIM($1),'') ELSE custom_name END,
@@ -3833,8 +4123,16 @@ func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
 			return fmt.Errorf("lead contact does not belong to account")
 		}
 		if _, err := tx.Exec(ctx, `
+			UPDATE leads SET
+				name=NULL,last_name=NULL,short_name=NULL,phone=NULL,email=NULL,company=NULL,age=NULL,
+				dni=NULL,birth_date=NULL,address=NULL,distrito=NULL,ocupacion=NULL,updated_at=NOW()
+			WHERE account_id=$1 AND contact_id=$2
+		`, lead.AccountID, *contactID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
 			UPDATE event_participants ep SET
-				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),ep.name),
+				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid),
 				last_name=c.last_name, short_name=c.short_name, phone=c.phone, email=c.email, age=c.age,
 				company=c.company, dni=c.dni, birth_date=c.birth_date, address=c.address, distrito=c.distrito, ocupacion=c.ocupacion,
 				updated_at=NOW()
@@ -3844,7 +4142,7 @@ func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE campaign_recipients cr SET
-				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),cr.name), phone=c.phone
+				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid), phone=c.phone, jid=c.jid
 			FROM contacts c WHERE cr.contact_id=c.id AND c.id=$1 AND c.account_id=$2
 		`, *contactID, lead.AccountID); err != nil {
 			return err
@@ -3871,17 +4169,28 @@ func (r *LeadRepository) GetByContactID(ctx context.Context, contactID uuid.UUID
 	lead := &domain.Lead{}
 	err := r.db.QueryRow(ctx, `
 		SELECT l.id, l.account_id, l.contact_id, l.jid,
-		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
-		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
-		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+		       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+		       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END,
+		       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+		       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END,
+		       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END,
+		       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END,
+		       CASE WHEN l.contact_id IS NULL THEN NULLIF(l.distrito,'') ELSE NULLIF(c.distrito,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN NULLIF(l.ocupacion,'') ELSE NULLIF(c.ocupacion,'') END,
 		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 		       ps.name, ps.color, ps.position, l.kommo_id,
-		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.is_archived,l.archived_at,
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END,
+		       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END,
+		       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END,l.kommo_deleted_at,
 		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 		FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE l.contact_id = $1
 		ORDER BY (l.deleted_at IS NULL) DESC, (l.status = 'open') DESC, l.updated_at DESC, l.id
@@ -6071,12 +6380,17 @@ func (r *EventRepository) BulkAddParticipantsFromLeads(ctx context.Context, even
 	tag, err := r.db.Exec(ctx, `
 		INSERT INTO event_participants (id, event_id, lead_id, contact_id, stage_id, name, last_name, short_name, phone, email, age, status, auto_tag_sync, invited_at, created_at, updated_at)
 		SELECT gen_random_uuid(), $1, l.id, l.contact_id, $3,
-		       COALESCE(c.custom_name, c.name, l.name, ''), COALESCE(c.last_name, l.last_name, ''), COALESCE(c.short_name, l.short_name, ''),
-		       COALESCE(c.phone, l.phone, ''), COALESCE(c.email, l.email, ''), COALESCE(c.age, l.age, 0),
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+		       COALESCE(CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,''),
+		       COALESCE(CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,''),
+		       COALESCE(CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,''),
+		       COALESCE(CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,''),
+		       COALESCE(CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,0),
 		       'invited', TRUE, NOW(), NOW(), NOW()
-		FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
-		WHERE l.id = ANY($2)
+		FROM events event_scope
+		JOIN leads l ON l.account_id=event_scope.account_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=event_scope.account_id
+		WHERE event_scope.id=$1 AND l.id=ANY($2)
 		AND NOT EXISTS (
 			SELECT 1 FROM event_participants ep
 			WHERE ep.event_id = $1 AND ep.lead_id = l.id
@@ -6956,21 +7270,31 @@ func (r *ParticipantRepository) BulkAdd(ctx context.Context, eventID uuid.UUID, 
 func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.UUID, search, statusFilter string, tagIDs []uuid.UUID, hasPhone *bool) ([]*domain.EventParticipant, error) {
 	useDistinct := len(tagIDs) > 0
 	selectClause := `SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-		COALESCE(NULLIF(BTRIM(c.custom_name),''), NULLIF(BTRIM(c.name),''), NULLIF(BTRIM(c.push_name),''), p.name),
-		COALESCE(c.last_name,p.last_name), COALESCE(c.short_name,p.short_name), COALESCE(c.phone,p.phone), COALESCE(c.email,p.email), COALESCE(c.age,p.age),
-		COALESCE(c.company,p.company), COALESCE(c.dni,p.dni), COALESCE(c.birth_date,p.birth_date), COALESCE(c.address,p.address), COALESCE(c.distrito,p.distrito), COALESCE(c.ocupacion,p.ocupacion),
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.name ELSE COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid,'') END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.last_name ELSE c.last_name END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.short_name ELSE c.short_name END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.phone ELSE c.phone END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.email ELSE c.email END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.age ELSE c.age END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.company ELSE c.company END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.dni ELSE c.dni END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.birth_date ELSE c.birth_date END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.address ELSE c.address END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.distrito ELSE c.distrito END,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.ocupacion ELSE c.ocupacion END,
 		p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.auto_tag_sync, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at, p.created_at, p.updated_at,
 		eps.name AS stage_name, eps.color AS stage_color, l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, ps.name AS lead_stage_name, ps.color AS lead_stage_color,
-		COALESCE(l.is_archived, false) AS is_archived, COALESCE(c.do_not_contact, false) AS is_blocked`
+		COALESCE(l.is_archived,false) AS is_archived,
+		CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(c.do_not_contact,false) END AS is_blocked`
 	if useDistinct {
 		selectClause = strings.Replace(selectClause, "SELECT ", "SELECT DISTINCT ", 1)
 	}
-	query := selectClause + ` FROM event_participants p LEFT JOIN contacts c ON c.id = p.contact_id LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id LEFT JOIN leads l ON l.id = p.lead_id LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id`
+	query := selectClause + ` FROM event_participants p JOIN events e ON e.id=p.event_id LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=e.account_id LEFT JOIN contacts c ON c.id=COALESCE(p.contact_id,l.contact_id) AND c.account_id=e.account_id LEFT JOIN event_pipeline_stages eps ON eps.id=p.stage_id AND eps.pipeline_id=e.pipeline_id LEFT JOIN pipeline_stages ps ON ps.id=l.stage_id AND ps.pipeline_id=l.pipeline_id`
 	args := []interface{}{eventID}
 	argNum := 2
 
 	if useDistinct {
-		query += ` JOIN contact_tags ct ON ct.contact_id = p.contact_id`
+		query += ` JOIN contact_tags ct ON ct.contact_id=COALESCE(p.contact_id,l.contact_id)`
 	}
 	query += ` WHERE p.event_id = $1 AND p.membership_state='active'`
 
@@ -6985,7 +7309,12 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 		argNum++
 	}
 	if search != "" {
-		query += fmt.Sprintf(" AND (COALESCE(c.custom_name,c.name,c.push_name,p.name,'') ILIKE $%d OR COALESCE(c.last_name,p.last_name,'') ILIKE $%d OR COALESCE(c.phone,p.phone,'') ILIKE $%d OR COALESCE(c.email,p.email,'') ILIKE $%d)", argNum, argNum, argNum, argNum)
+		query += fmt.Sprintf(` AND (
+			CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ILIKE $%d
+			OR CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.last_name,'') ELSE COALESCE(c.last_name,'') END ILIKE $%d
+			OR CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.phone,'') ELSE COALESCE(c.phone,'') END ILIKE $%d
+			OR CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.email,'') ELSE COALESCE(c.email,'') END ILIKE $%d
+		)`, argNum, argNum, argNum, argNum)
 		args = append(args, "%"+search+"%")
 		argNum++
 	}
@@ -7002,9 +7331,9 @@ func (r *ParticipantRepository) GetByEventID(ctx context.Context, eventID uuid.U
 		query += fmt.Sprintf(" AND ct.tag_id IN (%s)", placeholders)
 	}
 	if hasPhone != nil && *hasPhone {
-		query += " AND NULLIF(BTRIM(COALESCE(c.phone,p.phone,'')),'') IS NOT NULL"
+		query += " AND NULLIF(BTRIM(CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.phone,'') ELSE COALESCE(c.phone,'') END),'') IS NOT NULL"
 	}
-	query += " ORDER BY p.next_action_date ASC NULLS LAST, COALESCE(c.custom_name,c.name,c.push_name,p.name) ASC"
+	query += " ORDER BY p.next_action_date ASC NULLS LAST, CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.name ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ASC"
 
 	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
@@ -7057,11 +7386,23 @@ func (r *ParticipantRepository) GetByID(ctx context.Context, id uuid.UUID) (*dom
 	p := &domain.EventParticipant{}
 	err := r.db.QueryRow(ctx, `
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-		       COALESCE(NULLIF(BTRIM(c.custom_name),''), NULLIF(BTRIM(c.name),''), NULLIF(BTRIM(c.push_name),''), p.name),
-		       COALESCE(c.last_name,p.last_name), COALESCE(c.short_name,p.short_name), COALESCE(c.phone,p.phone), COALESCE(c.email,p.email), COALESCE(c.age,p.age),
-		       COALESCE(c.company,p.company), COALESCE(c.dni,p.dni), COALESCE(c.birth_date,p.birth_date), COALESCE(c.address,p.address), COALESCE(c.distrito,p.distrito), COALESCE(c.ocupacion,p.ocupacion),
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.name ELSE COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid,'') END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.last_name ELSE c.last_name END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.short_name ELSE c.short_name END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.phone ELSE c.phone END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.email ELSE c.email END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.age ELSE c.age END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.company ELSE c.company END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.dni ELSE c.dni END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.birth_date ELSE c.birth_date END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.address ELSE c.address END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.distrito ELSE c.distrito END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.ocupacion ELSE c.ocupacion END,
 		       p.status, p.notes, p.next_action, p.next_action_date, p.invited_at, p.confirmed_at, p.attended_at, p.auto_tag_sync, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at, p.created_at, p.updated_at
-		FROM event_participants p LEFT JOIN contacts c ON c.id=p.contact_id
+		FROM event_participants p
+		JOIN events e ON e.id=p.event_id
+		LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=e.account_id
+		LEFT JOIN contacts c ON c.id=COALESCE(p.contact_id,l.contact_id) AND c.account_id=e.account_id
 		WHERE p.id = $1
 	`, id).Scan(&p.ID, &p.EventID, &p.ContactID, &p.LeadID, &p.StageID, &p.Name, &p.LastName, &p.ShortName, &p.Phone, &p.Email, &p.Age, &p.Company, &p.DNI, &p.BirthDate, &p.Address, &p.Distrito, &p.Ocupacion, &p.Status, &p.Notes, &p.NextAction, &p.NextActionDate, &p.InvitedAt, &p.ConfirmedAt, &p.AttendedAt, &p.AutoTagSync, &p.MembershipState, &p.MembershipReason, &p.MembershipSource, &p.MembershipChangedAt, &p.CreatedAt, &p.UpdatedAt)
 	if err == pgx.ErrNoRows {
@@ -7256,6 +7597,16 @@ func (r *ParticipantRepository) Update(ctx context.Context, expectedAccountID uu
 		return err
 	}
 	if contactID != nil && len(p.PersonalFieldChanges) > 0 {
+		if p.PersonalFieldChanges["phone"] && p.Phone != nil {
+			normalized, err := normalizeContactProfilePhone(*p.Phone)
+			if err != nil {
+				return err
+			}
+			p.Phone = &normalized
+			if err := ensureContactProfilePhoneOwnershipTx(ctx, tx, accountID, *contactID, []string{normalized}); err != nil {
+				return err
+			}
+		}
 		result, err := tx.Exec(ctx, `
 			UPDATE contacts SET
 				custom_name=CASE WHEN $15 THEN NULLIF(BTRIM($1),'') ELSE custom_name END,
@@ -7286,8 +7637,16 @@ func (r *ParticipantRepository) Update(ctx context.Context, expectedAccountID uu
 			return fmt.Errorf("participant contact does not belong to event account")
 		}
 		if _, err := tx.Exec(ctx, `
+			UPDATE leads SET
+				name=NULL,last_name=NULL,short_name=NULL,phone=NULL,email=NULL,company=NULL,age=NULL,
+				dni=NULL,birth_date=NULL,address=NULL,distrito=NULL,ocupacion=NULL,updated_at=NOW()
+			WHERE account_id=$1 AND contact_id=$2
+		`, accountID, *contactID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
 			UPDATE event_participants ep SET
-				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),ep.name),
+				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid),
 				last_name=c.last_name, short_name=c.short_name, phone=c.phone, email=c.email, age=c.age,
 				company=c.company, dni=c.dni, birth_date=c.birth_date, address=c.address, distrito=c.distrito, ocupacion=c.ocupacion,
 				updated_at=NOW()
@@ -7297,8 +7656,8 @@ func (r *ParticipantRepository) Update(ctx context.Context, expectedAccountID uu
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE campaign_recipients cr SET
-				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),cr.name),
-				phone=c.phone
+				name=COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid),
+				phone=c.phone,jid=c.jid
 			FROM contacts c WHERE cr.contact_id=c.id AND c.id=$1 AND c.account_id=$2
 		`, *contactID, accountID); err != nil {
 			return err
@@ -7307,19 +7666,11 @@ func (r *ParticipantRepository) Update(ctx context.Context, expectedAccountID uu
 	return tx.Commit(ctx)
 }
 
-// SyncToContact propagates shared participant fields back to the linked contact
+// SyncToContact remains for compatibility with older service callers. Contact
+// is the source of truth and updates must carry explicit field-presence data to
+// Participant.Update, so an implicit full-profile write here would be unsafe.
 func (r *ParticipantRepository) SyncToContact(ctx context.Context, p *domain.EventParticipant) error {
-	if p.ContactID == nil {
-		return nil
-	}
-	_, err := r.db.Exec(ctx, `
-		UPDATE contacts SET
-			custom_name = COALESCE($1, custom_name), name = COALESCE($1, name), last_name = $2, short_name = $3, phone = COALESCE($4, phone), email = $5, age = $6,
-			company = $7, dni = $8, birth_date = $9, address = $10, distrito = $11, ocupacion = $12,
-			updated_at = NOW()
-		WHERE id = $13
-	`, p.Name, p.LastName, p.ShortName, p.Phone, p.Email, p.Age, p.Company, p.DNI, p.BirthDate, p.Address, p.Distrito, p.Ocupacion, *p.ContactID)
-	return err
+	return nil
 }
 
 func (r *ParticipantRepository) LinkContact(ctx context.Context, accountID, eventID, participantID, contactID uuid.UUID) error {
@@ -7357,13 +7708,18 @@ func (r *ParticipantRepository) GetUpcomingActions(ctx context.Context, accountI
 	}
 	rows, err := r.db.Query(ctx, `
 		SELECT ep.id, ep.event_id, ep.contact_id, ep.lead_id, ep.stage_id,
-		       COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),ep.name),
-		       COALESCE(c.last_name,ep.last_name), COALESCE(c.short_name,ep.short_name), COALESCE(c.phone,ep.phone), COALESCE(c.email,ep.email), COALESCE(c.age,ep.age),
+		       CASE WHEN COALESCE(ep.contact_id,l.contact_id) IS NULL THEN ep.name ELSE COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid,'') END,
+		       CASE WHEN COALESCE(ep.contact_id,l.contact_id) IS NULL THEN ep.last_name ELSE c.last_name END,
+		       CASE WHEN COALESCE(ep.contact_id,l.contact_id) IS NULL THEN ep.short_name ELSE c.short_name END,
+		       CASE WHEN COALESCE(ep.contact_id,l.contact_id) IS NULL THEN ep.phone ELSE c.phone END,
+		       CASE WHEN COALESCE(ep.contact_id,l.contact_id) IS NULL THEN ep.email ELSE c.email END,
+		       CASE WHEN COALESCE(ep.contact_id,l.contact_id) IS NULL THEN ep.age ELSE c.age END,
 		       ep.status, ep.notes, ep.next_action, ep.next_action_date, ep.invited_at, ep.confirmed_at, ep.attended_at,
 		       ep.auto_tag_sync, ep.membership_state, ep.membership_reason, ep.membership_source, ep.membership_changed_at, ep.created_at, ep.updated_at
 		FROM event_participants ep
 		JOIN events e ON e.id = ep.event_id
-		LEFT JOIN contacts c ON c.id=ep.contact_id AND c.account_id=e.account_id
+		LEFT JOIN leads l ON l.id=ep.lead_id AND l.account_id=e.account_id
+		LEFT JOIN contacts c ON c.id=COALESCE(ep.contact_id,l.contact_id) AND c.account_id=e.account_id
 		WHERE e.account_id = $1 AND ep.membership_state='active' AND ep.next_action_date IS NOT NULL AND ep.status NOT IN ('attended','no_show','declined')
 		ORDER BY ep.next_action_date ASC
 		LIMIT $2

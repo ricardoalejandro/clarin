@@ -95,12 +95,12 @@ func TestBuildOperationalLeadNeverReviewedSQLIsScopedAndParameterized(t *testing
 
 	checks := []string{
 		"l.account_id = $1",
-		"JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id",
+		"LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id",
 		"NOT EXISTS (SELECT 1 FROM chats",
 		"NOT EXISTS (SELECT 1 FROM interactions",
 		"filter_i.type = ANY(",
 		"l.is_archived =",
-		"COALESCE(c.do_not_contact, false) =",
+		"CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(c.do_not_contact,false) END =",
 		"l.deleted_at IS NULL",
 		"ORDER BY l.created_at DESC, l.id DESC",
 	}
@@ -111,6 +111,9 @@ func TestBuildOperationalLeadNeverReviewedSQLIsScopedAndParameterized(t *testing
 	}
 	if strings.Contains(query, "IQUITOS") || strings.Contains(query, "note,call") {
 		t.Fatalf("filter values were interpolated into SQL: %s", query)
+	}
+	if strings.Contains(query, "COALESCE(c.do_not_contact,l.is_blocked)") || strings.Contains(query, "COALESCE(c.do_not_contact, l.is_blocked)") {
+		t.Fatalf("linked Contact suppression falls through to a stale Lead snapshot: %s", query)
 	}
 	if len(args) < 7 || args[0] != accountID {
 		t.Fatalf("unexpected args: %#v", args)

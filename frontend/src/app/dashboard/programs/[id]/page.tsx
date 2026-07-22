@@ -6,25 +6,29 @@ import { useParams, useRouter } from 'next/navigation';
 import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
-  Repeat, ChevronRight, ChevronDown, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid, HeartPulse, Target, NotebookPen, Maximize2, Minimize2, Search
+  Repeat, ChevronRight, ChevronDown, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid, HeartPulse, Target, NotebookPen, Maximize2, Minimize2, Search, FileSpreadsheet, Loader2, BookOpen, UserPlus, ClipboardList
 } from 'lucide-react';
-import { api } from '@/lib/api';
+import { api, subscribeWebSocket } from '@/lib/api';
+import { contactIdFromRealtimeEvent } from '@/lib/contactProfileEvents';
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher';
-import { Program, ProgramParticipant, ProgramSession, ProgramAttendance, ProgramGoal, ProgramHealthSummary, ProgramAttendanceStatsResponse } from '@/types/program';
+import { Program, ProgramParticipant, ProgramSession, ProgramSessionTopic, ProgramAttendance, ProgramAttendanceObservation, ProgramGoal, ProgramHealthSummary, ProgramAttendanceStatsResponse, ProgramAcademicConfig } from '@/types/program';
 import { Chat } from '@/types/chat';
-import { Contact } from '@/types/contact';
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector';
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal';
-import LeadDetailPanel from '@/components/LeadDetailPanel';
 import ChatPanel from '@/components/chat/ChatPanel';
 import ObservationHistoryModal, { HistoryObservation } from '@/components/ObservationHistoryModal';
 import ContactPhotoPreview from '@/components/ContactPhotoPreview';
-import type { ContactAvatarInfo } from '@/components/ContactAvatarControl';
+import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface';
+import ProgramParticipantAttendanceSection from '@/components/programs/ProgramParticipantAttendanceSection';
+import ProgramParticipantEnrollmentDate from '@/components/programs/ProgramParticipantEnrollmentDate';
+import type { ContactProfileContact, ContactProfileResponse } from '@/types/contact-profile';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { calendarDateKey, formatCalendarDate, localDateInputValue } from '@/utils/calendarDate';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
-import ProgramParticipantMobileDetail from '@/components/ProgramParticipantMobileDetail';
+import ProgramAcademicConfigPanel from '@/components/programs/ProgramAcademicConfigPanel';
+import ProgramSurveyPanel from '@/components/programs/ProgramSurveyPanel';
+import SessionTopicField, { normalizedSessionTopics, pendingActiveCourseTopics } from '@/components/programs/SessionTopicField';
 
 const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : '';
 
@@ -40,8 +44,22 @@ interface Device {
   matches_historical?: boolean;
 }
 
+interface SessionFormState {
+  title: string;
+  date: string;
+  topics: ProgramSessionTopic[];
+  session_type: string;
+  start_time: string;
+  end_time: string;
+  location: string;
+}
+
 const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 const DAY_NAMES_FULL = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+const MAX_GENERATED_SESSIONS = 500;
+const MAX_SCHEDULE_RANGE_DAYS = 732;
+type ProgramDetailTab = 'health' | 'participants' | 'sessions' | 'stats' | 'kanban' | 'academic' | 'surveys';
+type ParticipantLifecycleView = 'active' | 'history';
 
 const normalizeParticipantSearch = (value: string) => value
   .normalize('NFD')
@@ -49,41 +67,93 @@ const normalizeParticipantSearch = (value: string) => value
   .toLocaleLowerCase('es')
   .trim();
 
-const contactToLead = (c: Contact) => ({
-  id: c.id,
-  jid: c.jid || '',
-  contact_id: c.id,
-  name: c.custom_name ?? c.name ?? '',
-  last_name: c.last_name ?? null,
-  short_name: c.short_name ?? null,
-  phone: c.phone ?? '',
-  email: c.email ?? '',
-  company: c.company ?? null,
-  age: c.age ?? null,
-  dni: c.dni ?? null,
-  birth_date: c.birth_date ?? null,
-  address: c.address ?? null,
-  distrito: c.distrito ?? null,
-  ocupacion: c.ocupacion ?? null,
-  status: 'new',
-  pipeline_id: null,
-  stage_id: null,
-  stage_name: null,
-  stage_color: null,
-  stage_position: null,
-  notes: c.notes ?? '',
-  tags: c.tags || [],
-  structured_tags: c.structured_tags || null,
-  kommo_id: c.kommo_id ?? null,
-  is_archived: false,
-  archived_at: null,
-  is_blocked: false,
-  blocked_at: null,
-  block_reason: '',
-  assigned_to: '',
-  created_at: c.created_at || '',
-  updated_at: c.updated_at || '',
-}) as any;
+const suggestedSessionTitle = (topics: ProgramSessionTopic[]) => topics[0]?.title?.trim() || '';
+
+const sessionDisplayTitle = (session: ProgramSession, fallback: string) =>
+  session.title?.trim() || session.topic?.trim() || suggestedSessionTitle(normalizedSessionTopics(session)) || fallback;
+
+const participantBelongsToSession = (participant: ProgramParticipant, session: ProgramSession) => {
+  const sessionDate = calendarDateKey(session.date);
+  const enrolledAt = calendarDateKey(participant.enrolled_at);
+  if (!sessionDate || !enrolledAt || sessionDate < enrolledAt) return false;
+  const endDates = [participant.dropped_at, participant.completed_at]
+    .map(calendarDateKey)
+    .filter(Boolean)
+    .sort();
+  return endDates.length === 0 || sessionDate <= endDates[0];
+};
+
+function ProgramParticipantHistoryList({
+  participants,
+  searching,
+  compact,
+  onOpen,
+}: {
+  participants: ProgramParticipant[];
+  searching: boolean;
+  compact: boolean;
+  onOpen: (participant: ProgramParticipant, trigger?: HTMLElement | null) => void;
+}) {
+  if (participants.length === 0) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white px-5 py-14 text-center">
+        <Archive className="mx-auto h-10 w-10 text-slate-300" />
+        <p className="mt-3 font-semibold text-slate-600">{searching ? 'Sin coincidencias en el historial' : 'El historial está vacío'}</p>
+        <p className="mt-1 text-xs leading-5 text-slate-400">{searching ? 'Prueba con otro nombre o teléfono.' : 'Los participantes retirados o que completaron el programa aparecerán aquí.'}</p>
+      </div>
+    );
+  }
+
+  if (compact) {
+    return (
+      <div className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white">
+        {participants.map(participant => {
+          const endedAt = participant.status === 'dropped' ? participant.dropped_at : participant.completed_at;
+          return (
+            <button key={participant.id} type="button" data-testid="mobile-program-participant-history-row" onClick={event => onOpen(participant, event.currentTarget)} className="flex min-h-[78px] w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500">
+              <ContactPhotoPreview url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} sizeClassName="h-11 w-11" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-semibold text-slate-800">{participant.contact_name || 'Sin nombre'}</span>
+                <span className="block truncate text-xs text-slate-400">{participant.contact_phone || 'Sin teléfono'}</span>
+                <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px]">
+                  <span className={`shrink-0 rounded-full px-2 py-0.5 font-semibold ${participant.status === 'completed' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>{participant.status === 'completed' ? 'Completado' : 'Retirado'}</span>
+                  {endedAt && <span className="truncate text-slate-400">{formatCalendarDate(endedAt, 'dd MMM yyyy', { locale: es })}</span>}
+                </span>
+                {participant.status === 'dropped' && participant.drop_reason && <span className="mt-1 block truncate text-xs text-slate-500">{participant.drop_reason}</span>}
+              </span>
+              <ChevronRight className="h-4 w-4 shrink-0 text-slate-300" />
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div className="border-b border-slate-100 px-4 py-3"><h3 className="text-sm font-semibold text-slate-800">Historial de participación</h3><p className="mt-0.5 text-xs text-slate-500">Conserva asistencia y observaciones sin afectar el padrón activo.</p></div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 text-slate-600"><tr><th className="px-4 py-3 font-medium">Participante</th><th className="px-4 py-3 font-medium">Resultado</th><th className="px-4 py-3 font-medium">Periodo</th><th className="px-4 py-3 font-medium">Motivo</th><th className="px-4 py-3" /></tr></thead>
+          <tbody className="divide-y divide-slate-100">
+            {participants.map(participant => {
+              const endedAt = participant.status === 'dropped' ? participant.dropped_at : participant.completed_at;
+              return (
+                <tr key={participant.id} onClick={() => onOpen(participant)} className="cursor-pointer transition-colors hover:bg-slate-50">
+                  <td className="px-4 py-3"><div className="flex items-center gap-3"><ContactPhotoPreview url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} /><div className="min-w-0"><p className="truncate font-medium text-slate-800">{participant.contact_name || 'Sin nombre'}</p><p className="truncate text-xs text-slate-400">{participant.contact_phone || 'Sin teléfono'}</p></div></div></td>
+                  <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${participant.status === 'completed' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>{participant.status === 'completed' ? 'Completado' : 'Retirado'}</span></td>
+                  <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">{formatCalendarDate(participant.enrolled_at, 'dd MMM yyyy', { locale: es })} — {endedAt ? formatCalendarDate(endedAt, 'dd MMM yyyy', { locale: es }) : '—'}</td>
+                  <td className="max-w-64 truncate px-4 py-3 text-xs text-slate-500">{participant.drop_reason || '—'}</td>
+                  <td className="px-4 py-3 text-right"><ChevronRight className="ml-auto h-4 w-4 text-slate-300" /></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 export default function ProgramDetailPage() {
   const params = useParams();
@@ -99,14 +169,25 @@ export default function ProgramDetailPage() {
   const [program, setProgram] = useState<Program | null>(null);
   const [participants, setParticipants] = useState<ProgramParticipant[]>([]);
   const [sessions, setSessions] = useState<ProgramSession[]>([]);
+  const [academicConfig, setAcademicConfig] = useState<ProgramAcademicConfig | null>(null);
+  const [academicLoading, setAcademicLoading] = useState(false);
+  const [academicError, setAcademicError] = useState('');
+  const [academicDirty, setAcademicDirty] = useState(false);
+  const academicRequestRef = useRef<AbortController | null>(null);
+  const academicRequestSequence = useRef(0);
   const [stages, setStages] = useState<Array<{ id: string; name: string; color: string; position: number }>>([]);
   const [draggedParticipantID, setDraggedParticipantID] = useState<string | null>(null);
   const [dragOverStageID, setDragOverStageID] = useState<string | null>(null);
   const [movingStageParticipantIDs, setMovingStageParticipantIDs] = useState<Set<string>>(() => new Set());
-  const [activeTab, setActiveTab] = useState<'health' | 'participants' | 'sessions' | 'stats' | 'kanban'>('health');
+  const [activeTab, setActiveTab] = useState<ProgramDetailTab>('health');
+  const [canUseSurveys, setCanUseSurveys] = useState(false);
   const [healthSummaryExpanded, setHealthSummaryExpanded] = useState(false);
   const [showSectionPicker, setShowSectionPicker] = useState(false);
   const [participantSearch, setParticipantSearch] = useState('');
+  const [debouncedParticipantSearch, setDebouncedParticipantSearch] = useState('');
+  const [participantLifecycleView, setParticipantLifecycleView] = useState<ParticipantLifecycleView>('active');
+  const [participantSearchFocused, setParticipantSearchFocused] = useState(false);
+  const [exportingParticipants, setExportingParticipants] = useState(false);
   const [loading, setLoading] = useState(true);
   const [detailError, setDetailError] = useState('');
   const [programNotFound, setProgramNotFound] = useState(false);
@@ -114,6 +195,29 @@ export default function ProgramDetailPage() {
   const programDataRequestSequence = useRef(0);
   const programSnapshotRef = useRef(false);
   const [devices, setDevices] = useState<Device[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const loadPermissions = async () => {
+      try {
+        const response = await fetch('/api/me', { credentials: 'include', signal: controller.signal });
+        if (!response.ok) return;
+        const payload = await response.json();
+        const user = payload?.user;
+        const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
+        const allowed = Boolean(user?.is_admin || user?.is_super_admin || permissions.includes('*') || permissions.includes('surveys'));
+        setCanUseSurveys(allowed);
+      } catch {
+        if (!controller.signal.aborted) setCanUseSurveys(false);
+      }
+    };
+    void loadPermissions();
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!canUseSurveys && activeTab === 'surveys') setActiveTab('health');
+  }, [activeTab, canUseSurveys]);
 
   // Modals state
   const [isAddParticipantOpen, setIsAddParticipantOpen] = useState(false);
@@ -126,15 +230,29 @@ export default function ProgramDetailPage() {
   const [participantSelectorRevision, setParticipantSelectorRevision] = useState(0);
 
   // Form state
-  const [newSession, setNewSession] = useState({ date: localDateInputValue(), topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
+  const [newSession, setNewSession] = useState<SessionFormState>({ title: '', date: localDateInputValue(), topics: [], session_type: 'regular', start_time: '', end_time: '', location: '' });
+  const [newSessionTitleEdited, setNewSessionTitleEdited] = useState(false);
   const [selectedSession, setSelectedSession] = useState<ProgramSession | null>(null);
-  const [attendanceData, setAttendanceData] = useState<Record<string, { status: string, notes: string }>>({});
+  const [attendanceData, setAttendanceData] = useState<Record<string, { status: string; observation_count: number; observation_preview: ProgramAttendanceObservation[] }>>({});
   const [attendanceDirty, setAttendanceDirty] = useState<Record<string, boolean>>({});
+  const [attendanceLoadState, setAttendanceLoadState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [attendanceLoadError, setAttendanceLoadError] = useState('');
+  const attendanceRequestRef = useRef<AbortController | null>(null);
+  const attendanceRequestSequence = useRef(0);
   const [savingAttendance, setSavingAttendance] = useState(false);
+  const [attendanceObservationParticipant, setAttendanceObservationParticipant] = useState<ProgramParticipant | null>(null);
+  const [attendanceObservationHistory, setAttendanceObservationHistory] = useState<HistoryObservation[]>([]);
+  const [attendanceObservationLoading, setAttendanceObservationLoading] = useState(false);
+  const [attendanceObservationError, setAttendanceObservationError] = useState('');
+  const [attendanceObservationComposerOpen, setAttendanceObservationComposerOpen] = useState(false);
+  const attendanceObservationRequestRef = useRef<AbortController | null>(null);
+  const attendanceObservationRequestSequence = useRef(0);
 
   // Edit session state
   const [editingSession, setEditingSession] = useState<ProgramSession | null>(null);
-  const [editSessionForm, setEditSessionForm] = useState({ date: '', topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
+  const [editSessionForm, setEditSessionForm] = useState<SessionFormState>({ title: '', date: '', topics: [], session_type: 'regular', start_time: '', end_time: '', location: '' });
+  const [editSessionTitleEdited, setEditSessionTitleEdited] = useState(false);
+  const [creatingSession, setCreatingSession] = useState(false);
   const [savingSession, setSavingSession] = useState(false);
   const [maximizedSessionDialog, setMaximizedSessionDialog] = useState<'create' | 'edit' | 'recurring' | null>(null);
 
@@ -155,10 +273,8 @@ export default function ProgramDetailPage() {
   const [showHeaderMenu, setShowHeaderMenu] = useState(false);
 
   // Participant detail panel
-  const [selectedLead, setSelectedLead] = useState<any | null>(null);
   const [loadingLead, setLoadingLead] = useState(false);
-  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
-  const [contactPanelMode, setContactPanelMode] = useState(false);
+  const [selectedContact, setSelectedContact] = useState<ContactProfileContact | null>(null);
   const [selectedParticipantID, setSelectedParticipantID] = useState<string | null>(null);
   const [participantDetailOpen, setParticipantDetailOpen] = useState(false);
   const [participantDetailError, setParticipantDetailError] = useState('');
@@ -166,6 +282,8 @@ export default function ProgramDetailPage() {
   const participantDetailSequence = useRef(0);
   const participantDetailDialogRef = useRef<HTMLDivElement>(null);
   const participantDetailReturnFocusRef = useRef<HTMLElement | null>(null);
+  const participantContextByContactRef = useRef(new Map<string, string>());
+  const contactRefreshSequenceRef = useRef(new Map<string, number>());
 
   // Column visibility (persisted in localStorage)
   const PARTICIPANT_COLUMNS: { id: string; label: string; always?: boolean }[] = [
@@ -246,8 +364,9 @@ export default function ProgramDetailPage() {
     days_of_week: [] as number[],
     start_time: '09:00',
     end_time: '10:00',
-    topic_prefix: 'Sesión',
+    title_prefix: 'Sesión',
     location: '',
+    assign_course_topics: false,
   });
   const [generating, setGenerating] = useState(false);
 
@@ -268,31 +387,101 @@ export default function ProgramDetailPage() {
   const [observationHistoryLoading, setObservationHistoryLoading] = useState(false);
   const [observationHistoryError, setObservationHistoryError] = useState('');
   const [observationComposerInitiallyOpen, setObservationComposerInitiallyOpen] = useState(false);
+  const observationHistoryRequestRef = useRef<AbortController | null>(null);
+  const observationHistoryRequestSequence = useRef(0);
   const [outcomeParticipant, setOutcomeParticipant] = useState<ProgramParticipant | null>(null);
   const [outcomeForm, setOutcomeForm] = useState({ status: 'completed', transferred_to_level: '', drop_reason: '', drop_notes: '' });
+  const [savingOutcome, setSavingOutcome] = useState(false);
 
   const normalizedParticipantQuery = useMemo(
-    () => normalizeParticipantSearch(participantSearch),
-    [participantSearch],
+    () => normalizeParticipantSearch(debouncedParticipantSearch),
+    [debouncedParticipantSearch],
   );
+  const participantSearchPending = participantSearch !== debouncedParticipantSearch;
+  const participantExportCollapsed = mobileWorkspace && !exportingParticipants && (participantSearchFocused || participantSearchPending);
+  const activeParticipants = useMemo(() => participants.filter(participant => participant.status === 'active'), [participants]);
+  const historicalParticipants = useMemo(() => participants.filter(participant => participant.status !== 'active'), [participants]);
+  const lifecycleParticipants = participantLifecycleView === 'active' ? activeParticipants : historicalParticipants;
   const filteredHealthParticipants = useMemo(() => {
     const source = health?.participants || [];
     if (!normalizedParticipantQuery) return source;
     return source.filter(participant => normalizeParticipantSearch(`${participant.name || ''} ${participant.phone || ''}`).includes(normalizedParticipantQuery));
   }, [health?.participants, normalizedParticipantQuery]);
   const filteredProgramParticipants = useMemo(() => {
-    if (!normalizedParticipantQuery) return participants;
-    return participants.filter(participant => normalizeParticipantSearch(`${participant.contact_name || ''} ${participant.contact_phone || ''}`).includes(normalizedParticipantQuery));
-  }, [normalizedParticipantQuery, participants]);
+    if (!normalizedParticipantQuery) return lifecycleParticipants;
+    return lifecycleParticipants.filter(participant => normalizeParticipantSearch(`${participant.contact_name || ''} ${participant.contact_phone || ''}`).includes(normalizedParticipantQuery));
+  }, [lifecycleParticipants, normalizedParticipantQuery]);
+  const eligibleAttendanceParticipants = useMemo(
+    () => selectedSession ? participants.filter(participant => participantBelongsToSession(participant, selectedSession)) : [],
+    [participants, selectedSession],
+  );
+  const pendingCourseTopics = useMemo(
+    () => pendingActiveCourseTopics(academicConfig?.courses || [], sessions),
+    [academicConfig?.courses, sessions],
+  );
+
+  const handleExportParticipants = async () => {
+    if (!program || exportingParticipants) return;
+    setExportingParticipants(true);
+    try {
+      const { exportProgramParticipants } = await import('@/utils/programParticipantsExport');
+      exportProgramParticipants(program, filteredProgramParticipants);
+      showToast(`Excel exportado con ${filteredProgramParticipants.length} participante${filteredProgramParticipants.length === 1 ? '' : 's'}`, 'success');
+    } catch (error) {
+      console.error('Error exporting program participants:', error);
+      showToast('No se pudo generar el archivo Excel.', 'error');
+    } finally {
+      setExportingParticipants(false);
+    }
+  };
+
+  const closeAttendanceModal = useCallback(() => {
+    attendanceRequestRef.current?.abort();
+    attendanceRequestRef.current = null;
+    attendanceRequestSequence.current += 1;
+    attendanceObservationRequestRef.current?.abort();
+    attendanceObservationRequestRef.current = null;
+    attendanceObservationRequestSequence.current += 1;
+    setIsAttendanceOpen(false);
+    setSelectedSession(null);
+    setAttendanceDirty({});
+    setAttendanceLoadState('idle');
+    setAttendanceLoadError('');
+    setAttendanceObservationParticipant(null);
+    setAttendanceObservationHistory([]);
+    setAttendanceObservationLoading(false);
+    setAttendanceObservationError('');
+    setAttendanceObservationComposerOpen(false);
+  }, []);
+
+  const closeAttendanceObservationHistory = useCallback(() => {
+    attendanceObservationRequestRef.current?.abort();
+    attendanceObservationRequestRef.current = null;
+    attendanceObservationRequestSequence.current += 1;
+    setAttendanceObservationParticipant(null);
+    setAttendanceObservationHistory([]);
+    setAttendanceObservationLoading(false);
+    setAttendanceObservationError('');
+    setAttendanceObservationComposerOpen(false);
+  }, []);
+
+  const closeObservationHistory = useCallback(() => {
+    observationHistoryRequestRef.current?.abort();
+    observationHistoryRequestRef.current = null;
+    observationHistoryRequestSequence.current += 1;
+    setObservationParticipant(null);
+    setObservationHistory([]);
+    setObservationHistoryLoading(false);
+    setObservationHistoryError('');
+    setObservationComposerInitiallyOpen(false);
+  }, []);
 
   const closeParticipantDetail = useCallback(() => {
     participantDetailRequestRef.current?.abort();
     participantDetailSequence.current += 1;
     setParticipantDetailOpen(false);
     setParticipantDetailError('');
-    setSelectedLead(null);
     setSelectedContact(null);
-    setContactPanelMode(false);
     setShowInlineChat(false);
     setSelectedParticipantID(null);
     const returnTarget = participantDetailReturnFocusRef.current;
@@ -306,6 +495,11 @@ export default function ProgramDetailPage() {
     const t = setTimeout(() => setToastMessage(null), 3000);
     return () => clearTimeout(t);
   }, [toastMessage]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedParticipantSearch(participantSearch), 500);
+    return () => window.clearTimeout(timer);
+  }, [participantSearch]);
 
   useEffect(() => {
     const media = window.matchMedia('(hover: none), (pointer: coarse)');
@@ -333,10 +527,6 @@ export default function ProgramDetailPage() {
     setHealthSummaryExpanded(false);
     setConfirmAction(null);
     setOutcomeParticipant(null);
-    setIsGenerateSessionsOpen(false);
-    setIsCreateSessionOpen(false);
-    setEditingSession(null);
-    setIsAddParticipantOpen(false);
     setIsEditModalOpen(false);
     setShowCampaignModal(false);
     setShowColumnPicker(false);
@@ -375,23 +565,140 @@ export default function ProgramDetailPage() {
     setToastType(type);
   };
 
+  const requestTabChange = useCallback((nextTab: ProgramDetailTab) => {
+    setShowSectionPicker(false);
+    if (nextTab === activeTab) return;
+    if (!academicDirty) {
+      setActiveTab(nextTab);
+      return;
+    }
+    setConfirmAction({
+      message: 'Hay cambios sin guardar en el plan o los instructores. Si cambias de sección, se perderán.',
+      onConfirm: () => {
+        setConfirmAction(null);
+        setAcademicDirty(false);
+        setActiveTab(nextTab);
+      },
+    });
+  }, [academicDirty, activeTab]);
+
+  const requestProgramNavigation = useCallback((destination: string) => {
+    if (!academicDirty) {
+      router.push(destination);
+      return;
+    }
+    setShowSectionPicker(false);
+    setConfirmAction({
+      message: 'Hay cambios sin guardar en el plan o los instructores. Si sales de esta página, se perderán.',
+      onConfirm: () => {
+        setConfirmAction(null);
+        setAcademicDirty(false);
+        router.push(destination);
+      },
+    });
+  }, [academicDirty, router]);
+
+  useEffect(() => {
+    if (!academicDirty) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [academicDirty]);
+
+  useEffect(() => {
+    if (!academicDirty) return;
+    const handleInternalNavigation = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const target = event.target;
+      const anchor = target instanceof Element ? target.closest<HTMLAnchorElement>('a[href]') : null;
+      if (!anchor || anchor.hasAttribute('download')) return;
+      const anchorTarget = anchor.getAttribute('target');
+      if (anchorTarget && anchorTarget !== '_self') return;
+      const url = new URL(anchor.href, window.location.href);
+      if (url.origin !== window.location.origin) return;
+      if (url.pathname === window.location.pathname && url.search === window.location.search) return;
+      event.preventDefault();
+      event.stopPropagation();
+      requestProgramNavigation(`${url.pathname}${url.search}${url.hash}`);
+    };
+    document.addEventListener('click', handleInternalNavigation, true);
+    return () => document.removeEventListener('click', handleInternalNavigation, true);
+  }, [academicDirty, requestProgramNavigation]);
+
+  const fetchAcademicData = useCallback(async () => {
+    if (!programId) return;
+    academicRequestRef.current?.abort();
+    const controller = new AbortController();
+    academicRequestRef.current = controller;
+    const requestID = ++academicRequestSequence.current;
+    setAcademicLoading(true);
+    setAcademicError('');
+    try {
+      const configResponse = await api<ProgramAcademicConfig>(`/api/programs/${programId}/academic-config`, { signal: controller.signal });
+      if (controller.signal.aborted || requestID !== academicRequestSequence.current) return;
+      if (configResponse.success && configResponse.data) setAcademicConfig(configResponse.data);
+      else setAcademicError(configResponse.error || 'No se pudo cargar el plan y los instructores.');
+    } catch (error) {
+      if (!controller.signal.aborted && requestID === academicRequestSequence.current) {
+        console.error('Error loading academic configuration:', error);
+        setAcademicError('No se pudo cargar el plan y los instructores.');
+      }
+    } finally {
+      if (!controller.signal.aborted && requestID === academicRequestSequence.current) setAcademicLoading(false);
+    }
+  }, [programId]);
+
   useEffect(() => {
     if (programId) {
       programDataRequestRef.current?.abort();
+      attendanceRequestRef.current?.abort();
+      attendanceRequestSequence.current += 1;
       programSnapshotRef.current = false;
       setProgram(null);
       setParticipants([]);
       setSessions([]);
+      setAcademicConfig(null);
+      setAcademicError('');
+      setAcademicDirty(false);
+      academicRequestRef.current?.abort();
       setStages([]);
       setParticipantSearch('');
+      setDebouncedParticipantSearch('');
+      setParticipantSearchFocused(false);
+      setIsAttendanceOpen(false);
+      setSelectedSession(null);
+      setAttendanceLoadState('idle');
+      setAttendanceLoadError('');
       setDetailError('');
       setProgramNotFound(false);
       setLoading(true);
       void fetchProgramData();
       void fetchDevices();
     }
-    return () => programDataRequestRef.current?.abort();
+    return () => {
+      programDataRequestRef.current?.abort();
+      academicRequestRef.current?.abort();
+      attendanceRequestRef.current?.abort();
+      attendanceObservationRequestRef.current?.abort();
+      observationHistoryRequestRef.current?.abort();
+    };
   }, [programId]);
+
+  useEffect(() => {
+    if (!program || program.type === 'event') {
+      academicRequestRef.current?.abort();
+      if (program?.type === 'event') {
+        setAcademicConfig(null);
+        setAcademicError('');
+      }
+      return;
+    }
+    void fetchAcademicData();
+    return () => academicRequestRef.current?.abort();
+  }, [fetchAcademicData, program?.id, program?.type]);
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -399,9 +706,15 @@ export default function ProgramDetailPage() {
       if (showSectionPicker) { setShowSectionPicker(false); return; }
       if (showDeviceSelector) { setShowDeviceSelector(false); return; }
       if (showInlineChat) { setShowInlineChat(false); return; }
-      if (observationParticipant) { setObservationParticipant(null); return; }
+      if (attendanceObservationParticipant) { closeAttendanceObservationHistory(); return; }
+      if (observationParticipant) { closeObservationHistory(); return; }
       if (outcomeParticipant) { setOutcomeParticipant(null); return; }
-      if (isAttendanceOpen) { setIsAttendanceOpen(false); return; }
+      if (isAttendanceOpen) {
+        if (Object.keys(attendanceDirty).length > 0) {
+          setConfirmAction({ message: 'Hay cambios de asistencia sin guardar. ¿Deseas descartarlos?', onConfirm: () => { setConfirmAction(null); closeAttendanceModal(); } });
+        } else closeAttendanceModal();
+        return;
+      }
       if (isGenerateSessionsOpen) { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); return; }
       if (isCreateSessionOpen) { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); return; }
       if (editingSession) { setEditingSession(null); setMaximizedSessionDialog(null); return; }
@@ -412,7 +725,7 @@ export default function ProgramDetailPage() {
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [showSectionPicker, showDeviceSelector, showInlineChat, observationParticipant, outcomeParticipant, isAttendanceOpen, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail]);
+  }, [showSectionPicker, showDeviceSelector, showInlineChat, attendanceObservationParticipant, observationParticipant, outcomeParticipant, isAttendanceOpen, attendanceDirty, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory]);
 
   const fetchProgramData = async () => {
     programDataRequestRef.current?.abort();
@@ -450,10 +763,19 @@ export default function ProgramDetailPage() {
       return;
     }
 
-    const participantsAvailable = partsRes.success && Array.isArray(partsRes.data);
-    // Older backends serialize a nil Go slice as JSON null when a program has
-    // no sessions. Treat that successful empty response as [] while the API
-    // boundary also guarantees arrays for new responses.
+    // Legacy event-shaped Programs are preserved as an auditable source, but
+    // their operational home is now the complete Events module. Redirect only
+    // after the lossless migration has produced a verified destination.
+    if (nextProgram.event_retirement_status === 'migrated' && nextProgram.migrated_event_id) {
+      programSnapshotRef.current = false;
+      setLoading(true);
+      router.replace(`/dashboard/events/${nextProgram.migrated_event_id}`);
+      return;
+    }
+
+    // Older backends serialize nil Go slices as JSON null for empty programs.
+    // Treat successful null responses as empty arrays at the UI boundary.
+    const participantsAvailable = partsRes.success && (partsRes.data == null || Array.isArray(partsRes.data));
     const sessionsAvailable = sessRes.success && (sessRes.data == null || Array.isArray(sessRes.data));
     const healthAvailable = healthRes.success && healthRes.data?.success && !!healthRes.data.health;
     const goalsAvailable = goalsRes.success && goalsRes.data?.success && !!goalsRes.data.goals;
@@ -483,7 +805,7 @@ export default function ProgramDetailPage() {
     }
 
     setProgram(nextProgram);
-    if (participantsAvailable) setParticipants(partsRes.data as ProgramParticipant[]);
+    if (participantsAvailable) setParticipants(Array.isArray(partsRes.data) ? partsRes.data : []);
     if (sessionsAvailable) setSessions(Array.isArray(sessRes.data) ? sessRes.data : []);
     if (healthAvailable) setHealth(healthRes.data!.health);
     if (goalsAvailable) setProgramGoals(goalsRes.data!.goals);
@@ -492,7 +814,7 @@ export default function ProgramDetailPage() {
     setProgramNotFound(false);
     programSnapshotRef.current = true;
     if (nextProgram.type === 'event') {
-      setActiveTab(prev => (prev === 'sessions' || prev === 'stats' || prev === 'health') ? 'kanban' : prev);
+      setActiveTab(prev => (prev === 'sessions' || prev === 'stats' || prev === 'health' || prev === 'academic' || prev === 'surveys') ? 'kanban' : prev);
     } else {
       setActiveTab(prev => (prev === 'kanban' || prev === 'participants') ? 'health' : prev);
     }
@@ -538,20 +860,29 @@ export default function ProgramDetailPage() {
   const openObservationHistory = async (participantId: string, openComposer = false) => {
     const participant = participants.find(p => p.id === participantId);
     if (!participant) return;
+    observationHistoryRequestRef.current?.abort();
+    const controller = new AbortController();
+    observationHistoryRequestRef.current = controller;
+    const requestID = ++observationHistoryRequestSequence.current;
     setObservationParticipant(participant);
     setObservationComposerInitiallyOpen(openComposer);
     setObservationHistory([]);
     setObservationHistoryError('');
     setObservationHistoryLoading(true);
     try {
-      const res = await api<{ success: boolean; interactions: HistoryObservation[] }>(`/api/contacts/${participant.contact_id}/interactions?limit=200`);
+      const res = await api<{ success: boolean; interactions: HistoryObservation[] }>(`/api/contacts/${participant.contact_id}/interactions?limit=200`, { signal: controller.signal });
+      if (controller.signal.aborted || requestID !== observationHistoryRequestSequence.current) return;
       if (res.success && res.data?.success) setObservationHistory(res.data.interactions || []);
       else throw new Error(res.error || 'No se pudo cargar el historial.');
     } catch {
+      if (controller.signal.aborted || requestID !== observationHistoryRequestSequence.current) return;
       setObservationHistory([]);
       setObservationHistoryError('No se pudo cargar el historial de observaciones.');
     } finally {
-      setObservationHistoryLoading(false);
+      if (requestID === observationHistoryRequestSequence.current) {
+        observationHistoryRequestRef.current = null;
+        setObservationHistoryLoading(false);
+      }
     }
   };
 
@@ -568,7 +899,8 @@ export default function ProgramDetailPage() {
   };
 
   const saveParticipantOutcome = async () => {
-    if (!outcomeParticipant) return;
+    if (!outcomeParticipant || savingOutcome) return;
+    setSavingOutcome(true);
     try {
       const payload = outcomeForm.status === 'completed'
         ? {
@@ -588,8 +920,9 @@ export default function ProgramDetailPage() {
         body: JSON.stringify(payload)
       });
       if (res.success) {
-        showToast(outcomeForm.status === 'completed' ? 'Participante completado' : 'Desistimiento registrado', 'success');
+        showToast(outcomeForm.status === 'completed' ? 'Participación completada y movida al historial' : 'Participante retirado; su historial se conserva', 'success');
         setOutcomeParticipant(null);
+        setParticipantLifecycleView('active');
         fetchProgramData();
       } else {
         showToast(res.error || 'Error al actualizar participante', 'error');
@@ -597,6 +930,8 @@ export default function ProgramDetailPage() {
     } catch (e) {
       console.error(e);
       showToast('Error al actualizar participante', 'error');
+    } finally {
+      setSavingOutcome(false);
     }
   };
 
@@ -671,6 +1006,7 @@ export default function ProgramDetailPage() {
       }
 
       const summary = response.data.summary;
+      setParticipantLifecycleView('active');
       setParticipantSelectorRevision(current => current + 1);
       fetchProgramData();
       if (summary.rejected > 0 || summary.created === 0) {
@@ -787,13 +1123,12 @@ export default function ProgramDetailPage() {
     if (returnFocus !== undefined) participantDetailReturnFocusRef.current = returnFocus;
     setSelectedParticipantID(participantID);
     setSelectedContact(null);
-    setSelectedLead(null);
-    setContactPanelMode(true);
     setParticipantDetailOpen(true);
     setParticipantDetailError('');
     setLoadingLead(true);
     try {
-      const res = await fetch(`/api/contacts/${contactID}`, {
+      const params = new URLSearchParams({ context_type: 'program_participant', context_id: participantID });
+      const res = await fetch(`/api/contact-profiles/${contactID}?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token()}` },
         signal: controller.signal,
       });
@@ -801,7 +1136,6 @@ export default function ProgramDetailPage() {
       if (!res.ok || !data.success || !data.contact) throw new Error(data.error || 'No se pudo cargar el contacto.');
       if (controller.signal.aborted || requestID !== participantDetailSequence.current) return;
       setSelectedContact(data.contact);
-      setSelectedLead(contactToLead(data.contact));
     } catch (error) {
       if (controller.signal.aborted || requestID !== participantDetailSequence.current) return;
       setParticipantDetailError(error instanceof Error ? error.message : 'No se pudo cargar el participante.');
@@ -823,16 +1157,68 @@ export default function ProgramDetailPage() {
     if (contactID) void openParticipantDetail(selectedParticipantID, contactID);
   };
 
-  const handleParticipantAvatarChange = (avatar: ContactAvatarInfo) => {
-    if (!selectedParticipantID) return;
-    const avatarURL = avatar.avatar_url || null;
-    setSelectedContact(current => current ? { ...current, avatar_url: avatarURL, avatar_revision: avatar.revision } : current);
-    setParticipants(current => current.map(participant => participant.id === selectedParticipantID ? { ...participant, avatar_url: avatarURL, avatar_revision: avatar.revision } : participant));
+  const reconcileProgramContact = useCallback((updated: ContactProfileContact) => {
+    const nextName = updated.custom_name || updated.name || updated.push_name || updated.phone || 'Sin nombre';
+    setSelectedContact(current => current?.id === updated.id ? updated : current);
+    setParticipants(current => current.map(participant => participant.contact_id === updated.id ? {
+      ...participant,
+      contact_name: nextName,
+      contact_phone: updated.phone || undefined,
+      avatar_url: updated.avatar_url || null,
+      avatar_revision: updated.avatar_revision || 0,
+    } : participant));
     setHealth(current => current ? {
       ...current,
-      participants: current.participants.map(participant => participant.participant_id === selectedParticipantID ? { ...participant, avatar_url: avatarURL, avatar_revision: avatar.revision } : participant),
+      participants: current.participants.map(participant => participant.contact_id === updated.id ? {
+        ...participant,
+        name: nextName,
+        phone: updated.phone || undefined,
+        avatar_url: updated.avatar_url || null,
+        avatar_revision: updated.avatar_revision || 0,
+      } : participant),
     } : current);
-  };
+  }, []);
+
+  const handleParticipantContactChange = reconcileProgramContact;
+
+  const handleParticipantEnrollmentChange = useCallback((participantID: string, enrolledAt: string) => {
+    setParticipants(current => current.map(participant => participant.id === participantID
+      ? { ...participant, enrolled_at: enrolledAt }
+      : participant));
+    setToastType('success');
+    setToastMessage('Fecha de incorporación actualizada.');
+    void fetchHealth();
+    if (activeTab === 'stats') {
+      void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
+    }
+  }, [activeTab, fetchHealth, fetchStats, selectedMonthsKey]);
+
+  useEffect(() => {
+    const contexts = new Map<string, string>();
+    participants.forEach(participant => {
+      if (participant.contact_id && !contexts.has(participant.contact_id)) contexts.set(participant.contact_id, participant.id);
+    });
+    (health?.participants || []).forEach(participant => {
+      if (participant.contact_id && !contexts.has(participant.contact_id)) contexts.set(participant.contact_id, participant.participant_id);
+    });
+    participantContextByContactRef.current = contexts;
+  }, [health?.participants, participants]);
+
+  const refreshLoadedParticipantContact = useCallback(async (contactID: string) => {
+    const participantID = participantContextByContactRef.current.get(contactID);
+    if (!participantID) return;
+    const sequence = (contactRefreshSequenceRef.current.get(contactID) || 0) + 1;
+    contactRefreshSequenceRef.current.set(contactID, sequence);
+    const result = await api<ContactProfileResponse>(`/api/contact-profiles/${contactID}?context_type=program_participant&context_id=${participantID}`);
+    if (contactRefreshSequenceRef.current.get(contactID) !== sequence) return;
+    if (result.success && result.data?.success && result.data.contact) reconcileProgramContact(result.data.contact);
+  }, [reconcileProgramContact]);
+
+  useEffect(() => subscribeWebSocket(message => {
+    if (!message || typeof message !== 'object' || (message as { event?: string }).event !== 'contact_update') return;
+    const contactID = contactIdFromRealtimeEvent(message);
+    if (contactID) void refreshLoadedParticipantContact(contactID);
+  }), [refreshLoadedParticipantContact]);
 
   // WhatsApp chat
   const handleSendWhatsApp = async (phone: string) => {
@@ -894,38 +1280,45 @@ export default function ProgramDetailPage() {
     }
   };
 
-  const handleRemoveParticipant = async (participantId: string) => {
-    setConfirmAction({
-      message: '¿Estás seguro de eliminar a este participante?',
-      onConfirm: async () => {
-        setConfirmAction(null);
-        try {
-          const res = await api(`/api/programs/${programId}/participants/${participantId}`, { method: 'DELETE' });
-          if (res.success) {
-            showToast('Participante eliminado', 'success');
-            fetchProgramData();
-          } else {
-            showToast('Error al eliminar participante', 'error');
-          }
-        } catch (error) {
-          console.error('Error removing participant:', error);
-          showToast('Error al eliminar participante', 'error');
-        }
-      },
+  const openCreateSession = (sessionType: 'regular' | 'recovery' = 'regular') => {
+    const topics: ProgramSessionTopic[] = sessionType === 'recovery' ? [{ kind: 'free', title: 'Clase de recuperación' }] : [];
+    const fallbackTitle = `Sesión ${sessions.length + 1}`;
+    setNewSession({
+      title: suggestedSessionTitle(topics) || fallbackTitle,
+      date: localDateInputValue(),
+      topics,
+      session_type: sessionType,
+      start_time: '',
+      end_time: '',
+      location: '',
     });
+    setNewSessionTitleEdited(false);
+    setIsCreateSessionOpen(true);
   };
 
   const handleCreateSession = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creatingSession) return;
+    if (!newSession.title.trim()) {
+      showToast('Escribe un título para la sesión.', 'error');
+      return;
+    }
+    if (newSession.topics.length === 0 || newSession.topics.some(topic => !topic.title.trim())) {
+      showToast('Escribe o selecciona al menos un tema para la sesión.', 'error');
+      return;
+    }
     if (newSession.start_time && newSession.end_time && newSession.end_time <= newSession.start_time) {
       showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
       return;
     }
+    setCreatingSession(true);
     try {
       const res = await api(`/api/programs/${programId}/sessions`, {
         method: 'POST',
         body: JSON.stringify({
           ...newSession,
+          title: newSession.title.trim(),
+          topics: newSession.topics.map(topic => ({ kind: topic.kind, course_topic_id: topic.course_topic_id || undefined, title: topic.title.trim() })),
           start_time: newSession.start_time || undefined,
           end_time: newSession.end_time || undefined,
           location: newSession.location || undefined,
@@ -934,33 +1327,51 @@ export default function ProgramDetailPage() {
       if (res.success) {
         setIsCreateSessionOpen(false);
         setMaximizedSessionDialog(null);
-        setNewSession({ date: localDateInputValue(), topic: '', session_type: 'regular', start_time: '', end_time: '', location: '' });
+        setNewSession({ title: '', date: localDateInputValue(), topics: [], session_type: 'regular', start_time: '', end_time: '', location: '' });
+        setNewSessionTitleEdited(false);
         showToast('Sesión creada', 'success');
         fetchProgramData();
       } else {
-        showToast('Error al crear sesión', 'error');
+        showToast(res.error || 'Error al crear sesión', 'error');
       }
     } catch (error) {
       console.error('Error creating session:', error);
       showToast('Error al crear sesión', 'error');
+    } finally {
+      setCreatingSession(false);
     }
   };
 
   const openEditSession = (session: ProgramSession) => {
+    const topics = normalizedSessionTopics(session);
+    const sessionIndex = sessions.findIndex(candidate => candidate.id === session.id);
+    const title = sessionDisplayTitle(session, `Sesión ${sessionIndex >= 0 ? sessionIndex + 1 : 1}`);
     setEditSessionForm({
+      title,
       date: session.date ? session.date.split('T')[0] : '',
-      topic: session.topic || '',
+      topics,
       session_type: session.session_type || 'regular',
       start_time: session.start_time || '',
       end_time: session.end_time || '',
       location: session.location || '',
     });
+    // An existing title is always treated as an explicit decision: changing its
+    // plan topics must never rename the session behind the user's back.
+    setEditSessionTitleEdited(true);
     setEditingSession(session);
   };
 
   const handleUpdateSession = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSession) return;
+    if (!editSessionForm.title.trim()) {
+      showToast('Escribe un título para la sesión.', 'error');
+      return;
+    }
+    if (editSessionForm.topics.length === 0 || editSessionForm.topics.some(topic => !topic.title.trim())) {
+      showToast('Escribe o selecciona al menos un tema para la sesión.', 'error');
+      return;
+    }
     if (editSessionForm.start_time && editSessionForm.end_time && editSessionForm.end_time <= editSessionForm.start_time) {
       showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
       return;
@@ -971,6 +1382,8 @@ export default function ProgramDetailPage() {
         method: 'PUT',
         body: JSON.stringify({
           ...editSessionForm,
+          title: editSessionForm.title.trim(),
+          topics: editSessionForm.topics.map(topic => ({ kind: topic.kind, course_topic_id: topic.course_topic_id || undefined, title: topic.title.trim() })),
           start_time: editSessionForm.start_time || undefined,
           end_time: editSessionForm.end_time || undefined,
           location: editSessionForm.location || undefined,
@@ -982,7 +1395,7 @@ export default function ProgramDetailPage() {
         showToast('Sesión actualizada', 'success');
         fetchProgramData();
       } else {
-        showToast('Error al actualizar sesión', 'error');
+        showToast(res.error || 'Error al actualizar sesión', 'error');
       }
     } catch (error) {
       console.error('Error updating session:', error);
@@ -1014,22 +1427,105 @@ export default function ProgramDetailPage() {
   };
 
   const openAttendance = async (session: ProgramSession) => {
+    attendanceRequestRef.current?.abort();
+    const controller = new AbortController();
+    attendanceRequestRef.current = controller;
+    const requestID = ++attendanceRequestSequence.current;
     setSelectedSession(session);
+    setAttendanceData({});
+    setAttendanceDirty({});
+    setAttendanceLoadError('');
+    setAttendanceLoadState('loading');
+    setIsAttendanceOpen(true);
     try {
-      const response = await api<ProgramAttendance[]>(`/api/programs/${programId}/sessions/${session.id}/attendance`);
-      const attMap: Record<string, { status: string, notes: string }> = {};
+      const response = await api<ProgramAttendance[]>(`/api/programs/${programId}/sessions/${session.id}/attendance`, { signal: controller.signal });
+      if (controller.signal.aborted || requestID !== attendanceRequestSequence.current) return;
+      const attMap: Record<string, { status: string; observation_count: number; observation_preview: ProgramAttendanceObservation[] }> = {};
 
-      if (response.success && response.data && Array.isArray(response.data)) {
-        response.data.forEach((a: ProgramAttendance) => {
-          attMap[a.participant_id] = { status: a.status || '', notes: a.notes || '' };
+      if (response.success && (response.data == null || Array.isArray(response.data))) {
+        (response.data || []).forEach((a: ProgramAttendance) => {
+          attMap[a.participant_id] = {
+            status: a.status || '',
+            observation_count: a.observation_count || 0,
+            observation_preview: Array.isArray(a.observation_preview) ? a.observation_preview : [],
+          };
         });
+      } else {
+        throw new Error(response.error || 'No se pudo cargar la asistencia');
       }
 
       setAttendanceData(attMap);
-      setAttendanceDirty({});
-      setIsAttendanceOpen(true);
+      setAttendanceLoadState('success');
     } catch (error) {
+      if (controller.signal.aborted || requestID !== attendanceRequestSequence.current) return;
       console.error('Error fetching attendance:', error);
+      setAttendanceLoadError(error instanceof Error ? error.message : 'No se pudo cargar la asistencia.');
+      setAttendanceLoadState('error');
+    } finally {
+      if (requestID === attendanceRequestSequence.current) attendanceRequestRef.current = null;
+    }
+  };
+
+  const requestCloseAttendance = () => {
+    if (Object.keys(attendanceDirty).length === 0) {
+      closeAttendanceModal();
+      return;
+    }
+    setConfirmAction({
+      message: 'Hay cambios de asistencia sin guardar. ¿Deseas descartarlos?',
+      onConfirm: () => { setConfirmAction(null); closeAttendanceModal(); },
+    });
+  };
+
+  const loadAttendanceObservationHistory = async (participant: ProgramParticipant) => {
+    if (!selectedSession) return;
+    attendanceObservationRequestRef.current?.abort();
+    const controller = new AbortController();
+    attendanceObservationRequestRef.current = controller;
+    const requestID = ++attendanceObservationRequestSequence.current;
+    const sessionID = selectedSession.id;
+    setAttendanceObservationParticipant(participant);
+    setAttendanceObservationComposerOpen(false);
+    setAttendanceObservationLoading(true);
+    setAttendanceObservationError('');
+    try {
+      const response = await api<{ success: boolean; observations: ProgramAttendanceObservation[] }>(`/api/programs/${programId}/sessions/${sessionID}/participants/${participant.id}/attendance-observations`, { signal: controller.signal });
+      if (controller.signal.aborted || requestID !== attendanceObservationRequestSequence.current) return;
+      if (!response.success || !response.data?.success) throw new Error(response.error || 'No se pudo cargar el historial.');
+      const observations = Array.isArray(response.data.observations) ? response.data.observations : [];
+      setAttendanceObservationHistory(observations.map(observation => ({
+        id: observation.id,
+        contact_id: participant.contact_id || null,
+        lead_id: null,
+        type: 'attendance',
+        direction: null,
+        outcome: null,
+        notes: observation.notes,
+        created_by_name: observation.created_by_name || null,
+        created_at: observation.created_at,
+        program_id: programId,
+        program_session_id: sessionID,
+        program_participant_id: participant.id,
+        source_label: observation.source_label || null,
+      })));
+      setAttendanceData(current => ({
+        ...current,
+        [participant.id]: {
+          status: current[participant.id]?.status || '',
+          observation_count: observations.length,
+          observation_preview: observations.slice(0, 1),
+        },
+      }));
+    } catch (error) {
+      if (controller.signal.aborted || requestID !== attendanceObservationRequestSequence.current) return;
+      console.error('Error fetching attendance observations:', error);
+      setAttendanceObservationHistory([]);
+      setAttendanceObservationError('No se pudieron cargar las observaciones de esta asistencia.');
+    } finally {
+      if (requestID === attendanceObservationRequestSequence.current) {
+        attendanceObservationRequestRef.current = null;
+        setAttendanceObservationLoading(false);
+      }
     }
   };
 
@@ -1042,7 +1538,6 @@ export default function ProgramDetailPage() {
         .map(([participantId, data]) => ({
           participant_id: participantId,
           status: data.status || '',
-          notes: data.notes || ''
         }));
       if (records.length > 0) {
         const result = await api<{ success: boolean; count: number }>(`/api/programs/${programId}/sessions/${selectedSession.id}/attendance/batch`, {
@@ -1051,7 +1546,7 @@ export default function ProgramDetailPage() {
         });
         if (!result.success) throw new Error(result.error || 'No se pudo guardar la asistencia');
       }
-      setIsAttendanceOpen(false);
+      closeAttendanceModal();
       fetchProgramData();
       fetchHealth();
     } catch (error) {
@@ -1134,6 +1629,10 @@ export default function ProgramDetailPage() {
       showToast('La fecha de fin debe ser igual o posterior a la fecha de inicio.', 'error');
       return;
     }
+    if (schedulePreview.error) {
+      showToast(schedulePreview.error, 'error');
+      return;
+    }
     if (genForm.start_time && genForm.end_time && genForm.end_time <= genForm.start_time) {
       showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
       return;
@@ -1148,9 +1647,21 @@ export default function ProgramDetailPage() {
           location: genForm.location || undefined,
         }),
       });
-      const data = await res.json();
+      const data = await res.json() as {
+        success?: boolean;
+        count?: number;
+        sessions?: ProgramSession[];
+        assigned_topic_count?: number;
+        fallback_count?: number;
+        warning?: string;
+        error?: string;
+      };
       if (data.success) {
-        showToast(`Se generaron ${data.count || data.sessions?.length || 0} sesiones exitosamente.`, 'success');
+        const generatedCount = data.count || data.sessions?.length || 0;
+        const assignmentSummary = genForm.assign_course_topics
+          ? ` ${data.assigned_topic_count || 0} recibieron un tema del plan${data.fallback_count ? ` y ${data.fallback_count} usaron un tema libre de respaldo` : ''}.`
+          : '';
+        showToast(`Se generaron ${generatedCount} sesiones.${assignmentSummary}${data.warning ? ` ${data.warning}` : ''}`, 'success');
         setIsGenerateSessionsOpen(false);
         setMaximizedSessionDialog(null);
         fetchProgramData();
@@ -1176,8 +1687,8 @@ export default function ProgramDetailPage() {
 
   // Campaign
   const participantsWithPhone = useMemo(
-    () => participants.filter(p => p.contact_phone && p.contact_phone.length > 5),
-    [participants]
+    () => activeParticipants.filter(p => p.contact_phone && p.contact_phone.length > 5),
+    [activeParticipants]
   );
 
   const handleCreateCampaign = async (formResult: CampaignFormResult) => {
@@ -1281,19 +1792,28 @@ export default function ProgramDetailPage() {
   };
 
   // Preview sessions count
-  const previewSessionCount = useMemo(() => {
-    if (!genForm.start_date || !genForm.end_date || genForm.days_of_week.length === 0) return 0;
-    const start = new Date(genForm.start_date + 'T00:00:00');
-    const end = new Date(genForm.end_date + 'T00:00:00');
-    if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) return 0;
-    let count = 0;
-    const current = new Date(start);
-    while (current <= end) {
-      if (genForm.days_of_week.includes(current.getDay())) count++;
-      current.setDate(current.getDate() + 1);
+  const schedulePreview = useMemo(() => {
+    if (!genForm.start_date || !genForm.end_date || genForm.days_of_week.length === 0) return { count: 0, error: '' };
+    const start = new Date(`${genForm.start_date}T00:00:00Z`);
+    const end = new Date(`${genForm.end_date}T00:00:00Z`);
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) return { count: 0, error: '' };
+    const totalDays = Math.floor((end.getTime() - start.getTime()) / 86_400_000) + 1;
+    if (totalDays > MAX_SCHEDULE_RANGE_DAYS) {
+      return { count: 0, error: 'El horario no puede abarcar más de dos años.' };
     }
-    return count;
+    const selectedDays = new Set(genForm.days_of_week);
+    const fullWeeks = Math.floor(totalDays / 7);
+    let count = fullWeeks * selectedDays.size;
+    const remainingDays = totalDays % 7;
+    for (let offset = 0; offset < remainingDays; offset += 1) {
+      if (selectedDays.has((start.getUTCDay() + offset) % 7)) count += 1;
+    }
+    if (count > MAX_GENERATED_SESSIONS) {
+      return { count, error: `Un horario puede generar como máximo ${MAX_GENERATED_SESSIONS} sesiones.` };
+    }
+    return { count, error: '' };
   }, [genForm.start_date, genForm.end_date, genForm.days_of_week]);
+  const previewSessionCount = schedulePreview.count;
 
   if (loading) {
     return (
@@ -1346,6 +1866,10 @@ export default function ProgramDetailPage() {
     );
   }
 
+  const selectedProgramParticipant = selectedParticipantID
+    ? participants.find(participant => participant.id === selectedParticipantID) || null
+    : null;
+
   const formatPct = (value?: number) => `${Math.round(value || 0)}%`;
   const healthClass = (value?: string) => {
     if (value === 'critical') return 'bg-red-50 text-red-700 border-red-100';
@@ -1385,7 +1909,7 @@ export default function ProgramDetailPage() {
       {/* Header */}
       <div className="flex items-center gap-3 shrink-0">
         <button
-          onClick={() => router.push('/dashboard/programs')}
+          onClick={() => requestProgramNavigation('/dashboard/programs')}
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-colors hover:bg-slate-100"
           aria-label="Volver a Programas"
         >
@@ -1400,12 +1924,12 @@ export default function ProgramDetailPage() {
         <div className="flex-1 min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <h1 className="min-w-0 truncate text-lg font-bold leading-tight text-slate-800">{program.name}</h1>
-            {mobileWorkspace && <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700" aria-label={`${participants.length} participantes`}><Users className="h-3 w-3" />{participants.length}</span>}
+            {mobileWorkspace && <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700" aria-label={`${activeParticipants.length} participantes`}><Users className="h-3 w-3" />{activeParticipants.length}</span>}
           </div>
           <p className="text-slate-500 text-xs truncate">{program.description || 'Sin descripción'}</p>
         </div>
-        {mobileWorkspace && <button type="button" onClick={() => setShowSectionPicker(true)} className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Cambiar sección. Actual: ${activeTab === 'sessions' ? 'Sesiones' : activeTab === 'stats' ? 'Estadísticas' : activeTab === 'kanban' ? 'Tablero' : 'Participantes'}`} aria-haspopup="dialog" aria-expanded={showSectionPicker}>
-          {activeTab === 'sessions' ? <Calendar className="h-5 w-5" /> : activeTab === 'stats' ? <BarChart3 className="h-5 w-5" /> : activeTab === 'kanban' ? <LayoutGrid className="h-5 w-5" /> : <Users className="h-5 w-5" />}
+        {mobileWorkspace && <button type="button" onClick={() => setShowSectionPicker(true)} className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Cambiar sección. Actual: ${activeTab === 'sessions' ? 'Sesiones' : activeTab === 'stats' ? 'Estadísticas' : activeTab === 'academic' ? 'Plan e instructores' : activeTab === 'surveys' ? 'Encuestas' : activeTab === 'kanban' ? 'Tablero' : 'Participantes'}`} aria-haspopup="dialog" aria-expanded={showSectionPicker}>
+          {activeTab === 'sessions' ? <Calendar className="h-5 w-5" /> : activeTab === 'stats' ? <BarChart3 className="h-5 w-5" /> : activeTab === 'academic' ? <GraduationCap className="h-5 w-5" /> : activeTab === 'surveys' ? <ClipboardList className="h-5 w-5" /> : activeTab === 'kanban' ? <LayoutGrid className="h-5 w-5" /> : <Users className="h-5 w-5" />}
           <ChevronDown className="absolute bottom-1 right-1 h-2.5 w-2.5 text-slate-400" />
         </button>}
         {!mobileWorkspace && <div className="flex items-center gap-2">
@@ -1463,26 +1987,10 @@ export default function ProgramDetailPage() {
       </div>
 
       {/* Tabs */}
-      {mobileWorkspace ? (
-        (activeTab === 'health' || activeTab === 'participants') && <div className="relative shrink-0">
-          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            value={participantSearch}
-            onChange={event => setParticipantSearch(event.target.value)}
-            placeholder="Buscar participante por nombre o teléfono"
-            aria-label="Buscar participante por nombre o teléfono"
-            className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-24 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20"
-          />
-          <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center">
-            <span className="px-2 text-[11px] font-semibold text-slate-400" aria-live="polite">{activeTab === 'health' ? filteredHealthParticipants.length : filteredProgramParticipants.length}/{participants.length}</span>
-            {participantSearch && <button type="button" onClick={() => setParticipantSearch('')} className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Limpiar búsqueda"><X className="h-4 w-4" /></button>}
-          </div>
-        </div>
-      ) : <div className="flex shrink-0 gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      {mobileWorkspace ? null : <div className="flex shrink-0 gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {program?.type === 'event' ? (
           <button
-            onClick={() => setActiveTab('kanban')}
+            onClick={() => requestTabChange('kanban')}
             className={`flex min-h-11 min-w-max flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-all sm:min-w-0 ${
               activeTab === 'kanban'
                 ? 'bg-white text-slate-800 shadow-sm'
@@ -1495,7 +2003,7 @@ export default function ProgramDetailPage() {
         ) : (
           <>
             <button
-              onClick={() => setActiveTab('health')}
+              onClick={() => requestTabChange('health')}
               className={`flex min-h-11 min-w-max flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-all sm:min-w-0 ${
                 activeTab === 'health'
                   ? 'bg-white text-slate-800 shadow-sm'
@@ -1503,10 +2011,21 @@ export default function ProgramDetailPage() {
               }`}
             >
               <Users className="w-4 h-4" />
-              Participantes ({participants.length})
+              Participantes ({activeParticipants.length})
             </button>
             <button
-              onClick={() => setActiveTab('sessions')}
+              onClick={() => requestTabChange('academic')}
+              className={`flex min-h-11 min-w-max flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-all sm:min-w-0 ${
+                activeTab === 'academic'
+                  ? 'bg-white text-slate-800 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <GraduationCap className="w-4 h-4" />
+              Plan e instructores
+            </button>
+            <button
+              onClick={() => requestTabChange('sessions')}
               className={`flex min-h-11 min-w-max flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-all sm:min-w-0 ${
                 activeTab === 'sessions'
                   ? 'bg-white text-slate-800 shadow-sm'
@@ -1517,7 +2036,7 @@ export default function ProgramDetailPage() {
               Sesiones ({sessions.length})
             </button>
             <button
-              onClick={() => setActiveTab('stats')}
+              onClick={() => requestTabChange('stats')}
               className={`flex min-h-11 min-w-max flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-all sm:min-w-0 ${
                 activeTab === 'stats'
                   ? 'bg-white text-slate-800 shadow-sm'
@@ -1527,11 +2046,22 @@ export default function ProgramDetailPage() {
               <BarChart3 className="w-4 h-4" />
               Estadísticas
             </button>
+            {canUseSurveys && <button
+              onClick={() => requestTabChange('surveys')}
+              className={`flex min-h-11 min-w-max flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-all sm:min-w-0 ${
+                activeTab === 'surveys'
+                  ? 'bg-white text-slate-800 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <ClipboardList className="w-4 h-4" />
+              Encuestas
+            </button>}
           </>
         )}
         {program?.type === 'event' && (
           <button
-            onClick={() => setActiveTab('participants')}
+            onClick={() => requestTabChange('participants')}
             className={`flex min-h-11 min-w-max flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium transition-all sm:min-w-0 ${
               activeTab === 'participants'
                 ? 'bg-white text-slate-800 shadow-sm'
@@ -1539,9 +2069,42 @@ export default function ProgramDetailPage() {
             }`}
           >
             <Users className="w-4 h-4" />
-            Participantes ({participants.length})
+            Participantes ({activeParticipants.length})
           </button>
         )}
+      </div>}
+
+      {(activeTab === 'health' || activeTab === 'participants') && <div className="flex shrink-0 items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            value={participantSearch}
+            onChange={event => setParticipantSearch(event.target.value)}
+            onFocus={() => setParticipantSearchFocused(true)}
+            onBlur={() => setParticipantSearchFocused(false)}
+            onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+            enterKeyHint="search"
+            placeholder="Buscar participante por nombre o teléfono"
+            aria-label="Buscar participante por nombre o teléfono"
+            className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-24 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20"
+          />
+          <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center">
+            {participantSearchPending
+              ? <span className="flex items-center gap-1 px-2 text-[11px] font-semibold text-slate-400" aria-live="polite"><Loader2 className="h-3.5 w-3.5 animate-spin" /><span className="sr-only">Buscando participantes</span><span className="hidden min-[380px]:inline" aria-hidden="true">Buscando</span></span>
+              : <span className="px-2 text-[11px] font-semibold text-slate-400" aria-live="polite">{filteredProgramParticipants.length}/{lifecycleParticipants.length}</span>}
+            {participantSearch && <button type="button" onClick={() => { setParticipantSearch(''); setDebouncedParticipantSearch(''); }} className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Limpiar búsqueda"><X className="h-4 w-4" /></button>}
+          </div>
+        </div>
+        <div aria-hidden={participantExportCollapsed} className={`shrink-0 overflow-hidden transition-[max-width,opacity] duration-150 ease-out motion-reduce:transition-none ${participantExportCollapsed ? 'pointer-events-none max-w-0 opacity-0' : 'max-w-[10rem] opacity-100'}`}>
+          <button type="button" tabIndex={participantExportCollapsed ? -1 : 0} onClick={() => { void handleExportParticipants(); }} disabled={participantSearchPending || exportingParticipants || filteredProgramParticipants.length === 0} className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40" title="Exportar exactamente la lista filtrada a Excel" aria-label="Exportar participantes filtrados a Excel">{exportingParticipants ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}<span className="hidden sm:inline">Exportar Excel</span></button>
+        </div>
+        {mobileWorkspace && <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Agregar participantes" title={program?.status !== 'active' ? 'Solo disponible para programas activos' : 'Agregar participantes'}><UserPlus className="h-4 w-4" /></button>}
+      </div>}
+
+      {(activeTab === 'health' || activeTab === 'participants') && <div className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="Estado de participantes">
+        <button type="button" role="tab" aria-selected={participantLifecycleView === 'active'} onClick={() => setParticipantLifecycleView('active')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold transition-colors ${participantLifecycleView === 'active' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Activos <span className="ml-1 tabular-nums text-xs">{activeParticipants.length}</span></button>
+        <button type="button" role="tab" aria-selected={participantLifecycleView === 'history'} onClick={() => setParticipantLifecycleView('history')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold transition-colors ${participantLifecycleView === 'history' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Historial <span className="ml-1 tabular-nums text-xs">{historicalParticipants.length}</span></button>
       </div>}
 
       {/* Content */}
@@ -1568,7 +2131,7 @@ export default function ProgramDetailPage() {
                       <label className="text-xs text-slate-500">Meta asistencia<input type="number" min={1} max={100} value={programGoals.attendance_goal_percent} onChange={(e) => setProgramGoals(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))} className="mt-1 w-28 px-2.5 py-1.5 border border-slate-200 rounded-lg text-sm" /></label>
                       <label className="text-xs text-slate-500">Meta traspaso<input type="number" min={1} max={100} value={programGoals.transfer_goal_percent} onChange={(e) => setProgramGoals(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))} className="mt-1 w-28 px-2.5 py-1.5 border border-slate-200 rounded-lg text-sm" /></label>
                       <button onClick={saveProgramGoals} disabled={savingGoals} className="min-h-11 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50">{savingGoals ? 'Guardando...' : 'Guardar metas'}</button>
-                      <button onClick={() => { setNewSession(prev => ({ ...prev, session_type: 'recovery', topic: prev.topic || 'Clase de recuperación' })); setIsCreateSessionOpen(true); }} className="min-h-11 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">Recuperación</button>
+                      <button onClick={() => openCreateSession('recovery')} className="min-h-11 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">Recuperación</button>
                     </div>
                   </div>
                 )}
@@ -1603,7 +2166,14 @@ export default function ProgramDetailPage() {
                 </div>
               </div>}
 
-              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              {participantLifecycleView === 'history' ? (
+                <ProgramParticipantHistoryList
+                  participants={filteredProgramParticipants}
+                  searching={Boolean(normalizedParticipantQuery)}
+                  compact={compactWorkspace}
+                  onOpen={(participant, trigger) => handleParticipantClick(participant, trigger)}
+                />
+              ) : <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 {!mobileWorkspace && <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold text-slate-800">Participantes</h3>
                   <div className="flex items-center gap-2">
@@ -1614,9 +2184,9 @@ export default function ProgramDetailPage() {
                 <div>
                   {compactWorkspace ? (
                     <div className="divide-y divide-slate-100">
-                      {(mobileWorkspace ? filteredHealthParticipants : (health?.participants || [])).length === 0 ? (
-                        <div className="px-4 py-10 text-center text-sm text-slate-400">{mobileWorkspace && normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</div>
-                      ) : (mobileWorkspace ? filteredHealthParticipants : (health?.participants || [])).map(p => mobileWorkspace ? (
+                      {filteredHealthParticipants.length === 0 ? (
+                        <div className="px-4 py-10 text-center text-sm text-slate-400"><p>{normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</p>{mobileWorkspace && !normalizedParticipantQuery && <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button>}</div>
+                      ) : filteredHealthParticipants.map(p => mobileWorkspace ? (
                         <div key={p.participant_id} data-testid="mobile-program-participant-row" className="flex min-h-[78px] items-center gap-2 px-3 py-2 transition-colors hover:bg-slate-50">
                           <button type="button" onClick={event => { void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
                             <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-11 w-11" />
@@ -1630,6 +2200,7 @@ export default function ProgramDetailPage() {
                             <NotebookPen className="h-4 w-4" />
                             {p.notes_count > 0 && <span className="absolute right-0.5 top-0.5 min-w-4 rounded-full bg-emerald-600 px-1 text-center text-[9px] font-bold leading-4 text-white">{p.notes_count > 99 ? '99+' : p.notes_count}</span>}
                           </button>
+                          <button type="button" onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400" aria-label={`Retirar del programa a ${p.name || 'participante'}`}><XCircle className="h-4 w-4" /></button>
                         </div>
                       ) : (
                         <div key={p.participant_id} onClick={() => { void openParticipantDetail(p.participant_id, p.contact_id) }} className="cursor-pointer space-y-3 p-4 transition-colors hover:bg-slate-50">
@@ -1643,12 +2214,12 @@ export default function ProgramDetailPage() {
                             <div onClick={event => event.stopPropagation()} className="flex shrink-0 items-center gap-0.5">
                               <button onClick={() => openObservationHistory(p.participant_id)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-emerald-50 hover:text-emerald-600" title="Abrir observaciones"><NotebookPen className="h-4 w-4" /></button>
                               <><button onClick={() => openOutcomeModal(p.participant_id, 'completed')} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Completar y traspasar"><Target className="h-4 w-4" /></button>
-                              <button onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600" title="Registrar desistimiento"><XCircle className="h-4 w-4" /></button></>
+                              <button onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600" title="Retirar del programa"><XCircle className="h-4 w-4" /></button></>
                             </div>
                           </div>
                           <div className="grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-3">
                             <div><span className="block text-[10px] uppercase tracking-wide text-slate-400">Salud</span><span className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${healthClass(p.health)}`}>{healthLabel(p.health)}</span></div>
-                            <div><span className="block text-[10px] uppercase tracking-wide text-slate-400">Asistencia</span><span className="mt-1 block font-semibold text-slate-700">{formatPct(p.attendance_rate)}</span><span className="text-[10px] text-slate-400">{p.present} P · {p.late} T · {p.absent} A · {p.excused} J</span></div>
+                            <div><span className="block text-[10px] uppercase tracking-wide text-slate-400">Asistencia</span><span className="mt-1 block font-semibold text-slate-700">{formatPct(p.attendance_rate)}</span><span className="text-[10px] text-slate-400">{p.present} P · {p.absent} F · {p.late} T</span></div>
                           </div>
                           {(p.reasons || []).length > 0 && <div className="flex flex-wrap gap-1">{p.reasons.slice(0, 3).map(reason => <span key={reason} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">{reason}</span>)}</div>}
                         </div>
@@ -1666,12 +2237,12 @@ export default function ProgramDetailPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {(health?.participants || []).length === 0 ? (
+                      {filteredHealthParticipants.length === 0 ? (
                         <tr>
-                          <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-400">Sin inscritos para evaluar</td>
+                          <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-400">{normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</td>
                         </tr>
                       ) : (
-                        (health?.participants || []).map(p => (
+                        filteredHealthParticipants.map(p => (
                           <tr key={p.participant_id} onClick={() => void openParticipantDetail(p.participant_id, p.contact_id)} className="cursor-pointer hover:bg-slate-50">
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-3">
@@ -1690,7 +2261,7 @@ export default function ProgramDetailPage() {
                             </td>
                             <td className="px-4 py-3">
                               <div className="font-semibold text-slate-700">{formatPct(p.attendance_rate)}</div>
-                              <div className="text-[11px] text-slate-400">{p.present} P · {p.late} T · {p.absent} A · {p.excused} J</div>
+                              <div className="text-[11px] text-slate-400">{p.present} P · {p.absent} F · {p.late} T</div>
                             </td>
                             <td className="px-4 py-3">
                               <div className="flex flex-wrap gap-1">
@@ -1708,7 +2279,7 @@ export default function ProgramDetailPage() {
                                 <button onClick={() => openOutcomeModal(p.participant_id, 'completed')} className="p-1.5 rounded-lg hover:bg-blue-50 text-slate-400 hover:text-blue-600" title="Completar y traspasar">
                                   <Target className="w-4 h-4" />
                                 </button>
-                                <button onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-600" title="Registrar desistimiento">
+                                <button onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-600" title="Retirar del programa">
                                   <XCircle className="w-4 h-4" />
                                 </button>
                               </div>
@@ -1720,7 +2291,7 @@ export default function ProgramDetailPage() {
                   </table>
                   </div>}
                 </div>
-              </div>
+              </div>}
             </>
           )}
         </div>
@@ -1778,13 +2349,16 @@ export default function ProgramDetailPage() {
             </div>
           </div>}
 
-          <div className="flex-1 min-h-0 bg-white rounded-xl border border-slate-200 overflow-hidden">
+          {participantLifecycleView === 'history' ? (
+            <ProgramParticipantHistoryList participants={filteredProgramParticipants} searching={Boolean(normalizedParticipantQuery)} compact={compactWorkspace} onOpen={(participant, trigger) => handleParticipantClick(participant, trigger)} />
+          ) : <div className="flex-1 min-h-0 bg-white rounded-xl border border-slate-200 overflow-hidden">
             {compactWorkspace && <div className="h-full overflow-y-auto divide-y divide-slate-100">
               {mobileWorkspace ? (filteredProgramParticipants.length === 0 ? (
                 <div className="px-5 py-12 text-center">
                   <Users className="mx-auto mb-3 h-10 w-10 text-slate-300" />
                   <p className="font-medium text-slate-500">{normalizedParticipantQuery ? 'Sin coincidencias' : 'Sin participantes'}</p>
                   <p className="mt-1 text-xs text-slate-400">{normalizedParticipantQuery ? 'Prueba con otro nombre o teléfono.' : 'Todavía no hay participantes para consultar.'}</p>
+                  {!normalizedParticipantQuery && <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button>}
                 </div>
               ) : filteredProgramParticipants.map(p => (
                 <div key={p.id} data-testid="mobile-program-participant-row" className={`flex min-h-[78px] items-center gap-2 px-3 py-2 transition-colors ${selectedParticipantID === p.id ? 'bg-emerald-50' : 'bg-white'}`}>
@@ -1799,14 +2373,15 @@ export default function ProgramDetailPage() {
                     </div>
                   </button>
                   <button type="button" onClick={() => openObservationHistory(p.id)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-emerald-50 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Abrir observaciones de ${p.contact_name || 'participante'}`}><NotebookPen className="h-4 w-4" /></button>
+                  <button type="button" onClick={() => openOutcomeModal(p.id, 'dropped')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400" aria-label={`Retirar del programa a ${p.contact_name || 'participante'}`}><XCircle className="h-4 w-4" /></button>
                 </div>
-              ))) : (participants.length === 0 ? (
+              ))) : (filteredProgramParticipants.length === 0 ? (
                 <div className="px-5 py-12 text-center">
                   <Users className="mx-auto mb-3 h-10 w-10 text-slate-300" />
-                  <p className="font-medium text-slate-500">Sin participantes</p>
-                  <p className="mt-1 text-xs text-slate-400">Agrega participantes para comenzar</p>
+                  <p className="font-medium text-slate-500">{normalizedParticipantQuery ? 'Sin coincidencias' : 'Sin participantes'}</p>
+                  <p className="mt-1 text-xs text-slate-400">{normalizedParticipantQuery ? 'Prueba con otro nombre o teléfono.' : 'Agrega participantes para comenzar'}</p>
                 </div>
-              ) : participants.map(p => (
+              ) : filteredProgramParticipants.map(p => (
                 <div key={p.id} className={`p-4 transition-colors ${selectedParticipantID === p.id ? 'bg-emerald-50' : 'bg-white'}`}>
                   <button type="button" onClick={(event) => handleParticipantClick(p, event.currentTarget)} className="w-full text-left">
                     <div className="flex items-start gap-3">
@@ -1817,11 +2392,11 @@ export default function ProgramDetailPage() {
                           <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${p.status === 'active' ? 'bg-emerald-50 text-emerald-700' : p.status === 'completed' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>{p.status === 'active' ? 'Activo' : p.status === 'completed' ? 'Completado' : 'Retirado'}</span>
                         </div>
                         <p className="mt-1 break-all text-xs text-slate-500">{p.contact_phone || 'Sin teléfono'}</p>
-                        <p className="mt-1 text-xs text-slate-400">Inscripción: {format(new Date(p.enrolled_at), 'dd MMM yyyy', { locale: es })}</p>
+                        <p className="mt-1 text-xs text-slate-400">Inscripción: {formatCalendarDate(p.enrolled_at, 'dd MMM yyyy', { locale: es })}</p>
                       </div>
                     </div>
                   </button>
-                  <div className="mt-3 flex justify-end border-t border-slate-100 pt-2"><button type="button" onClick={() => handleRemoveParticipant(p.id)} className="flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-red-600 hover:bg-red-50"><Trash2 className="h-4 w-4" /> Quitar</button></div>
+                  <div className="mt-3 flex justify-end gap-2 border-t border-slate-100 pt-2"><button type="button" onClick={() => openOutcomeModal(p.id, 'completed')} className="flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-blue-700 hover:bg-blue-50"><Target className="h-4 w-4" /> Completar</button><button type="button" onClick={() => openOutcomeModal(p.id, 'dropped')} className="flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-red-600 hover:bg-red-50"><XCircle className="h-4 w-4" /> Retirar</button></div>
                 </div>
               )))}
             </div>}
@@ -1836,16 +2411,16 @@ export default function ProgramDetailPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {participants.length === 0 ? (
+                    {filteredProgramParticipants.length === 0 ? (
                       <tr>
                         <td colSpan={visibleColumns.length} className="px-5 py-12 text-center">
                           <Users className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-                          <p className="text-slate-500 font-medium">Sin participantes</p>
-                          <p className="text-slate-400 text-xs mt-1">Agrega participantes para comenzar</p>
+                          <p className="text-slate-500 font-medium">{normalizedParticipantQuery ? 'Sin coincidencias' : 'Sin participantes'}</p>
+                          <p className="text-slate-400 text-xs mt-1">{normalizedParticipantQuery ? 'Prueba con otro nombre o teléfono.' : 'Agrega participantes para comenzar'}</p>
                         </td>
                       </tr>
                     ) : (
-                      participants.map((p) => {
+                      filteredProgramParticipants.map((p) => {
                         const isSelected = selectedParticipantID === p.id;
                         return (
                         <tr
@@ -1890,20 +2465,15 @@ export default function ProgramDetailPage() {
                             if (col.id === 'enrolled_at') {
                               return (
                                 <td key={col.id} className="px-5 py-3 text-slate-500 text-xs">
-                                  {format(new Date(p.enrolled_at), 'dd MMM yyyy', { locale: es })}
+                                  {formatCalendarDate(p.enrolled_at, 'dd MMM yyyy', { locale: es })}
                                 </td>
                               );
                             }
                             if (col.id === 'actions') {
                               return (
                                 <td key={col.id} className="px-5 py-3 text-right">
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); handleRemoveParticipant(p.id); }}
-                                    className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all"
-                                    title="Eliminar participante"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
+                                  <button onClick={(e) => { e.stopPropagation(); openOutcomeModal(p.id, 'completed'); }} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-blue-50 hover:text-blue-600" title="Completar participación"><Target className="h-4 w-4" /></button>
+                                  <button onClick={(e) => { e.stopPropagation(); openOutcomeModal(p.id, 'dropped'); }} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-red-50 hover:text-red-600" title="Retirar del programa"><XCircle className="h-4 w-4" /></button>
                                 </td>
                               );
                             }
@@ -1917,7 +2487,7 @@ export default function ProgramDetailPage() {
                 </table>
               </div>
             </div>}
-          </div>
+          </div>}
         </div>
       ) : activeTab === 'kanban' ? (
         <div className="h-full flex flex-col gap-3">
@@ -2064,11 +2634,27 @@ export default function ProgramDetailPage() {
             </div>
           )}
         </div>
+      ) : activeTab === 'academic' ? (
+        <ProgramAcademicConfigPanel
+          programId={programId}
+          config={academicConfig}
+          loading={academicLoading}
+          error={academicError}
+          onRetry={() => { void fetchAcademicData(); }}
+          onChange={setAcademicConfig}
+          onToast={showToast}
+          onDirtyChange={setAcademicDirty}
+          onNavigateToCatalog={() => requestProgramNavigation('/dashboard/programs/courses')}
+        />
+      ) : activeTab === 'surveys' && canUseSurveys ? (
+        <div className="h-full overflow-y-auto pb-3">
+          <ProgramSurveyPanel programId={programId} programName={program.name} canManageSurveys />
+        </div>
       ) : activeTab === 'sessions' ? (
         <div className="h-full flex flex-col gap-3">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0">
             <h2 className="text-base font-semibold text-slate-800">Sesiones y Asistencia</h2>
-            {!mobileWorkspace && <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap">
+            <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap">
               <button
                 onClick={() => setIsGenerateSessionsOpen(true)}
                 className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-100 sm:flex-none"
@@ -2077,13 +2663,13 @@ export default function ProgramDetailPage() {
                 Generar Horario
               </button>
               <button
-                onClick={() => setIsCreateSessionOpen(true)}
+                onClick={() => openCreateSession()}
                 className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
               >
                 <Plus className="w-4 h-4" />
                 Nueva Sesión
               </button>
-            </div>}
+            </div>
           </div>
 
           <div className="flex-1 min-h-0 overflow-y-auto">
@@ -2094,30 +2680,31 @@ export default function ProgramDetailPage() {
               </div>
               <h3 className="text-lg font-semibold text-slate-800 mb-2">Sin sesiones programadas</h3>
               <p className="text-slate-500 mb-5 max-w-md mx-auto text-sm">
-                {mobileWorkspace ? 'Todavía no hay sesiones para consultar.' : 'Crea sesiones individuales o genera un horario recurrente estilo Google Calendar.'}
+                Crea sesiones individuales o genera un horario recurrente. El plan de clases siempre será una sugerencia editable.
               </p>
-              {!mobileWorkspace && <div className="flex flex-wrap justify-center gap-3">
+              <div className="flex flex-wrap justify-center gap-3">
                 <button
                   onClick={() => setIsGenerateSessionsOpen(true)}
-                  className="flex items-center gap-2 px-4 py-2 border border-emerald-200 text-emerald-700 bg-emerald-50 rounded-xl hover:bg-emerald-100 transition-all text-sm font-medium"
+                  className="flex min-h-11 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-100"
                 >
                   <Repeat className="w-4 h-4" />
                   Generar Horario
                 </button>
                 <button
-                  onClick={() => setIsCreateSessionOpen(true)}
-                  className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all text-sm font-medium shadow-sm"
+                  onClick={() => openCreateSession()}
+                  className="flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700"
                 >
                   <Plus className="w-4 h-4" />
                   Sesión Individual
                 </button>
-              </div>}
+              </div>
             </div>
           ) : (
             <div className="space-y-3 pb-2">
               {sessions.map((session, idx) => {
-                const totalAtt = (session.attendance_stats?.present || 0) + (session.attendance_stats?.absent || 0) + (session.attendance_stats?.late || 0) + (session.attendance_stats?.excused || 0);
+                const totalAtt = (session.attendance_stats?.present || 0) + (session.attendance_stats?.absent || 0) + (session.attendance_stats?.late || 0);
                 const isPast = calendarDateKey(session.date) < localDateInputValue();
+                const sessionTopics = normalizedSessionTopics(session);
                 return (
                   <div
                     key={session.id}
@@ -2138,7 +2725,7 @@ export default function ProgramDetailPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-0.5">
                           <h3 className="font-semibold text-slate-800 truncate">
-                            {session.topic || `Sesión ${idx + 1}`}
+                            {sessionDisplayTitle(session, `Sesión ${idx + 1}`)}
                           </h3>
                           {session.session_type === 'recovery' && (
                             <span className="text-xs px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full shrink-0">
@@ -2151,6 +2738,7 @@ export default function ProgramDetailPage() {
                             </span>
                           )}
                         </div>
+                        {sessionTopics.some(topic => topic.kind === 'course') && <div className="mb-1.5 flex flex-wrap gap-1.5">{sessionTopics.filter(topic => topic.kind === 'course').slice(0, 2).map(topic => <span key={topic.id || topic.course_topic_id || topic.title} className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700"><BookOpen className="h-3 w-3 shrink-0" /><span className="truncate">{topic.course_name || 'Curso histórico'} · {topic.title}</span></span>)}{sessionTopics.filter(topic => topic.kind === 'course').length > 2 && <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">+{sessionTopics.filter(topic => topic.kind === 'course').length - 2}</span>}</div>}
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
                           <span className="flex items-center gap-1">
                             <CalendarDays className="w-3 h-3" />
@@ -2178,7 +2766,7 @@ export default function ProgramDetailPage() {
                             <div className="flex items-center gap-0.5 text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg" title="Presentes">
                               <Check className="w-3 h-3" /> {session.attendance_stats?.present || 0}
                             </div>
-                            <div className="flex items-center gap-0.5 text-red-600 bg-red-50 px-2 py-1 rounded-lg" title="Ausentes">
+                            <div className="flex items-center gap-0.5 text-red-600 bg-red-50 px-2 py-1 rounded-lg" title="Faltas">
                               <X className="w-3 h-3" /> {session.attendance_stats?.absent || 0}
                             </div>
                             <div className="flex items-center gap-0.5 text-amber-600 bg-amber-50 px-2 py-1 rounded-lg" title="Tardes">
@@ -2196,22 +2784,22 @@ export default function ProgramDetailPage() {
                           onClick={() => openAttendance(session)}
                           className="min-h-11 flex-1 rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200 md:min-h-0 md:flex-none md:rounded-lg"
                         >
-                          {mobileWorkspace ? 'Ver asistencia' : 'Asistencia'}
+                          Asistencia
                         </button>
-                        {!mobileWorkspace && <button
+                        <button
                           onClick={() => openEditSession(session)}
                           className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 opacity-100 transition-all hover:bg-slate-100 hover:text-slate-700 md:h-8 md:w-8 md:rounded-lg md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
                           title="Editar sesión"
                         >
                           <Edit2 className="w-4 h-4" />
-                        </button>}
-                        {!mobileWorkspace && <button
+                        </button>
+                        <button
                           onClick={() => handleDeleteSession(session.id)}
                           className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 opacity-100 transition-all hover:bg-red-50 hover:text-red-500 md:h-8 md:w-8 md:rounded-lg md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
                           title="Eliminar sesión"
                         >
                           <Trash2 className="w-4 h-4" />
-                        </button>}
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -2324,11 +2912,10 @@ export default function ProgramDetailPage() {
                 const totalPresent = statsData.session_stats.reduce((s, ss) => s + (ss.present || 0), 0);
                 const totalAbsent = statsData.session_stats.reduce((s, ss) => s + (ss.absent || 0), 0);
                 const totalLate = statsData.session_stats.reduce((s, ss) => s + (ss.late || 0), 0);
-                const totalExcused = statsData.session_stats.reduce((s, ss) => s + (ss.excused || 0), 0);
-                const totalAll = totalPresent + totalAbsent + totalLate + totalExcused;
+                const totalAll = totalPresent + totalAbsent + totalLate;
                 const avgRate = totalAll > 0 ? Math.round(((totalPresent + totalLate) / totalAll) * 100) : 0;
                 return (
-                  <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
                       <p className="text-xs text-slate-500 mb-1">Tasa promedio</p>
                       <p className="text-2xl font-bold text-emerald-600">{avgRate}%</p>
@@ -2338,16 +2925,12 @@ export default function ProgramDetailPage() {
                       <p className="text-2xl font-bold text-emerald-600">{totalPresent}</p>
                     </div>
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
-                      <p className="text-xs text-slate-500 mb-1">Ausentes</p>
+                      <p className="text-xs text-slate-500 mb-1">Faltas</p>
                       <p className="text-2xl font-bold text-red-500">{totalAbsent}</p>
                     </div>
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
                       <p className="text-xs text-slate-500 mb-1">Tardanzas</p>
                       <p className="text-2xl font-bold text-amber-500">{totalLate}</p>
-                    </div>
-                    <div className="bg-white rounded-xl border border-slate-200 p-4">
-                      <p className="text-xs text-slate-500 mb-1">Justificados</p>
-                      <p className="text-2xl font-bold text-blue-500">{totalExcused}</p>
                     </div>
                   </div>
                 );
@@ -2357,13 +2940,12 @@ export default function ProgramDetailPage() {
               <div className="bg-white rounded-xl border border-slate-200 p-5">
                 <h3 className="font-semibold text-slate-800 mb-4 text-sm">Asistencia por sesión</h3>
                 <div className="space-y-3">
-                  {statsData.session_stats.map((ss: any, i: number) => {
-                    const total = (ss.present || 0) + (ss.absent || 0) + (ss.late || 0) + (ss.excused || 0);
+                  {statsData.session_stats.map((ss, i) => {
+                    const total = (ss.present || 0) + (ss.absent || 0) + (ss.late || 0);
                     const pPct = total > 0 ? ((ss.present || 0) / total) * 100 : 0;
                     const lPct = total > 0 ? ((ss.late || 0) / total) * 100 : 0;
-                    const ePct = total > 0 ? ((ss.excused || 0) / total) * 100 : 0;
                     const aPct = total > 0 ? ((ss.absent || 0) / total) * 100 : 0;
-                    const label = ss.topic || (ss.date ? formatCalendarDate(ss.date, 'dd MMM', { locale: es }) : `Sesión ${i + 1}`);
+                    const label = ss.title || ss.topic || (ss.date ? formatCalendarDate(ss.date, 'dd MMM', { locale: es }) : `Sesión ${i + 1}`);
                     return (
                       <div key={ss.session_id || i}>
                         <div className="flex items-center justify-between mb-1">
@@ -2373,8 +2955,7 @@ export default function ProgramDetailPage() {
                         <div className="flex h-5 rounded-lg overflow-hidden bg-slate-100">
                           {pPct > 0 && <div className="bg-emerald-500 transition-all" style={{ width: `${pPct}%` }} title={`Presentes: ${ss.present}`} />}
                           {lPct > 0 && <div className="bg-amber-400 transition-all" style={{ width: `${lPct}%` }} title={`Tardanzas: ${ss.late}`} />}
-                          {ePct > 0 && <div className="bg-blue-400 transition-all" style={{ width: `${ePct}%` }} title={`Justificados: ${ss.excused}`} />}
-                          {aPct > 0 && <div className="bg-red-400 transition-all" style={{ width: `${aPct}%` }} title={`Ausentes: ${ss.absent}`} />}
+                          {aPct > 0 && <div className="bg-red-400 transition-all" style={{ width: `${aPct}%` }} title={`Faltas: ${ss.absent}`} />}
                         </div>
                       </div>
                     );
@@ -2384,8 +2965,7 @@ export default function ProgramDetailPage() {
                 <div className="flex gap-4 mt-4 text-xs text-slate-500">
                   <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-500 inline-block" />Presente</span>
                   <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-400 inline-block" />Tardanza</span>
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-blue-400 inline-block" />Justificado</span>
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-red-400 inline-block" />Ausente</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-red-400 inline-block" />Falta</span>
                 </div>
               </div>
 
@@ -2398,10 +2978,10 @@ export default function ProgramDetailPage() {
                   </div>
                   <div className="overflow-x-auto pb-2" style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 transparent' }}>
                     <div className="h-48 flex items-end gap-2" style={{ minWidth: `${Math.max(statsData.session_stats.length * 52, 300)}px` }}>
-                      {statsData.session_stats.map((ss: any, i: number) => {
-                        const total = (ss.present || 0) + (ss.absent || 0) + (ss.late || 0) + (ss.excused || 0);
+                      {statsData.session_stats.map((ss, i) => {
+                        const total = (ss.present || 0) + (ss.absent || 0) + (ss.late || 0);
                         const rate = total > 0 ? Math.round(((ss.present || 0) + (ss.late || 0)) / total * 100) : 0;
-                        const label = ss.topic || (ss.date ? formatCalendarDate(ss.date, 'dd/MM', { locale: es }) : `S${i + 1}`);
+                        const label = ss.title || ss.topic || (ss.date ? formatCalendarDate(ss.date, 'dd/MM', { locale: es }) : `S${i + 1}`);
                         return (
                           <div key={ss.session_id || i} className="flex flex-col items-center gap-1 w-[44px] shrink-0">
                             <span className="text-[10px] font-semibold text-slate-700">{rate}%</span>
@@ -2421,30 +3001,33 @@ export default function ProgramDetailPage() {
               {/* Participant ranking (thermometer) */}
               {statsData.participant_stats.length > 0 && (
                 <div className="bg-white rounded-xl border border-slate-200 p-5">
-                  <h3 className="font-semibold text-slate-800 mb-4 text-sm">Ranking de asistencia por participante</h3>
+                  <h3 className="font-semibold text-slate-800 mb-1 text-sm">Asistencia de participantes activos</h3>
+                  <p className="mb-4 text-xs text-slate-500">Las sesiones pendientes se informan, pero no reducen el porcentaje.</p>
                   <div className="space-y-2">
                     {[...statsData.participant_stats]
-                      .sort((a: any, b: any) => (b.rate || 0) - (a.rate || 0))
-                      .map((ps: any, i: number) => {
+                      .sort((a, b) => (b.rate || 0) - (a.rate || 0))
+                      .map((ps, i) => {
                         const rate = ps.rate || 0;
-                        const color = rate >= 80 ? 'bg-emerald-500' : rate >= 50 ? 'bg-amber-400' : 'bg-red-400';
-                        const textColor = rate >= 80 ? 'text-emerald-700' : rate >= 50 ? 'text-amber-700' : 'text-red-600';
+                        const hasMarkedAttendance = (ps.marked_sessions || 0) > 0;
+                        const color = !hasMarkedAttendance ? 'bg-slate-300' : rate >= 80 ? 'bg-emerald-500' : rate >= 50 ? 'bg-amber-400' : 'bg-red-400';
+                        const textColor = !hasMarkedAttendance ? 'text-slate-400' : rate >= 80 ? 'text-emerald-700' : rate >= 50 ? 'text-amber-700' : 'text-red-600';
                         return (
                           <div key={ps.participant_id || i} className="flex items-center gap-3">
                             <span className="w-6 text-xs text-slate-400 text-right font-medium">{i + 1}</span>
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center justify-between mb-0.5">
                                 <span className="text-sm font-medium text-slate-700 truncate">{ps.name || 'Sin nombre'}</span>
-                                <span className={`text-xs font-bold ${textColor}`}>{Math.round(rate)}%</span>
+                                <span className={`text-xs font-bold ${textColor}`}>{hasMarkedAttendance ? `${Math.round(rate)}%` : 'Sin registros'}</span>
                               </div>
                               <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                                <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${rate}%` }} />
+                                <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${hasMarkedAttendance ? rate : 0}%` }} />
                               </div>
                               <div className="flex gap-3 mt-0.5 text-[10px] text-slate-400">
                                 <span>{ps.present || 0} presentes</span>
                                 <span>{ps.late || 0} tardanzas</span>
                                 <span>{ps.absent || 0} ausentes</span>
-                                <span>{ps.total_sessions || 0} sesiones</span>
+                                <span>{ps.marked_sessions || 0} registradas</span>
+                                {(ps.pending || 0) > 0 && <span>{ps.pending} pendientes</span>}
                               </div>
                             </div>
                           </div>
@@ -2463,7 +3046,7 @@ export default function ProgramDetailPage() {
 
       {/* Add Participant Selector */}
       <ContactSelector
-        open={isAddParticipantOpen && !mobileWorkspace}
+        open={isAddParticipantOpen}
         onClose={closeAddParticipantSelector}
         onConfirm={handleAddParticipants}
         title="Agregar participantes"
@@ -2481,24 +3064,26 @@ export default function ProgramDetailPage() {
       {showSectionPicker && mobileWorkspace && typeof document !== 'undefined' && createPortal(
         <div className="app-viewport fixed inset-0 z-[90] flex flex-col bg-white" role="dialog" aria-modal="true" aria-labelledby="program-mobile-sections-title">
           <div className="safe-area-top flex min-h-16 shrink-0 items-center justify-between border-b border-slate-200 px-4">
-            <div><h2 id="program-mobile-sections-title" className="font-bold text-slate-900">Secciones del programa</h2><p className="text-xs text-slate-500">Selecciona la información que quieres consultar</p></div>
+            <div><h2 id="program-mobile-sections-title" className="font-bold text-slate-900">Secciones del programa</h2><p className="text-xs text-slate-500">Elige qué quieres ver o administrar</p></div>
             <button type="button" onClick={() => setShowSectionPicker(false)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar selector"><X className="h-5 w-5" /></button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
             {(program.type === 'event'
               ? [
                   { id: 'kanban' as const, label: 'Tablero', detail: `${stages.length} etapas`, icon: LayoutGrid },
-                  { id: 'participants' as const, label: 'Participantes', detail: `${participants.length} inscritos`, icon: Users },
+                  { id: 'participants' as const, label: 'Participantes', detail: `${activeParticipants.length} activos`, icon: Users },
                 ]
               : [
-                  { id: 'health' as const, label: 'Participantes', detail: `${participants.length} inscritos`, icon: Users },
+                  { id: 'health' as const, label: 'Participantes', detail: `${activeParticipants.length} activos`, icon: Users },
+                  { id: 'academic' as const, label: 'Plan e instructores', detail: `${academicConfig?.courses.length || 0} cursos · ${academicConfig?.instructors.length || 0} instructores`, icon: GraduationCap },
                   { id: 'sessions' as const, label: 'Sesiones', detail: `${sessions.length} registradas`, icon: Calendar },
                   { id: 'stats' as const, label: 'Estadísticas', detail: 'Asistencia y evolución', icon: BarChart3 },
+                  ...(canUseSurveys ? [{ id: 'surveys' as const, label: 'Encuestas', detail: 'Aplicaciones y resultados', icon: ClipboardList }] : []),
                 ]
             ).map(section => {
               const Icon = section.icon
               const selected = activeTab === section.id
-              return <button key={section.id} type="button" onClick={() => { setActiveTab(section.id); setShowSectionPicker(false) }} className={`mb-2 flex min-h-16 w-full items-center gap-3 rounded-2xl border px-4 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${selected ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white hover:bg-slate-50'}`} aria-current={selected ? 'page' : undefined}><span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${selected ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}><Icon className="h-5 w-5" /></span><span className="min-w-0 flex-1"><span className={`block font-semibold ${selected ? 'text-emerald-800' : 'text-slate-800'}`}>{section.label}</span><span className="block text-xs text-slate-500">{section.detail}</span></span>{selected && <Check className="h-5 w-5 text-emerald-600" />}</button>
+              return <button key={section.id} type="button" onClick={() => requestTabChange(section.id)} className={`mb-2 flex min-h-16 w-full items-center gap-3 rounded-2xl border px-4 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${selected ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white hover:bg-slate-50'}`} aria-current={selected ? 'page' : undefined}><span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${selected ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}><Icon className="h-5 w-5" /></span><span className="min-w-0 flex-1"><span className={`block font-semibold ${selected ? 'text-emerald-800' : 'text-slate-800'}`}>{section.label}</span><span className="block text-xs text-slate-500">{section.detail}</span></span>{selected && <Check className="h-5 w-5 text-emerald-600" />}</button>
             })}
           </div>
           <div className="safe-area-bottom shrink-0 border-t border-slate-200 p-4"><button type="button" onClick={() => setShowSectionPicker(false)} className="min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cerrar</button></div>
@@ -2506,12 +3091,12 @@ export default function ProgramDetailPage() {
         document.body,
       )}
 
-      {isCreateSessionOpen && !mobileWorkspace && (
+      {isCreateSessionOpen && (
         <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div role="dialog" aria-modal="true" aria-labelledby="create-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'create' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-2xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
             <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 shrink-0">
               <h2 id="create-session-title" className="text-xl font-bold text-slate-800">Nueva Sesión</h2>
-              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'create' ? null : 'create')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'create' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'create' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="w-5 h-5" /></button></div>
+              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'create' ? null : 'create')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'create' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'create' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button type="button" onClick={() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Cerrar nueva sesión"><X className="w-5 h-5" /></button></div>
             </div>
             <form onSubmit={handleCreateSession} className="flex flex-1 min-h-0 flex-col">
               <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -2525,17 +3110,35 @@ export default function ProgramDetailPage() {
                     className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Tema / Título</label>
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5" htmlFor="new-session-title-input">Nombre de la sesión</label>
                   <input
+                    id="new-session-title-input"
                     type="text"
                     required
-                    value={newSession.topic}
-                    onChange={(e) => setNewSession({ ...newSession, topic: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                    placeholder="Ej: Introducción al curso"
+                    maxLength={255}
+                    value={newSession.title}
+                    onChange={(event) => {
+                      setNewSession(current => ({ ...current, title: event.target.value }));
+                      setNewSessionTitleEdited(true);
+                    }}
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    placeholder={`Sesión ${sessions.length + 1}`}
                   />
+                  <p className="mt-1 text-xs leading-5 text-slate-400">{newSessionTitleEdited ? 'Título personalizado. Los temas pueden cambiar sin modificarlo.' : 'Se sugiere desde el primer tema, pero puedes escribir cualquier título.'}</p>
                 </div>
+                <SessionTopicField
+                  courses={academicConfig?.courses || []}
+                  sessions={sessions}
+                  selectedTopics={newSession.topics}
+                  targetDate={newSession.date}
+                  targetStartTime={newSession.start_time}
+                  onChange={(topics) => setNewSession(current => ({
+                    ...current,
+                    topics,
+                    title: newSessionTitleEdited ? current.title : (suggestedSessionTitle(topics) || `Sesión ${sessions.length + 1}`),
+                  }))}
+                />
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Tipo de sesión</label>
                   <select
@@ -2588,9 +3191,10 @@ export default function ProgramDetailPage() {
                 </button>
                 <button
                   type="submit"
-                  className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
+                  disabled={creatingSession}
+                  className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60 sm:flex-none"
                 >
-                  Crear Sesión
+                  {creatingSession ? 'Creando…' : 'Crear Sesión'}
                 </button>
               </div>
             </form>
@@ -2599,7 +3203,7 @@ export default function ProgramDetailPage() {
       )}
 
       {/* Edit Session Modal */}
-      {editingSession && !mobileWorkspace && (
+      {editingSession && (
         <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div role="dialog" aria-modal="true" aria-labelledby="edit-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'edit' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-2xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
             <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 shrink-0">
@@ -2608,7 +3212,7 @@ export default function ProgramDetailPage() {
             </div>
             <form onSubmit={handleUpdateSession} className="flex flex-1 min-h-0 flex-col">
               <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
+                <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
                   <input
                     type="date"
@@ -2618,17 +3222,36 @@ export default function ProgramDetailPage() {
                     className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Tema / Título</label>
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-medium text-slate-700 mb-1.5" htmlFor="edit-session-title-input">Nombre de la sesión</label>
                   <input
+                    id="edit-session-title-input"
                     type="text"
                     required
-                    value={editSessionForm.topic}
-                    onChange={(e) => setEditSessionForm({ ...editSessionForm, topic: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                    placeholder="Ej: Introducción al curso"
+                    maxLength={255}
+                    value={editSessionForm.title}
+                    onChange={(event) => {
+                      setEditSessionForm(current => ({ ...current, title: event.target.value }));
+                      setEditSessionTitleEdited(true);
+                    }}
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                    placeholder="Título de la sesión"
                   />
+                  <p className="mt-1 text-xs leading-5 text-slate-400">El título es independiente de los temas seleccionados.</p>
                 </div>
+                <SessionTopicField
+                  courses={academicConfig?.courses || []}
+                  sessions={sessions}
+                  currentSessionId={editingSession.id}
+                  selectedTopics={editSessionForm.topics}
+                  targetDate={editSessionForm.date}
+                  targetStartTime={editSessionForm.start_time}
+                  onChange={(topics) => setEditSessionForm(current => ({
+                    ...current,
+                    topics,
+                    title: editSessionTitleEdited ? current.title : (suggestedSessionTitle(topics) || current.title),
+                  }))}
+                />
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Tipo de sesión</label>
                   <select
@@ -2693,20 +3316,20 @@ export default function ProgramDetailPage() {
       )}
 
       {/* Generate Sessions Modal - Google Calendar Style */}
-      {isGenerateSessionsOpen && !mobileWorkspace && (
+      {isGenerateSessionsOpen && (
         <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div role="dialog" aria-modal="true" aria-labelledby="recurring-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'recurring' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-3xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
-            <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 shrink-0">
-              <div className="flex items-center gap-3">
+            <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-4 sm:px-5 shrink-0">
+              <div className="flex min-w-0 flex-1 items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center">
                   <Repeat className="w-5 h-5 text-emerald-600" />
                 </div>
-                <div>
-                  <h2 id="recurring-session-title" className="text-xl font-bold text-slate-800">Generar Horario Recurrente</h2>
-                  <p className="text-xs text-slate-500">Configura la recurrencia y genera todas las sesiones</p>
+                <div className="min-w-0">
+                  <h2 id="recurring-session-title" className="text-lg font-bold leading-tight text-slate-800 sm:text-xl">Generar horario recurrente</h2>
+                  <p className="truncate text-xs text-slate-500">Configura la recurrencia y genera todas las sesiones</p>
                 </div>
               </div>
-              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'recurring' ? null : 'recurring')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'recurring' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'recurring' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="w-5 h-5" /></button></div>
+              <div className="flex shrink-0 items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'recurring' ? null : 'recurring')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'recurring' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'recurring' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="w-5 h-5" /></button></div>
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -2731,6 +3354,13 @@ export default function ProgramDetailPage() {
                   />
                 </div>
               </div>
+
+              {schedulePreview.error && (
+                <div role="alert" className="sm:col-span-2 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3 text-sm text-red-700">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{schedulePreview.error}</span>
+                </div>
+              )}
 
               {/* Days of week - Google Calendar style */}
               <div className="sm:col-span-2">
@@ -2780,17 +3410,26 @@ export default function ProgramDetailPage() {
                 </div>
               </div>
 
-              {/* Topic prefix */}
+              <div className="sm:col-span-2 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
+                <div className="flex items-start gap-3">
+                  <button type="button" role="switch" aria-checked={genForm.assign_course_topics} onClick={() => setGenForm(current => ({ ...current, assign_course_topics: !current.assign_course_topics }))} className={`relative mt-0.5 h-7 w-12 shrink-0 rounded-full transition ${genForm.assign_course_topics ? 'bg-emerald-600' : 'bg-slate-300'}`}><span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${genForm.assign_course_topics ? 'translate-x-6' : 'translate-x-1'}`} /></button>
+                  <div className="min-w-0 flex-1"><p className="text-sm font-semibold text-slate-800">Asignar temas del plan</p><p className="mt-0.5 text-xs leading-5 text-slate-600">Usará en orden los {pendingCourseTopics.length} temas activos aún no utilizados. Los temas siempre podrán cambiarse después.</p></div>
+                </div>
+                {genForm.assign_course_topics && previewSessionCount > pendingCourseTopics.length && <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>Faltan {previewSessionCount - pendingCourseTopics.length} temas del plan: esas sesiones usarán un tema libre de respaldo, pero conservarán su título correlativo.</span></div>}
+              </div>
+
+              {/* Session title prefix */}
               <div className="sm:col-span-2">
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">Prefijo del tema</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">Prefijo del título</label>
                 <input
                   type="text"
-                  value={genForm.topic_prefix}
-                  onChange={(e) => setGenForm({ ...genForm, topic_prefix: e.target.value })}
+                  value={genForm.title_prefix}
+                  onChange={(e) => setGenForm({ ...genForm, title_prefix: e.target.value })}
+                  maxLength={251}
                   className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                   placeholder="Ej: Sesión, Clase, Taller"
                 />
-                <p className="text-xs text-slate-400 mt-1">Se generará como &quot;{genForm.topic_prefix || 'Sesión'} 1&quot;, &quot;{genForm.topic_prefix || 'Sesión'} 2&quot;, etc.</p>
+                <p className="text-xs text-slate-400 mt-1">Se generarán títulos como &quot;{genForm.title_prefix || 'Sesión'} 1&quot;, &quot;{genForm.title_prefix || 'Sesión'} 2&quot;…</p>
               </div>
 
               {/* Location */}
@@ -2800,13 +3439,14 @@ export default function ProgramDetailPage() {
                   type="text"
                   value={genForm.location}
                   onChange={(e) => setGenForm({ ...genForm, location: e.target.value })}
+                  maxLength={500}
                   className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                   placeholder="Ej: Auditorio Principal"
                 />
               </div>
 
               {/* Preview */}
-              {previewSessionCount > 0 && (
+              {previewSessionCount > 0 && !schedulePreview.error && (
                 <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
                   <div className="flex items-center gap-2">
                     <CalendarDays className="w-5 h-5 text-emerald-600" />
@@ -2831,7 +3471,7 @@ export default function ProgramDetailPage() {
               </button>
               <button
                 onClick={handleGenerateSessions}
-                disabled={generating || previewSessionCount === 0}
+                disabled={generating || previewSessionCount === 0 || Boolean(schedulePreview.error)}
                 className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
               >
                 {generating ? (
@@ -2857,36 +3497,49 @@ export default function ProgramDetailPage() {
           <div role="dialog" aria-modal="true" aria-labelledby="attendance-title" className="flex h-[var(--app-height)] w-full max-w-5xl flex-col rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6">
             <div className="flex justify-between items-center mb-4">
               <div>
-                <h2 id="attendance-title" className="text-xl font-bold text-slate-800">{mobileWorkspace ? 'Ver asistencia' : 'Tomar Asistencia'}</h2>
+                <h2 id="attendance-title" className="text-xl font-bold text-slate-800">Tomar asistencia</h2>
                 <p className="mt-1 text-sm leading-snug text-slate-500">
-                  {selectedSession.topic} — {formatCalendarDate(selectedSession.date, "EEEE, d 'de' MMMM", { locale: es })}
+                  {sessionDisplayTitle(selectedSession, `Sesión ${Math.max(1, sessions.findIndex(session => session.id === selectedSession.id) + 1)}`)} — {formatCalendarDate(selectedSession.date, "EEEE, d 'de' MMMM", { locale: es })}
                   {selectedSession.start_time && ` · ${selectedSession.start_time}`}
                 </p>
               </div>
-              <button onClick={() => setIsAttendanceOpen(false)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
+              <button onClick={requestCloseAttendance} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Cerrar asistencia">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="flex-1 overflow-y-auto pr-1">
+              {attendanceLoadState === 'loading' ? (
+                <div className="flex min-h-64 items-center justify-center px-4 py-10 text-center" role="status">
+                  <div><Loader2 className="mx-auto h-8 w-8 animate-spin text-emerald-600" /><p className="mt-3 text-sm font-semibold text-slate-700">Cargando asistencia…</p><p className="mt-1 text-xs text-slate-500">Puedes permanecer aquí mientras preparamos la lista.</p></div>
+                </div>
+              ) : attendanceLoadState === 'error' ? (
+                <div className="flex min-h-64 items-center justify-center px-4 py-10 text-center" role="alert">
+                  <div><AlertCircle className="mx-auto h-9 w-9 text-red-400" /><p className="mt-3 text-sm font-semibold text-slate-800">No se pudo cargar la asistencia</p><p className="mt-1 text-xs leading-5 text-slate-500">{attendanceLoadError || 'Inténtalo nuevamente.'}</p><button type="button" onClick={() => { void openAttendance(selectedSession); }} className="mt-4 min-h-11 rounded-xl border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 transition hover:bg-red-50">Reintentar</button></div>
+                </div>
+              ) : (
+                <>
+              {eligibleAttendanceParticipants.length === 0 && <div className="flex min-h-48 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 text-center text-sm leading-6 text-slate-500">No hay participantes cuyo periodo de incorporación incluya esta sesión.</div>}
               <div className="space-y-3 md:hidden">
-                {participants.map(p => (
+                {eligibleAttendanceParticipants.map(p => (
                   <div key={p.id} className="rounded-xl border border-slate-200 p-3">
                     <div className="flex items-center gap-2">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">{(p.contact_name || '?').charAt(0).toUpperCase()}</div>
                       <span className="min-w-0 truncate text-sm font-semibold text-slate-800">{p.contact_name || 'Sin nombre'}</span>
                     </div>
-                    <div className="mt-3 grid grid-cols-4 gap-2">
+                    <div className="mt-3 grid grid-cols-3 gap-2">
                       {[
                         { key: 'present', label: 'P', color: 'emerald', title: 'Presente' },
-                        { key: 'absent', label: 'A', color: 'red', title: 'Ausente' },
+                        { key: 'absent', label: 'F', color: 'red', title: 'Falta' },
                         { key: 'late', label: 'T', color: 'amber', title: 'Tarde' },
-                        { key: 'excused', label: 'J', color: 'blue', title: 'Justificado' },
                       ].map(opt => (
-                        <button key={opt.key} type="button" disabled={mobileWorkspace} onClick={() => { setAttendanceData({ ...attendanceData, [p.id]: { ...attendanceData[p.id], status: opt.key, notes: attendanceData[p.id]?.notes || '' } }); setAttendanceDirty(prev => ({ ...prev, [p.id]: true })); }} aria-label={`${opt.title}: ${p.contact_name || 'participante'}`} className={`min-h-11 rounded-xl text-xs font-bold transition-all disabled:cursor-default ${attendanceData[p.id]?.status === opt.key ? opt.color === 'emerald' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-300' : opt.color === 'red' ? 'bg-red-100 text-red-700 ring-2 ring-red-300' : opt.color === 'amber' ? 'bg-amber-100 text-amber-700 ring-2 ring-amber-300' : 'bg-blue-100 text-blue-700 ring-2 ring-blue-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{opt.label}<span className="sr-only"> {opt.title}</span></button>
+                        <button key={opt.key} type="button" onClick={() => { setAttendanceData(current => ({ ...current, [p.id]: { status: current[p.id]?.status === opt.key ? '' : opt.key, observation_count: current[p.id]?.observation_count || 0, observation_preview: current[p.id]?.observation_preview || [] } })); setAttendanceDirty(prev => ({ ...prev, [p.id]: true })); }} aria-label={`${opt.title}: ${p.contact_name || 'participante'}`} aria-pressed={attendanceData[p.id]?.status === opt.key} title={`${opt.title}. Pulsa otra vez para dejar sin marcar.`} className={`min-h-11 rounded-xl text-xs font-bold transition-all ${attendanceData[p.id]?.status === opt.key ? opt.color === 'emerald' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-300' : opt.color === 'red' ? 'bg-red-100 text-red-700 ring-2 ring-red-300' : 'bg-amber-100 text-amber-700 ring-2 ring-amber-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{opt.label}<span className="sr-only"> {opt.title}</span></button>
                       ))}
                     </div>
-                    <input type="text" readOnly={mobileWorkspace} value={attendanceData[p.id]?.notes || ''} onChange={(event) => { setAttendanceData({ ...attendanceData, [p.id]: { ...attendanceData[p.id], status: attendanceData[p.id]?.status || '', notes: event.target.value } }); setAttendanceDirty(prev => ({ ...prev, [p.id]: true })); }} placeholder={mobileWorkspace ? 'Sin observación' : 'Escribir observación...'} className="mt-3 min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm read-only:bg-slate-50 read-only:text-slate-600 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20" />
+                    <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                      {attendanceData[p.id]?.observation_preview?.[0] ? <><p className="line-clamp-2 text-sm leading-5 text-slate-700">{attendanceData[p.id].observation_preview[0].notes}</p><p className="mt-1 text-[10px] text-slate-400">{attendanceData[p.id].observation_preview[0].created_by_name || 'Autor no registrado'} · {format(new Date(attendanceData[p.id].observation_preview[0].created_at), 'dd MMM, HH:mm', { locale: es })}</p></> : <p className="text-xs text-slate-400">Sin observaciones</p>}
+                      <div className="mt-2 flex justify-end"><button type="button" onClick={() => void loadAttendanceObservationHistory(p)} aria-label={`Abrir observaciones de asistencia de ${p.contact_name || 'participante'}`} className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-white px-3 text-xs font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200 transition hover:bg-emerald-50"><NotebookPen className="h-3.5 w-3.5" />Observaciones{(attendanceData[p.id]?.observation_count || 0) > 1 && <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px]">+{(attendanceData[p.id]?.observation_count || 0) - 1} más</span>}</button></div>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -2899,7 +3552,7 @@ export default function ProgramDetailPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {participants.map((p) => (
+                  {eligibleAttendanceParticipants.map((p) => (
                     <tr key={p.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
@@ -2913,25 +3566,23 @@ export default function ProgramDetailPage() {
                         <div className="flex gap-1">
                           {[
                             { key: 'present', label: 'P', color: 'emerald', title: 'Presente' },
-                            { key: 'absent', label: 'A', color: 'red', title: 'Ausente' },
+                            { key: 'absent', label: 'F', color: 'red', title: 'Falta' },
                             { key: 'late', label: 'T', color: 'amber', title: 'Tarde' },
-                            { key: 'excused', label: 'J', color: 'blue', title: 'Justificado' },
                           ].map(opt => (
                             <button
                               key={opt.key}
                               type="button"
-                              disabled={mobileWorkspace}
                               onClick={() => {
-                                setAttendanceData({ ...attendanceData, [p.id]: { ...attendanceData[p.id], status: opt.key, notes: attendanceData[p.id]?.notes || '' } });
+                                setAttendanceData(current => ({ ...current, [p.id]: { status: current[p.id]?.status === opt.key ? '' : opt.key, observation_count: current[p.id]?.observation_count || 0, observation_preview: current[p.id]?.observation_preview || [] } }));
                                 setAttendanceDirty(prev => ({ ...prev, [p.id]: true }));
                               }}
-                              title={opt.title}
+                              title={`${opt.title}. Pulsa otra vez para dejar sin marcar.`}
+                              aria-pressed={attendanceData[p.id]?.status === opt.key}
                               className={`w-8 h-8 rounded-lg text-xs font-bold transition-all ${
                                 attendanceData[p.id]?.status === opt.key
                                   ? opt.color === 'emerald' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-300'
                                   : opt.color === 'red' ? 'bg-red-100 text-red-700 ring-2 ring-red-300'
-                                  : opt.color === 'amber' ? 'bg-amber-100 text-amber-700 ring-2 ring-amber-300'
-                                  : 'bg-blue-100 text-blue-700 ring-2 ring-blue-300'
+                                  : 'bg-amber-100 text-amber-700 ring-2 ring-amber-300'
                                   : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
                               }`}
                             >
@@ -2941,43 +3592,52 @@ export default function ProgramDetailPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        <input
-                          type="text"
-                          readOnly={mobileWorkspace}
-                          value={attendanceData[p.id]?.notes || ''}
-                          onChange={(e) => {
-                            setAttendanceData({ ...attendanceData, [p.id]: { ...attendanceData[p.id], status: attendanceData[p.id]?.status || '', notes: e.target.value } });
-                            setAttendanceDirty(prev => ({ ...prev, [p.id]: true }));
-                          }}
-                          placeholder={mobileWorkspace ? 'Sin observación' : 'Escribir observación...'}
-                          className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs read-only:bg-slate-50 read-only:text-slate-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                        />
+                        <div className="min-w-[260px]">
+                          {attendanceData[p.id]?.observation_preview?.[0] ? <><p className="line-clamp-2 text-xs leading-5 text-slate-700">{attendanceData[p.id].observation_preview[0].notes}</p><p className="text-[10px] text-slate-400">{attendanceData[p.id].observation_preview[0].created_by_name || 'Autor no registrado'} · {format(new Date(attendanceData[p.id].observation_preview[0].created_at), 'dd MMM, HH:mm', { locale: es })}</p></> : <span className="text-xs text-slate-400">Sin observaciones</span>}
+                          <div className="mt-1"><button type="button" onClick={() => void loadAttendanceObservationHistory(p)} aria-label={`Abrir observaciones de asistencia de ${p.contact_name || 'participante'}`} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-50"><NotebookPen className="h-3.5 w-3.5" />Observaciones{(attendanceData[p.id]?.observation_count || 0) > 1 && ` · +${(attendanceData[p.id]?.observation_count || 0) - 1} más`}</button></div>
+                        </div>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+                </>
+              )}
             </div>
 
             <div className="flex gap-3 mt-4 pt-4 border-t border-slate-100 sm:justify-end">
               <button
-                onClick={() => setIsAttendanceOpen(false)}
+                onClick={requestCloseAttendance}
                 className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none"
               >
-                {mobileWorkspace ? 'Cerrar' : 'Cancelar'}
+                Cancelar
               </button>
-              {!mobileWorkspace && <button onClick={saveAttendance} disabled={savingAttendance} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:opacity-50 sm:flex-none">
+              <button onClick={saveAttendance} disabled={attendanceLoadState !== 'success' || savingAttendance || Object.keys(attendanceDirty).length === 0} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:opacity-50 sm:flex-none">
                 <Check className="w-4 h-4" />
                 {savingAttendance ? 'Guardando...' : 'Guardar Asistencia'}
-              </button>}
+              </button>
             </div>
           </div>
         </div>
       )}
 
       <ObservationHistoryModal
+        isOpen={!!attendanceObservationParticipant && !!selectedSession}
+        onClose={closeAttendanceObservationHistory}
+        attendanceContext={attendanceObservationParticipant && selectedSession ? { programId, sessionId: selectedSession.id, participantId: attendanceObservationParticipant.id } : null}
+        name={attendanceObservationParticipant?.contact_name || 'Participante sin nombre'}
+        observations={attendanceObservationHistory}
+        loading={attendanceObservationLoading}
+        errorMessage={attendanceObservationError}
+        onRetry={() => { if (attendanceObservationParticipant) void loadAttendanceObservationHistory(attendanceObservationParticipant); }}
+        onObservationChange={() => { if (attendanceObservationParticipant) void loadAttendanceObservationHistory(attendanceObservationParticipant); }}
+        mutationMode="manage"
+        initialComposerOpen={attendanceObservationComposerOpen}
+      />
+
+      <ObservationHistoryModal
         isOpen={!!observationParticipant}
-        onClose={() => { setObservationParticipant(null); setObservationComposerInitiallyOpen(false); setObservationHistoryError('') }}
+        onClose={closeObservationHistory}
         leadId={undefined}
         contactId={observationParticipant?.contact_id || null}
         programId={programId}
@@ -2995,13 +3655,13 @@ export default function ProgramDetailPage() {
       />
 
       {/* Participant Outcome Modal */}
-      {outcomeParticipant && !mobileWorkspace && (
+      {outcomeParticipant && (
         <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div role="dialog" aria-modal="true" aria-labelledby="participant-outcome-title" className="h-[var(--app-height)] w-full max-w-md overflow-y-auto rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6">
             <div className="flex justify-between items-start mb-5">
               <div>
                 <h2 id="participant-outcome-title" className="text-xl font-bold text-slate-800">
-                  {outcomeForm.status === 'completed' ? 'Completar y traspasar' : 'Registrar desistimiento'}
+                  {outcomeForm.status === 'completed' ? 'Completar participación' : 'Retirar del programa'}
                 </h2>
                 <p className="text-sm text-slate-500">{outcomeParticipant.contact_name || 'Participante sin nombre'}</p>
               </div>
@@ -3021,6 +3681,7 @@ export default function ProgramDetailPage() {
               </div>
             ) : (
               <div className="space-y-4">
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-800">Saldrá del padrón activo y de sus cálculos actuales. Su asistencia, observaciones y periodo permanecerán disponibles en Historial.</div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Motivo</label>
                   <input
@@ -3042,11 +3703,11 @@ export default function ProgramDetailPage() {
               </div>
             )}
             <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-4 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">
-              <button onClick={() => setOutcomeParticipant(null)} className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none">
+              <button onClick={() => setOutcomeParticipant(null)} disabled={savingOutcome} className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:opacity-50 sm:flex-none">
                 Cancelar
               </button>
-              <button onClick={saveParticipantOutcome} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none">
-                Guardar
+              <button onClick={saveParticipantOutcome} disabled={savingOutcome} className={`min-h-11 flex-1 rounded-xl px-5 py-2.5 font-medium text-white shadow-sm transition-all disabled:cursor-wait disabled:opacity-60 sm:flex-none ${outcomeForm.status === 'dropped' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+                {savingOutcome ? 'Guardando…' : outcomeForm.status === 'dropped' ? 'Retirar y conservar historial' : 'Completar'}
               </button>
             </div>
           </div>
@@ -3156,7 +3817,7 @@ export default function ProgramDetailPage() {
             className="absolute inset-0 bg-black/30"
             onClick={closeParticipantDetail}
           />
-          <div ref={participantDetailDialogRef} role="dialog" aria-modal="true" aria-label="Detalle del participante" tabIndex={-1} className={`relative flex h-[var(--app-height,100dvh)] border-l border-slate-200 bg-white pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)] shadow-2xl outline-none transition-all duration-300 lg:pl-0 lg:pr-0 lg:pt-0 ${showInlineChat ? 'w-full lg:w-[85vw] lg:max-w-6xl' : 'w-full max-w-md'}`}>
+          <div ref={participantDetailDialogRef} role="dialog" aria-modal="true" aria-label="Detalle del participante" tabIndex={-1} className={`relative flex h-[var(--app-height,100dvh)] border-l border-slate-200 bg-white pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] shadow-2xl outline-none transition-all duration-200 motion-reduce:transition-none lg:pl-0 lg:pr-0 ${showInlineChat ? 'w-full pt-[env(safe-area-inset-top)] lg:w-[85vw] lg:max-w-6xl lg:pt-0' : 'w-full max-w-md'}`}>
             {/* Chat Panel - Left Side */}
             {showInlineChat && inlineChatId && (
               <div className="flex h-full min-w-0 flex-1 flex-col bg-slate-50/50 lg:border-r lg:border-slate-200">
@@ -3182,48 +3843,75 @@ export default function ProgramDetailPage() {
                   <div className="flex h-16 items-center justify-between border-b border-slate-100 px-4"><h2 className="text-sm font-semibold text-slate-900">Detalle del participante</h2><button type="button" onClick={closeParticipantDetail} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Cerrar"><X className="h-4 w-4" /></button></div>
                   <div className="flex flex-1 items-center justify-center p-6"><div className="text-center"><AlertCircle className="mx-auto h-9 w-9 text-red-400" /><p className="mt-3 font-medium text-slate-800">No se pudo cargar el participante</p><p className="mt-1 text-sm text-slate-500">{participantDetailError}</p><button type="button" onClick={retryParticipantDetail} className="mt-4 min-h-11 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700">Reintentar</button></div></div>
                 </div>
-              ) : selectedContact && selectedLead ? (
-                mobileWorkspace && selectedParticipantID ? <ProgramParticipantMobileDetail
-                  contact={selectedContact}
-                  participantId={selectedParticipantID}
-                  participantStatus={participants.find(participant => participant.id === selectedParticipantID)?.status || 'active'}
-                  programId={programId}
-                  onClose={closeParticipantDetail}
-                  onObservationChange={() => { void fetchHealth() }}
-                  onSendMessage={handleSendWhatsApp}
-                  sendingMessage={whatsappLaunching || whatsappCreating}
-                /> : <LeadDetailPanel
-                  contactMode
+              ) : selectedContact && selectedParticipantID ? (
+                <ContactDetailSurface
                   contactId={selectedContact.id}
-                  avatarContextType="program_participant"
-                  avatarContextId={selectedParticipantID || undefined}
-                  lead={contactToLead(selectedContact)}
-                  pushName={selectedContact.push_name}
-                  avatarUrl={selectedContact.avatar_url}
-                  detailTitle="Detalle del participante"
-                  programContext={selectedParticipantID ? { programId, participantId: selectedParticipantID } : undefined}
-                  defaultObservationType="note"
-                  onAvatarChange={handleParticipantAvatarChange}
-                  onLeadChange={() => {}}
-                  onContactUpdate={(updated: any) => {
-                    setSelectedContact(updated);
-                    setSelectedLead(contactToLead(updated));
-                    // Update participant list in-place without full page refresh
-                    setParticipants(prev => prev.map(p =>
-                      p.contact_id === updated.id
-                        ? { ...p, contact_name: updated.custom_name || updated.name || p.contact_name, contact_phone: updated.phone || p.contact_phone }
-                        : p
-                    ));
-                    setHealth(prev => prev ? {
-                      ...prev,
-                      participants: prev.participants.map(p => p.contact_id === updated.id ? { ...p, name: updated.custom_name || updated.name || p.name, phone: updated.phone || p.phone } : p),
-                    } : prev);
-                  }}
+                  context={{ type: 'program_participant', id: selectedParticipantID }}
+                  initialContact={selectedContact}
+                  title="Detalle del participante"
+                  subtitle={program.name}
                   onClose={closeParticipantDetail}
-                  onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-                  onObservationChange={() => { void fetchHealth(); }}
-                  hideDelete
-                  hideWhatsApp={showInlineChat}
+                  onContactChange={handleParticipantContactChange}
+                  onSendMessage={showInlineChat ? undefined : handleSendWhatsApp}
+                  sendingMessage={whatsappLaunching || whatsappCreating}
+                  contextContent={(
+                    <div className="pb-[calc(1rem+env(safe-area-inset-bottom))]">
+                      <section className="border-b border-slate-200 px-4 py-4" aria-labelledby="program-participation-title">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <h4 id="program-participation-title" className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Participación en el programa</h4>
+                            <p className="mt-1 truncate text-sm font-semibold text-slate-800">{program.name}</p>
+                          </div>
+                          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold ${
+                            selectedProgramParticipant?.status === 'completed'
+                              ? 'bg-blue-50 text-blue-700'
+                              : selectedProgramParticipant?.status === 'dropped'
+                                ? 'bg-red-50 text-red-700'
+                                : 'bg-emerald-50 text-emerald-700'
+                          }`}>
+                            {selectedProgramParticipant?.status === 'completed'
+                              ? 'Completado'
+                              : selectedProgramParticipant?.status === 'dropped'
+                                ? 'Retirado'
+                                : 'Activo'}
+                          </span>
+                        </div>
+                        {selectedProgramParticipant && (
+                          <div className="mt-3 grid grid-cols-1 gap-2 text-xs text-slate-600 sm:grid-cols-2">
+                            <ProgramParticipantEnrollmentDate programId={programId} participant={selectedProgramParticipant} onChange={enrolledAt => handleParticipantEnrollmentChange(selectedProgramParticipant.id, enrolledAt)} />
+                            {selectedProgramParticipant.completed_at && (
+                              <div className="rounded-xl bg-slate-50 px-3 py-2">
+                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Finalización</p>
+                                <p className="mt-0.5 font-semibold text-slate-700">{formatCalendarDate(selectedProgramParticipant.completed_at, 'dd MMM yyyy', { locale: es })}</p>
+                              </div>
+                            )}
+                            {selectedProgramParticipant.dropped_at && (
+                              <div className="rounded-xl bg-slate-50 px-3 py-2">
+                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Retiro</p>
+                                <p className="mt-0.5 font-semibold text-slate-700">{formatCalendarDate(selectedProgramParticipant.dropped_at, 'dd MMM yyyy', { locale: es })}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {selectedProgramParticipant?.status === 'active' ? (
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <button type="button" onClick={() => openOutcomeModal(selectedProgramParticipant.id, 'completed')} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"><Target className="h-4 w-4" />Completar</button>
+                            <button type="button" onClick={() => openOutcomeModal(selectedProgramParticipant.id, 'dropped')} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 text-xs font-semibold text-red-700 transition hover:bg-red-100"><XCircle className="h-4 w-4" />Retirar</button>
+                          </div>
+                        ) : (
+                          <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500">Esta participación está en el historial y no afecta el padrón ni la salud actual del programa.</p>
+                        )}
+                      </section>
+                      <div className="px-4">
+                        <ProgramParticipantAttendanceSection
+                          programId={programId}
+                          participantId={selectedParticipantID}
+                          participantName={selectedProgramParticipant?.contact_name || selectedContact.custom_name || selectedContact.name || selectedContact.phone || 'Participante'}
+                          enrolledAt={selectedProgramParticipant?.enrolled_at || ''}
+                        />
+                      </div>
+                    </div>
+                  )}
                 />
               ) : null}
             </div>
@@ -3269,12 +3957,12 @@ export default function ProgramDetailPage() {
 
       {/* Toast */}
       {toastMessage && (
-        <div className={`fixed bottom-6 right-6 z-[70] flex items-center gap-2.5 px-5 py-3 rounded-xl shadow-lg text-sm font-medium transition-all animate-in slide-in-from-bottom-4 ${
+        <div className={`fixed bottom-[calc(1.5rem+env(safe-area-inset-bottom))] left-4 right-4 z-[100] flex items-start gap-2.5 rounded-xl px-4 py-3 text-sm font-medium shadow-lg transition-all animate-in slide-in-from-bottom-4 sm:left-auto sm:right-6 sm:max-w-lg sm:px-5 ${
           toastType === 'success' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
         }`}>
-          {toastType === 'success' ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
-          {toastMessage}
-          <button onClick={() => setToastMessage(null)} className="ml-1 p-0.5 hover:bg-white/20 rounded">
+          {toastType === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />}
+          <span className="min-w-0 flex-1 break-words">{toastMessage}</span>
+          <button onClick={() => setToastMessage(null)} className="ml-1 shrink-0 rounded p-0.5 hover:bg-white/20">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -3282,8 +3970,8 @@ export default function ProgramDetailPage() {
 
       {/* Confirmation Dialog */}
       {confirmAction && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4">
+          <div role="alertdialog" aria-modal="true" aria-label="Confirmar acción" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center shrink-0">
                 <AlertCircle className="w-5 h-5 text-red-500" />

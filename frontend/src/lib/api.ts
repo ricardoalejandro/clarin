@@ -230,7 +230,7 @@ interface FetchOptions extends RequestInit {
 export async function api<T>(
   endpoint: string,
   options: FetchOptions = {}
-): Promise<{ success: boolean; data?: T; error?: string }> {
+): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
   const { skipAuth = false, ...fetchOptions } = options
 
   if (!skipAuth && isAuthIdleExpired()) {
@@ -263,7 +263,7 @@ export async function api<T>(
 
     // Handle empty responses (204 No Content, etc.)
     if (res.status === 204 || res.headers.get('content-length') === '0') {
-      return { success: true, data: undefined as unknown as T }
+      return { success: true, data: undefined as unknown as T, status: res.status }
     }
 
     let data: any
@@ -271,8 +271,8 @@ export async function api<T>(
       data = await res.json()
     } catch {
       // Response body is not JSON (empty or non-JSON)
-      if (res.ok) return { success: true, data: undefined as unknown as T }
-      return { success: false, error: `Error ${res.status}` }
+      if (res.ok) return { success: true, data: undefined as unknown as T, status: res.status }
+      return { success: false, error: `Error ${res.status}`, status: res.status }
     }
 
     if (!res.ok) {
@@ -288,18 +288,18 @@ export async function api<T>(
           if (retryRes.ok) {
             const retryData = await retryRes.json().catch(() => undefined)
             markAuthActivity()
-            return { success: true, data: retryData as T }
+            return { success: true, data: retryData as T, status: retryRes.status }
           }
         }
         // Refresh failed — session truly expired
         await logoutFromBrowser('expired')
-        return { success: false, error: 'Sesión expirada' }
+        return { success: false, error: 'Sesión expirada', status: res.status }
       }
-      return { success: false, error: data?.error || `Error ${res.status}` }
+      return { success: false, error: data?.error || `Error ${res.status}`, status: res.status }
     }
 
     if (!skipAuth) markAuthActivity()
-    return { success: true, data: data as T }
+    return { success: true, data: data as T, status: res.status }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       return { success: false, error: 'Solicitud cancelada' }

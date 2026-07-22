@@ -2,10 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { X, User, Smartphone, Tag, Pencil, Check, Archive, ShieldBan, ShieldOff, AlertCircle, CheckCircle2, Loader2, RotateCcw, BriefcaseBusiness, Mail, Building2, Cake, FileText, Plus, RefreshCw, Search } from 'lucide-react'
+import { X, User, Smartphone, Check, Archive, ShieldBan, ShieldOff, AlertCircle, CheckCircle2, Loader2, RotateCcw, BriefcaseBusiness, Plus, RefreshCw, Search } from 'lucide-react'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
-import ContactAvatarControl from '@/components/ContactAvatarControl'
-import TagInput from '@/components/TagInput'
+import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import type { Lead, PipelineStage, StructuredTag } from '@/types/contact'
 
@@ -75,16 +74,11 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   const [newOpportunityTitle, setNewOpportunityTitle] = useState('Consulta por WhatsApp')
   const [creatingOpportunity, setCreatingOpportunity] = useState(false)
   const [createOpportunityError, setCreateOpportunityError] = useState('')
-  const [editingName, setEditingName] = useState(false)
-  const [editNameValue, setEditNameValue] = useState('')
-  const [savingName, setSavingName] = useState(false)
-  const nameInputRef = useRef<HTMLInputElement>(null)
   const activeChatIdRef = useRef<string | null>(isOpen ? chatId : null)
   const selectedOpportunityIdRef = useRef<string | null>(null)
   const detailsAbortRef = useRef<AbortController | null>(null)
   const opportunityAbortRef = useRef<AbortController | null>(null)
   const stageMutationAbortRef = useRef<AbortController | null>(null)
-  const nameMutationAbortRef = useRef<AbortController | null>(null)
   const createMutationAbortRef = useRef<AbortController | null>(null)
   const preferenceMutationAbortRef = useRef<AbortController | null>(null)
   const restoreMutationAbortRef = useRef<AbortController | null>(null)
@@ -415,7 +409,6 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   useEffect(() => {
 	mutationEpochRef.current += 1
 	stageMutationAbortRef.current?.abort()
-	nameMutationAbortRef.current?.abort()
 	createMutationAbortRef.current?.abort()
 	preferenceMutationAbortRef.current?.abort()
 	restoreMutationAbortRef.current?.abort()
@@ -440,7 +433,6 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
       setArchiveTargetId(null)
       setArchiveError('')
       selectedOpportunityIdRef.current = null
-      setEditingName(false)
       setShowContactLinker(false)
       setContactMatches([])
       setContactLinkError('')
@@ -459,7 +451,6 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
     return () => {
 	  mutationEpochRef.current += 1
 	  stageMutationAbortRef.current?.abort()
-	  nameMutationAbortRef.current?.abort()
 	  createMutationAbortRef.current?.abort()
 	  preferenceMutationAbortRef.current?.abort()
 	  restoreMutationAbortRef.current?.abort()
@@ -598,44 +589,6 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
 
   if (!isOpen) return null
 
-  const startEditingName = () => {
-    setEditNameValue(contact?.custom_name || contact?.name || contact?.push_name || '')
-    setEditingName(true)
-    setTimeout(() => nameInputRef.current?.focus(), 50)
-  }
-
-  const saveCustomName = async () => {
-    if (!contact) return
-	const targetChatId = activeChatIdRef.current
-	const targetContactId = contact.id
-	const epoch = mutationEpochRef.current
-	if (!targetChatId) return
-	nameMutationAbortRef.current?.abort()
-	const controller = new AbortController()
-	nameMutationAbortRef.current = controller
-    setSavingName(true)
-    try {
-      const token = localStorage.getItem('token')
-      const res = await fetch(`/api/contacts/${contact.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ custom_name: editNameValue.trim() }),
-		signal: controller.signal,
-      })
-      const data = await res.json().catch(() => null)
-      if (!res.ok || !data?.success || !data.contact) throw new Error(data?.error || 'No se pudo actualizar el nombre.')
-	  if (controller.signal.aborted || mutationEpochRef.current !== epoch || activeChatIdRef.current !== targetChatId || data.contact.id !== targetContactId) return
-	  setContact(data.contact)
-    } catch (err) {
-	  if (!controller.signal.aborted && mutationEpochRef.current === epoch && activeChatIdRef.current === targetChatId) console.error('Failed to save contact name:', err)
-    } finally {
-	  if (mutationEpochRef.current === epoch && activeChatIdRef.current === targetChatId) {
-		setSavingName(false)
-		setEditingName(false)
-	  }
-    }
-  }
-
   const createOpportunity = async () => {
     if (!contact || !newOpportunityTitle.trim() || creatingOpportunity) return
 	const targetChatId = activeChatIdRef.current
@@ -672,8 +625,6 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   }
 
   const cleanName = (name?: string | null) => name?.replace(/^[\s.·•\-]+/, '').trim() || ''
-  const displayName = cleanName(contact?.custom_name) || cleanName(contact?.name) || cleanName(contact?.push_name) || cleanName(lead?.name) || 'Número sin vincular'
-  const avatarUrl = contact?.avatar_url
   const actualDeviceName = cleanName(chatDevice?.name) || deviceName || 'Dispositivo WhatsApp'
   const actualDevicePhone = cleanName(chatDevice?.phone) || devicePhone || ''
   const fmtDevicePhone = actualDevicePhone ? (actualDevicePhone.startsWith('+') ? actualDevicePhone : '+' + actualDevicePhone) : ''
@@ -743,54 +694,15 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-          <div className="border-b border-slate-200 px-4 py-4">
+          {!contact && <div className="border-b border-slate-200 px-4 py-4">
             <div className="flex items-center gap-3">
-              {contact ? (
-                <ContactAvatarControl
-                  contactId={contact.id}
-                  contextType="chat"
-                  contextId={chatId}
-                  displayName={displayName}
-                  avatarUrl={avatarUrl}
-                  compact
-                  onChange={updated => setContact(current => current ? { ...current, avatar_url: updated.avatar_url || undefined } : current)}
-                />
-              ) : (
-                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-emerald-50 ring-1 ring-emerald-100">
-                  <User className="h-5 w-5 text-emerald-700" />
-                </div>
-              )}
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-emerald-50 ring-1 ring-emerald-100">
+                <User className="h-5 w-5 text-emerald-700" />
+              </div>
               <div className="min-w-0 flex-1">
-                <div className="group/name flex min-w-0 items-center gap-1.5">
-                  {editingName ? (
-                    <>
-                      <input
-                        ref={nameInputRef}
-                        value={editNameValue}
-                        onChange={event => setEditNameValue(event.target.value)}
-                        onKeyDown={event => { if (event.key === 'Enter') void saveCustomName(); if (event.key === 'Escape') setEditingName(false) }}
-                        disabled={savingName}
-                        className="h-9 min-w-0 flex-1 rounded-lg border border-emerald-300 px-2 text-sm font-semibold text-slate-900 outline-none focus:ring-2 focus:ring-emerald-100"
-                        aria-label="Nombre del contacto"
-                      />
-                      <button type="button" onClick={() => void saveCustomName()} disabled={savingName} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Guardar nombre">
-                        {savingName ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <p className="truncate text-sm font-bold text-slate-900">{displayName}</p>
-                      {contact && (
-                        <button type="button" onClick={startEditingName} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 opacity-100 hover:bg-slate-100 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:opacity-0 sm:group-hover/name:opacity-100 sm:focus:opacity-100" aria-label="Editar nombre">
-                          <Pencil className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
+                <p className="truncate text-sm font-bold text-slate-900">Número sin vincular</p>
                 {displayPhone && <p className="mt-0.5 truncate text-xs font-medium text-slate-500">{displayPhone}</p>}
               </div>
-              {contact?.do_not_contact && <span className="shrink-0 rounded-full border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-bold text-red-700">No contactar</span>}
             </div>
             {(chatDevice || deviceName || fmtDevicePhone) && (
               <div className="mt-3 flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
@@ -802,7 +714,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
                 {chatDevice?.status && <span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${chatDevice.status === 'connected' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>{chatDevice.status === 'connected' ? 'Conectado' : 'No disponible'}</span>}
               </div>
             )}
-          </div>
+          </div>}
 
           <div>
             {detailsError && (
@@ -857,34 +769,38 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
               </div>
             ) : (
               <>
-                <div className="divide-y divide-slate-100 border-b border-slate-200 bg-white">
-                  {(contact.email || contact.company || contact.age) && (
-                    <section className="space-y-2 px-4 py-3" aria-labelledby="contact-information-title">
-                      <h5 id="contact-information-title" className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Datos del contacto</h5>
-                      {contact.email && <div className="flex items-center gap-2 text-sm text-slate-700"><Mail className="h-4 w-4 shrink-0 text-slate-400" /><span className="truncate">{contact.email}</span></div>}
-                      {contact.company && <div className="flex items-center gap-2 text-sm text-slate-700"><Building2 className="h-4 w-4 shrink-0 text-slate-400" /><span className="truncate">{contact.company}</span></div>}
-                      {contact.age && <div className="flex items-center gap-2 text-sm text-slate-700"><Cake className="h-4 w-4 shrink-0 text-slate-400" /><span>{contact.age} años</span></div>}
+                <ContactDetailSurface
+                  contactId={contact.id}
+                  context={{ type: 'chat', id: chatId }}
+                  initialContact={{
+                    ...contact,
+                    structured_tags: contact.structured_tags || [],
+                    extra_phones: [],
+                    custom_field_values: [],
+                  }}
+                  title="Detalles"
+                  subtitle="Contacto y contexto comercial"
+                  onClose={onClose}
+                  onContactChange={updated => setContact(current => current?.id === updated.id ? { ...current, ...updated, jid: updated.jid || current.jid, is_group: updated.is_group ?? current.is_group } as Contact : current)}
+                  hideHeader
+                  parentOwnsScroll
+                  contextContent={(
+                    <section className="space-y-3 border-b border-slate-200 px-4 py-4">
+                      {(chatDevice || deviceName || fmtDevicePhone) && (
+                        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                          <Smartphone className="h-4 w-4 shrink-0 text-slate-400" />
+                          <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{actualDeviceName}</p>{(fmtDevicePhone || deviceProvider) && <p className="truncate text-[10px] text-slate-500">{[fmtDevicePhone, deviceProvider].filter(Boolean).join(' · ')}</p>}</div>
+                          {chatDevice?.status && <span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${chatDevice.status === 'connected' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>{chatDevice.status === 'connected' ? 'Conectado' : 'No disponible'}</span>}
+                        </div>
+                      )}
+                      {contact.do_not_contact ? (
+                        <div className="rounded-xl border border-red-200 bg-red-50 p-3"><div className="flex items-start gap-2"><ShieldBan className="mt-0.5 h-4 w-4 shrink-0 text-red-600" /><div className="min-w-0 flex-1"><p className="text-xs font-bold text-red-900">No contactar</p><p className="mt-0.5 text-xs leading-relaxed text-red-700">{contact.do_not_contact_reason || 'Este contacto no debe recibir mensajes.'}</p></div></div><button type="button" onClick={() => void handleUnblock()} className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><ShieldOff className="h-4 w-4" /> Permitir contacto</button></div>
+                      ) : (
+                        <button type="button" onClick={openBlockModal} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-red-200 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><ShieldBan className="h-4 w-4" /> Marcar como no contactable</button>
+                      )}
                     </section>
                   )}
-                  <section className="space-y-2 px-4 py-3" aria-labelledby="contact-notes-title">
-                    <div className="flex items-center gap-1.5"><FileText className="h-3.5 w-3.5 text-slate-400" /><h5 id="contact-notes-title" className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Notas del contacto</h5></div>
-                    <p className={`whitespace-pre-wrap text-xs leading-5 ${contact.notes?.trim() ? 'text-slate-700' : 'italic text-slate-400'}`}>{contact.notes?.trim() || 'Sin notas registradas en la ficha del contacto.'}</p>
-                  </section>
-                  <section className="px-4 py-3" aria-labelledby="contact-tags-title">
-                    <div className="mb-2 flex items-center gap-1.5"><Tag className="h-3.5 w-3.5 text-slate-400" /><h5 id="contact-tags-title" className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Etiquetas del contacto</h5></div>
-                    <TagInput entityType="contact" entityId={contact.id} assignedTags={contact.structured_tags || []} onTagsChange={newTags => setContact(current => current ? { ...current, structured_tags: newTags } : current)} />
-                  </section>
-                  <section className="px-4 py-3">
-                    {contact.do_not_contact ? (
-                      <div className="rounded-xl border border-red-200 bg-red-50 p-3">
-                        <div className="flex items-start gap-2"><ShieldBan className="mt-0.5 h-4 w-4 shrink-0 text-red-600" /><div className="min-w-0 flex-1"><p className="text-xs font-bold text-red-900">No contactar</p><p className="mt-0.5 text-xs leading-relaxed text-red-700">{contact.do_not_contact_reason || 'Este contacto no debe recibir mensajes.'}</p></div></div>
-                        <button type="button" onClick={() => void handleUnblock()} className="mt-2 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-white px-3 text-xs font-semibold text-red-700 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><ShieldOff className="h-4 w-4" /> Permitir contacto</button>
-                      </div>
-                    ) : (
-                      <button type="button" onClick={openBlockModal} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-red-200 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><ShieldBan className="h-4 w-4" /> Marcar como no contactable</button>
-                    )}
-                  </section>
-                </div>
+                />
 
                 <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-slate-50/70 px-4 py-2">
                   <div className="flex min-w-0 items-center gap-2"><BriefcaseBusiness className="h-4 w-4 shrink-0 text-emerald-700" /><div><h4 className="text-xs font-bold text-slate-800">Contexto comercial</h4><p className="text-[10px] text-slate-500">{opportunities.length} oportunidad{opportunities.length === 1 ? '' : 'es'}</p></div></div>
@@ -977,6 +893,9 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
                         hideIdentity={true}
                         commercialOnly={true}
                         parentOwnsScroll={true}
+                        hideTabs={true}
+                        hideCustomFields={true}
+                        hideObservations={true}
                         hideWhatsApp={true}
                         hideDelete={false}
                         onDelete={() => { setOpportunities(current => current.filter(item => item.id !== lead.id)); selectedOpportunityIdRef.current = null; setLead(null); void fetchDetails() }}

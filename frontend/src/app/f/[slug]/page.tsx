@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import {
   ChevronDown, ChevronUp, Check, Star, Upload, Loader2,
   ArrowRight, AlertCircle
@@ -41,9 +41,23 @@ interface Question {
   required: boolean; config: QuestionConfig; logic_rules: LogicRule[];
 }
 
+function safeSurveyRedirect(raw: string): string {
+  try {
+    const target = new URL(raw);
+    if ((target.protocol !== 'http:' && target.protocol !== 'https:') || !target.hostname || target.username || target.password) {
+      return '';
+    }
+    return target.href;
+  } catch {
+    return '';
+  }
+}
+
 export default function PublicFormPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const slug = params.slug as string;
+  const recipientToken = searchParams.get('recipient') || '';
 
   const [survey, setSurvey] = useState<SurveyData | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -54,39 +68,82 @@ export default function PublicFormPage() {
   const [step, setStep] = useState(-1);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [fileUrls, setFileUrls] = useState<Record<string, string>>({});
+  const [fileUploadIds, setFileUploadIds] = useState<Record<string, string>>({});
+  const [navigationHistory, setNavigationHistory] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
-  const [startedAt] = useState(new Date().toISOString());
-  const [respondentToken] = useState(() => crypto.randomUUID());
   const [validationError, setValidationError] = useState('');
   const [uploading, setUploading] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const flowEpochRef = useRef(0);
+  const submitInFlightRef = useRef(false);
+  const submitAbortRef = useRef<AbortController | null>(null);
+  const startedAtRef = useRef('');
+  const respondentTokenRef = useRef('');
+  const redirectTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
-    fetchSurvey();
-  }, [slug]);
-
-  const fetchSurvey = async () => {
-    try {
-      const res = await fetch(`/api/public/surveys/${encodeURIComponent(slug)}`);
-      if (!res.ok) {
-        setError('Encuesta no encontrada o no está activa.');
-        return;
-      }
-      const data = await res.json();
-      setSurvey(data.survey);
-      setQuestions(data.questions || []);
-      // If no welcome screen, start at first question
-      if (!data.survey.welcome_title && !data.survey.welcome_description) {
-        setStep(0);
-      }
-    } catch {
-      setError('Error al cargar la encuesta.');
-    } finally {
-      setLoading(false);
+    const epoch = flowEpochRef.current + 1;
+    flowEpochRef.current = epoch;
+    const controller = new AbortController();
+    submitAbortRef.current?.abort();
+    submitAbortRef.current = null;
+    submitInFlightRef.current = false;
+    if (redirectTimeoutRef.current !== null) {
+      window.clearTimeout(redirectTimeoutRef.current);
+      redirectTimeoutRef.current = null;
     }
-  };
+
+    setSurvey(null);
+    setQuestions([]);
+    setLoading(true);
+    setError('');
+    setStep(-1);
+    setAnswers({});
+    setFileUrls({});
+    setFileUploadIds({});
+    setNavigationHistory([]);
+    setSubmitting(false);
+    setSubmitted(false);
+    setValidationError('');
+    setUploading(false);
+    startedAtRef.current = new Date().toISOString();
+    respondentTokenRef.current = crypto.randomUUID();
+
+    const loadSurvey = async () => {
+      try {
+        const query = recipientToken ? `?recipient=${encodeURIComponent(recipientToken)}` : '';
+        const res = await fetch(`/api/public/surveys/${encodeURIComponent(slug)}${query}`, { signal: controller.signal });
+        if (controller.signal.aborted || flowEpochRef.current !== epoch) return;
+        if (!res.ok) {
+          setError('Encuesta no encontrada o no está activa.');
+          return;
+        }
+        const data = await res.json();
+        if (controller.signal.aborted || flowEpochRef.current !== epoch) return;
+        setSurvey(data.survey);
+        setQuestions(data.questions || []);
+        setStep(data.survey.welcome_title || data.survey.welcome_description ? -1 : 0);
+      } catch (loadError) {
+        if (controller.signal.aborted || flowEpochRef.current !== epoch) return;
+        setError(loadError instanceof Error ? 'Error al cargar la encuesta.' : 'Error al cargar la encuesta.');
+      } finally {
+        if (!controller.signal.aborted && flowEpochRef.current === epoch) setLoading(false);
+      }
+    };
+    void loadSurvey();
+
+    return () => {
+      if (flowEpochRef.current === epoch) flowEpochRef.current += 1;
+      controller.abort();
+      submitAbortRef.current?.abort();
+      if (redirectTimeoutRef.current !== null) {
+        window.clearTimeout(redirectTimeoutRef.current);
+        redirectTimeoutRef.current = null;
+      }
+    };
+  }, [slug, recipientToken]);
 
   const currentQuestion = step >= 0 && step < questions.length ? questions[step] : null;
 
@@ -103,13 +160,81 @@ export default function PublicFormPage() {
 
       if (match) {
         const jumpIdx = questions.findIndex(qq => qq.id === rule.jump_to);
-        if (jumpIdx >= 0) return jumpIdx;
+        const sourceIdx = questions.findIndex(qq => qq.id === q.id);
+        if (jumpIdx > sourceIdx) return jumpIdx;
       }
     }
     return null;
   }, [questions]);
 
+  const submitResponses = useCallback(async () => {
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
+    setSubmitting(true);
+    setValidationError('');
+    const epoch = flowEpochRef.current;
+    const controller = new AbortController();
+    submitAbortRef.current?.abort();
+    submitAbortRef.current = controller;
+    try {
+      const reachableQuestionIDs = new Set<string>();
+      for (let index = 0; index < questions.length;) {
+        const question = questions[index];
+        reachableQuestionIDs.add(question.id);
+        const jumpIndex = evaluateLogic(question, answers[question.id] || '');
+        index = jumpIndex !== null && jumpIndex > index ? jumpIndex : index + 1;
+      }
+      const answersList = questions
+        .filter(q => reachableQuestionIDs.has(q.id) && (answers[q.id] || fileUploadIds[q.id]))
+        .map(q => ({
+          question_id: q.id,
+          value: answers[q.id] || '',
+          upload_id: fileUploadIds[q.id] || undefined,
+        }));
+
+      const res = await fetch(`/api/public/surveys/${encodeURIComponent(slug)}/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          respondent_token: respondentTokenRef.current,
+          recipient_token: recipientToken,
+          source: 'direct',
+          started_at: startedAtRef.current,
+          answers: answersList,
+        }),
+      });
+      if (controller.signal.aborted || flowEpochRef.current !== epoch) return;
+
+      if (res.ok) {
+        setSubmitted(true);
+        const redirectURL = safeSurveyRedirect(survey?.thank_you_redirect_url || '');
+        if (redirectURL) {
+          redirectTimeoutRef.current = window.setTimeout(() => {
+            if (flowEpochRef.current === epoch) window.location.assign(redirectURL);
+          }, 2000);
+        }
+        return;
+      }
+      const payload = await res.json().catch(() => ({}));
+      if (flowEpochRef.current === epoch) {
+        setValidationError(typeof payload.error === 'string' ? payload.error : 'No se pudo enviar la encuesta.');
+      }
+    } catch (submitError) {
+      if (!controller.signal.aborted && flowEpochRef.current === epoch) {
+        setValidationError('Error al enviar respuestas. Intenta nuevamente.');
+      }
+    } finally {
+      if (flowEpochRef.current === epoch) {
+        submitInFlightRef.current = false;
+        setSubmitting(false);
+      }
+      if (submitAbortRef.current === controller) submitAbortRef.current = null;
+    }
+  }, [answers, evaluateLogic, fileUploadIds, questions, recipientToken, slug, survey?.thank_you_redirect_url]);
+
   const goNext = useCallback(async () => {
+    if (submitInFlightRef.current || submitting || uploading) return;
     setValidationError('');
 
     // Validate current question
@@ -123,6 +248,7 @@ export default function PublicFormPage() {
 
     if (step === -1) {
       // Welcome → first question
+      setNavigationHistory(current => [...current, -1]);
       setStep(0);
       return;
     }
@@ -134,6 +260,7 @@ export default function PublicFormPage() {
         if (jumpIdx >= questions.length) {
           await submitResponses();
         } else {
+          setNavigationHistory(current => [...current, step]);
           setStep(jumpIdx);
         }
         return;
@@ -141,74 +268,49 @@ export default function PublicFormPage() {
     }
 
     if (step < questions.length - 1) {
+      setNavigationHistory(current => [...current, step]);
       setStep(step + 1);
     } else {
       await submitResponses();
     }
-  }, [step, currentQuestion, answers, fileUrls, questions, evaluateLogic]);
+  }, [step, currentQuestion, answers, fileUrls, questions, evaluateLogic, submitResponses, submitting, uploading]);
 
   const goPrev = () => {
+    if (submitInFlightRef.current || submitting || uploading) return;
     setValidationError('');
-    if (step > (survey?.welcome_title || survey?.welcome_description ? -1 : 0)) {
-      setStep(step - 1);
-    }
-  };
-
-  const submitResponses = async () => {
-    setSubmitting(true);
-    try {
-      const answersList = questions
-        .filter(q => answers[q.id] || fileUrls[q.id])
-        .map(q => ({
-          question_id: q.id,
-          value: answers[q.id] || '',
-          file_url: fileUrls[q.id] || '',
-        }));
-
-      const res = await fetch(`/api/public/surveys/${encodeURIComponent(slug)}/submit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          respondent_token: respondentToken,
-          source: 'direct',
-          started_at: startedAt,
-          answers: answersList,
-        }),
-      });
-
-      if (res.ok) {
-        setSubmitted(true);
-        if (survey?.thank_you_redirect_url) {
-          setTimeout(() => {
-            window.location.href = survey.thank_you_redirect_url;
-          }, 2000);
-        }
-      }
-    } catch {
-      setValidationError('Error al enviar respuestas. Intenta nuevamente.');
-    } finally {
-      setSubmitting(false);
-    }
+    if (navigationHistory.length === 0) return;
+    setStep(navigationHistory[navigationHistory.length - 1]);
+    setNavigationHistory(navigationHistory.slice(0, -1));
   };
 
   const handleFileUpload = async (questionId: string, file: File) => {
+	const epoch = flowEpochRef.current;
     setUploading(true);
+	setValidationError('');
     try {
       const form = new FormData();
       form.append('file', file);
-      const res = await fetch(`/api/public/surveys/${encodeURIComponent(slug)}/upload`, {
+	  form.append('question_id', questionId);
+	  form.append('respondent_token', respondentTokenRef.current);
+      const query = recipientToken ? `?recipient=${encodeURIComponent(recipientToken)}` : '';
+      const res = await fetch(`/api/public/surveys/${encodeURIComponent(slug)}/upload${query}`, {
         method: 'POST',
         body: form,
       });
+	  if (flowEpochRef.current !== epoch) return;
       if (res.ok) {
         const data = await res.json();
         setFileUrls(prev => ({ ...prev, [questionId]: data.url }));
+		setFileUploadIds(prev => ({ ...prev, [questionId]: data.upload_id }));
         setAnswers(prev => ({ ...prev, [questionId]: data.filename || file.name }));
+		return;
       }
+	  const payload = await res.json().catch(() => ({}));
+	  setValidationError(typeof payload.error === 'string' ? payload.error : 'No se pudo subir el archivo.');
     } catch {
-      setValidationError('Error al subir archivo.');
+	  if (flowEpochRef.current === epoch) setValidationError('Error al subir archivo.');
     } finally {
-      setUploading(false);
+	  if (flowEpochRef.current === epoch) setUploading(false);
     }
   };
 
@@ -306,7 +408,8 @@ export default function PublicFormPage() {
           )}
           <button
             onClick={goNext}
-            className={`inline-flex items-center gap-2 px-8 py-4 ${btnClass} text-white font-semibold text-lg shadow-lg hover:shadow-xl transition-all transform hover:scale-[1.02]`}
+            disabled={submitting}
+            className={`inline-flex items-center gap-2 px-8 py-4 ${btnClass} text-white font-semibold text-lg shadow-lg hover:shadow-xl transition-all transform hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-60`}
             style={{ backgroundColor: accent }}
           >
             Comenzar <ArrowRight className="w-5 h-5" />
@@ -357,6 +460,7 @@ export default function PublicFormPage() {
               onFileUpload={(file) => handleFileUpload(currentQuestion.id, file)}
               fileUrl={fileUrls[currentQuestion.id]}
               uploading={uploading}
+              disabled={submitting}
               accent={accent}
             />
           </div>
@@ -371,8 +475,8 @@ export default function PublicFormPage() {
           {/* Next button */}
           <button
             onClick={goNext}
-            disabled={submitting}
-            className={`inline-flex items-center gap-2 px-6 py-3 ${btnClass} text-white font-medium shadow-md hover:shadow-lg transition-all`}
+            disabled={submitting || uploading}
+            className={`inline-flex items-center gap-2 px-6 py-3 ${btnClass} text-white font-medium shadow-md hover:shadow-lg transition-all disabled:cursor-not-allowed disabled:opacity-60`}
             style={{ backgroundColor: accent }}
           >
             {submitting ? (
@@ -392,10 +496,10 @@ export default function PublicFormPage() {
 
       {/* Navigation */}
       <div className="fixed bottom-4 right-4 flex flex-col gap-1">
-        <button onClick={goPrev} disabled={step <= (survey.welcome_title ? -1 : 0)} className="p-2 rounded-lg bg-white shadow border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-30">
+        <button aria-label="Pregunta anterior" onClick={goPrev} disabled={submitting || uploading || navigationHistory.length === 0} className="p-2 rounded-lg bg-white shadow border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-30">
           <ChevronUp className="w-4 h-4" />
         </button>
-        <button onClick={goNext} className="p-2 rounded-lg bg-white shadow border border-slate-200 text-slate-600 hover:bg-slate-50">
+        <button aria-label="Siguiente pregunta" onClick={goNext} disabled={submitting || uploading} className="p-2 rounded-lg bg-white shadow border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-30">
           <ChevronDown className="w-4 h-4" />
         </button>
       </div>
@@ -405,9 +509,9 @@ export default function PublicFormPage() {
 
 // ─── Question Input Renderer ────────────────────────────────────────────────
 
-function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploading, accent }: {
+function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploading, disabled, accent }: {
   question: Question; value: string; onChange: (v: string) => void;
-  onFileUpload: (f: File) => void; fileUrl?: string; uploading: boolean; accent: string;
+  onFileUpload: (f: File) => void; fileUrl?: string; uploading: boolean; disabled: boolean; accent: string;
 }) {
   const config = question.config || {};
 
@@ -418,6 +522,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
       return (
         <input
           autoFocus
+          disabled={disabled}
           type={question.type === 'email' ? 'email' : question.type === 'phone' ? 'tel' : 'text'}
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -431,6 +536,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
       return (
         <textarea
           autoFocus
+          disabled={disabled}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={config.placeholder || 'Escribe tu respuesta...'}
@@ -445,6 +551,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
           {(config.options || []).map((opt, i) => (
             <button
               key={i}
+              disabled={disabled}
               onClick={() => onChange(opt)}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 text-left transition-all ${
                 value === opt ? 'bg-emerald-50 border-emerald-500 text-emerald-700' : 'border-slate-200 hover:border-slate-300 text-slate-700'
@@ -474,6 +581,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
           {(config.options || []).map((opt, i) => (
             <button
               key={i}
+              disabled={disabled}
               onClick={() => toggle(opt)}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 text-left transition-all ${
                 selected.includes(opt) ? 'bg-emerald-50 border-emerald-500' : 'border-slate-200 hover:border-slate-300'
@@ -500,6 +608,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
           {Array.from({ length: max }, (_, i) => i + 1).map((n) => (
             <button
               key={n}
+              disabled={disabled}
               onClick={() => onChange(String(n))}
               className="transition-transform hover:scale-110"
             >
@@ -526,6 +635,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
             {Array.from({ length: scale }, (_, i) => i + 1).map((n) => (
               <button
                 key={n}
+                disabled={disabled}
                 onClick={() => onChange(String(n))}
                 className={`flex-1 py-3 rounded-xl border-2 font-medium text-lg transition-all ${
                   current === n ? 'text-white' : 'border-slate-200 text-slate-600 hover:border-slate-300'
@@ -544,6 +654,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
       return (
         <input
           type="date"
+          disabled={disabled}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           className="w-full border-b-2 border-slate-200 focus:border-emerald-500 bg-transparent text-xl py-3 focus:outline-none transition-colors"
@@ -559,7 +670,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
               <span className="text-sm text-emerald-700 font-medium">{value || 'Archivo subido'}</span>
             </div>
           ) : (
-            <label className="flex flex-col items-center justify-center w-full h-40 border-2 border-dashed border-slate-300 rounded-xl cursor-pointer hover:border-slate-400 transition-colors">
+            <label className={`flex h-40 w-full flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 transition-colors ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-slate-400'}`}>
               {uploading ? (
                 <Loader2 className="w-8 h-8 animate-spin text-slate-400" />
               ) : (
@@ -571,6 +682,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
               )}
               <input
                 type="file"
+                disabled={disabled}
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
@@ -586,6 +698,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
       return (
         <input
           autoFocus
+          disabled={disabled}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder="Escribe tu respuesta..."

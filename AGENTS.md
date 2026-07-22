@@ -35,6 +35,26 @@ Before changing any area below, read the matching local skill completely:
 
 If a task touches multiple areas, read all matching skills before editing.
 
+## Contact And Program Product Invariants
+
+- `ContactDetailSurface` is the canonical identity surface for Contactos, Leads, Chats, Eventos and Programas. Keep identity, phones, email, photo, tags, notes, custom fields and contact history single-sourced from `Contact`; module sections must contain only contextual data.
+- `program_participants.enrolled_at` represents the participant's real start date in the program. New participants receive it automatically, but authorized users must be able to correct it explicitly; never infer or move it automatically from attendance rows.
+- Individual attendance counts only held sessions inside the inclusive participation window from `enrolled_at` through the earliest of `dropped_at` or `completed_at`. Preserve real out-of-window attendance as clearly labelled history and never include it in rates.
+- A Contact may participate in many Programs, but enrollment dates, lifecycle status, attendance, observations, outcomes and rates belong to the specific `program_participant_id`. Never merge or present one unqualified attendance score across Programs.
+- Operational Program rosters default to active participants. Retired and completed participation remains available as history, is excluded from current headcount and current health, and still contributes to historical session metrics only when the session date was inside its participation window.
+- `Retirar` is a lifecycle transition, not a deletion. Never physically delete a Program participation that has attendance, observations, notes or other activity; an administrative enrollment annulment is only valid for a proven empty enrollment created by mistake.
+- Session attendance rosters and writes must enforce eligibility for that session date in both frontend and backend. A later withdrawal must not rewrite historical rosters or past rates, and pending attendance is never an absence.
+- Programs are groups of classes. New event workflows belong exclusively to the full Eventos module; do not reintroduce `type=event` creation inside Programas or duplicate Evento capabilities there.
+- Contact tag editing must remain usable for very large catalogs: render assigned tags immediately, search a bounded server-side result set, and gate creation of global tags with `PermTags`; never load or render the entire tag catalog in every contact detail.
+- Contact observation history must be user-expandable and lazy-loaded. Keep its count and add action available while collapsed, and keep the observation composer independent from the history list.
+
+## Survey Product Invariants
+
+- A survey template is reusable design only and never receives responses or owns a public link. A survey application/instance is the immutable answerable copy created from one template revision.
+- Program survey applications belong to one Program and freeze their recipient audience at launch. Link each recipient and response to the canonical Contact and the specific `program_participant_id` so the same Contact can participate independently in multiple Programs.
+- Editing a template must never mutate published applications, questions, answers, exports or analytics. Preserve existing public slugs and legacy responses during migrations; do not use delete-and-reinsert question flows once answers exist.
+- Results are instance-specific. Template-level analytics may compare or aggregate instances only with explicit origin/revision filters and must never silently mix incompatible question revisions.
+
 ## Chat And WhatsApp Product Invariants
 
 - Treat `Contact` as the single identity parent. Render identity, phone, avatar, notes, and contact tags once. Opportunities may add commercial data but must not duplicate or contradict Contact data.

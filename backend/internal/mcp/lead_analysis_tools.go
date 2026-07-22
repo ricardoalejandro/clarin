@@ -182,11 +182,11 @@ func leadAnalysisWhere(req mcp.CallToolRequest, accountID uuid.UUID) (string, []
 
 	if query := strings.TrimSpace(stringArg(req, "query")); query != "" {
 		where += fmt.Sprintf(` AND (
-			COALESCE(l.name, '') ILIKE $%d OR COALESCE(l.last_name, '') ILIKE $%d OR
-			COALESCE(c.name, '') ILIKE $%d OR COALESCE(c.custom_name, '') ILIKE $%d OR
-			COALESCE(c.push_name, '') ILIKE $%d OR COALESCE(l.phone, c.phone, '') ILIKE $%d OR
-			COALESCE(l.email, c.email, '') ILIKE $%d
-		)`, argN, argN, argN, argN, argN, argN, argN)
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.last_name,'') ELSE COALESCE(c.last_name,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END ILIKE $%d
+		)`, argN, argN, argN, argN)
 		args = append(args, "%"+query+"%")
 		argN++
 	}
@@ -321,7 +321,7 @@ func (s *MCPServer) toolGetLeadAnalysisOverview(ctx context.Context, req mcp.Cal
 		return errResult(err.Error()), nil
 	}
 
-	baseFrom := ` FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id`
+	baseFrom := ` FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id LEFT JOIN pipeline_stages ps ON ps.id=l.stage_id`
 	var total int
 	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*)`+baseFrom+where, args...).Scan(&total)
 
@@ -333,11 +333,11 @@ func (s *MCPServer) toolGetLeadAnalysisOverview(ctx context.Context, req mcp.Cal
 
 	overview["data_quality"] = s.singleRowMap(ctx, `
 		SELECT
-			COUNT(*) FILTER (WHERE COALESCE(l.phone, c.phone, '') <> '') AS with_phone,
-			COUNT(*) FILTER (WHERE COALESCE(l.email, c.email, '') <> '') AS with_email,
+			COUNT(*) FILTER (WHERE CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END <> '') AS with_phone,
+			COUNT(*) FILTER (WHERE CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END <> '') AS with_email,
 			COUNT(*) FILTER (WHERE l.contact_id IS NOT NULL) AS with_contact,
 			COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM chats ch WHERE ch.account_id = l.account_id AND ch.contact_id = l.contact_id)) AS with_chat,
-			COUNT(*) FILTER (WHERE COALESCE(l.notes, c.notes, '') <> '') AS with_notes,
+			COUNT(*) FILTER (WHERE CASE WHEN l.contact_id IS NULL THEN COALESCE(l.notes,'') ELSE COALESCE(c.notes,'') END <> '') AS with_notes,
 			COUNT(*) FILTER (WHERE l.is_archived = true) AS archived,
 			COUNT(*) FILTER (WHERE l.is_blocked = true) AS blocked
 	`+baseFrom+where, args...)
@@ -452,7 +452,7 @@ func (s *MCPServer) fetchLeadAnalysisBase(ctx context.Context, accountID uuid.UU
 	if err != nil {
 		return nil, 0, false, err
 	}
-	baseFrom := ` FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id`
+	baseFrom := ` FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id LEFT JOIN pipeline_stages ps ON ps.id=l.stage_id`
 	var total int
 	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*)`+baseFrom+where, args...).Scan(&total)
 
@@ -460,11 +460,11 @@ func (s *MCPServer) fetchLeadAnalysisBase(ctx context.Context, accountID uuid.UU
 		SELECT
 			l.id::text,
 			COALESCE(l.contact_id::text, ''),
-			COALESCE(NULLIF(l.name, ''), NULLIF(c.custom_name, ''), NULLIF(c.name, ''), NULLIF(c.push_name, ''), ''),
-			COALESCE(NULLIF(l.phone, ''), NULLIF(c.phone, ''), ''),
-			COALESCE(NULLIF(l.email, ''), NULLIF(c.email, ''), ''),
-			COALESCE(l.age, c.age),
-			COALESCE(NULLIF(l.dni, ''), NULLIF(c.dni, ''), ''),
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.phone,'') ELSE NULLIF(c.phone,'') END,''),
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.email,'') ELSE NULLIF(c.email,'') END,''),
+			CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.dni,'') ELSE NULLIF(c.dni,'') END,''),
 			l.created_at,
 			COALESCE(NULLIF(l.source, ''), NULLIF(c.source, ''), ''),
 			COALESCE(l.status, ''),
@@ -541,7 +541,7 @@ func (s *MCPServer) fetchLeadAnalysisBase(ctx context.Context, accountID uuid.UU
 			JOIN campaigns ca ON ca.id = cr.campaign_id AND ca.account_id = l.account_id
 			WHERE cr.contact_id = l.contact_id
 			   OR (regexp_replace(COALESCE(cr.phone, ''), '\D', '', 'g') <> ''
-			       AND regexp_replace(COALESCE(cr.phone, ''), '\D', '', 'g') = regexp_replace(COALESCE(l.phone, c.phone, ''), '\D', '', 'g'))
+			       AND regexp_replace(COALESCE(cr.phone, ''), '\D', '', 'g') = regexp_replace(CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END, '\D', '', 'g'))
 		) cpg ON true
 		LEFT JOIN LATERAL (
 			SELECT COUNT(sr.id)::int AS survey_count
@@ -574,11 +574,11 @@ func (s *MCPServer) fetchLeadAnalysisBase(ctx context.Context, accountID uuid.UU
 		LEFT JOIN LATERAL (
 			SELECT COUNT(l2.id)::int AS duplicate_phone_count
 			FROM leads l2
-			LEFT JOIN contacts c2 ON c2.id = l2.contact_id
+			LEFT JOIN contacts c2 ON c2.id=l2.contact_id AND c2.account_id=l2.account_id
 			WHERE l2.account_id = l.account_id
 			  AND l2.id <> l.id
-			  AND regexp_replace(COALESCE(l2.phone, c2.phone, ''), '\D', '', 'g') <> ''
-			  AND regexp_replace(COALESCE(l2.phone, c2.phone, ''), '\D', '', 'g') = regexp_replace(COALESCE(l.phone, c.phone, ''), '\D', '', 'g')
+			  AND regexp_replace(CASE WHEN l2.contact_id IS NULL THEN COALESCE(l2.phone,'') ELSE COALESCE(c2.phone,'') END, '\D', '', 'g') <> ''
+			  AND regexp_replace(CASE WHEN l2.contact_id IS NULL THEN COALESCE(l2.phone,'') ELSE COALESCE(c2.phone,'') END, '\D', '', 'g') = regexp_replace(CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END, '\D', '', 'g')
 		) dup ON true
 	` + where + fmt.Sprintf(` ORDER BY l.created_at DESC, l.id DESC LIMIT %d`, maxScan)
 
@@ -1210,7 +1210,7 @@ func (s *MCPServer) toolExportLeadsForAnalysis(ctx context.Context, req mcp.Call
 		return errResult(err.Error()), nil
 	}
 
-	baseFrom := ` FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id`
+	baseFrom := ` FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id LEFT JOIN pipeline_stages ps ON ps.id=l.stage_id`
 	var total int
 	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*)`+baseFrom+where, args...).Scan(&total)
 
@@ -1218,11 +1218,11 @@ func (s *MCPServer) toolExportLeadsForAnalysis(ctx context.Context, req mcp.Call
 		SELECT
 			l.id::text AS lead_id,
 			COALESCE(l.contact_id::text, '') AS contact_id,
-			COALESCE(NULLIF(l.name, ''), NULLIF(c.custom_name, ''), NULLIF(c.name, ''), NULLIF(c.push_name, ''), '') AS name,
-			COALESCE(NULLIF(l.phone, ''), NULLIF(c.phone, ''), '') AS phone,
-			COALESCE(NULLIF(l.email, ''), NULLIF(c.email, ''), '') AS email,
-			COALESCE(l.age, c.age) AS age,
-			COALESCE(NULLIF(l.dni, ''), NULLIF(c.dni, ''), '') AS dni,
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END AS name,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.phone,'') ELSE NULLIF(c.phone,'') END,'') AS phone,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.email,'') ELSE NULLIF(c.email,'') END,'') AS email,
+			CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END AS age,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.dni,'') ELSE NULLIF(c.dni,'') END,'') AS dni,
 			l.created_at,
 			l.updated_at,
 			COALESCE(NULLIF(l.source, ''), NULLIF(c.source, ''), '') AS source,
@@ -1294,7 +1294,7 @@ func (s *MCPServer) toolExportLeadsForAnalysis(ctx context.Context, req mcp.Call
 			JOIN campaigns ca ON ca.id = cr.campaign_id AND ca.account_id = l.account_id
 			WHERE cr.contact_id = l.contact_id
 			   OR (regexp_replace(COALESCE(cr.phone, ''), '\D', '', 'g') <> ''
-			       AND regexp_replace(COALESCE(cr.phone, ''), '\D', '', 'g') = regexp_replace(COALESCE(l.phone, c.phone, ''), '\D', '', 'g'))
+			       AND regexp_replace(COALESCE(cr.phone, ''), '\D', '', 'g') = regexp_replace(CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END, '\D', '', 'g'))
 		) campaigns ON true
 		LEFT JOIN LATERAL (
 			SELECT jsonb_agg(jsonb_build_object(
@@ -1349,11 +1349,11 @@ func (s *MCPServer) toolExportLeadsForAnalysis(ctx context.Context, req mcp.Call
 				'has_phone_duplicate', COUNT(l2.id) > 0
 			) AS data
 			FROM leads l2
-			LEFT JOIN contacts c2 ON c2.id = l2.contact_id
+			LEFT JOIN contacts c2 ON c2.id=l2.contact_id AND c2.account_id=l2.account_id
 			WHERE l2.account_id = l.account_id
 			  AND l2.id <> l.id
-			  AND regexp_replace(COALESCE(l2.phone, c2.phone, ''), '\D', '', 'g') <> ''
-			  AND regexp_replace(COALESCE(l2.phone, c2.phone, ''), '\D', '', 'g') = regexp_replace(COALESCE(l.phone, c.phone, ''), '\D', '', 'g')
+			  AND regexp_replace(CASE WHEN l2.contact_id IS NULL THEN COALESCE(l2.phone,'') ELSE COALESCE(c2.phone,'') END, '\D', '', 'g') <> ''
+			  AND regexp_replace(CASE WHEN l2.contact_id IS NULL THEN COALESCE(l2.phone,'') ELSE COALESCE(c2.phone,'') END, '\D', '', 'g') = regexp_replace(CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END, '\D', '', 'g')
 		) duplicates ON true
 	` + where + fmt.Sprintf(` ORDER BY l.created_at DESC, l.id DESC LIMIT %d OFFSET %d`, limit, offset)
 

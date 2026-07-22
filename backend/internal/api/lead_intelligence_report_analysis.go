@@ -143,13 +143,16 @@ func (s *Server) loadLeadIntelligenceFacts(ctx context.Context, accountID uuid.U
 	query := `
 	WITH base AS (
 		SELECT l.id,l.account_id,l.contact_id,l.jid,
-			COALESCE(NULLIF(BTRIM(l.name),''),NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),'Sin nombre') name,
-			COALESCE(NULLIF(l.phone,''),NULLIF(c.phone,''),'') phone,
-			COALESCE(NULLIF(l.email,''),NULLIF(c.email,''),'') email,
-			COALESCE(l.age,c.age,0) age,COALESCE(NULLIF(l.dni,''),NULLIF(c.dni,''),'') dni,
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(NULLIF(BTRIM(l.name),''),'Sin nombre') ELSE COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),'Sin nombre') END name,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.phone,'') ELSE NULLIF(c.phone,'') END,'') phone,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.email,'') ELSE NULLIF(c.email,'') END,'') email,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,0) age,
+			COALESCE(CASE WHEN l.contact_id IS NULL THEN NULLIF(l.dni,'') ELSE NULLIF(c.dni,'') END,'') dni,
 			l.created_at,l.updated_at,COALESCE(l.source,'') source,COALESCE(l.status,'') status,COALESCE(l.notes,'') lead_notes,
 			COALESCE(c.notes,'') contact_notes,COALESCE(l.tags,'{}'::text[]) lead_tags,COALESCE(c.tags,'{}'::text[]) contact_tags_array,
-			COALESCE(l.is_archived,FALSE) is_archived,COALESCE(c.do_not_contact,FALSE) do_not_contact,COALESCE(c.do_not_contact_reason,'') do_not_contact_reason,
+			COALESCE(l.is_archived,FALSE) is_archived,
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END do_not_contact,
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.block_reason,'') ELSE COALESCE(c.do_not_contact_reason,'') END do_not_contact_reason,
 			COALESCE(ps.name,'') stage_name,COALESCE(ps.stage_type,'') stage_type
 		FROM leads l
 		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id

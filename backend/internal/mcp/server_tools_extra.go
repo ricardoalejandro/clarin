@@ -137,11 +137,12 @@ func (s *MCPServer) toolGetProgramDetail(ctx context.Context, req mcp.CallToolRe
 	}
 
 	// Sessions
-	sessions, err := s.repos.Program.ListSessions(ctx, programID)
+	sessions, err := s.repos.Program.ListSessions(ctx, accountID, programID)
 	if err == nil {
 		type sessResult struct {
 			ID        string `json:"id"`
 			Date      string `json:"date"`
+			Title     string `json:"title"`
 			Topic     string `json:"topic,omitempty"`
 			StartTime string `json:"start_time,omitempty"`
 			EndTime   string `json:"end_time,omitempty"`
@@ -154,8 +155,9 @@ func (s *MCPServer) toolGetProgramDetail(ctx context.Context, req mcp.CallToolRe
 		sessList := make([]sessResult, 0, len(sessions))
 		for _, ss := range sessions {
 			sr := sessResult{
-				ID:   ss.ID.String(),
-				Date: ss.Date.Format("2006-01-02"),
+				ID:    ss.ID.String(),
+				Date:  ss.Date.Format("2006-01-02"),
+				Title: ss.Title,
 			}
 			if ss.Topic != nil {
 				sr.Topic = *ss.Topic
@@ -185,30 +187,36 @@ func (s *MCPServer) toolGetProgramDetail(ctx context.Context, req mcp.CallToolRe
 
 // ──── get_program_attendance ────
 func (s *MCPServer) toolGetProgramAttendance(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
+	if err != nil {
+		return mcpAccountStructuredError(err), nil
+	}
 	sessionID, err := uuidArg(req, "session_id")
 	if err != nil {
 		return errResult("session_id inválido"), nil
 	}
 
-	attendance, err := s.repos.Program.GetAttendanceBySession(ctx, sessionID)
+	attendance, err := s.repos.Program.GetAttendanceBySession(ctx, accountID, sessionID)
 	if err != nil {
 		return errResult("error al obtener asistencia: " + err.Error()), nil
 	}
 
 	type attResult struct {
-		ID              string `json:"id"`
-		ParticipantName string `json:"participant_name"`
-		Phone           string `json:"phone,omitempty"`
-		Status          string `json:"status"`
-		Notes           string `json:"notes,omitempty"`
+		ID               string `json:"id"`
+		ParticipantName  string `json:"participant_name"`
+		Phone            string `json:"phone,omitempty"`
+		Status           string `json:"status"`
+		Notes            string `json:"notes,omitempty"`
+		ObservationCount int    `json:"observation_count"`
 	}
 
 	results := make([]attResult, 0, len(attendance))
 	for _, a := range attendance {
 		ar := attResult{
-			ID:              a.ID.String(),
-			ParticipantName: a.ParticipantName,
-			Status:          a.Status,
+			ID:               a.ID.String(),
+			ParticipantName:  a.ParticipantName,
+			Status:           a.Status,
+			ObservationCount: a.ObservationCount,
 		}
 		if a.ParticipantPhone != nil {
 			ar.Phone = *a.ParticipantPhone
@@ -441,12 +449,21 @@ func (s *MCPServer) toolGetSurveyDetail(ctx context.Context, req mcp.CallToolReq
 
 // ──── get_survey_analytics ────
 func (s *MCPServer) toolGetSurveyAnalytics(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	accountID, err := s.getAccountIDFromRequest(ctx, req)
+	if err != nil {
+		return mcpAccountStructuredError(err), nil
+	}
+
 	surveyID, err := uuidArg(req, "survey_id")
 	if err != nil {
 		return errResult("survey_id inválido"), nil
 	}
 
-	analytics, err := s.repos.Survey.GetAnalytics(ctx, surveyID)
+	if survey, err := s.repos.Survey.GetByID(ctx, surveyID, accountID); err != nil || survey == nil {
+		return errResult("encuesta no encontrada"), nil
+	}
+
+	analytics, err := s.repos.Survey.GetAnalytics(ctx, accountID, surveyID)
 	if err != nil {
 		return errResult("error al obtener analytics: " + err.Error()), nil
 	}

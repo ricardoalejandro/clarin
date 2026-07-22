@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Search, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, ChevronDown, MoreHorizontal, LayoutGrid, LayoutTemplate, List, AlertCircle, Settings2 } from 'lucide-react';
+import { Plus, Search, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, ChevronDown, MoreHorizontal, LayoutGrid, LayoutTemplate, List, AlertCircle, Settings2, BookOpenText } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program, ProgramDashboardSummary, ProgramFolder, ProgramGoal } from '@/types/program';
 import Link from 'next/link';
@@ -18,8 +18,6 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; i
 const COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#6366f1', '#ec4899', '#f43f5e', '#f97316', '#f59e0b'];
 const FOLDER_ICONS = ['📁', '📂', '🎓', '🎉', '🏋️', '📊', '📝', '🎯', '📌', '🗂️'];
 const FOLDER_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316', '#14b8a6', '#6366f1'];
-
-const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : '';
 
 export default function ProgramsPage() {
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
@@ -38,13 +36,7 @@ export default function ProgramsPage() {
     name: string;
     description: string;
     color: string;
-    type: 'course' | 'event';
-    pipeline_id?: string;
-    event_date?: string;
-    event_end?: string;
-    location?: string;
-  }>({ name: '', description: '', color: '#10b981', type: 'course' });
-  const [pipelines, setPipelines] = useState<Array<{ id: string; name: string }>>([]);
+  }>({ name: '', description: '', color: '#10b981' });
   const [dashboard, setDashboard] = useState<ProgramDashboardSummary | null>(null);
   const [loadingDashboard, setLoadingDashboard] = useState(true);
   const [dashboardError, setDashboardError] = useState('');
@@ -112,7 +104,6 @@ export default function ProgramsPage() {
   useEffect(() => {
     if (!mobileWorkspace) return;
     setMenuID(null);
-    setIsCreateModalOpen(false);
     setEditingProgram(null);
     setShowFolderModal(false);
     setConfirmAction(null);
@@ -121,7 +112,6 @@ export default function ProgramsPage() {
   useEffect(() => {
     void fetchPrograms();
     void fetchFolders();
-    void fetchPipelines();
     return () => {
       programsRequestRef.current?.abort();
       foldersRequestRef.current?.abort();
@@ -149,14 +139,6 @@ export default function ProgramsPage() {
       window.visualViewport?.removeEventListener('resize', update);
     };
   }, []);
-
-  const fetchPipelines = async () => {
-    try {
-      const res = await fetch('/api/events/pipelines', { headers: { Authorization: `Bearer ${token()}` } });
-      const data = await res.json();
-      if (data.success) setPipelines((data.pipelines || []).map((p: any) => ({ id: p.id, name: p.name })));
-    } catch (e) { console.error(e); }
-  };
 
   // Close menus on outside click
   useEffect(() => {
@@ -264,31 +246,21 @@ export default function ProgramsPage() {
 
   const handleCreateProgram = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newProgram.type === 'event' && !newProgram.pipeline_id) {
-      showToast('Selecciona un pipeline para el evento', 'error');
-      return;
-    }
     try {
       const payload: any = {
         name: newProgram.name,
         description: newProgram.description,
         color: newProgram.color,
-        type: newProgram.type,
+        type: 'course',
         folder_id: currentFolderID || undefined,
       };
-      if (newProgram.type === 'event') {
-        payload.pipeline_id = newProgram.pipeline_id;
-        if (newProgram.event_date) payload.event_date = newProgram.event_date;
-        if (newProgram.event_end) payload.event_end = newProgram.event_end;
-        if (newProgram.location) payload.location = newProgram.location;
-      }
       const response = await api('/api/programs', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
       if (response.success) {
         setIsCreateModalOpen(false);
-        setNewProgram({ name: '', description: '', color: '#10b981', type: 'course' });
+        setNewProgram({ name: '', description: '', color: '#10b981' });
         fetchPrograms();
       } else {
         showToast((response as any).error || 'Error al crear programa', 'error');
@@ -735,27 +707,37 @@ export default function ProgramsPage() {
             <GraduationCap className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-lg font-bold text-slate-800 leading-tight">Programas y Clases</h1>
-            <p className="text-xs text-slate-500">Cursos, talleres y control de asistencia</p>
+            <h1 className="text-lg font-bold text-slate-800 leading-tight">Programas</h1>
+            <p className="text-xs text-slate-500">Grupos de clases, temarios y asistencia</p>
           </div>
         </div>
-        {!mobileWorkspace && <div className="flex items-center gap-2 sm:shrink-0">
-          <button
-            onClick={openCreateFolder}
-            className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-slate-50 sm:flex-none"
+        <div className="flex items-center gap-2 sm:shrink-0">
+          <Link
+            href="/dashboard/programs/courses"
+            className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700 transition-all hover:border-emerald-300 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:flex-none"
+            aria-label="Administrar cursos"
           >
-            <FolderPlus className="w-4 h-4" />
-            <span className="hidden sm:inline">Carpeta</span>
-          </button>
+            <BookOpenText className="h-4 w-4" />
+            <span>Cursos</span>
+          </Link>
+          {!mobileWorkspace && (
+            <button
+              onClick={openCreateFolder}
+              className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-slate-50 sm:flex-none"
+            >
+              <FolderPlus className="w-4 h-4" />
+              <span className="hidden sm:inline">Carpeta</span>
+            </button>
+          )}
           <button
             onClick={() => setIsCreateModalOpen(true)}
             className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
           >
             <Plus className="w-4 h-4" />
-            <span className="hidden sm:inline">Nuevo Programa</span>
+            <span className="hidden sm:inline">Nuevo grupo</span>
             <span className="sm:hidden">Nuevo</span>
           </button>
-        </div>}
+        </div>
       </div>
 
       {/* General health dashboard */}
@@ -980,19 +962,19 @@ export default function ProgramsPage() {
             <GraduationCap className="w-10 h-10 text-emerald-400" />
           </div>
           <h3 className="text-lg font-semibold text-slate-800 mb-2">
-            {searchQuery ? 'Sin resultados' : folderPath.length > 0 ? 'Carpeta vacía' : 'Crea tu primer programa'}
+            {searchQuery ? 'Sin resultados' : folderPath.length > 0 ? 'Carpeta vacía' : 'Crea tu primer grupo de clases'}
           </h3>
           <p className="text-slate-500 mb-6 max-w-md mx-auto">
             {searchQuery
               ? 'No se encontraron programas activos con esa búsqueda.'
-              : 'Organiza cursos, talleres y clases. Controla la asistencia y envía mensajes masivos a los participantes.'}
+              : 'Organiza grupos, asigna planes de clases y controla la asistencia de sus participantes.'}
           </p>
           {!searchQuery && !mobileWorkspace && (
             <button
               onClick={() => setIsCreateModalOpen(true)}
               className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium"
             >
-              Crear Programa
+              Crear grupo
             </button>
           )}
         </div>
@@ -1076,45 +1058,24 @@ export default function ProgramsPage() {
         <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div role="dialog" aria-modal="true" aria-labelledby="create-program-title" className="h-[var(--app-height)] w-full max-w-md overflow-y-auto rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6">
             <div className="flex justify-between items-center mb-5">
-              <h2 id="create-program-title" className="text-xl font-bold text-slate-800">Nuevo Programa</h2>
+              <h2 id="create-program-title" className="text-xl font-bold text-slate-800">Nuevo grupo de clases</h2>
               <button
                 onClick={() => setIsCreateModalOpen(false)}
                 className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+                aria-label="Cerrar nuevo programa"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleCreateProgram}>
               <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">Tipo de programa</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setNewProgram({ ...newProgram, type: 'course' })}
-                      className={`p-4 rounded-xl border-2 text-left transition-all ${
-                        newProgram.type === 'course'
-                          ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-500/20'
-                          : 'border-slate-200 hover:border-slate-300'
-                      }`}
-                    >
-                      <GraduationCap className="w-5 h-5 text-emerald-600 mb-1.5" />
-                      <div className="font-semibold text-slate-800 text-sm">Curso</div>
-                      <div className="text-xs text-slate-500 mt-0.5">Sesiones y asistencia</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setNewProgram({ ...newProgram, type: 'event' })}
-                      className={`p-4 rounded-xl border-2 text-left transition-all ${
-                        newProgram.type === 'event'
-                          ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-500/20'
-                          : 'border-slate-200 hover:border-slate-300'
-                      }`}
-                    >
-                      <Calendar className="w-5 h-5 text-emerald-600 mb-1.5" />
-                      <div className="font-semibold text-slate-800 text-sm">Evento</div>
-                      <div className="text-xs text-slate-500 mt-0.5">Kanban con etapas</div>
-                    </button>
+                <div className="flex items-start gap-3 rounded-xl border border-emerald-100 bg-emerald-50/70 p-3.5">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-emerald-600 shadow-sm">
+                    <GraduationCap className="h-5 w-5" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-slate-800">Programa educativo</p>
+                    <p className="mt-0.5 text-xs leading-5 text-slate-600">Aquí crearás un grupo de clases con participantes, planes, sesiones y asistencia. Los eventos se administran desde el módulo Eventos.</p>
                   </div>
                 </div>
                 <div>
@@ -1138,59 +1099,6 @@ export default function ProgramsPage() {
                     placeholder="Descripción del programa..."
                   />
                 </div>
-                {newProgram.type === 'event' && (
-                  <>
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1.5">Pipeline *</label>
-                      <select
-                        required
-                        value={newProgram.pipeline_id || ''}
-                        onChange={(e) => setNewProgram({ ...newProgram, pipeline_id: e.target.value })}
-                        className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all bg-white"
-                      >
-                        <option value="">Selecciona un pipeline...</option>
-                        {pipelines.map(p => (
-                          <option key={p.id} value={p.id}>{p.name}</option>
-                        ))}
-                      </select>
-                      {pipelines.length === 0 && (
-                        <p className="text-xs text-amber-600 mt-1.5 flex items-center gap-1">
-                          <AlertCircle className="w-3.5 h-3.5" /> No hay pipelines. Crea uno en Eventos → Pipelines.
-                        </p>
-                      )}
-                    </div>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha inicio</label>
-                        <input
-                          type="datetime-local"
-                          value={newProgram.event_date || ''}
-                          onChange={(e) => setNewProgram({ ...newProgram, event_date: e.target.value })}
-                          className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha fin</label>
-                        <input
-                          type="datetime-local"
-                          value={newProgram.event_end || ''}
-                          onChange={(e) => setNewProgram({ ...newProgram, event_end: e.target.value })}
-                          className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1.5">Ubicación</label>
-                      <input
-                        type="text"
-                        value={newProgram.location || ''}
-                        onChange={(e) => setNewProgram({ ...newProgram, location: e.target.value })}
-                        className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                        placeholder="Ej: Auditorio principal"
-                      />
-                    </div>
-                  </>
-                )}
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">Color</label>
                   <div className="flex flex-wrap gap-3">
@@ -1222,7 +1130,7 @@ export default function ProgramsPage() {
                   type="submit"
                   className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
                 >
-                  Crear Programa
+                  Crear grupo
                 </button>
               </div>
             </form>

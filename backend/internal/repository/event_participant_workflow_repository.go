@@ -984,9 +984,18 @@ func (r *ParticipantRepository) GetForEvent(ctx context.Context, accountID, even
 	p := &domain.EventParticipant{}
 	err := r.db.QueryRow(ctx, `
 		SELECT ep.id,ep.event_id,ep.contact_id,ep.lead_id,ep.stage_id,
-		       COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),ep.name),
-		       COALESCE(c.last_name,ep.last_name),COALESCE(c.short_name,ep.short_name),COALESCE(c.phone,ep.phone),COALESCE(c.email,ep.email),COALESCE(c.age,ep.age),
-		       COALESCE(c.company,ep.company),COALESCE(c.dni,ep.dni),COALESCE(c.birth_date,ep.birth_date),COALESCE(c.address,ep.address),COALESCE(c.distrito,ep.distrito),COALESCE(c.ocupacion,ep.ocupacion),
+		       CASE WHEN ep.contact_id IS NULL THEN ep.name ELSE COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.phone),''),c.jid,'') END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.last_name ELSE c.last_name END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.short_name ELSE c.short_name END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.phone ELSE c.phone END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.email ELSE c.email END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.age ELSE c.age END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.company ELSE c.company END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.dni ELSE c.dni END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.birth_date ELSE c.birth_date END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.address ELSE c.address END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.distrito ELSE c.distrito END,
+		       CASE WHEN ep.contact_id IS NULL THEN ep.ocupacion ELSE c.ocupacion END,
 		       ep.status,ep.notes,ep.next_action,ep.next_action_date,ep.invited_at,ep.confirmed_at,ep.attended_at,
 		       ep.auto_tag_sync,ep.membership_state,ep.membership_reason,ep.membership_source,ep.membership_changed_at,ep.created_at,ep.updated_at,
 		       eps.name,eps.color,COALESCE(c.do_not_contact,FALSE)

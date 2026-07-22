@@ -180,6 +180,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	})
 
 	server.setupRoutes()
+	server.startSurveyUploadCleanupWorker()
 	// Retention is an invariant of persisted status data, not a publishing
 	// capability. Keep cleanup running even if publication is disabled after a
 	// real-device trial, otherwise old rows and media would outlive 24 hours.
@@ -281,6 +282,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/public/surveys/:slug", s.handleGetPublicSurvey)
 	api.Post("/public/surveys/:slug/submit", s.handleSubmitSurveyResponse)
 	api.Post("/public/surveys/:slug/upload", s.handleUploadSurveyFile)
+	api.Get("/public/survey-files/:accessToken", s.handleGetPublicSurveyFile)
 
 	// Public dynamic routes (no auth required)
 	// Order matters: specific paths before the catch-all :slug
@@ -499,11 +501,19 @@ func (s *Server) setupRoutes() {
 	programs.Get("/dashboard", s.handleGetProgramsDashboard)
 	programs.Get("/goals", s.handleGetGlobalProgramGoals)
 	programs.Put("/goals", s.handleUpsertGlobalProgramGoals)
+	// Reusable class-plan routes must be declared before /:id so "courses" is
+	// never interpreted as a program UUID.
+	programs.Get("/courses", s.handleListCourses)
+	programs.Post("/courses", s.handleCreateCourse)
+	programs.Get("/courses/:courseId", s.handleGetCourse)
+	programs.Put("/courses/:courseId", s.handleUpdateCourse)
+	programs.Delete("/courses/:courseId", s.handleDeleteCourse)
 	// Folder routes — must be declared BEFORE /:id to avoid param collision
 	programs.Get("/folders", s.handleGetProgramFolders)
 	programs.Post("/folders", s.handleCreateProgramFolder)
 	programs.Put("/folders/:fid", s.handleUpdateProgramFolder)
 	programs.Delete("/folders/:fid", s.handleDeleteProgramFolder)
+	programs.Use("/:id", guardMigratedProgramMutations(s.services.Program.GetMigratedEventTarget))
 	programs.Get("/:id", s.handleGetProgram)
 	programs.Put("/:id", s.handleUpdateProgram)
 	programs.Delete("/:id", s.handleDeleteProgram)
@@ -512,11 +522,20 @@ func (s *Server) setupRoutes() {
 	programs.Get("/:id/goals", s.handleGetProgramGoals)
 	programs.Put("/:id/goals", s.handleUpsertProgramGoals)
 	programs.Get("/:id/attendance-stats", s.handleGetAttendanceStats)
+	programs.Get("/:id/academic-config", s.handleGetProgramAcademicConfig)
+	programs.Put("/:id/academic-config", s.handleReplaceProgramAcademicConfig)
+	programs.Put("/:id/courses", s.handleReplaceProgramCourses)
+	programs.Put("/:id/instructors", s.handleReplaceProgramInstructors)
+	programs.Get("/:id/surveys", s.handleListProgramSurveyInstances)
+	programs.Post("/:id/surveys", s.handleCreateProgramSurveyInstance)
+	programs.Get("/:id/surveys/:surveyId/recipients", s.handleListProgramSurveyRecipients)
 
 	programs.Get("/:id/participants", s.handleListParticipants)
 	programs.Post("/:id/participants", s.handleAddParticipant)
 	programs.Post("/:id/participants/bulk", s.handleAddProgramParticipantsBulk)
 	programs.Delete("/:id/participants/:participantId", s.handleRemoveParticipant)
+	programs.Get("/:id/participants/:participantId/attendance-history", s.handleGetProgramParticipantAttendanceHistory)
+	programs.Patch("/:id/participants/:participantId/enrollment", s.handleUpdateProgramParticipantEnrollment)
 	programs.Patch("/:id/participants/:participantId/outcome", s.handleUpdateProgramParticipantOutcome)
 	programs.Get("/:id/participants/:participantId/notes", s.handleListProgramParticipantNotes)
 	programs.Post("/:id/participants/:participantId/notes", s.handleCreateProgramParticipantNote)
@@ -531,6 +550,9 @@ func (s *Server) setupRoutes() {
 	programs.Post("/:id/sessions/:sessionId/attendance", s.handleMarkAttendance)
 	programs.Post("/:id/sessions/:sessionId/attendance/batch", s.handleBatchMarkAttendance)
 	programs.Get("/:id/sessions/:sessionId/attendance/filter", s.handleGetParticipantsByAttendanceStatus)
+	programs.Get("/:id/sessions/:sessionId/participants/:participantId/attendance-observations", s.handleListAttendanceObservations)
+	programs.Post("/:id/sessions/:sessionId/participants/:participantId/attendance-observations", s.handleCreateAttendanceObservation)
+	programs.Delete("/:id/sessions/:sessionId/participants/:participantId/attendance-observations/:observationId", s.handleDeleteAttendanceObservation)
 	programs.Post("/:id/sessions/generate", s.handleGenerateSessions)
 	programs.Post("/:id/campaign", s.handleCreateCampaignFromProgram)
 	campaigns.Put("/:id", s.handleUpdateCampaign)
@@ -576,6 +598,9 @@ func (s *Server) setupRoutes() {
 	// Contact is the sole owner of a person's photo. Authorization is resolved
 	// per Contact/Lead/Chat/Event/Program context inside these shared routes.
 	s.registerContactAvatarRoutes(protected)
+	// Identity and observation history share the same contextual authorization
+	// model while Contact remains the sole owner of personal data.
+	s.registerContactProfileRoutes(protected)
 
 	// Custom field value routes (under contacts, all authenticated users)
 	contacts.Get("/:id/custom-fields", s.handleGetCustomFieldValues)
@@ -773,6 +798,16 @@ func (s *Server) setupRoutes() {
 	automations.Get("/:id/executions/:execId/logs", s.handleGetExecutionLogs)
 
 	// Survey routes
+	surveyTemplates := protected.Group("/survey-templates", s.requirePermission(domain.PermSurveys))
+	surveyTemplates.Get("/", s.handleListSurveyTemplates)
+	surveyTemplates.Post("/", s.handleCreateSurveyTemplate)
+	surveyTemplates.Get("/:templateId", s.handleGetSurveyTemplate)
+	surveyTemplates.Patch("/:templateId", s.handleUpdateSurveyTemplate)
+	surveyTemplates.Get("/:templateId/questions", s.handleListSurveyTemplateQuestions)
+	surveyTemplates.Put("/:templateId/questions", s.handleReplaceSurveyTemplateQuestions)
+	surveyTemplates.Get("/:templateId/instances", s.handleListSurveyTemplateInstances)
+	surveyTemplates.Post("/:templateId/instances", s.handleCreateStandaloneSurveyInstance)
+
 	surveys := protected.Group("/surveys", s.requirePermission(domain.PermSurveys))
 	surveys.Get("/", s.handleListSurveys)
 	surveys.Post("/", s.handleCreateSurvey)
@@ -4868,17 +4903,29 @@ func (s *Server) handleGetLeads(c *fiber.Ctx) error {
 		if len(deviceUUIDs) > 0 {
 			rows, qErr := s.repos.DB().Query(c.Context(), `
 				SELECT l.id, l.account_id, l.contact_id, l.jid,
-				       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
-				       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-				       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
-				       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
+				       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+				       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+				       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,
+				       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+				       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+				       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END,
+				       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+				       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END,
+				       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END,
+				       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END,
+				       CASE WHEN l.contact_id IS NULL THEN l.distrito ELSE c.distrito END,
+				       CASE WHEN l.contact_id IS NULL THEN l.ocupacion ELSE c.ocupacion END,
 				       l.status, l.source, l.notes,
 				       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id, l.created_at, l.updated_at,
 				       ps.name, ps.color, ps.position, l.kommo_id,
-				       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+				       l.is_archived,l.archived_at,
+				       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END,
+				       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END,
+				       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END,
+				       l.kommo_deleted_at,
 				       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 				FROM leads l
-				LEFT JOIN contacts c ON c.id = l.contact_id
+				LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 				LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 				WHERE l.account_id = $1 AND l.deleted_at IS NULL
 				  AND l.jid IN (SELECT DISTINCT jid FROM chats WHERE device_id = ANY($2))
@@ -5269,10 +5316,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
-		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(l.title) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx, argIdx, argIdx,
-		))
+		whereClauses = append(whereClauses, canonicalLeadSearchClause(argIdx, true))
 		args = append(args, searchPattern)
 		argIdx++
 	}
@@ -5391,7 +5435,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	// Goroutine 2: count leads per stage
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT l.stage_id, COUNT(*) FROM leads l JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id WHERE %s AND l.stage_id IS NOT NULL GROUP BY l.stage_id`, whereSQL)
+		q := fmt.Sprintf(`SELECT l.stage_id,COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id WHERE %s AND l.stage_id IS NOT NULL GROUP BY l.stage_id`, whereSQL)
 		rows, err := s.repos.DB().Query(c.Context(), q, args...)
 		if err != nil {
 			countsErr = err
@@ -5414,18 +5458,31 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		q := fmt.Sprintf(`
 			WITH ranked AS (
 				SELECT l.id, l.account_id, l.contact_id, l.jid,
-				       COALESCE(c.custom_name, c.name, l.name) AS name, COALESCE(c.last_name, l.last_name) AS last_name, COALESCE(c.short_name, l.short_name) AS short_name,
-				       COALESCE(c.phone, l.phone) AS phone, COALESCE(c.email, l.email) AS email, COALESCE(c.company, l.company) AS company,
-				       COALESCE(c.age, l.age) AS age, COALESCE(c.dni, l.dni) AS dni, COALESCE(c.birth_date, l.birth_date) AS birth_date, COALESCE(c.address, l.address) AS address, COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')) AS distrito, COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')) AS ocupacion,
+				       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END AS name,
+				       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END AS last_name,
+				       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END AS short_name,
+				       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END AS phone,
+				       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END AS email,
+				       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END AS company,
+				       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END AS age,
+				       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END AS dni,
+				       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END AS birth_date,
+				       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END AS address,
+				       CASE WHEN l.contact_id IS NULL THEN l.distrito ELSE c.distrito END AS distrito,
+				       CASE WHEN l.contact_id IS NULL THEN l.ocupacion ELSE c.ocupacion END AS ocupacion,
 				       l.status, l.source, l.notes AS notes,
 				       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 				       l.created_at, l.updated_at, l.kommo_id,
-				       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE) AS is_blocked, COALESCE(c.do_not_contact_at,l.blocked_at) AS blocked_at, COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason) AS block_reason, l.kommo_deleted_at,
+				       l.is_archived,l.archived_at,
+				       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END AS is_blocked,
+				       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END AS blocked_at,
+				       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END AS block_reason,
+				       l.kommo_deleted_at,
 				       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason,
 				       ps.name AS stage_name, ps.color AS stage_color, ps.position AS stage_position,
 				       ROW_NUMBER() OVER (PARTITION BY l.stage_id ORDER BY l.created_at DESC) AS rn
 				FROM leads l
-				JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
+				LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 				LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 				WHERE %s AND l.stage_id IS NOT NULL
 			)
@@ -5492,7 +5549,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	// Goroutine 5: unassigned leads count + first N
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id WHERE %s AND (l.stage_id IS NULL)`, whereSQL)
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id WHERE %s AND l.stage_id IS NULL`, whereSQL)
 		err := s.repos.DB().QueryRow(c.Context(), q, args...).Scan(&unassignedCount)
 		if err != nil {
 			unassignedErr = err
@@ -5529,10 +5586,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		addLeadPipelineWhere(pipelineID, &hClauses, &hArgs, &hIdx)
 		if search != "" {
 			searchPattern := "%" + strings.ToLower(search) + "%"
-			hClauses = append(hClauses, fmt.Sprintf(
-				"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(l.title) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-				hIdx, hIdx, hIdx, hIdx, hIdx, hIdx,
-			))
+			hClauses = append(hClauses, canonicalLeadSearchClause(hIdx, true))
 			hArgs = append(hArgs, searchPattern)
 			hIdx++
 		}
@@ -5576,7 +5630,7 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 		hWhereSQL := strings.Join(hClauses, " AND ")
 		var totalAll int
 		err := s.repos.DB().QueryRow(c.Context(),
-			fmt.Sprintf("SELECT COUNT(*) FROM leads l JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id WHERE %s", hWhereSQL),
+			fmt.Sprintf("SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id WHERE %s", hWhereSQL),
 			hArgs...,
 		).Scan(&totalAll)
 		if err == nil {
@@ -5647,17 +5701,29 @@ func (s *Server) handleGetLeadsPaginated(c *fiber.Ctx) error {
 	if unassignedCount > 0 && len(unassignedLeads) == 0 {
 		unassignedQ := fmt.Sprintf(`
 			SELECT l.id, l.account_id, l.contact_id, l.jid,
-			       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
-			       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-			       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
-			       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
+			       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+			       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+			       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,
+			       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+			       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+			       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END,
+			       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+			       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END,
+			       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END,
+			       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END,
+			       CASE WHEN l.contact_id IS NULL THEN l.distrito ELSE c.distrito END,
+			       CASE WHEN l.contact_id IS NULL THEN l.ocupacion ELSE c.ocupacion END,
 			       l.status, l.source, l.notes,
 			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 			       l.created_at, l.updated_at, l.kommo_id,
-			       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+			       l.is_archived,l.archived_at,
+			       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END,
+			       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END,
+			       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END,
+			       l.kommo_deleted_at,
 			       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason
 			FROM leads l
-			JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
+			LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 			WHERE %s AND l.stage_id IS NULL
 			ORDER BY l.created_at DESC
 			LIMIT %d
@@ -5765,10 +5831,7 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
-		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(l.title) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx, argIdx, argIdx,
-		))
+		whereClauses = append(whereClauses, canonicalLeadSearchClause(argIdx, true))
 		args = append(args, searchPattern)
 		argIdx++
 	}
@@ -5813,18 +5876,30 @@ func (s *Server) handleGetLeadsByStage(c *fiber.Ctx) error {
 	// Query leads with OFFSET/LIMIT
 	q := fmt.Sprintf(`
 		SELECT l.id, l.account_id, l.contact_id, l.jid,
-		       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
-		       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-		       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
-		       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+		       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+		       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END,
+		       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+		       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END,
+		       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END,
+		       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END,
+		       CASE WHEN l.contact_id IS NULL THEN l.distrito ELSE c.distrito END,
+		       CASE WHEN l.contact_id IS NULL THEN l.ocupacion ELSE c.ocupacion END,
 		       l.status, l.source, l.notes,
 		       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 		       l.created_at, l.updated_at, l.kommo_id,
-		       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+		       l.is_archived,l.archived_at,
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END,
+		       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END,
+		       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END,
+		       l.kommo_deleted_at,
 		       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason,
 		       ps.name, ps.color, ps.position
 		FROM leads l
-		JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		WHERE %s
 		ORDER BY l.created_at DESC
@@ -5933,10 +6008,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 	addLeadPipelineWhere(pipelineID, &whereClauses, &args, &argIdx)
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
-		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(l.title) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx, argIdx, argIdx,
-		))
+		whereClauses = append(whereClauses, canonicalLeadSearchClause(argIdx, true))
 		args = append(args, searchPattern)
 		argIdx++
 	}
@@ -6016,7 +6088,7 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id WHERE %s`, whereSQL)
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id WHERE %s`, whereSQL)
 		countErr = s.repos.DB().QueryRow(c.Context(), q, args...).Scan(&total)
 	}()
 
@@ -6024,18 +6096,30 @@ func (s *Server) handleGetLeadsListPaginated(c *fiber.Ctx) error {
 		defer wg.Done()
 		q := fmt.Sprintf(`
 			SELECT l.id, l.account_id, l.contact_id, l.jid,
-			       COALESCE(c.custom_name, c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.short_name, l.short_name),
-			       COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), COALESCE(c.company, l.company),
-			       COALESCE(c.age, l.age), COALESCE(c.dni, l.dni), COALESCE(c.birth_date, l.birth_date), COALESCE(c.address, l.address),
-			       COALESCE(NULLIF(c.distrito, ''), NULLIF(l.distrito, '')), COALESCE(NULLIF(c.ocupacion, ''), NULLIF(l.ocupacion, '')),
+			       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+			       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+			       CASE WHEN l.contact_id IS NULL THEN l.short_name ELSE c.short_name END,
+			       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+			       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+			       CASE WHEN l.contact_id IS NULL THEN l.company ELSE c.company END,
+			       CASE WHEN l.contact_id IS NULL THEN l.age ELSE c.age END,
+			       CASE WHEN l.contact_id IS NULL THEN l.dni ELSE c.dni END,
+			       CASE WHEN l.contact_id IS NULL THEN l.birth_date ELSE c.birth_date END,
+			       CASE WHEN l.contact_id IS NULL THEN l.address ELSE c.address END,
+			       CASE WHEN l.contact_id IS NULL THEN l.distrito ELSE c.distrito END,
+			       CASE WHEN l.contact_id IS NULL THEN l.ocupacion ELSE c.ocupacion END,
 			       l.status, l.source, l.notes,
 			       l.tags, l.custom_fields, l.assigned_to, l.pipeline_id, l.stage_id,
 			       l.created_at, l.updated_at, l.kommo_id,
-			       l.is_archived, l.archived_at, COALESCE(c.do_not_contact,FALSE), COALESCE(c.do_not_contact_at,l.blocked_at), COALESCE(NULLIF(c.do_not_contact_reason,''),l.block_reason), l.kommo_deleted_at,
+			       l.is_archived,l.archived_at,
+			       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.is_blocked,FALSE) ELSE COALESCE(c.do_not_contact,FALSE) END,
+			       CASE WHEN l.contact_id IS NULL THEN l.blocked_at ELSE c.do_not_contact_at END,
+			       CASE WHEN l.contact_id IS NULL THEN l.block_reason ELSE c.do_not_contact_reason END,
+			       l.kommo_deleted_at,
 			       l.title, l.closed_at, l.closed_by, l.close_reason, l.deleted_at, l.deleted_by, l.delete_reason,
 			       ps.name, ps.color, ps.position
 			FROM leads l
-			JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
+			LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 			WHERE %s
 			ORDER BY l.updated_at DESC
@@ -6739,6 +6823,13 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Lead.Update(c.Context(), lead); err != nil {
+		if errors.Is(err, repository.ErrContactIdentityConflict) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"success": false,
+				"code":    "CONTACT_IDENTITY_CONFLICT",
+				"error":   "El teléfono ya pertenece a otro contacto de la cuenta",
+			})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -6781,27 +6872,21 @@ func (s *Server) handleUpdateLead(c *fiber.Ctx) error {
 		}
 	}
 
-	// Auto-sync to Google Contacts if linked contact is synced
-	if s.googleClient != nil && lead.ContactID != nil && len(lead.PersonalFieldChanges) > 0 {
-		go func() {
-			contact, err := s.repos.Contact.GetByID(context.Background(), *lead.ContactID)
-			if err == nil && contact != nil && contact.GoogleSync {
-				log.Printf("[GOOGLE] Auto-sync triggered from handleUpdateLead for lead %s → contact %s (google_sync=%v)", lead.ID, contact.ID, contact.GoogleSync)
-				if _, err := s.syncContactToGoogle(context.Background(), lead.AccountID, contact.ID); err != nil {
-					log.Printf("[GOOGLE] Auto-sync from lead %s failed: %v", lead.ID, err)
-				}
-			} else if err != nil {
-				log.Printf("[GOOGLE] Auto-sync skipped: contact load error: %v", err)
-			} else if contact != nil && !contact.GoogleSync {
-				log.Printf("[GOOGLE] Auto-sync skipped for lead %s → contact %s: google_sync=false", lead.ID, contact.ID)
-			}
-		}()
-	}
-
 	// Populate structured_tags before responding
 	tags, err := s.repos.Tag.GetByLead(c.Context(), lead.ID)
 	if err == nil {
 		lead.StructuredTags = tags
+	}
+	// The legacy Lead editor writes personal fields to the canonical Contact in
+	// the same repository transaction. Reuse the canonical post-commit path so
+	// every open module refreshes the same identity and Google is mirrored once.
+	if lead.ContactID != nil && len(lead.PersonalFieldChanges) > 0 {
+		contact, profileErr := s.services.ContactProfile.Get(c.Context(), accountID, *lead.ContactID)
+		if profileErr != nil {
+			log.Printf("contact profile refresh after lead %s update failed: %v", lead.ID, profileErr)
+		} else if contact != nil {
+			s.afterCanonicalContactProfileChange(accountID, contact)
+		}
 	}
 
 	s.invalidateLeadsCache(lead.AccountID)
@@ -7296,7 +7381,7 @@ func (s *Server) handleGetLeadCounts(c *fiber.Ctx) error {
 			COUNT(*) FILTER (WHERE %s),
 			COUNT(*) FILTER (WHERE %s)
 		FROM leads l
-		JOIN contacts c ON c.id = l.contact_id AND c.account_id = l.account_id
+		LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		WHERE %s%s
 	`, openPredicate, wonPredicate, lostPredicate, archivedPredicate, blockedPredicate, trashPredicate, basePredicate, extraWhere), args...).Scan(&active, &won, &lost, &archived, &blocked, &trash)
 	if err != nil {
@@ -9309,124 +9394,104 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
 	}
 
-	if body.CustomName != nil {
-		if *body.CustomName == "" {
-			contact.CustomName = nil
-		} else {
-			contact.CustomName = body.CustomName
+	// Keep the compatibility endpoint, but route every personal field through
+	// the same transactional profile boundary used by Leads, Chats, Eventos
+	// and Programas. This preserves omitted-vs-clear semantics and refreshes
+	// every linked snapshot in the same database transaction.
+	nullableText := func(value *string) *string {
+		if value == nil {
+			return nil
 		}
+		trimmed := strings.TrimSpace(*value)
+		if trimmed == "" {
+			return nil
+		}
+		return &trimmed
 	}
-	if body.LastName != nil {
-		if *body.LastName == "" {
-			contact.LastName = nil
-		} else {
-			contact.LastName = body.LastName
-		}
-	}
-	if body.ShortName != nil {
-		if *body.ShortName == "" {
-			contact.ShortName = nil
-		} else {
-			contact.ShortName = body.ShortName
-		}
-	}
-	if body.Phone != nil {
-		if *body.Phone == "" {
-			contact.Phone = nil
-		} else {
-			contact.Phone = body.Phone
-		}
-	}
-	if body.Email != nil {
-		if *body.Email == "" {
-			contact.Email = nil
-		} else {
-			contact.Email = body.Email
-		}
-	}
-	if body.Company != nil {
-		if *body.Company == "" {
-			contact.Company = nil
-		} else {
-			contact.Company = body.Company
-		}
+	patch := repository.ContactProfilePatch{
+		CustomNameSet: body.CustomName != nil, CustomName: nullableText(body.CustomName),
+		LastNameSet: body.LastName != nil, LastName: nullableText(body.LastName),
+		ShortNameSet: body.ShortName != nil, ShortName: nullableText(body.ShortName),
+		PhoneSet: body.Phone != nil, Phone: nullableText(body.Phone),
+		EmailSet: body.Email != nil, Email: nullableText(body.Email),
+		CompanySet: body.Company != nil, Company: nullableText(body.Company),
+		DNISet: body.DNI != nil, DNI: nullableText(body.DNI),
+		AddressSet: body.Address != nil, Address: nullableText(body.Address),
+		DistritoSet: body.Distrito != nil, Distrito: nullableText(body.Distrito),
+		OcupacionSet: body.Ocupacion != nil, Ocupacion: nullableText(body.Ocupacion),
+		NotesSet: body.Notes != nil, Notes: nullableText(body.Notes),
 	}
 	if body.Age != nil {
-		if *body.Age == 0 {
-			contact.Age = nil
-		} else {
-			contact.Age = body.Age
-		}
-	}
-	if body.DNI != nil {
-		if *body.DNI == "" {
-			contact.DNI = nil
-		} else {
-			contact.DNI = body.DNI
+		patch.AgeSet = true
+		if *body.Age > 0 {
+			patch.Age = body.Age
 		}
 	}
 	if body.BirthDate != nil {
-		if *body.BirthDate == "" {
-			contact.BirthDate = nil
-		} else {
-			if t, err := time.Parse("2006-01-02", *body.BirthDate); err == nil {
-				contact.BirthDate = &t
+		patch.BirthDateSet = true
+		if strings.TrimSpace(*body.BirthDate) != "" {
+			parsed, parseErr := time.Parse("2006-01-02", strings.TrimSpace(*body.BirthDate))
+			if parseErr != nil {
+				return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Fecha de nacimiento inválida"})
+			}
+			patch.BirthDate = &parsed
+		}
+	}
+	if body.Tags != nil {
+		patch.TagIDsSet = true
+		seenTagIDs := make(map[uuid.UUID]struct{}, len(body.Tags))
+		for _, rawName := range body.Tags {
+			name := strings.TrimSpace(rawName)
+			if name == "" {
+				continue
+			}
+			var tagID uuid.UUID
+			resolveErr := s.repos.DB().QueryRow(c.Context(), `
+				INSERT INTO tags (id,account_id,name,color,created_at,updated_at)
+				VALUES ($1,$2,$3,'#6366f1',NOW(),NOW())
+				ON CONFLICT (account_id,name) DO UPDATE SET name=EXCLUDED.name
+				RETURNING id
+			`, uuid.New(), accountID, name).Scan(&tagID)
+			if resolveErr != nil {
+				return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "No se pudieron resolver las etiquetas"})
+			}
+			if _, duplicate := seenTagIDs[tagID]; !duplicate {
+				patch.TagIDs = append(patch.TagIDs, tagID)
+				seenTagIDs[tagID] = struct{}{}
 			}
 		}
 	}
-	if body.Address != nil {
-		if *body.Address == "" {
-			contact.Address = nil
-		} else {
-			contact.Address = body.Address
+	hasPersonalPatch := patch.CustomNameSet || patch.LastNameSet || patch.ShortNameSet || patch.PhoneSet ||
+		patch.EmailSet || patch.CompanySet || patch.AgeSet || patch.DNISet || patch.BirthDateSet ||
+		patch.AddressSet || patch.DistritoSet || patch.OcupacionSet || patch.NotesSet
+	hasCanonicalPatch := hasPersonalPatch || patch.TagIDsSet
+	if hasCanonicalPatch {
+		updated, updateErr := s.services.ContactProfile.Update(c.Context(), accountID, id, patch)
+		if errors.Is(updateErr, repository.ErrContactProfileNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "contact not found"})
 		}
-	}
-	if body.Distrito != nil {
-		if *body.Distrito == "" {
-			contact.Distrito = nil
-		} else {
-			contact.Distrito = body.Distrito
+		if errors.Is(updateErr, repository.ErrContactIdentityConflict) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El teléfono o identidad ya pertenece a otro contacto", "code": "contact_identity_conflict"})
 		}
-	}
-	if body.Ocupacion != nil {
-		if *body.Ocupacion == "" {
-			contact.Ocupacion = nil
-		} else {
-			contact.Ocupacion = body.Ocupacion
+		if updateErr != nil {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "No se pudo actualizar el contacto"})
 		}
-	}
-	if body.Tags != nil {
-		contact.Tags = body.Tags
-	}
-	if body.Notes != nil {
-		if *body.Notes == "" {
-			contact.Notes = nil
-		} else {
-			contact.Notes = body.Notes
-		}
+		contact = updated
 	}
 
-	if err := s.services.Contact.Update(c.Context(), contact); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	// Sync tags to contact_tags table
+	// Tag assignment was committed atomically by ContactProfile.Update. Event
+	// auto-membership remains a contextual follow-up and cannot partially roll
+	// back the canonical Contact profile.
 	if body.Tags != nil {
-		if err := s.repos.Tag.SyncContactTagsByNames(c.Context(), contact.AccountID, contact.ID, body.Tags); err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron actualizar las etiquetas"})
-		}
 		if _, err := s.services.Event.ReconcileContactEventMembership(c.Context(), contact.AccountID, contact.ID); err != nil {
 			log.Printf("[EVENT-SYNC] Immediate contact update reconciliation failed for contact %s: %v", contact.ID, err)
 		} else {
 			s.invalidateEventsCache(contact.AccountID)
 		}
+		// Preserve the legacy flat field in this compatibility response; the
+		// canonical relation remains structured_tags/contact_tags.
+		contact.Tags = append([]string(nil), body.Tags...)
 	}
-
-	// Sync shared fields to all linked event_participants
-	_ = s.services.Contact.SyncToParticipants(c.Context(), contact)
-
-	// Sync shared fields to linked lead
-	_ = s.services.Contact.SyncToLead(c.Context(), contact)
 
 	if body.CustomName != nil || body.LastName != nil || body.ShortName != nil || body.Age != nil || body.DNI != nil || body.BirthDate != nil || body.Ocupacion != nil {
 		if kommoSync := s.kommoForAccount(c.Context(), contact.AccountID); kommoSync != nil {
@@ -9441,36 +9506,14 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 		}
 	}
 
-	// Broadcast contact update via WebSocket
-	s.hub.BroadcastToAccount(contact.AccountID, ws.EventContactUpdate, map[string]interface{}{
-		"action":     "updated",
-		"contact_id": contact.ID.String(),
-		"jid":        contact.JID,
-	})
-
-	// Auto-sync to Google Contacts if synced
-	if s.googleClient != nil && contact.GoogleSync {
-		log.Printf("[GOOGLE] Auto-sync triggered from handleUpdateContact for contact %s (google_sync=%v)", contact.ID, contact.GoogleSync)
-		go func() {
-			if _, err := s.syncContactToGoogle(context.Background(), contact.AccountID, contact.ID); err != nil {
-				log.Printf("[GOOGLE] Auto-sync contact %s failed: %v", contact.ID, err)
-			}
-		}()
-	} else if s.googleClient != nil && !contact.GoogleSync {
-		log.Printf("[GOOGLE] Auto-sync skipped for contact %s: google_sync=false", contact.ID)
-	}
-
-	// Populate structured_tags so the frontend keeps tags in sync after an update.
+	// Populate structured_tags so old callers receive the same canonical tags.
 	if tags, err := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID); err == nil {
 		contact.StructuredTags = tags
 	}
 
-	// Populate structured_tags so the frontend keeps tags in sync after an update.
-	if tags, err := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID); err == nil {
-		contact.StructuredTags = tags
+	if hasCanonicalPatch {
+		s.afterCanonicalContactProfileChange(contact.AccountID, contact)
 	}
-
-	s.invalidateContactsCache(contact.AccountID)
 	return c.JSON(fiber.Map{"success": true, "contact": contact})
 }
 
@@ -9488,8 +9531,20 @@ func (s *Server) handleResetContactFromDevice(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Return updated contact
-	contact, _ := s.services.Contact.GetByID(c.Context(), id)
+	// Reset is a specialized compatibility mutation. Re-hydrate through the
+	// canonical profile service, refresh legacy event/campaign snapshots, and
+	// publish the same invalidation/event contract as every other editor.
+	contact, profileErr := s.services.ContactProfile.Get(c.Context(), accountID, id)
+	if profileErr != nil || contact == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo recargar el contacto"})
+	}
+	if syncErr := s.services.Contact.SyncToParticipants(c.Context(), contact); syncErr != nil {
+		log.Printf("contact %s reset snapshot refresh failed: %v", contact.ID, syncErr)
+	}
+	if syncErr := s.services.Contact.SyncToLead(c.Context(), contact); syncErr != nil {
+		log.Printf("contact %s reset lead cleanup failed: %v", contact.ID, syncErr)
+	}
+	s.afterCanonicalContactProfileChange(accountID, contact)
 	return c.JSON(fiber.Map{"success": true, "contact": contact})
 }
 
@@ -9519,17 +9574,17 @@ func (s *Server) handleGetContactLeads(c *fiber.Ctx) error {
 
 	rows, err := s.repos.DB().Query(c.Context(), `
 		SELECT l.id, l.account_id, l.contact_id, l.jid,
-		       COALESCE(c.custom_name, c.name, l.name) AS name,
-		       COALESCE(c.last_name, l.last_name) AS last_name,
-		       COALESCE(c.phone, l.phone) AS phone,
-		       COALESCE(c.email, l.email) AS email,
+		       COALESCE(c.custom_name,c.name,c.push_name) AS name,
+		       c.last_name AS last_name,
+		       c.phone AS phone,
+		       c.email AS email,
 		       l.title, l.status, l.pipeline_id, l.stage_id,
 		       ps.name AS stage_name, ps.color AS stage_color, ps.stage_type,
 		       pp.name AS pipeline_name,
 		       l.is_archived, COALESCE(c.do_not_contact,FALSE), l.closed_at, l.close_reason,
 		       l.deleted_at, l.delete_reason, l.created_at
 		FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
+		JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		LEFT JOIN pipelines pp ON pp.id = l.pipeline_id
 		WHERE l.account_id = $1 AND l.contact_id = $2
@@ -10676,7 +10731,7 @@ func (s *Server) handleAddCampaignRecipientsFromLeads(c *fiber.Ctx) error {
 	// Build WHERE — same logic as handleGetLeadsListPaginated
 	args := []interface{}{accountID}
 	argIdx := 2
-	whereClauses := []string{"l.account_id = $1", "COALESCE(c.phone, l.phone, '') != ''", "COALESCE(c.do_not_contact,FALSE)=FALSE"}
+	whereClauses := []string{"l.account_id = $1", "NULLIF(c.phone,'') IS NOT NULL", "COALESCE(c.do_not_contact,FALSE)=FALSE"}
 	addLeadLifecycleWhere(c, &whereClauses)
 
 	if pipelineID == "__no_pipeline__" {
@@ -10690,10 +10745,7 @@ func (s *Server) handleAddCampaignRecipientsFromLeads(c *fiber.Ctx) error {
 	}
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
-		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx, argIdx,
-		))
+		whereClauses = append(whereClauses, canonicalLeadSearchClause(argIdx, false))
 		args = append(args, searchPattern)
 		argIdx++
 	}
@@ -11924,10 +11976,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
-		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(contact.custom_name,contact.name,contact.push_name,p.name,'')) LIKE $%d OR LOWER(COALESCE(contact.phone,p.phone,'')) LIKE $%d OR LOWER(COALESCE(contact.email,p.email,'')) LIKE $%d OR LOWER(COALESCE(contact.last_name,p.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx,
-		))
+		whereClauses = append(whereClauses, canonicalParticipantSearchClause(argIdx))
 		args = append(args, searchPattern)
 		argIdx++
 	}
@@ -11981,7 +12030,7 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 	}
 
 	if hasPhone != nil && *hasPhone {
-		whereClauses = append(whereClauses, "NULLIF(BTRIM(COALESCE(contact.phone,p.phone,'')),'') IS NOT NULL")
+		whereClauses = append(whereClauses, "NULLIF(BTRIM("+canonicalParticipantPhoneExpr+"),'') IS NOT NULL")
 	}
 
 	if stageIDsRaw != "" {
@@ -12004,29 +12053,45 @@ func (s *Server) handleGetEventParticipants(c *fiber.Ctx) error {
 
 	// Count total
 	var total int
-	countQ := fmt.Sprintf("SELECT COUNT(*) FROM event_participants p LEFT JOIN contacts contact ON contact.id=p.contact_id WHERE %s", whereSQL)
+	countQ := fmt.Sprintf(`SELECT COUNT(*) FROM event_participants p
+		JOIN events event_scope ON event_scope.id=p.event_id
+		LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+		LEFT JOIN contacts contact ON contact.id=COALESCE(p.contact_id,l.contact_id) AND contact.account_id=event_scope.account_id
+		WHERE %s`, whereSQL)
 	_ = s.repos.DB().QueryRow(c.Context(), countQ, args...).Scan(&total)
 
 	// Fetch page
 	dataQ := fmt.Sprintf(`
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-		       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),p.name),
-		       COALESCE(contact.last_name,p.last_name), COALESCE(contact.short_name,p.short_name), COALESCE(contact.phone,p.phone), COALESCE(contact.email,p.email), COALESCE(contact.age,p.age),
-		       COALESCE(contact.company,p.company), COALESCE(contact.dni,p.dni), COALESCE(contact.birth_date,p.birth_date), COALESCE(contact.address,p.address), COALESCE(contact.distrito,p.distrito), COALESCE(contact.ocupacion,p.ocupacion),
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.last_name ELSE contact.last_name END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.short_name ELSE contact.short_name END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.phone ELSE contact.phone END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.email ELSE contact.email END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.age ELSE contact.age END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.company ELSE contact.company END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.dni ELSE contact.dni END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.birth_date ELSE contact.birth_date END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.address ELSE contact.address END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.distrito ELSE contact.distrito END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.ocupacion ELSE contact.ocupacion END,
 		       p.status, p.notes, p.next_action, p.next_action_date,
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.auto_tag_sync, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at,
 		       p.created_at, p.updated_at,
 		       eps.name AS stage_name, eps.color AS stage_color,
 		       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
-		       COALESCE(l.is_archived, false) AS is_archived, COALESCE(contact.do_not_contact, false) AS is_blocked
+		       COALESCE(l.is_archived,false) AS is_archived,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(contact.do_not_contact,false) END AS is_blocked
 		FROM event_participants p
-		LEFT JOIN contacts contact ON contact.id = p.contact_id
+		JOIN events event_scope ON event_scope.id=p.event_id
+		LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+		LEFT JOIN contacts contact ON contact.id=COALESCE(p.contact_id,l.contact_id) AND contact.account_id=event_scope.account_id
 		LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id
-		LEFT JOIN leads l ON l.id = p.lead_id
 		LEFT JOIN pipeline_stages lps ON lps.id = l.stage_id
 		WHERE %s
-		ORDER BY p.next_action_date ASC NULLS LAST, COALESCE(contact.custom_name,contact.name,contact.push_name,p.name) ASC
+		ORDER BY p.next_action_date ASC NULLS LAST,
+		         CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END ASC
 		OFFSET %d LIMIT %d
 	`, whereSQL, offset, limit)
 
@@ -12128,10 +12193,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
-		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(contact.custom_name,contact.name,contact.push_name,p.name,'')) LIKE $%d OR LOWER(COALESCE(contact.phone,p.phone,'')) LIKE $%d OR LOWER(COALESCE(contact.email,p.email,'')) LIKE $%d OR LOWER(COALESCE(contact.last_name,p.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx,
-		))
+		whereClauses = append(whereClauses, canonicalParticipantSearchClause(argIdx))
 		args = append(args, searchPattern)
 		argIdx++
 	}
@@ -12185,7 +12247,7 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	}
 
 	if hasPhone != nil && *hasPhone {
-		whereClauses = append(whereClauses, "NULLIF(BTRIM(COALESCE(contact.phone,p.phone,'')),'') IS NOT NULL")
+		whereClauses = append(whereClauses, "NULLIF(BTRIM("+canonicalParticipantPhoneExpr+"),'') IS NOT NULL")
 	}
 
 	if stageIDsRaw != "" {
@@ -12259,7 +12321,11 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	// Goroutine 2: Count participants per stage
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT p.stage_id, COUNT(*) FROM event_participants p LEFT JOIN contacts contact ON contact.id=p.contact_id WHERE %s AND p.stage_id IS NOT NULL GROUP BY p.stage_id`, whereSQL)
+		q := fmt.Sprintf(`SELECT p.stage_id,COUNT(*) FROM event_participants p
+			JOIN events event_scope ON event_scope.id=p.event_id
+			LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+			LEFT JOIN contacts contact ON contact.id=COALESCE(p.contact_id,l.contact_id) AND contact.account_id=event_scope.account_id
+			WHERE %s AND p.stage_id IS NOT NULL GROUP BY p.stage_id`, whereSQL)
 		rows, err := s.repos.DB().Query(c.Context(), q, args...)
 		if err != nil {
 			countsErr = err
@@ -12282,23 +12348,32 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 		q := fmt.Sprintf(`
 			WITH ranked AS (
 				SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-				       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),p.name) AS name,
-				       COALESCE(contact.last_name,p.last_name) AS last_name, COALESCE(contact.short_name,p.short_name) AS short_name,
-				       COALESCE(contact.phone,p.phone) AS phone, COALESCE(contact.email,p.email) AS email, COALESCE(contact.age,p.age) AS age,
-				       COALESCE(contact.company,p.company) AS company, COALESCE(contact.dni,p.dni) AS dni, COALESCE(contact.birth_date,p.birth_date) AS birth_date,
-				       COALESCE(contact.address,p.address) AS address, COALESCE(contact.distrito,p.distrito) AS distrito, COALESCE(contact.ocupacion,p.ocupacion) AS ocupacion,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END AS name,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.last_name ELSE contact.last_name END AS last_name,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.short_name ELSE contact.short_name END AS short_name,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.phone ELSE contact.phone END AS phone,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.email ELSE contact.email END AS email,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.age ELSE contact.age END AS age,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.company ELSE contact.company END AS company,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.dni ELSE contact.dni END AS dni,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.birth_date ELSE contact.birth_date END AS birth_date,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.address ELSE contact.address END AS address,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.distrito ELSE contact.distrito END AS distrito,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.ocupacion ELSE contact.ocupacion END AS ocupacion,
 				       p.status, p.notes, p.next_action, p.next_action_date,
 				       p.invited_at, p.confirmed_at, p.attended_at,
 				       p.auto_tag_sync, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at,
 				       p.created_at, p.updated_at,
 				       s.name AS stage_name, s.color AS stage_color, s.position AS stage_position,
 				       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
-				       COALESCE(l.is_archived, false) AS is_archived, COALESCE(contact.do_not_contact, false) AS is_blocked,
+				       COALESCE(l.is_archived,false) AS is_archived,
+				       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(contact.do_not_contact,false) END AS is_blocked,
 				       ROW_NUMBER() OVER (PARTITION BY p.stage_id ORDER BY p.created_at DESC) AS rn
 				FROM event_participants p
-				LEFT JOIN contacts contact ON contact.id = p.contact_id
+				JOIN events event_scope ON event_scope.id=p.event_id
+				LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+				LEFT JOIN contacts contact ON contact.id=COALESCE(p.contact_id,l.contact_id) AND contact.account_id=event_scope.account_id
 				LEFT JOIN event_pipeline_stages s ON s.id = p.stage_id
-				LEFT JOIN leads l ON l.id = p.lead_id
 				LEFT JOIN pipeline_stages lps ON lps.id = l.stage_id
 				WHERE %s AND p.stage_id IS NOT NULL
 			)
@@ -12347,14 +12422,15 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	go func() {
 		defer wg.Done()
 		rows, err := s.repos.DB().Query(c.Context(), `
-			SELECT p.id, t.id, t.account_id, t.name, t.color
-			FROM event_participants p
-			LEFT JOIN leads l ON l.id = p.lead_id
-			JOIN contact_tags ct ON ct.contact_id = COALESCE(p.contact_id, l.contact_id)
-			JOIN tags t ON t.id = ct.tag_id
-			WHERE p.event_id = $1 AND COALESCE(p.contact_id, l.contact_id) IS NOT NULL
-			ORDER BY t.name
-		`, eventID)
+				SELECT p.id, t.id, t.account_id, t.name, t.color
+				FROM event_participants p
+				JOIN events event_scope ON event_scope.id=p.event_id AND event_scope.account_id=$2
+				LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+				JOIN contact_tags ct ON ct.contact_id = COALESCE(p.contact_id, l.contact_id)
+				JOIN tags t ON t.id=ct.tag_id AND t.account_id=event_scope.account_id
+				WHERE p.event_id = $1 AND COALESCE(p.contact_id, l.contact_id) IS NOT NULL
+				ORDER BY t.name
+			`, eventID, accountID)
 		if err != nil {
 			tagsErr = err
 			return
@@ -12373,7 +12449,11 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	// Goroutine 5: Unassigned participants count
 	go func() {
 		defer wg.Done()
-		q := fmt.Sprintf(`SELECT COUNT(*) FROM event_participants p LEFT JOIN contacts contact ON contact.id=p.contact_id WHERE %s AND (p.stage_id IS NULL)`, whereSQL)
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM event_participants p
+			JOIN events event_scope ON event_scope.id=p.event_id
+			LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+			LEFT JOIN contacts contact ON contact.id=COALESCE(p.contact_id,l.contact_id) AND contact.account_id=event_scope.account_id
+			WHERE %s AND p.stage_id IS NULL`, whereSQL)
 		err := s.repos.DB().QueryRow(c.Context(), q, args...).Scan(&unassignedCount)
 		if err != nil {
 			unassignedErr = err
@@ -12470,15 +12550,26 @@ func (s *Server) handleGetEventParticipantsPaginated(c *fiber.Ctx) error {
 	if unassignedCount > 0 {
 		q := fmt.Sprintf(`
 			SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-			       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),p.name),
-			       COALESCE(contact.last_name,p.last_name), COALESCE(contact.short_name,p.short_name), COALESCE(contact.phone,p.phone), COALESCE(contact.email,p.email), COALESCE(contact.age,p.age),
-			       COALESCE(contact.company,p.company), COALESCE(contact.dni,p.dni), COALESCE(contact.birth_date,p.birth_date), COALESCE(contact.address,p.address), COALESCE(contact.distrito,p.distrito), COALESCE(contact.ocupacion,p.ocupacion),
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.last_name ELSE contact.last_name END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.short_name ELSE contact.short_name END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.phone ELSE contact.phone END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.email ELSE contact.email END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.age ELSE contact.age END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.company ELSE contact.company END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.dni ELSE contact.dni END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.birth_date ELSE contact.birth_date END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.address ELSE contact.address END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.distrito ELSE contact.distrito END,
+			       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.ocupacion ELSE contact.ocupacion END,
 			       p.status, p.notes, p.next_action, p.next_action_date,
 			       p.invited_at, p.confirmed_at, p.attended_at,
 			       p.auto_tag_sync, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at,
 			       p.created_at, p.updated_at
 			FROM event_participants p
-			LEFT JOIN contacts contact ON contact.id=p.contact_id
+			JOIN events event_scope ON event_scope.id=p.event_id
+			LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+			LEFT JOIN contacts contact ON contact.id=COALESCE(p.contact_id,l.contact_id) AND contact.account_id=event_scope.account_id
 			WHERE %s AND p.stage_id IS NULL
 			ORDER BY p.created_at DESC
 			LIMIT %d
@@ -12613,10 +12704,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
-		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(contact.custom_name,contact.name,contact.push_name,p.name,'')) LIKE $%d OR LOWER(COALESCE(contact.phone,p.phone,'')) LIKE $%d OR LOWER(COALESCE(contact.email,p.email,'')) LIKE $%d OR LOWER(COALESCE(contact.last_name,p.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx,
-		))
+		whereClauses = append(whereClauses, canonicalParticipantSearchClause(argIdx))
 		args = append(args, searchPattern)
 		argIdx++
 	}
@@ -12670,7 +12758,7 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 	}
 
 	if hasPhone != nil && *hasPhone {
-		whereClauses = append(whereClauses, "NULLIF(BTRIM(COALESCE(contact.phone,p.phone,'')),'') IS NOT NULL")
+		whereClauses = append(whereClauses, "NULLIF(BTRIM("+canonicalParticipantPhoneExpr+"),'') IS NOT NULL")
 	}
 
 	addDateFilter(c, "p", participantDateFields, &whereClauses, &args, &argIdx)
@@ -12680,20 +12768,31 @@ func (s *Server) handleGetEventParticipantsByStage(c *fiber.Ctx) error {
 	// Query with LIMIT+1 OFFSET
 	q := fmt.Sprintf(`
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-		       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),p.name),
-		       COALESCE(contact.last_name,p.last_name), COALESCE(contact.short_name,p.short_name), COALESCE(contact.phone,p.phone), COALESCE(contact.email,p.email), COALESCE(contact.age,p.age),
-		       COALESCE(contact.company,p.company), COALESCE(contact.dni,p.dni), COALESCE(contact.birth_date,p.birth_date), COALESCE(contact.address,p.address), COALESCE(contact.distrito,p.distrito), COALESCE(contact.ocupacion,p.ocupacion),
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(p.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.last_name ELSE contact.last_name END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.short_name ELSE contact.short_name END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.phone ELSE contact.phone END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.email ELSE contact.email END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.age ELSE contact.age END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.company ELSE contact.company END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.dni ELSE contact.dni END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.birth_date ELSE contact.birth_date END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.address ELSE contact.address END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.distrito ELSE contact.distrito END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.ocupacion ELSE contact.ocupacion END,
 		       p.status, p.notes, p.next_action, p.next_action_date,
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.auto_tag_sync, p.membership_state, p.membership_reason, p.membership_source, p.membership_changed_at,
 		       p.created_at, p.updated_at,
 		       COALESCE(s.name, '') AS stage_name, COALESCE(s.color, '') AS stage_color,
 		       l.pipeline_id AS lead_pipeline_id, l.stage_id AS lead_stage_id, lps.name AS lead_stage_name, lps.color AS lead_stage_color,
-		       COALESCE(l.is_archived, false) AS is_archived, COALESCE(contact.do_not_contact, false) AS is_blocked
+		       COALESCE(l.is_archived,false) AS is_archived,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN COALESCE(l.is_blocked,false) ELSE COALESCE(contact.do_not_contact,false) END AS is_blocked
 		FROM event_participants p
-		LEFT JOIN contacts contact ON contact.id = p.contact_id
+		JOIN events event_scope ON event_scope.id=p.event_id
+		LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+		LEFT JOIN contacts contact ON contact.id=COALESCE(p.contact_id,l.contact_id) AND contact.account_id=event_scope.account_id
 		LEFT JOIN event_pipeline_stages s ON s.id = p.stage_id
-		LEFT JOIN leads l ON l.id = p.lead_id
 		LEFT JOIN pipeline_stages lps ON lps.id = l.stage_id
 		WHERE %s
 		ORDER BY p.created_at DESC
@@ -13304,6 +13403,13 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 		if errors.Is(err, repository.ErrEventMembershipFrozen) {
 			return writeEventMembershipError(c, err)
 		}
+		if errors.Is(err, repository.ErrContactIdentityConflict) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"success": false,
+				"code":    "CONTACT_IDENTITY_CONFLICT",
+				"error":   "El teléfono ya pertenece a otro contacto de la cuenta",
+			})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	if s.hub != nil {
@@ -13311,20 +13417,14 @@ func (s *Server) handleUpdateEventParticipant(c *fiber.Ctx) error {
 	}
 
 	// ParticipantRepository updates the Contact once and refreshes every
-	// participant/campaign snapshot. Only external Google sync remains here.
+	// participant/campaign snapshot. Reuse the canonical post-commit path so
+	// Contact, Lead, Chat, Event and Program surfaces reconcile immediately.
 	if p.ContactID != nil && len(p.PersonalFieldChanges) > 0 {
-		// Auto-sync to Google Contacts if linked contact has google_sync enabled
-		if s.googleClient != nil {
-			contactID := *p.ContactID
-			go func() {
-				contact, err := s.repos.Contact.GetByID(context.Background(), contactID)
-				if err == nil && contact != nil && contact.AccountID == accountID && contact.GoogleSync {
-					log.Printf("[GOOGLE] Auto-sync triggered from handleUpdateEventParticipant for participant %s → contact %s (google_sync=%v)", p.ID, contact.ID, contact.GoogleSync)
-					if _, err := s.syncContactToGoogle(context.Background(), contact.AccountID, contact.ID); err != nil {
-						log.Printf("[GOOGLE] Auto-sync from participant %s failed: %v", p.ID, err)
-					}
-				}
-			}()
+		contact, profileErr := s.services.ContactProfile.Get(c.Context(), accountID, *p.ContactID)
+		if profileErr != nil {
+			log.Printf("contact profile refresh after event participant %s update failed: %v", p.ID, profileErr)
+		} else if contact != nil {
+			s.afterCanonicalContactProfileChange(accountID, contact)
 		}
 	}
 
@@ -13674,17 +13774,23 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	whereSQL := strings.Join(pWhere, " AND ")
 	dataQ := fmt.Sprintf(`
 		SELECT p.id, p.event_id, p.contact_id, p.lead_id, p.stage_id,
-		       COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),contact.phone),
-		       contact.last_name, contact.short_name, contact.phone, contact.email, contact.age,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.name ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone) END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.last_name ELSE contact.last_name END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.short_name ELSE contact.short_name END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.phone ELSE contact.phone END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.email ELSE contact.email END,
+		       CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.age ELSE contact.age END,
 		       p.status, p.notes, p.next_action, p.next_action_date,
 		       p.invited_at, p.confirmed_at, p.attended_at,
 		       p.created_at, p.updated_at,
 		       eps.name AS stage_name, eps.color AS stage_color
 		FROM event_participants p
-		LEFT JOIN contacts contact ON contact.id=p.contact_id
+		JOIN events event_scope ON event_scope.id=p.event_id
+		LEFT JOIN leads l ON l.id=p.lead_id AND l.account_id=event_scope.account_id
+		LEFT JOIN contacts contact ON contact.id=COALESCE(p.contact_id,l.contact_id) AND contact.account_id=event_scope.account_id
 		LEFT JOIN event_pipeline_stages eps ON eps.id = p.stage_id
 		WHERE %s
-		ORDER BY COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone) ASC
+		ORDER BY CASE WHEN COALESCE(p.contact_id,l.contact_id) IS NULL THEN p.name ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone) END ASC
 	`, whereSQL)
 
 	rows, err := s.repos.DB().Query(c.Context(), dataQ, pArgs...)
@@ -14510,10 +14616,7 @@ func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
 	}
 	if req.Search != "" {
 		searchPattern := "%" + strings.ToLower(req.Search) + "%"
-		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(LOWER(COALESCE(c.name,l.name,'')) LIKE $%d OR LOWER(COALESCE(c.phone,l.phone,'')) LIKE $%d OR LOWER(COALESCE(c.email,l.email,'')) LIKE $%d OR LOWER(COALESCE(c.company,l.company,'')) LIKE $%d OR LOWER(COALESCE(c.last_name,l.last_name,'')) LIKE $%d)",
-			argIdx, argIdx, argIdx, argIdx, argIdx,
-		))
+		whereClauses = append(whereClauses, canonicalLeadSearchClause(argIdx, false))
 		args = append(args, searchPattern)
 		argIdx++
 	}
@@ -14556,9 +14659,9 @@ func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
 	query := fmt.Sprintf(`
 		SELECT DISTINCT ON (l.contact_id)
 		       l.id, l.contact_id,
-		       COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),l.name,''),
-		       COALESCE(c.last_name,l.last_name,''), COALESCE(c.short_name,l.short_name,''),
-		       COALESCE(c.phone,l.phone), COALESCE(c.email,l.email), COALESCE(c.age,l.age)
+		       COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),''),
+		       COALESCE(c.last_name,''),COALESCE(c.short_name,''),
+		       c.phone,c.email,c.age
 		FROM leads l
 		JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id
 		WHERE %s
@@ -14788,6 +14891,9 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 		if parseErr != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program participant ID"})
 		}
+		if handled, guardErr := s.rejectMigratedProgramMutation(c, accountID, programID); handled {
+			return guardErr
+		}
 		var participantContactID uuid.UUID
 		var programName string
 		if err := s.repos.DB().QueryRow(c.Context(), `
@@ -14969,9 +15075,15 @@ func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 	// Before deleting, capture lead_id and type for Kommo re-push
 	accountID := c.Locals("account_id").(uuid.UUID)
 	var interactionLeadID *uuid.UUID
+	var interactionProgramID *uuid.UUID
 	var interactionType string
-	if err := s.repos.DB().QueryRow(c.Context(), `SELECT lead_id, type FROM interactions WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&interactionLeadID, &interactionType); err != nil {
+	if err := s.repos.DB().QueryRow(c.Context(), `SELECT lead_id, program_id, type FROM interactions WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&interactionLeadID, &interactionProgramID, &interactionType); err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Interaction not found"})
+	}
+	if interactionProgramID != nil {
+		if handled, guardErr := s.rejectMigratedProgramMutation(c, accountID, *interactionProgramID); handled {
+			return guardErr
+		}
 	}
 	if interactionType == domain.InteractionTypeAttendance {
 		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Edit or clear this observation from the attendance window"})

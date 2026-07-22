@@ -47,6 +47,11 @@ git diff --check
 
 - Exercise chat list updates with rapid outgoing messages, incoming messages, duplicate events, active filters, selection mode, and preserved scroll. No populated list may flash skeletons.
 - Exercise Details with no Contact, zero/one/many opportunities, many tags, long commercial fields, integrated/drawer/mobile modes, and ensure the final action remains reachable with one parent scroll.
+- Exercise Contact editing with thousands of available tags: only assigned chips render initially, search is bounded/debounced, stale responses cannot win, and global creation follows `PermTags`.
+- Exercise collapsed/expanded Contact history, lazy loading, count accuracy, adding while collapsed, composer persistence after save, retry, and rapid Contact switching.
+- Exercise Program participant dates with automatic defaults, explicit past/future corrections, account isolation, inclusive boundaries, no eligible sessions, pending sessions, and real attendance before/after the participation window. Historical records must remain visible and must not alter P/F/T rates.
+- Exercise active/history Program rosters, withdrawal with retained records, blocked annulment when activity exists, session-date eligibility and proof that one Contact has independent rates in two Programs.
+- Exercise survey template versioning, instance creation from Programas, frozen audiences, legacy public slugs, responses in two Programs for one Contact, and proof that template edits do not change prior applications or answers.
 - Exercise widths 320, 375, 768, 1024, 1280, and 1440 px plus browser zoom 80–150%, sidebar/Eros open and closed. Decide integrated versus drawer from actual available width.
 - Exercise portaled menus near every viewport edge using mouse, touch, keyboard, Escape, resize, and outside scroll.
 - Exercise replies after immediate send, WebSocket echo, reload, pagination, and search hydration; the quote must remain visible and point to the correct message.

@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   Search, Phone, PhoneOff, Mail, Building2, Tag, Edit, Trash2, RefreshCw,
-  ChevronDown, CheckSquare, Square, XCircle, MoreVertical, MoreHorizontal,
+  ChevronDown, CheckSquare, Square, XCircle, AlertCircle, MoreVertical, MoreHorizontal,
   Users, Merge, Eye, X, Smartphone, MessageSquare, Send,
   Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter, Radio,
   UserPlus, ClipboardPaste, Hash, Code, Download, CheckCircle2, ExternalLink, ArrowUpDown, ChevronUp, Cloud, Settings
@@ -18,7 +18,7 @@ import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import CreateContactModal from '@/components/CreateContactModal'
 import PasteFromExcelModal from '@/components/PasteFromExcelModal'
-import LeadDetailPanel from '@/components/LeadDetailPanel'
+import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
 import ChatPanel from '@/components/chat/ChatPanel'
 import FormulaEditor from '@/components/FormulaEditor'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
@@ -82,6 +82,20 @@ interface Contact {
   google_sync?: boolean
   google_synced_at?: string | null
   google_sync_error?: string | null
+}
+
+interface ContactOpportunity {
+  id: string
+  title?: string | null
+  status?: string | null
+  pipeline_name?: string | null
+  stage_name?: string | null
+  stage_color?: string | null
+  is_archived?: boolean
+  is_blocked?: boolean
+  deleted_at?: string | null
+  close_reason?: string | null
+  created_at?: string | null
 }
 
 interface ContactRelationCounts {
@@ -210,46 +224,92 @@ function resolveDatePreset(preset: string, customFrom?: string, customTo?: strin
   }
 }
 
-function contactToLead(c: Contact): Lead {
-  return {
-    id: c.id,
-    account_id: c.account_id,
-    contact_id: c.id,
-    jid: c.jid,
-    name: c.custom_name ?? c.name ?? c.push_name ?? null,
-    last_name: c.last_name ?? null,
-    short_name: c.short_name ?? null,
-    phone: c.phone ?? null,
-    email: c.email ?? null,
-    company: c.company ?? null,
-    age: c.age ?? null,
-    dni: c.dni ?? null,
-    birth_date: c.birth_date ?? null,
-    address: c.address ?? null,
-    distrito: c.distrito ?? null,
-    ocupacion: c.ocupacion ?? null,
-    notes: c.notes ?? null,
-    tags: c.tags || null,
-    structured_tags: c.structured_tags || null,
-    status: 'active',
-    source: c.source ?? null,
-    pipeline_id: null,
-    stage_id: null,
-    stage_name: null,
-    stage_color: null,
-    stage_position: null,
-    kommo_id: c.kommo_id ?? null,
-    is_archived: false,
-    is_blocked: false,
-    archived_at: null,
-    blocked_at: null,
-    block_reason: null,
-    assigned_to: null,
-    assigned_to_name: null,
-    custom_fields: null,
-    created_at: c.created_at,
-    updated_at: c.updated_at,
-  } as unknown as Lead
+function opportunityLifecycle(opportunity: ContactOpportunity) {
+  if (opportunity.deleted_at) return { label: 'Papelera', className: 'bg-slate-200 text-slate-700' }
+  if (opportunity.is_archived) return { label: 'Archivada', className: 'bg-amber-100 text-amber-800' }
+  if (opportunity.status === 'won') return { label: 'Ganada', className: 'bg-emerald-100 text-emerald-800' }
+  if (opportunity.status === 'lost') return { label: 'Perdida', className: 'bg-red-100 text-red-800' }
+  return { label: 'Abierta', className: 'bg-blue-100 text-blue-800' }
+}
+
+function ContactOpportunitySummary({
+  contactId,
+  opportunities,
+  loading,
+  error,
+  selectedId,
+  onSelect,
+  onRetry,
+  onOpen,
+}: {
+  contactId: string
+  opportunities: ContactOpportunity[]
+  loading: boolean
+  error: string
+  selectedId: string
+  onSelect: (id: string) => void
+  onRetry: () => void
+  onOpen: (id: string) => void
+}) {
+  const selected = opportunities.find(opportunity => opportunity.id === selectedId) || opportunities[0]
+  if (!loading && !error && !selected) return null
+  const lifecycle = selected ? opportunityLifecycle(selected) : null
+  const selectorId = `contact-opportunity-${contactId}`
+
+  return (
+    <section className="border-b border-slate-200 px-4 py-4" aria-labelledby={`${selectorId}-title`}>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Radio className="h-4 w-4 shrink-0 text-slate-400" />
+          <div className="min-w-0">
+            <h4 id={`${selectorId}-title`} className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Oportunidades</h4>
+            {!loading && !error && <p className="text-[10px] text-slate-400">{opportunities.length} registro{opportunities.length === 1 ? '' : 's'} comercial{opportunities.length === 1 ? '' : 'es'}</p>}
+          </div>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex min-h-20 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50" aria-busy="true">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-200 border-b-emerald-600 motion-reduce:animate-none" />
+          <span className="ml-2 text-xs font-medium text-slate-500">Cargando oportunidades…</span>
+        </div>
+      ) : error ? (
+        <div className="flex items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-800" role="status">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1">{error}</span>
+          <button type="button" onClick={onRetry} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500" aria-label="Reintentar oportunidades"><RefreshCw className="h-4 w-4" /></button>
+        </div>
+      ) : selected ? (
+        <div className="space-y-3">
+          {opportunities.length > 1 && (
+            <div>
+              <label htmlFor={selectorId} className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Seleccionar oportunidad</label>
+              <select id={selectorId} value={selected.id} onChange={event => onSelect(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100">
+                {opportunities.map(opportunity => <option key={opportunity.id} value={opportunity.id}>{opportunity.title || 'Oportunidad sin título'}{opportunity.pipeline_name ? ` · ${opportunity.pipeline_name}` : ''}</option>)}
+              </select>
+            </div>
+          )}
+          <article className="rounded-2xl border border-slate-200 bg-slate-50/60 p-3">
+            <div className="flex items-start gap-3">
+              <span className="mt-1.5 h-3 w-3 shrink-0 rounded-full ring-2 ring-white shadow-[0_0_0_1px_rgba(15,23,42,0.15)]" style={{ backgroundColor: selected.stage_color || '#94a3b8' }} aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h5 className="min-w-0 truncate text-sm font-bold text-slate-900">{selected.title || 'Oportunidad sin título'}</h5>
+                  {lifecycle && <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${lifecycle.className}`}>{lifecycle.label}</span>}
+                  {selected.is_blocked && <span className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-red-700 ring-1 ring-red-200">No contactable</span>}
+                </div>
+                <p className="mt-1.5 text-xs text-slate-500">{selected.pipeline_name || 'Sin pipeline'} <span aria-hidden="true">·</span> <span className="font-medium text-slate-600">{selected.stage_name || 'Sin etapa'}</span></p>
+                {selected.status === 'lost' && selected.close_reason && <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-red-700">Motivo: {selected.close_reason}</p>}
+              </div>
+            </div>
+            <button type="button" onClick={() => onOpen(selected.id)} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-700 transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+              Abrir oportunidad <ExternalLink className="h-3.5 w-3.5" />
+            </button>
+          </article>
+        </div>
+      ) : null}
+    </section>
+  )
 }
 
 export default function ContactsPage() {
@@ -296,20 +356,12 @@ export default function ContactsPage() {
   // Detail / Edit
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null)
   const [showDetailPanel, setShowDetailPanel] = useState(false)
-  const [scrollToTasks, setScrollToTasks] = useState(false)
-  const [showEditModal, setShowEditModal] = useState(false)
-  const [editForm, setEditForm] = useState({
-    custom_name: '',
-    last_name: '',
-    short_name: '',
-    phone: '',
-    email: '',
-    company: '',
-    age: '',
-    tags: '',
-    notes: '',
-    address: '',
-  })
+  const [detailOpportunities, setDetailOpportunities] = useState<ContactOpportunity[]>([])
+  const [selectedDetailOpportunityId, setSelectedDetailOpportunityId] = useState('')
+  const [detailOpportunitiesLoading, setDetailOpportunitiesLoading] = useState(false)
+  const [detailOpportunitiesError, setDetailOpportunitiesError] = useState('')
+  const detailOpportunitiesRequestRef = useRef(0)
+  const detailOpportunitiesAbortRef = useRef<AbortController | null>(null)
 
   // Duplicates
   const [showDuplicates, setShowDuplicates] = useState(false)
@@ -446,6 +498,55 @@ export default function ContactsPage() {
   const [cfFilters, setCfFilters] = useState<CustomFieldFilter[]>([])
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+
+  const loadDetailOpportunities = useCallback(async (contactId: string) => {
+    const requestId = ++detailOpportunitiesRequestRef.current
+    detailOpportunitiesAbortRef.current?.abort()
+    const controller = new AbortController()
+    detailOpportunitiesAbortRef.current = controller
+    setDetailOpportunities([])
+    setSelectedDetailOpportunityId('')
+    setDetailOpportunitiesError('')
+    setDetailOpportunitiesLoading(true)
+
+    try {
+      const response = await fetch(`/api/contacts/${contactId}/leads`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || 'No se pudieron cargar las oportunidades.')
+      }
+      if (requestId !== detailOpportunitiesRequestRef.current || activeContactIdRef.current !== contactId) return
+      const opportunities = Array.isArray(data.leads) ? data.leads as ContactOpportunity[] : []
+      setDetailOpportunities(opportunities)
+      setSelectedDetailOpportunityId(opportunities[0]?.id || '')
+    } catch (error) {
+      if (controller.signal.aborted) return
+      if (requestId !== detailOpportunitiesRequestRef.current || activeContactIdRef.current !== contactId) return
+      setDetailOpportunitiesError(error instanceof Error ? error.message : 'No se pudieron cargar las oportunidades.')
+    } finally {
+      if (requestId === detailOpportunitiesRequestRef.current && activeContactIdRef.current === contactId) {
+        setDetailOpportunitiesLoading(false)
+      }
+    }
+  }, [token])
+
+  const closeDetailPanel = useCallback(() => {
+    contactDetailRequestRef.current += 1
+    detailOpportunitiesRequestRef.current += 1
+    detailOpportunitiesAbortRef.current?.abort()
+    activeContactIdRef.current = null
+    setShowDetailPanel(false)
+    setDetailOpportunities([])
+    setSelectedDetailOpportunityId('')
+    setDetailOpportunitiesError('')
+    setDetailOpportunitiesLoading(false)
+    resetInlineChatState()
+  }, [resetInlineChatState])
+
+  useEffect(() => () => detailOpportunitiesAbortRef.current?.abort(), [])
 
   // Virtualizer for contacts table
   const contactsVirtualizer = useVirtualizer({
@@ -713,29 +814,30 @@ export default function ContactsPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const cId = params.get('contact_id')
-    const scroll = params.get('scroll')
     if (!cId) return
 
     // Clear URL params to avoid re-triggering
     window.history.replaceState({}, '', window.location.pathname)
 
     const fetchAndOpenContact = async () => {
+      const requestId = ++contactDetailRequestRef.current
+      activeContactIdRef.current = cId
+      resetInlineChatState()
+      void loadDetailOpportunities(cId)
       try {
         const token = localStorage.getItem('token')
         const res = await fetch(`/api/contacts/${cId}`, {
           headers: { Authorization: `Bearer ${token}` },
         })
         const data = await res.json()
-        if (data.success && data.contact) {
-          resetInlineChatState()
+        if (requestId === contactDetailRequestRef.current && activeContactIdRef.current === cId && data.success && data.contact) {
           setSelectedContact(data.contact)
           setShowDetailPanel(true)
-          if (scroll === 'tasks') setScrollToTasks(true)
         }
       } catch { /* ignore */ }
     }
     fetchAndOpenContact()
-  }, [resetInlineChatState])
+  }, [loadDetailOpportunities, resetInlineChatState])
 
   // Lock body scroll when detail panel is open
   useEffect(() => {
@@ -757,86 +859,21 @@ export default function ContactsPage() {
       if (showFilterDropdown) { setShowFilterDropdown(false); return }
       if (showSendMessage) { resetInlineChatState(); return }
       if (showDuplicates) { setShowDuplicates(false); return }
-      if (showEditModal) { setShowEditModal(false); setSelectedContact(null); return }
       if (showInlineChat) { resetInlineChatState(); return }
-      if (showDetailPanel) { setShowDetailPanel(false); resetInlineChatState(); return }
+      if (showDetailPanel) { closeDetailPanel(); return }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [actionsMenuId, resetInlineChatState, showFilterDropdown, showMobileBulkMenu, showMoreMenu, showSendMessage, showDuplicates, showEditModal, showInlineChat, showDetailPanel])
+  }, [actionsMenuId, closeDetailPanel, resetInlineChatState, showFilterDropdown, showMobileBulkMenu, showMoreMenu, showSendMessage, showDuplicates, showInlineChat, showDetailPanel])
 
-  const openDetail = async (contact: Contact) => {
+  const openDetail = (contact: Contact) => {
     resetInlineChatState()
-    const requestId = ++contactDetailRequestRef.current
+    contactDetailRequestRef.current += 1
     activeContactIdRef.current = contact.id
     setSelectedContact(contact)
     setShowDetailPanel(true)
-    // Fetch full contact with device names
-    try {
-      const res = await fetch(`/api/contacts/${contact.id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (requestId === contactDetailRequestRef.current && activeContactIdRef.current === contact.id && data.success) {
-        setSelectedContact(data.contact)
-      }
-    } catch { /* Keep the list projection already shown in the panel. */ }
+    void loadDetailOpportunities(contact.id)
   }
-
-  const openEditModal = (contact: Contact) => {
-    setSelectedContact(contact)
-    setEditForm({
-      custom_name: contact.custom_name || '',
-      last_name: contact.last_name || '',
-      short_name: contact.short_name || '',
-      phone: contact.phone || '',
-      email: contact.email || '',
-      company: contact.company || '',
-      age: contact.age ? String(contact.age) : '',
-      tags: (contact.tags || []).join(', '),
-      notes: contact.notes || '',
-      address: contact.address || '',
-    })
-    setShowEditModal(true)
-  }
-
-  const handleUpdateContact = async () => {
-    if (!selectedContact) return
-    try {
-      const res = await fetch(`/api/contacts/${selectedContact.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          custom_name: editForm.custom_name || null,
-          last_name: editForm.last_name || null,
-          short_name: editForm.short_name || null,
-          phone: editForm.phone || null,
-          email: editForm.email || null,
-          company: editForm.company || null,
-          age: editForm.age ? parseInt(editForm.age) : null,
-          tags: editForm.tags.split(',').map(t => t.trim()).filter(Boolean),
-          notes: editForm.notes || null,
-          address: editForm.address || null,
-        }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setShowEditModal(false)
-        fetchContacts()
-        if (showDetailPanel && data.contact) {
-          setSelectedContact(data.contact)
-        }
-      } else {
-        alert(data.error || 'Error al actualizar contacto')
-      }
-    } catch {
-      alert('Error de conexión')
-    }
-  }
-
 
   const handleDeleteContact = async (contactId: string) => {
     if (!confirm('¿Eliminar este contacto? También se eliminarán sus leads, chats y mensajes. Esta acción no se puede deshacer.')) return
@@ -847,7 +884,7 @@ export default function ContactsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        setShowDetailPanel(false)
+        closeDetailPanel()
         setSelectedContact(null)
         fetchContacts()
       }
@@ -2293,10 +2330,10 @@ export default function ContactsPage() {
                               <Eye className="w-4 h-4 text-slate-400" /> Ver detalle
                             </button>
                             <button
-                              onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); openEditModal(contact); setActionsMenuId(null) }}
+                              onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); openDetail(contact); setActionsMenuId(null) }}
                               className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
                             >
-                              <Edit2 className="w-4 h-4 text-slate-400" /> Editar
+                              <Edit2 className="w-4 h-4 text-slate-400" /> Editar en ficha
                             </button>
                             <button
                               onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); fetchContactLeads(contact); setActionsMenuId(null) }}
@@ -2431,7 +2468,7 @@ export default function ContactsPage() {
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" />
             <p className="truncate px-2 pb-2 text-sm font-semibold text-slate-800">{getDisplayName(mobileActionContact)}</p>
             <button type="button" onClick={() => { setActionsMenuId(null); openDetail(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-5 w-5 text-slate-400" />Ver detalle</button>
-            <button type="button" onClick={() => { setActionsMenuId(null); openEditModal(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-5 w-5 text-slate-400" />Editar</button>
+            <button type="button" onClick={() => { setActionsMenuId(null); openDetail(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-5 w-5 text-slate-400" />Editar en ficha</button>
             <button type="button" onClick={() => { setActionsMenuId(null); fetchContactLeads(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Users className="h-5 w-5 text-slate-400" />Ver oportunidades ({mobileActionContact.lead_count ?? 0})</button>
             <button
               type="button"
@@ -2459,9 +2496,9 @@ export default function ContactsPage() {
         <div className="app-viewport fixed inset-0 z-[70] flex justify-end overflow-hidden">
           <div
             className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
-            onClick={() => { setShowDetailPanel(false); resetInlineChatState() }}
+            onClick={closeDetailPanel}
           />
-          <div className={`relative flex h-full w-full bg-white shadow-2xl transition-all duration-300 border-l border-slate-200 ${showInlineChat ? 'xl:w-[85vw] xl:max-w-6xl' : 'max-w-md'}`}>
+          <div className={`relative flex h-full w-full bg-white shadow-2xl transition-all duration-200 motion-reduce:transition-none border-l border-slate-200 ${showInlineChat ? 'xl:w-[85vw] xl:max-w-6xl' : 'max-w-md'}`}>
 
             {/* Chat Panel - Left Side */}
             {showInlineChat && inlineChatId && (
@@ -2480,179 +2517,41 @@ export default function ContactsPage() {
 
             {/* Contact Details - Right Side */}
             <div className={`${showInlineChat ? 'hidden xl:flex xl:w-[360px] xl:shrink-0' : 'flex w-full'} h-full flex-col bg-white`}>
-            <LeadDetailPanel
-              contactMode
+            <ContactDetailSurface
               contactId={selectedContact.id}
-              scrollToTasks={scrollToTasks}
-              lead={contactToLead(selectedContact)}
-              onLeadChange={(updatedLead) => {
-                const updatedContact = {
-                  ...selectedContact,
-                  name: updatedLead.name,
-                  last_name: updatedLead.last_name,
-                  short_name: updatedLead.short_name,
-                  phone: updatedLead.phone,
-                  email: updatedLead.email,
-                  company: updatedLead.company,
-                  age: updatedLead.age,
-                  dni: updatedLead.dni,
-                  birth_date: updatedLead.birth_date,
-                  address: updatedLead.address,
-                  distrito: updatedLead.distrito,
-                  ocupacion: updatedLead.ocupacion,
-                  notes: updatedLead.notes,
-                  structured_tags: updatedLead.structured_tags,
-                }
-                setSelectedContact(updatedContact)
-                setContacts(prev => prev.map(c => c.id === updatedContact.id ? { ...c, ...updatedContact } : c))
+              context={{ type: 'contact', id: selectedContact.id }}
+              initialContact={{
+                ...selectedContact,
+                tags: selectedContact.tags || [],
+                structured_tags: selectedContact.structured_tags || [],
+                extra_phones: [],
+                custom_field_values: (selectedContact as any).custom_field_values || [],
               }}
-              onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
-              onDelete={() => {
-                setShowDetailPanel(false)
-                resetInlineChatState()
-                setSelectedContact(null)
-                fetchContacts()
+              title="Detalles"
+              subtitle="Perfil del contacto"
+              onClose={closeDetailPanel}
+              onSendMessage={showInlineChat ? undefined : (phone: string) => handleSendWhatsApp(phone)}
+              onContactChange={(contact) => {
+                setSelectedContact(current => current?.id === contact.id ? { ...current, ...contact } as Contact : current)
+                setContacts(current => current.map(item => item.id === contact.id ? { ...item, ...contact } as Contact : item))
               }}
-              deviceNames={selectedContact.device_names}
-              pushName={selectedContact.push_name}
-              avatarUrl={selectedContact.avatar_url}
-              onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-              hideWhatsApp={showInlineChat}
-              onContactUpdate={(contact) => {
-                setSelectedContact(contact)
-                setContacts(prev => prev.map(c => c.id === contact.id ? { ...c, ...contact } : c))
-              }}
+              contextContent={detailOpportunitiesLoading || detailOpportunitiesError || detailOpportunities.length > 0 ? (
+                <ContactOpportunitySummary
+                  contactId={selectedContact.id}
+                  opportunities={detailOpportunities}
+                  loading={detailOpportunitiesLoading}
+                  error={detailOpportunitiesError}
+                  selectedId={selectedDetailOpportunityId}
+                  onSelect={setSelectedDetailOpportunityId}
+                  onRetry={() => void loadDetailOpportunities(selectedContact.id)}
+                  onOpen={leadId => {
+                    closeDetailPanel()
+                    router.push(`/dashboard/leads?lead_id=${leadId}`)
+                  }}
+                />
+              ) : undefined}
+              onDeleteContact={() => void handleDeleteContact(selectedContact.id)}
             />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Modal */}
-      {showEditModal && selectedContact && (
-        <div className="responsive-dialog-backdrop fixed inset-0 flex items-center justify-center bg-black/50">
-          <div className="responsive-dialog-panel w-full max-w-md overflow-y-auto rounded-xl bg-white p-4 sm:max-h-[90vh] sm:p-6">
-            <h2 className="text-xl font-bold text-slate-900 mb-4">Editar Contacto</h2>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Nombre personalizado</label>
-                <input
-                  type="text"
-                  value={editForm.custom_name}
-                  onChange={(e) => setEditForm({ ...editForm, custom_name: e.target.value })}
-                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                  placeholder={selectedContact.name || selectedContact.push_name || 'Nombre del contacto'}
-                />
-                <p className="text-xs text-slate-400 mt-1">
-                  Nombre original: {selectedContact.name || selectedContact.push_name || '-'}
-                </p>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Apellido</label>
-                  <input
-                    type="text"
-                    value={editForm.last_name}
-                    onChange={(e) => setEditForm({ ...editForm, last_name: e.target.value })}
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Nombre Corto</label>
-                  <input
-                    type="text"
-                    value={editForm.short_name}
-                    onChange={(e) => setEditForm({ ...editForm, short_name: e.target.value })}
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                    placeholder="Apodo o nombre corto"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Teléfono</label>
-                <input
-                  type="tel"
-                  value={editForm.phone}
-                  onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
-                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                  placeholder="+51 999 888 777"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
-                <input
-                  type="email"
-                  value={editForm.email}
-                  onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
-                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                  placeholder="correo@ejemplo.com"
-                />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Empresa</label>
-                  <input
-                    type="text"
-                    value={editForm.company}
-                    onChange={(e) => setEditForm({ ...editForm, company: e.target.value })}
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                    placeholder="Nombre de la empresa"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Edad</label>
-                  <input
-                    type="number"
-                    value={editForm.age}
-                    onChange={(e) => setEditForm({ ...editForm, age: e.target.value })}
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Etiquetas</label>
-                <input
-                  type="text"
-                  value={editForm.tags}
-                  onChange={(e) => setEditForm({ ...editForm, tags: e.target.value })}
-                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                  placeholder="cliente, vip, urgente (separadas por coma)"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Notas</label>
-                <textarea
-                  value={editForm.notes}
-                  onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
-                  rows={3}
-                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                  placeholder="Notas sobre este contacto..."
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Dirección</label>
-                <input
-                  type="text"
-                  value={editForm.address}
-                  onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
-                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 placeholder:text-slate-400 text-sm"
-                  placeholder="Dirección del contacto"
-                />
-              </div>
-            </div>
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => { setShowEditModal(false); setSelectedContact(null) }}
-                className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 text-sm"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={handleUpdateContact}
-                className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm"
-              >
-                Guardar
-              </button>
             </div>
           </div>
         </div>

@@ -51,6 +51,15 @@ export interface Survey {
   thank_you_redirect_url: string;
   branding: SurveyBranding;
   is_template?: boolean;
+  template_id?: string;
+  template_revision?: number;
+  origin_type?: 'standalone' | 'program';
+  program_id?: string;
+  origin_label?: string;
+  audience_mode?: 'public' | 'program_participants';
+  opens_at?: string;
+  closes_at?: string;
+  legacy_instance?: boolean;
   created_by?: string;
   created_at: string;
   updated_at: string;
@@ -107,6 +116,7 @@ export interface SurveyAnswer {
   question_id: string;
   value: string;
   file_url?: string;
+  upload_id?: string;
   created_at: string;
 }
 
@@ -116,6 +126,11 @@ export interface SurveyResponse {
   account_id: string;
   respondent_token: string;
   lead_id?: string;
+  contact_id?: string;
+  program_id?: string;
+  program_participant_id?: string;
+  contact_name?: string;
+  contact_phone?: string;
   source: string;
   started_at: string;
   completed_at?: string;

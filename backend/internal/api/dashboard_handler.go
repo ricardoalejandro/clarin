@@ -492,7 +492,10 @@ func (s *Server) getDashboardChatSummary(c *fiber.Ctx, accountID uuid.UUID) (*da
 			FROM eligible
 		), ranked AS (
 			SELECT eligible.id,
-				COALESCE(NULLIF(BTRIM(contact.custom_name),''), NULLIF(BTRIM(contact.name),''), NULLIF(BTRIM(eligible.name),''), NULLIF(BTRIM(contact.phone),''), 'Sin nombre') AS display_name,
+				CASE WHEN eligible.contact_id IS NULL
+				  THEN COALESCE(NULLIF(BTRIM(eligible.name),''),'Sin nombre')
+				  ELSE COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),NULLIF(BTRIM(contact.phone),''),'Sin nombre')
+				END AS display_name,
 				eligible.last_message, eligible.last_message_at, eligible.effective_last_inbound_at, eligible.unread_count,
 				ROW_NUMBER() OVER (ORDER BY eligible.effective_last_inbound_at ASC, eligible.id ASC) AS row_number
 			FROM eligible
@@ -593,12 +596,16 @@ func (s *Server) getDashboardEventSummary(c *fiber.Ctx, accountID uuid.UUID) (*d
 	}
 
 	rows, err := s.repos.DB().Query(c.Context(), `
-		SELECT ep.id, e.id, e.name,
-			COALESCE(NULLIF(BTRIM(contact.custom_name),''), NULLIF(BTRIM(contact.name),''), NULLIF(BTRIM(ep.name),''), 'Sin nombre'),
+		SELECT ep.id,e.id,e.name,
+			CASE WHEN COALESCE(ep.contact_id,l.contact_id) IS NULL
+			  THEN COALESCE(NULLIF(BTRIM(ep.name),''),'Sin nombre')
+			  ELSE COALESCE(NULLIF(BTRIM(contact.custom_name),''),NULLIF(BTRIM(contact.name),''),NULLIF(BTRIM(contact.push_name),''),'Sin nombre')
+			END,
 			ep.next_action, ep.next_action_date
 		FROM event_participants ep
 		JOIN events e ON e.id=ep.event_id AND e.account_id=$1
-		LEFT JOIN contacts contact ON contact.id=ep.contact_id AND contact.account_id=e.account_id
+		LEFT JOIN leads l ON l.id=ep.lead_id AND l.account_id=e.account_id
+		LEFT JOIN contacts contact ON contact.id=COALESCE(ep.contact_id,l.contact_id) AND contact.account_id=e.account_id
 		WHERE ep.membership_state='active' AND ep.next_action_date IS NOT NULL AND ep.next_action_date < $2
 			AND ep.status NOT IN ('attended','no_show','declined') AND e.status NOT IN ('completed','cancelled')
 		ORDER BY ep.next_action_date ASC, ep.id ASC

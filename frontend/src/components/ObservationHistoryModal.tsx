@@ -34,6 +34,7 @@ interface ObservationHistoryModalProps {
   contactId?: string | null
   programId?: string | null
   programParticipantId?: string | null
+  attendanceContext?: { programId: string; sessionId: string; participantId: string } | null
   defaultNewType?: 'note' | 'call'
   /** Display name for header */
   name: string
@@ -61,6 +62,7 @@ export default function ObservationHistoryModal({
   contactId,
   programId,
   programParticipantId,
+  attendanceContext,
   defaultNewType = 'call',
   name,
   observations: initialObservations,
@@ -78,8 +80,10 @@ export default function ObservationHistoryModal({
   const [filterFrom, setFilterFrom] = useState('')
   const [filterTo, setFilterTo] = useState('')
 
-  // Toolbar accordion
-  const [toolbarOpen, setToolbarOpen] = useState(false)
+  // Filters and composer are independent: opening a filter must not expose the
+  // write controls, and adding one observation must not collapse the composer.
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [composerOpen, setComposerOpen] = useState(false)
 
   // Add observation form
   const [newType, setNewType] = useState<'note' | 'call'>(defaultNewType)
@@ -92,6 +96,28 @@ export default function ObservationHistoryModal({
   const [loadingMore, setLoadingMore] = useState(false)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const modalWasOpenRef = useRef(false)
+  const isOpenRef = useRef(isOpen)
+  const viewIdentityRef = useRef('')
+  const viewGenerationRef = useRef(0)
+
+  const viewIdentity = !isOpen
+    ? 'closed'
+    : attendanceContext
+    ? `attendance:${attendanceContext.programId}:${attendanceContext.sessionId}:${attendanceContext.participantId}`
+    : participantId
+    ? `participant:${participantId}`
+    : contactId
+    ? `contact:${contactId}`
+    : leadId
+    ? `lead:${leadId}`
+    : 'open:none'
+  isOpenRef.current = isOpen
+  if (viewIdentityRef.current !== viewIdentity) {
+    viewIdentityRef.current = viewIdentity
+    viewGenerationRef.current += 1
+  }
 
   // Sync observations when prop changes
   useEffect(() => { setObservations(initialObservations) }, [initialObservations])
@@ -100,13 +126,23 @@ export default function ObservationHistoryModal({
   useEffect(() => {
     if (!isOpen) {
       setFilterType(''); setFilterFrom(''); setFilterTo(''); setNewText(''); setNewType(defaultNewType)
-      setToolbarOpen(false); setVisibleCount(PAGE_SIZE); setActionError('')
+      setFiltersOpen(false); setComposerOpen(false); setVisibleCount(PAGE_SIZE); setActionError('')
     }
   }, [defaultNewType, isOpen])
 
   useEffect(() => {
-    if (isOpen) setToolbarOpen(initialComposerOpen)
+    if (isOpen && !modalWasOpenRef.current) {
+      setFiltersOpen(false)
+      setComposerOpen(initialComposerOpen)
+    }
+    modalWasOpenRef.current = isOpen
   }, [initialComposerOpen, isOpen])
+
+  useEffect(() => {
+    if (!composerOpen) return
+    const frame = window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [composerOpen])
 
   // Escape key — capture phase to prevent parent handlers from firing
   useEffect(() => {
@@ -121,7 +157,9 @@ export default function ObservationHistoryModal({
   const fetchObservations = useCallback(async () => {
     const token = localStorage.getItem('token')
     try {
-      const url = participantId
+      const url = attendanceContext
+        ? `/api/programs/${attendanceContext.programId}/sessions/${attendanceContext.sessionId}/participants/${attendanceContext.participantId}/attendance-observations`
+        : participantId
         ? `/api/interactions?participant_id=${participantId}&limit=200`
         : contactId
         ? `/api/contacts/${contactId}/interactions?limit=200`
@@ -132,13 +170,16 @@ export default function ObservationHistoryModal({
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       const data = await res.json()
       if (data.success) {
-        setObservations(data.interactions || [])
+        const next = attendanceContext
+          ? (data.observations || []).map((observation: any) => ({ ...observation, contact_id: null, lead_id: null, type: 'attendance', direction: null, outcome: null }))
+          : (data.interactions || [])
+        setObservations(next)
         setVisibleCount(PAGE_SIZE)
       }
     } catch (err) {
       console.error('Failed to fetch observations:', err)
     }
-  }, [leadId, participantId, contactId])
+  }, [attendanceContext, leadId, participantId, contactId])
 
   // Infinite scroll with IntersectionObserver
   useEffect(() => {
@@ -159,30 +200,39 @@ export default function ObservationHistoryModal({
   }, [isOpen, observations.length, filterType, filterFrom, filterTo])
 
   const handleAdd = async () => {
-    if (!newText.trim() || (!participantId && !contactId && !leadId)) return
+    if (!newText.trim() || (!attendanceContext && !participantId && !contactId && !leadId)) return
+    const operationGeneration = viewGenerationRef.current
     setSaving(true)
     setActionError('')
     const token = localStorage.getItem('token')
     try {
-      const body = participantId
+      const body = attendanceContext
+        ? { notes: newText.trim() }
+        : participantId
         ? { event_id: eventId || undefined, participant_id: participantId, contact_id: contactId || undefined, type: newType, notes: newText.trim() }
         : contactId
         ? { contact_id: contactId, program_id: programId || undefined, program_participant_id: programParticipantId || undefined, type: newType, notes: newText.trim() }
         : { lead_id: leadId, type: newType, notes: newText.trim() }
-      const res = await fetch('/api/interactions', {
+      const url = attendanceContext
+        ? `/api/programs/${attendanceContext.programId}/sessions/${attendanceContext.sessionId}/participants/${attendanceContext.participantId}/attendance-observations`
+        : '/api/interactions'
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
       })
       const data = await res.json()
       if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo guardar la observación.')
+      if (!isOpenRef.current || operationGeneration !== viewGenerationRef.current) return
       setNewText('')
-      setToolbarOpen(false)
-      await fetchObservations()
-      onObservationChange?.()
+      window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+      if (onObservationChange) onObservationChange()
+      else await fetchObservations()
     } catch (err) {
       console.error('Failed to add observation:', err)
-      setActionError(err instanceof Error ? err.message : 'No se pudo guardar la observación.')
+      if (isOpenRef.current && operationGeneration === viewGenerationRef.current) {
+        setActionError(err instanceof Error ? err.message : 'No se pudo guardar la observación.')
+      }
     } finally {
       setSaving(false)
     }
@@ -190,19 +240,26 @@ export default function ObservationHistoryModal({
 
   const handleDelete = async (obsId: string) => {
     if (!confirm('¿Eliminar esta observación?')) return
+    const operationGeneration = viewGenerationRef.current
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/interactions/${obsId}`, {
+      const url = attendanceContext
+        ? `/api/programs/${attendanceContext.programId}/sessions/${attendanceContext.sessionId}/participants/${attendanceContext.participantId}/attendance-observations/${obsId}`
+        : `/api/interactions/${obsId}`
+      const res = await fetch(url, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) {
-        await fetchObservations()
-        onObservationChange?.()
-      }
+      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo eliminar la observación.')
+      if (!isOpenRef.current || operationGeneration !== viewGenerationRef.current) return
+      if (onObservationChange) onObservationChange()
+      else await fetchObservations()
     } catch (err) {
       console.error('Failed to delete observation:', err)
+      if (isOpenRef.current && operationGeneration === viewGenerationRef.current) {
+        setActionError(err instanceof Error ? err.message : 'No se pudo eliminar la observación.')
+      }
     }
   }
 
@@ -240,43 +297,45 @@ export default function ObservationHistoryModal({
       <div className="flex h-[var(--app-height)] w-full max-w-3xl flex-col overflow-hidden rounded-none border border-slate-200/60 bg-white shadow-2xl animate-in zoom-in-95 duration-200 sm:h-auto sm:max-h-[85vh] sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white shrink-0">
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center">
               <Clock className="w-4 h-4 text-emerald-600" />
             </div>
-            <div>
-              <h2 className="text-sm font-semibold text-slate-900">Historial de Observaciones</h2>
-              <p className="text-[11px] text-slate-500">{name || 'Sin nombre'} · {observations.length} registro{observations.length !== 1 ? 's' : ''}</p>
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold text-slate-900">{attendanceContext ? 'Observaciones de asistencia' : 'Historial de Observaciones'}</h2>
+              <p className="truncate text-[11px] text-slate-500">{name || 'Sin nombre'} · {observations.length} registro{observations.length !== 1 ? 's' : ''}</p>
             </div>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             {mutationMode !== 'append-only' && <button
-              onClick={() => setToolbarOpen(!toolbarOpen)}
-              className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition-all sm:h-9 sm:w-9 ${toolbarOpen || hasFilters ? 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'}`}
-              title="Filtrar y agregar"
+              type="button"
+              onClick={() => setFiltersOpen(value => !value)}
+              className={`inline-flex h-11 w-11 items-center justify-center rounded-xl transition-all sm:h-9 sm:w-9 ${filtersOpen || hasFilters ? 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'}`}
+              title="Filtrar observaciones"
+              aria-label="Filtrar observaciones"
+              aria-expanded={filtersOpen}
             >
               <SlidersHorizontal className="w-4 h-4" />
             </button>}
-            <button onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 sm:h-9 sm:w-9" title="Cerrar (Esc)">
+            <button type="button" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 sm:h-9 sm:w-9" title="Cerrar (Esc)" aria-label="Cerrar observaciones">
               <X className="w-4.5 h-4.5" />
             </button>
           </div>
         </div>
 
-        {mutationMode === 'append-only' && (
+        {mutationMode !== 'read-only' && (
           <div className="shrink-0 border-b border-slate-100 bg-white px-4 py-2">
-            <button type="button" onClick={() => { setToolbarOpen(value => !value); setActionError('') }} className={`inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${toolbarOpen ? 'border border-slate-200 bg-slate-50 text-slate-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`} aria-expanded={toolbarOpen}>
-              {toolbarOpen ? <><ChevronDown className="h-4 w-4 rotate-180" /> Ocultar formulario</> : <><Plus className="h-4 w-4" /> Nueva observación</>}
+            <button type="button" onClick={() => { setComposerOpen(value => !value); setActionError('') }} className={`inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${composerOpen ? 'border border-slate-200 bg-slate-50 text-slate-600' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`} aria-expanded={composerOpen}>
+              {composerOpen ? <><ChevronDown className="h-4 w-4 rotate-180" /> Ocultar formulario</> : <><Plus className="h-4 w-4" /> Nueva observación</>}
             </button>
           </div>
         )}
 
-        {/* Collapsible Toolbar: Filters + Add Form */}
-        {toolbarOpen && (
+        {/* Filters are independent from the observation composer. */}
+        {filtersOpen && mutationMode !== 'append-only' && (
           <div className="border-b border-slate-100 bg-slate-50/50 shrink-0 animate-in slide-in-from-top-2 duration-150">
-            {/* Filters row */}
             <div className="px-5 py-2.5 flex items-end gap-3 flex-wrap">
-              <div>
+              {!attendanceContext && <div>
                 <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5 block font-semibold">Tipo</label>
                 <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="px-2.5 py-1 border border-slate-200 rounded-lg text-xs text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition">
                   <option value="">Todos</option>
@@ -287,7 +346,7 @@ export default function ObservationHistoryModal({
                   <option value="email">Email</option>
                   <option value="meeting">Reunión</option>
                 </select>
-              </div>
+              </div>}
               <div>
                 <label className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5 block font-semibold">Desde</label>
                 <input type="date" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} className="px-2.5 py-1 border border-slate-200 rounded-lg text-xs text-slate-700 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-300 bg-white transition" />
@@ -302,10 +361,15 @@ export default function ObservationHistoryModal({
                 </button>
               )}
             </div>
-            {/* Add form */}
-            {mutationMode !== 'read-only' && <div className="px-5 py-2.5 border-t border-slate-100/80">
+          </div>
+        )}
+
+        {composerOpen && mutationMode !== 'read-only' && (
+          <div className="shrink-0 animate-in border-b border-slate-100 bg-slate-50/50 slide-in-from-top-2 duration-150">
+            <div className="px-5 py-2.5">
               <div className="flex items-center gap-1.5 mb-1.5">
-                {allowedNewTypes.includes('note') && <button
+                {!attendanceContext && allowedNewTypes.includes('note') && <button
+                  type="button"
                   onClick={() => setNewType('note')}
                   className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md transition font-medium ${
                     newType === 'note' ? 'bg-yellow-100 text-yellow-700 ring-1 ring-yellow-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
@@ -313,7 +377,8 @@ export default function ObservationHistoryModal({
                 >
                   <FileText className="w-3 h-3" /> Nota
                 </button>}
-                {allowedNewTypes.includes('call') && <button
+                {!attendanceContext && allowedNewTypes.includes('call') && <button
+                  type="button"
                   onClick={() => setNewType('call')}
                   className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md transition font-medium ${
                     newType === 'call' ? 'bg-blue-100 text-blue-700 ring-1 ring-blue-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
@@ -322,8 +387,9 @@ export default function ObservationHistoryModal({
                   <Phone className="w-3 h-3" /> Llamada
                 </button>}
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-col gap-2 min-[390px]:flex-row">
                 <textarea
+                  ref={composerTextareaRef}
                   value={newText}
                   onChange={(e) => setNewText(e.target.value)}
                   onKeyDown={(e) => {
@@ -332,26 +398,27 @@ export default function ObservationHistoryModal({
                       handleAdd()
                     }
                   }}
-                  placeholder={newType === 'call' ? 'Resultado de llamada... (Ctrl+Enter)' : 'Escribir observación... (Ctrl+Enter)'}
+                  placeholder={attendanceContext ? 'Escribir observación de asistencia... (Ctrl+Enter)' : newType === 'call' ? 'Resultado de llamada... (Ctrl+Enter)' : 'Escribir observación... (Ctrl+Enter)'}
                   rows={2}
-                  className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
+                  className="min-w-0 w-full flex-1 px-3 py-1.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
                 />
                 <button
+                  type="button"
                   onClick={handleAdd}
                   disabled={!newText.trim() || saving}
-                  className="self-end px-3 py-1.5 bg-emerald-600 text-white text-xs rounded-lg hover:bg-emerald-700 disabled:opacity-50 transition flex items-center gap-1.5 shrink-0"
+                  className="flex min-h-11 w-full shrink-0 items-center justify-center gap-1.5 self-stretch rounded-lg bg-emerald-600 px-3 py-1.5 text-xs text-white transition hover:bg-emerald-700 disabled:opacity-50 min-[390px]:w-auto min-[390px]:self-end"
                 >
                   {saving ? <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" /> : <Plus className="w-3 h-3" />}
                   Agregar
                 </button>
               </div>
               {actionError && <div role="alert" className="mt-2 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{actionError}</span></div>}
-            </div>}
+            </div>
           </div>
         )}
 
-        {/* Active filters indicator (when toolbar is closed) */}
-        {!toolbarOpen && hasFilters && (
+        {/* Active filters indicator (when filters are closed) */}
+        {!filtersOpen && hasFilters && (
           <div className="px-5 py-1.5 border-b border-slate-100 bg-emerald-50/50 shrink-0 flex items-center gap-2">
             <Filter className="w-3 h-3 text-emerald-600" />
             <span className="text-[11px] text-emerald-700 font-medium">
@@ -379,8 +446,8 @@ export default function ObservationHistoryModal({
             <div className="text-center py-16">
               <FileText className="w-10 h-10 text-slate-200 mx-auto mb-3" />
               <p className="text-sm text-slate-400">No hay registros{hasFilters ? ' con los filtros seleccionados' : ''}</p>
-              {!toolbarOpen && (
-                <button onClick={() => setToolbarOpen(true)} className="mt-3 text-xs text-emerald-600 hover:text-emerald-700 font-medium">
+              {!composerOpen && mutationMode !== 'read-only' && (
+                <button type="button" onClick={() => setComposerOpen(true)} className="mt-3 min-h-11 rounded-xl px-3 text-xs font-medium text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700">
                   + Agregar observación
                 </button>
               )}
@@ -406,7 +473,7 @@ export default function ObservationHistoryModal({
                       <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
                       {obs.program_id && obs.source_label && <p className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium ${obs.type === 'attendance' ? 'text-emerald-700' : 'text-slate-500'}`}><CalendarCheck2 className="h-3 w-3" />{obs.source_label}</p>}
                     </div>
-                    {mutationMode === 'manage' && obs.type !== 'attendance' && <button onClick={() => handleDelete(obs.id)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-300 transition-all hover:bg-red-50 hover:text-red-500 sm:h-7 sm:w-7 sm:opacity-0 sm:group-hover:opacity-100" title="Eliminar"><Trash2 className="w-3 h-3" /></button>}
+                    {mutationMode === 'manage' && (obs.type !== 'attendance' || attendanceContext) && <button onClick={() => handleDelete(obs.id)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-300 transition-all hover:bg-red-50 hover:text-red-500 sm:h-7 sm:w-7 sm:opacity-0 sm:group-hover:opacity-100" title="Eliminar"><Trash2 className="w-3 h-3" /></button>}
                   </div>
                 </div>
               ))}

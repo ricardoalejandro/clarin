@@ -430,7 +430,7 @@ func New(repos *repository.Repositories, services *service.Services, jwtSecret s
 	), s.toolGetProgramDetail)
 
 	mcpSrv.AddTool(readOnlyTool("get_program_attendance",
-		mcp.WithDescription("Asistencia detallada de una sesión de programa: lista de participantes con su estado (present, absent, late, excused) y notas."),
+		mcp.WithDescription("Asistencia detallada de una sesión de programa: lista de participantes con su estado (present, absent o late), observación más reciente y cantidad de observaciones."),
 		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
 		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("UUID de la sesión")),
@@ -1381,7 +1381,7 @@ func (s *MCPServer) toolSearchLeads(ctx context.Context, req mcp.CallToolRequest
 
 	// Build dynamic query
 	baseWhere := ` FROM leads l
-		LEFT JOIN contacts c ON c.id = l.contact_id
+		LEFT JOIN contacts c ON c.id = l.contact_id AND c.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		LEFT JOIN contact_tags ct ON ct.contact_id = l.contact_id
 		LEFT JOIN tags t ON t.id = ct.tag_id
@@ -1391,7 +1391,11 @@ func (s *MCPServer) toolSearchLeads(ctx context.Context, req mcp.CallToolRequest
 	argN := 2
 
 	if query != "" {
-		baseWhere += fmt.Sprintf(` AND (COALESCE(c.name, l.name) ILIKE $%d OR COALESCE(c.last_name, l.last_name) ILIKE $%d OR COALESCE(c.phone, l.phone) ILIKE $%d OR COALESCE(c.email, l.email) ILIKE $%d)`, argN, argN, argN, argN)
+		baseWhere += fmt.Sprintf(` AND (
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.last_name,'') ELSE COALESCE(c.last_name,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(c.phone,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(c.email,'') END ILIKE $%d)`, argN, argN, argN, argN)
 		args = append(args, "%"+query+"%")
 		argN++
 	}
@@ -1428,11 +1432,16 @@ func (s *MCPServer) toolSearchLeads(ctx context.Context, req mcp.CallToolRequest
 	countSQL := `SELECT COUNT(DISTINCT l.id)` + baseWhere
 	_ = s.repos.DB().QueryRow(ctx, countSQL, args...).Scan(&total)
 
-	sql := `SELECT l.id, COALESCE(c.name, l.name), COALESCE(c.last_name, l.last_name), COALESCE(c.phone, l.phone), COALESCE(c.email, l.email), l.source, COALESCE(c.notes, l.notes),
+	sql := `SELECT l.id,
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE c.phone END,
+		       CASE WHEN l.contact_id IS NULL THEN l.email ELSE c.email END,
+		       l.source, CASE WHEN l.contact_id IS NULL THEN l.notes ELSE c.notes END,
 		       COALESCE(ps.name, '') as stage_name,
 		       COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') as tags,
 		       l.created_at` + baseWhere
-	sql += ` GROUP BY l.id, c.name, l.name, c.last_name, l.last_name, c.phone, l.phone, c.email, l.email, l.source, c.notes, l.notes, ps.name, ps.position, l.created_at
+	sql += ` GROUP BY l.id,l.contact_id,c.custom_name,c.name,c.push_name,c.phone,c.jid,l.name,c.last_name,l.last_name,l.phone,c.email,l.email,l.source,c.notes,l.notes,ps.name,ps.position,l.created_at
 	         ORDER BY l.created_at DESC LIMIT ` + fmt.Sprintf("%d", limit) + ` OFFSET ` + fmt.Sprintf("%d", offset)
 
 	rows, err := s.repos.DB().Query(ctx, sql, args...)
@@ -1822,13 +1831,13 @@ func (s *MCPServer) toolGetLeadAnalytics(ctx context.Context, req mcp.CallToolRe
 	// Leads with vs without active chat
 	var withChat, withPhone int
 	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l`+baseWhere+` AND l.jid != '' AND l.jid IS NOT NULL`, args...).Scan(&withChat)
-	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id`+baseWhere+` AND COALESCE(c.phone, l.phone) IS NOT NULL AND COALESCE(c.phone, l.phone) != ''`, args...).Scan(&withPhone)
+	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id`+baseWhere+` AND CASE WHEN l.contact_id IS NULL THEN NULLIF(l.phone,'') ELSE NULLIF(c.phone,'') END IS NOT NULL`, args...).Scan(&withPhone)
 	result["with_whatsapp"] = withChat
 	result["with_phone"] = withPhone
 
 	// Leads with notes
 	var withNotes int
-	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id = l.contact_id`+baseWhere+` AND COALESCE(c.notes, l.notes) IS NOT NULL AND COALESCE(c.notes, l.notes) != ''`, args...).Scan(&withNotes)
+	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*) FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id`+baseWhere+` AND CASE WHEN l.contact_id IS NULL THEN NULLIF(l.notes,'') ELSE NULLIF(c.notes,'') END IS NOT NULL`, args...).Scan(&withNotes)
 	result["with_notes"] = withNotes
 
 	return jsonResult(result), nil
@@ -1895,8 +1904,8 @@ func (s *MCPServer) toolAnalyzeLeads(ctx context.Context, req mcp.CallToolReques
 		WITH lead_scores AS (
 			SELECT
 				l.id,
-				COALESCE(c.name, l.name) AS name,
-				COALESCE(c.last_name, l.last_name) AS last_name,
+				CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(c.custom_name,c.name,c.push_name,c.phone,c.jid,'') END AS name,
+				CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE c.last_name END AS last_name,
 				COALESCE(ps.name, 'Sin etapa') AS stage_name,
 				COALESCE(ps.position, 0) AS stage_position,
 				(CASE
@@ -1916,7 +1925,7 @@ func (s *MCPServer) toolAnalyzeLeads(ctx context.Context, req mcp.CallToolReques
 					AND l.jid IS NOT NULL AND l.jid != ''
 					AND m.timestamp > NOW() - INTERVAL '30 days'
 				), 0) AS chat_score,
-				(CASE WHEN COALESCE(c.notes, l.notes) IS NOT NULL AND COALESCE(c.notes, l.notes) != '' THEN 3 ELSE 0 END) AS notes_score,
+				(CASE WHEN CASE WHEN l.contact_id IS NULL THEN NULLIF(l.notes,'') ELSE NULLIF(c.notes,'') END IS NOT NULL THEN 3 ELSE 0 END) AS notes_score,
 				LEAST(COALESCE((
 					SELECT COUNT(*)::int FROM contact_tags ct3 WHERE ct3.contact_id = l.contact_id
 				), 0), 5) AS tag_score,
@@ -1929,12 +1938,12 @@ func (s *MCPServer) toolAnalyzeLeads(ctx context.Context, req mcp.CallToolReques
 				COALESCE(array_agg(DISTINCT t.name) FILTER (WHERE t.name IS NOT NULL), '{}') AS tags,
 				l.created_at
 			FROM leads l
-			LEFT JOIN contacts c ON c.id = l.contact_id
+			LEFT JOIN contacts c ON c.id = l.contact_id AND c.account_id=l.account_id
 			LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 			LEFT JOIN contact_tags ct ON ct.contact_id = l.contact_id
 			LEFT JOIN tags t ON t.id = ct.tag_id
 		` + baseWhere + `
-			GROUP BY l.id, c.name, l.name, c.last_name, l.last_name, c.notes, l.notes, ps.name, ps.position, l.jid, l.created_at, l.account_id
+			GROUP BY l.id,l.contact_id,c.custom_name,c.name,c.push_name,c.phone,c.jid,l.name,c.last_name,l.last_name,c.notes,l.notes,ps.name,ps.position,l.jid,l.created_at,l.account_id
 		)
 		SELECT
 			id, name, last_name, stage_name, stage_position,
@@ -2167,6 +2176,8 @@ func (s *MCPServer) toolListEventParticipants(ctx context.Context, req mcp.CallT
 	// Build dynamic query
 	baseSQL := ` FROM event_participants ep
 		JOIN events e ON e.id = ep.event_id
+		LEFT JOIN leads participant_lead ON participant_lead.id=ep.lead_id AND participant_lead.account_id=e.account_id
+		LEFT JOIN contacts contact ON contact.id=COALESCE(ep.contact_id,participant_lead.contact_id) AND contact.account_id=e.account_id
 		LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
 		WHERE e.account_id = $1 AND ep.event_id = $2 AND ep.membership_state='active'`
 	args := []interface{}{accountID, eventID}
@@ -2183,7 +2194,10 @@ func (s *MCPServer) toolListEventParticipants(ctx context.Context, req mcp.CallT
 		argN++
 	}
 	if search != "" {
-		baseSQL += fmt.Sprintf(` AND (ep.name ILIKE $%d OR COALESCE(ep.last_name, '') ILIKE $%d OR COALESCE(ep.phone, '') ILIKE $%d)`, argN, argN, argN)
+		baseSQL += fmt.Sprintf(` AND (
+			CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN COALESCE(ep.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END ILIKE $%d OR
+			CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN COALESCE(ep.last_name,'') ELSE COALESCE(contact.last_name,'') END ILIKE $%d OR
+			CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN COALESCE(ep.phone,'') ELSE COALESCE(contact.phone,'') END ILIKE $%d)`, argN, argN, argN)
 		args = append(args, "%"+search+"%")
 		argN++
 	}
@@ -2193,7 +2207,11 @@ func (s *MCPServer) toolListEventParticipants(ctx context.Context, req mcp.CallT
 	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*)`+baseSQL, args...).Scan(&total)
 
 	// Fetch data
-	dataSQL := `SELECT ep.id, ep.name, COALESCE(ep.last_name, ''), COALESCE(ep.phone, ''), COALESCE(ep.email, ''),
+	dataSQL := `SELECT ep.id,
+		CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN COALESCE(ep.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END,
+		COALESCE(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.last_name ELSE contact.last_name END,''),
+		COALESCE(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.phone ELSE contact.phone END,''),
+		COALESCE(CASE WHEN COALESCE(ep.contact_id,participant_lead.contact_id) IS NULL THEN ep.email ELSE contact.email END,''),
 		ep.status, COALESCE(eps.name, ''), COALESCE(ep.notes, ''), ep.created_at` + baseSQL + ` ORDER BY ep.created_at DESC LIMIT ` + fmt.Sprintf("%d", limit)
 
 	rows, err := s.repos.DB().Query(ctx, dataSQL, args...)
@@ -2368,10 +2386,15 @@ func (s *MCPServer) toolGetLeadsWithChats(ctx context.Context, req mcp.CallToolR
 	}
 
 	// Build query to get lead IDs matching filters
-	sql := `SELECT DISTINCT l.id, l.name, l.last_name, l.phone, l.jid,
+	sql := `SELECT DISTINCT l.id,
+		       CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END,
+		       CASE WHEN l.contact_id IS NULL THEN l.last_name ELSE contact.last_name END,
+		       CASE WHEN l.contact_id IS NULL THEN l.phone ELSE contact.phone END,
+		       l.jid,
 		       COALESCE(ps.name, '') as stage_name,
 		       COALESCE(array_agg(DISTINCT t2.name) FILTER (WHERE t2.name IS NOT NULL), '{}') as tags
 		FROM leads l
+		LEFT JOIN contacts contact ON contact.id=l.contact_id AND contact.account_id=l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id
 		LEFT JOIN contact_tags ct2 ON ct2.contact_id = l.contact_id
 		LEFT JOIN tags t2 ON t2.id = ct2.tag_id`
@@ -2388,7 +2411,11 @@ func (s *MCPServer) toolGetLeadsWithChats(ctx context.Context, req mcp.CallToolR
 	}
 
 	if query != "" {
-		sql += fmt.Sprintf(` AND (l.name ILIKE $%d OR l.last_name ILIKE $%d OR l.phone ILIKE $%d OR l.email ILIKE $%d)`, argN, argN, argN, argN)
+		sql += fmt.Sprintf(` AND (
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.last_name,'') ELSE COALESCE(contact.last_name,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.phone,'') ELSE COALESCE(contact.phone,'') END ILIKE $%d OR
+			CASE WHEN l.contact_id IS NULL THEN COALESCE(l.email,'') ELSE COALESCE(contact.email,'') END ILIKE $%d)`, argN, argN, argN, argN)
 		args = append(args, "%"+query+"%")
 		argN++
 	}
@@ -2396,7 +2423,7 @@ func (s *MCPServer) toolGetLeadsWithChats(ctx context.Context, req mcp.CallToolR
 	if eventIDStr != "" {
 		eventID, err := uuid.Parse(eventIDStr)
 		if err == nil {
-			sql += fmt.Sprintf(` AND l.id IN (SELECT ep.lead_id FROM event_participants ep WHERE ep.event_id = $%d AND ep.lead_id IS NOT NULL`, argN)
+			sql += fmt.Sprintf(` AND l.id IN (SELECT ep.lead_id FROM event_participants ep JOIN events event_scope ON event_scope.id=ep.event_id AND event_scope.account_id=$1 WHERE ep.event_id = $%d AND ep.lead_id IS NOT NULL`, argN)
 			args = append(args, eventID)
 			argN++
 			if stage != "" {
@@ -2412,7 +2439,7 @@ func (s *MCPServer) toolGetLeadsWithChats(ctx context.Context, req mcp.CallToolR
 		argN++
 	}
 
-	sql += ` GROUP BY l.id, l.name, l.last_name, l.phone, l.jid, ps.name`
+	sql += ` GROUP BY l.id,l.contact_id,contact.custom_name,contact.name,contact.push_name,contact.phone,contact.jid,l.name,contact.last_name,l.last_name,l.phone,ps.name`
 	sql += fmt.Sprintf(` LIMIT %d`, maxLeads)
 
 	rows, err := s.repos.DB().Query(ctx, sql, args...)
