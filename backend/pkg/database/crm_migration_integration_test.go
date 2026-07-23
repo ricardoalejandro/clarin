@@ -465,6 +465,34 @@ func TestCRMMigrationDirtyAndIdempotent(t *testing.T) {
 	if _, err := chatRepos.Chat.GetOrCreateForContact(ctx, accountID, otherDeviceID, contactID, "51999900003@s.whatsapp.net", "51999900003", "Persona"); err != pgx.ErrNoRows {
 		t.Fatalf("cross-account device was accepted for new chat: %v", err)
 	}
+	// A WhatsApp outgoing event may carry our own LID as Sender while its phone
+	// was resolved from the peer chat. A historical alias must never use that
+	// mixed identity to overwrite the canonical Contact phone.
+	aliasOwnerID, peerOwnerID := uuid.New(), uuid.New()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO contacts (id,account_id,device_id,jid,phone,name) VALUES
+		($1,$3,$4,'51999900110@s.whatsapp.net','51999900110','Canonical alias owner'),
+		($2,$3,$4,'51999900111@s.whatsapp.net','51999900111','Peer owner')
+	`, aliasOwnerID, peerOwnerID, accountID, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO contact_aliases (account_id,contact_id,alias_type,alias_value,normalized_value)
+		VALUES ($1,$2,'jid','77911008784537@lid','77911008784537@lid')
+	`, accountID, aliasOwnerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := chatRepos.Contact.GetOrCreate(ctx, accountID, &deviceID, "77911008784537@lid", "51999900111", "Own sender", "Own sender", false); err != repository.ErrContactIdentityConflict {
+		t.Fatalf("mixed own-LID/peer-phone identity was accepted: %v", err)
+	}
+	assertInt(t, db, `SELECT COUNT(*) FROM contacts WHERE account_id=$1 AND id=$2 AND phone='51999900110'`, 1, accountID, aliasOwnerID)
+	if _, err := chatRepos.Contact.GetOrCreate(ctx, accountID, &deviceID, "77911008784537@lid", "51999900112", "Own sender", "Own sender", false); err != nil {
+		t.Fatalf("non-conflicting alias lookup failed: %v", err)
+	}
+	assertInt(t, db, `SELECT COUNT(*) FROM contacts WHERE account_id=$1 AND id=$2 AND phone='51999900110'`, 1, accountID, aliasOwnerID)
+	if contact, err := chatRepos.Contact.GetByIDForAccount(ctx, otherAccountID, aliasOwnerID); err != nil || contact != nil {
+		t.Fatalf("account-scoped Contact lookup crossed tenant boundary: contact=%v err=%v", contact, err)
+	}
 	// Exercise the defensive no-contact flow against a controlled legacy shape.
 	// Current production migrations require Contact as parent; the column is
 	// restored to NOT NULL before continuing the idempotency test.

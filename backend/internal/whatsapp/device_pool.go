@@ -1360,14 +1360,17 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
-	// Use chatJID for contact in 1-to-1 chats so the LEFT JOIN in queries matches
-	contactJID := senderJID
-	if !isFromMe {
-		contactJID = chatJID
-	}
-	contact, contactErr := p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, contactJID, phone, senderName, evt.Info.PushName, false)
-	if contactErr != nil {
-		log.Printf("[Contact] Failed to get/create contact for %s: %v", contactJID, contactErr)
+	// Chat.GetOrCreate already creates or links the peer Contact. Reuse that
+	// account-scoped parent instead of upserting evt.Info.Sender: for outgoing
+	// messages Sender is our own PN/LID while phone belongs to the recipient.
+	contactJID := chatJID
+	var contact *domain.Contact
+	var contactErr error
+	if chat.ContactID != nil {
+		contact, contactErr = p.repos.Contact.GetByIDForAccount(ctx, instance.AccountID, *chat.ContactID)
+		if contactErr != nil {
+			log.Printf("[Contact] Failed to load chat contact account=%s contact=%s: %v", instance.AccountID, *chat.ContactID, contactErr)
+		}
 	}
 	// Sync contact name/fields to linked lead (if lead exists)
 	if contact != nil {
@@ -2462,12 +2465,10 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 	chatJID := evt.Info.Chat.ToNonAD().String()
 	senderJID := evt.Info.Sender.ToNonAD().String()
 	isFromMe := evt.Info.IsFromMe
-	phone := evt.Info.Sender.ToNonAD().User
 
 	if evt.Info.Chat.Server == types.HiddenUserServer {
 		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 			chatJID = pnJID.User + "@s.whatsapp.net"
-			phone = pnJID.User
 		}
 	}
 
@@ -2533,12 +2534,6 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 	msg.PollOptions, _ = p.repos.Poll.GetOptions(ctx, msg.ID)
 
 	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, "📊 "+question, evt.Info.Timestamp, !isFromMe)
-
-	contactJID := senderJID
-	if !isFromMe {
-		contactJID = chatJID
-	}
-	p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, contactJID, phone, evt.Info.PushName, evt.Info.PushName, false)
 
 	p.hub.BroadcastNewMessage(instance.AccountID, map[string]interface{}{
 		"chat_id":      chat.ID.String(),
