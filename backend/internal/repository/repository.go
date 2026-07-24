@@ -829,17 +829,26 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 		if aliasContactID, err := findContactAliasID(ctx, r.db, accountID, jid, phone); err != nil {
 			return nil, err
 		} else if aliasContactID != nil {
-			_, _ = r.db.Exec(ctx, `
+			conflict, err := contactIdentityConflictsWithOwner(ctx, r.db, accountID, *aliasContactID, jid, phone)
+			if err != nil {
+				return nil, err
+			}
+			if conflict {
+				return nil, ErrContactIdentityConflict
+			}
+			if _, err := r.db.Exec(ctx, `
 				UPDATE contacts
 				SET device_id = COALESCE(device_id, $2),
 				    name = COALESCE(NULLIF($3, ''), name),
 				    push_name = COALESCE(NULLIF($3, ''), push_name),
-				    phone = COALESCE(NULLIF($4, ''), phone),
+				    phone = COALESCE(NULLIF(phone, ''), NULLIF($4, '')),
 				    updated_at = NOW()
 				WHERE account_id = $1 AND id = $5
-			`, accountID, deviceID, name, phone, *aliasContactID)
+			`, accountID, deviceID, name, phone, *aliasContactID); err != nil {
+				return nil, err
+			}
 			chat := &domain.Chat{}
-			err := r.db.QueryRow(ctx, `
+			err = r.db.QueryRow(ctx, `
 				INSERT INTO chats (account_id, device_id, contact_id, jid, name, channel_key)
 				VALUES ($1, $2, $3, $4, $5, $6)
 				ON CONFLICT (account_id, channel_key, jid) DO UPDATE SET
@@ -1290,6 +1299,48 @@ func findContactAliasID(ctx context.Context, db *pgxpool.Pool, accountID uuid.UU
 		return nil, err
 	}
 	return &contactID, nil
+}
+
+func contactIdentityConflictsWithOwner(ctx context.Context, db *pgxpool.Pool, accountID, ownerID uuid.UUID, jid, phone string) (bool, error) {
+	normalizedJID := strings.ToLower(strings.TrimSpace(jid))
+	normalizedPhone := normalizeAliasValue("phone", firstNonEmptyPlain(phone, phoneFromJID(jid)))
+	if normalizedJID == "" && normalizedPhone == "" {
+		return false, nil
+	}
+	var conflict bool
+	err := db.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM contacts c
+			WHERE c.account_id=$1 AND c.id<>$2
+			  AND (
+				($3::text<>'' AND LOWER(BTRIM(c.jid))=$3::text)
+				OR ($4::text<>'' AND CASE
+					WHEN LENGTH(REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g'))=9
+					 AND REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g') LIKE '9%'
+					THEN '51'||REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g')
+					ELSE REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g')
+				END=$4::text)
+				OR ($4::text<>'' AND EXISTS (
+					SELECT 1 FROM contact_phones cp
+					WHERE cp.contact_id=c.id
+					  AND CASE
+						WHEN LENGTH(REGEXP_REPLACE(COALESCE(cp.phone,''),'[^0-9]','','g'))=9
+						 AND REGEXP_REPLACE(COALESCE(cp.phone,''),'[^0-9]','','g') LIKE '9%'
+						THEN '51'||REGEXP_REPLACE(COALESCE(cp.phone,''),'[^0-9]','','g')
+						ELSE REGEXP_REPLACE(COALESCE(cp.phone,''),'[^0-9]','','g')
+					  END=$4::text
+				))
+				OR EXISTS (
+					SELECT 1 FROM contact_aliases ca
+					WHERE ca.account_id=$1 AND ca.contact_id=c.id
+					  AND ((ca.alias_type='jid' AND ca.normalized_value=$3::text)
+					    OR ($4::text<>'' AND ca.alias_type='phone' AND ca.normalized_value=$4::text))
+				)
+			  )
+		)
+	`, accountID, ownerID, normalizedJID, normalizedPhone).Scan(&conflict)
+	return conflict, err
 }
 
 func firstNonEmptyPlain(values ...string) string {
@@ -1935,19 +1986,28 @@ func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID
 		if aliasContactID, err := findContactAliasID(ctx, r.db, accountID, jid, phone); err != nil {
 			return nil, err
 		} else if aliasContactID != nil {
-			_, _ = r.db.Exec(ctx, `
+			conflict, err := contactIdentityConflictsWithOwner(ctx, r.db, accountID, *aliasContactID, jid, phone)
+			if err != nil {
+				return nil, err
+			}
+			if conflict {
+				return nil, ErrContactIdentityConflict
+			}
+			if _, err := r.db.Exec(ctx, `
 				UPDATE contacts
 				SET device_id = COALESCE(device_id, $2),
 				    name = COALESCE(NULLIF($3, ''), name),
 				    push_name = COALESCE(NULLIF($4, ''), push_name),
-				    phone = COALESCE(NULLIF($5, ''), phone),
+				    phone = COALESCE(NULLIF(phone, ''), NULLIF($5, '')),
 				    updated_at = NOW()
 				WHERE account_id = $1 AND id = $6
-			`, accountID, deviceID, name, pushName, phone, *aliasContactID)
+			`, accountID, deviceID, name, pushName, phone, *aliasContactID); err != nil {
+				return nil, err
+			}
 			if _, err := applyDurableSuppressionToContact(ctx, r.db, accountID, *aliasContactID); err != nil {
 				return nil, err
 			}
-			return r.GetByID(ctx, *aliasContactID)
+			return r.GetByIDForAccount(ctx, accountID, *aliasContactID)
 		}
 	}
 	contact := &domain.Contact{}
@@ -2399,6 +2459,28 @@ func (r *ContactRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 		       do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
 		FROM contacts WHERE id = $1
 	`, id).Scan(
+		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
+		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
+		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
+		&contact.IsGroup, &contact.CreatedAt, &contact.UpdatedAt,
+		&contact.GoogleSync, &contact.GoogleResourceName, &contact.GoogleSyncedAt, &contact.GoogleSyncError,
+		&contact.DoNotContact, &contact.DoNotContactAt, &contact.DoNotContactBy, &contact.DoNotContactReason,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return contact, err
+}
+
+func (r *ContactRepository) GetByIDForAccount(ctx context.Context, accountID, id uuid.UUID) (*domain.Contact, error) {
+	contact := &domain.Contact{}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, account_id, device_id, jid, phone, name, last_name, short_name, custom_name, push_name, avatar_url,
+		       email, company, age, dni, birth_date, address, distrito, ocupacion, tags, notes, source, is_group, created_at, updated_at,
+		       google_sync, google_resource_name, google_synced_at, google_sync_error,
+		       do_not_contact, do_not_contact_at, do_not_contact_by, do_not_contact_reason
+		FROM contacts WHERE account_id = $1 AND id = $2
+	`, accountID, id).Scan(
 		&contact.ID, &contact.AccountID, &contact.DeviceID, &contact.JID, &contact.Phone,
 		&contact.Name, &contact.LastName, &contact.ShortName, &contact.CustomName, &contact.PushName, &contact.AvatarURL,
 		&contact.Email, &contact.Company, &contact.Age, &contact.DNI, &contact.BirthDate, &contact.Address, &contact.Distrito, &contact.Ocupacion, &contact.Tags, &contact.Notes, &contact.Source,
