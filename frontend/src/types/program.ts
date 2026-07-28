@@ -86,6 +86,21 @@ export interface ProgramSession {
   created_at: string;
   updated_at: string;
   attendance_stats?: Record<string, number>;
+  observation_count?: number;
+  pinned_observation_count?: number;
+  observation_preview?: ProgramSessionObservation | null;
+}
+
+export interface ProgramSessionObservation {
+  id: string; session_id: string; notes: string; created_by?: string | null; created_by_name?: string | null;
+  created_at: string; updated_at: string; updated_by?: string | null; updated_by_name?: string | null;
+  is_pinned: boolean; pinned_at?: string | null; pinned_by?: string | null; can_edit: boolean; can_pin: boolean; can_delete: boolean;
+}
+
+export interface ProgramSessionRosterEntry {
+  participant_id: string; contact_id: string; contact_name: string; contact_phone?: string | null; avatar_url?: string | null;
+  avatar_revision?: number; participation_status: ProgramParticipant['status']; enrolled_at: string; dropped_at?: string | null;
+  completed_at?: string | null; attendance_status: ProgramAttendance['status']; observation_count: number; observation_preview: ProgramAttendanceObservation[];
 }
 
 export interface ProgramSessionTopic {

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { CalendarDays, Check, Edit2, Loader2, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { ProgramParticipant } from '@/types/program'
-import { localDateInputValue } from '@/utils/calendarDate'
+import { limaDateInputValue } from '@/utils/calendarDate'
 
 interface ProgramParticipantEnrollmentDateProps {
   programId: string
@@ -27,7 +27,7 @@ export default function ProgramParticipantEnrollmentDate({ programId, participan
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const maximumDate = useMemo(() => {
-    const candidates = [localDateInputValue(), dateKey(participant.dropped_at), dateKey(participant.completed_at)].filter(Boolean).sort()
+    const candidates = [limaDateInputValue(), dateKey(participant.dropped_at), dateKey(participant.completed_at)].filter(Boolean).sort()
     return candidates[0]
   }, [participant.completed_at, participant.dropped_at])
 

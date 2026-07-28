@@ -1,6 +1,39 @@
 export type TaskType = 'call' | 'whatsapp' | 'meeting' | 'reminder'
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent'
 export type TaskStatus = 'pending' | 'completed' | 'overdue' | 'cancelled'
+export type TaskStatusCategory = 'not_started' | 'active' | 'done' | 'cancelled'
+export type TaskViewMode = 'list' | 'board' | 'calendar' | 'gantt' | 'summary'
+
+export interface TaskWorkflowStatus {
+  id: string
+  account_id: string
+  workflow_id: string
+  name: string
+  color: string
+  category: TaskStatusCategory
+  sort_order: number
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskWorkflow {
+  id: string
+  account_id: string
+  name: string
+  is_default: boolean
+  created_by?: string
+  created_at: string
+  updated_at: string
+  statuses: TaskWorkflowStatus[]
+}
+
+export interface TaskCollaborator {
+  user_id: string
+  display_name: string
+  username: string
+  created_at: string
+}
 
 export interface Task {
   id: string
@@ -10,10 +43,14 @@ export interface Task {
   title: string
   description: string
   type: TaskType
+  start_at?: string
   due_at?: string
   due_end_at?: string
+  is_all_day?: boolean
   priority: TaskPriority
   status: TaskStatus
+  status_id?: string
+  status_detail?: TaskWorkflowStatus
   completed_at?: string
   completed_by?: string
   lead_id?: string
@@ -21,8 +58,14 @@ export interface Task {
   program_id?: string
   contact_id?: string
   list_id?: string
+  parent_task_id?: string
   starred?: boolean
   sort_order?: number
+  progress?: number
+  is_milestone?: boolean
+  deleted_at?: string
+  deleted_by?: string
+  version?: number
   recurrence_rule: string
   recurrence_parent_id?: string
   reminder_minutes?: number
@@ -37,6 +80,9 @@ export interface Task {
   program_name?: string
   contact_name?: string
   list_name?: string
+  folder_id?: string
+  folder_name?: string
+  collaborators?: TaskCollaborator[]
   // Subtask counts
   subtask_count?: number
   subtask_done?: number
@@ -90,11 +136,97 @@ export const REMINDER_OPTIONS = [
 export interface TaskList {
   id: string
   account_id: string
+  folder_id?: string
+  workflow_id?: string
+  workflow_inherited?: boolean
   name: string
+  description?: string
   color: string
   sort_order: number
   created_by: string
   created_at: string
   updated_at: string
   task_count: number
+}
+
+export interface TaskFolder {
+  id: string
+  account_id: string
+  workflow_id?: string
+  name: string
+  description?: string
+  color: string
+  sort_order: number
+  created_by: string
+  archived_at?: string
+  created_at: string
+  updated_at: string
+  task_count: number
+  lists: TaskList[]
+}
+
+export interface TaskComment {
+  id: string
+  account_id: string
+  task_id: string
+  author_id: string
+  author_name: string
+  body: string
+  edited_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskActivity {
+  id: string
+  account_id: string
+  task_id: string
+  actor_id?: string
+  actor_name?: string
+  action: string
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export interface TaskAttachment {
+  id: string
+  account_id: string
+  task_id: string
+  media_asset_id: string
+  filename: string
+  content_type: string
+  media_type: string
+  size_bytes: number
+  url: string
+  uploaded_by?: string
+  created_at: string
+}
+
+export interface TaskDependency {
+  id: string
+  account_id: string
+  predecessor_task_id: string
+  successor_task_id: string
+  dependency_type: 'finish_to_start'
+  lag_minutes: number
+  predecessor_title?: string
+  successor_title?: string
+  created_by?: string
+  created_at: string
+}
+
+export interface TaskWorkSummary {
+  total: number
+  done: number
+  active: number
+  overdue: number
+  owners: number
+  progress: number
+}
+
+export interface TaskGanttData {
+  tasks: Task[]
+  dependencies: TaskDependency[]
+  critical_task_ids: string[]
+  slack_minutes: Record<string, number>
 }

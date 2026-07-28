@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,7 +44,7 @@ func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
 
 	// Broadcast
 	if s.hub != nil {
-		s.hub.BroadcastToAccount(task.AccountID, ws.EventTaskUpdate, map[string]interface{}{
+		s.hub.BroadcastToAccountWithPermission(task.AccountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
 			"action": "created",
 			"task":   task,
 		})
@@ -53,33 +54,51 @@ func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
 }
 
 func (s *TaskService) Update(ctx context.Context, task *domain.Task) error {
+	previous, _ := s.repos.Task.GetByID(ctx, task.ID, task.AccountID)
 	if err := s.repos.Task.Update(ctx, task); err != nil {
 		return err
 	}
 
-	// Recreate reminder if reminder_minutes changed (only if task has a due date)
-	_ = s.repos.Task.DeleteRemindersByTask(ctx, task.ID)
-	if task.DueAt != nil && task.ReminderMinutes != nil && *task.ReminderMinutes > 0 {
-		reminderAt := task.DueAt.Add(-time.Duration(*task.ReminderMinutes) * time.Minute)
-		if reminderAt.After(time.Now()) {
-			rem := &domain.TaskReminder{
-				TaskID:     task.ID,
-				AccountID:  task.AccountID,
-				AssignedTo: task.AssignedTo,
-				ReminderAt: reminderAt,
-			}
-			_ = s.repos.Task.CreateReminder(ctx, rem)
-		}
+	if previous == nil || taskReminderScheduleChanged(previous, task) {
+		s.RebuildReminder(ctx, task)
 	}
 
 	if s.hub != nil {
-		s.hub.BroadcastToAccount(task.AccountID, ws.EventTaskUpdate, map[string]interface{}{
+		s.hub.BroadcastToAccountWithPermission(task.AccountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
 			"action": "updated",
 			"task":   task,
 		})
 	}
 
 	return nil
+}
+
+func (s *TaskService) RebuildReminder(ctx context.Context, task *domain.Task) {
+	if task == nil {
+		return
+	}
+	_ = s.repos.Task.DeleteRemindersByTask(ctx, task.ID)
+	if task.DueAt == nil || task.ReminderMinutes == nil || *task.ReminderMinutes <= 0 {
+		return
+	}
+	reminderAt := task.DueAt.Add(-time.Duration(*task.ReminderMinutes) * time.Minute)
+	if !reminderAt.After(time.Now()) {
+		return
+	}
+	_ = s.repos.Task.CreateReminder(ctx, &domain.TaskReminder{TaskID: task.ID, AccountID: task.AccountID, AssignedTo: task.AssignedTo, ReminderAt: reminderAt})
+}
+
+func taskReminderScheduleChanged(before, after *domain.Task) bool {
+	if before == nil || after == nil || before.AssignedTo != after.AssignedTo {
+		return true
+	}
+	if (before.DueAt == nil) != (after.DueAt == nil) || (before.ReminderMinutes == nil) != (after.ReminderMinutes == nil) {
+		return true
+	}
+	if before.DueAt != nil && !before.DueAt.Equal(*after.DueAt) {
+		return true
+	}
+	return before.ReminderMinutes != nil && *before.ReminderMinutes != *after.ReminderMinutes
 }
 
 func (s *TaskService) Delete(ctx context.Context, id, accountID uuid.UUID) error {
@@ -89,7 +108,7 @@ func (s *TaskService) Delete(ctx context.Context, id, accountID uuid.UUID) error
 	}
 
 	if s.hub != nil {
-		s.hub.BroadcastToAccount(accountID, ws.EventTaskUpdate, map[string]interface{}{
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
 			"action":  "deleted",
 			"task_id": id.String(),
 		})
@@ -99,18 +118,102 @@ func (s *TaskService) Delete(ctx context.Context, id, accountID uuid.UUID) error
 }
 
 func (s *TaskService) Complete(ctx context.Context, id, accountID, completedBy uuid.UUID) error {
+	task, loadErr := s.repos.Task.GetByID(ctx, id, accountID)
 	if err := s.repos.Task.MarkCompleted(ctx, id, accountID, completedBy); err != nil {
 		return err
 	}
+	if loadErr == nil {
+		s.EnsureNextOccurrence(ctx, task)
+	}
 
 	if s.hub != nil {
-		s.hub.BroadcastToAccount(accountID, ws.EventTaskUpdate, map[string]interface{}{
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
 			"action":  "completed",
 			"task_id": id.String(),
 		})
 	}
 
 	return nil
+}
+
+// EnsureNextOccurrence creates exactly one following occurrence for supported
+// recurrence rules. Completion remains successful if recurrence generation
+// cannot run; the error is logged and a later completion retry is idempotent.
+func (s *TaskService) EnsureNextOccurrence(ctx context.Context, task *domain.Task) {
+	if task == nil || task.DueAt == nil || strings.TrimSpace(task.RecurrenceRule) == "" {
+		return
+	}
+	nextDue, supported := nextRecurringDue(*task.DueAt, task.RecurrenceRule)
+	if !supported {
+		return
+	}
+	rootID := task.ID
+	if task.RecurrenceParentID != nil {
+		rootID = *task.RecurrenceParentID
+	}
+	exists, err := s.repos.Task.RecurringOccurrenceExists(ctx, task.AccountID, rootID, nextDue)
+	if err != nil || exists {
+		return
+	}
+	status, err := s.repos.TaskWork.ResolveStatus(ctx, task.AccountID, task.ListID, nil, domain.TaskStatusCategoryNotStarted)
+	if err != nil {
+		log.Printf("[TASK] Failed to resolve recurring status for %s: %v", task.ID, err)
+		return
+	}
+	clone := *task
+	clone.ID = uuid.Nil
+	clone.Status = domain.TaskStatusPending
+	clone.StatusID = &status.ID
+	clone.StatusDetail = status
+	clone.Progress = 0
+	clone.CompletedAt = nil
+	clone.CompletedBy = nil
+	clone.DeletedAt = nil
+	clone.DeletedBy = nil
+	clone.Version = 1
+	clone.RecurrenceParentID = &rootID
+	clone.DueAt = &nextDue
+	if task.StartAt != nil {
+		delta := nextDue.Sub(*task.DueAt)
+		nextStart := task.StartAt.Add(delta)
+		clone.StartAt = &nextStart
+	}
+	clone.Collaborators = nil
+	clone.SubtaskCount = 0
+	clone.SubtaskDone = 0
+	if err := s.Create(ctx, &clone); err != nil {
+		log.Printf("[TASK] Failed to create recurring occurrence for %s: %v", task.ID, err)
+		return
+	}
+	if collaborators, err := s.repos.TaskWork.ListCollaborators(ctx, task.AccountID, task.ID); err == nil && len(collaborators) > 0 {
+		ids := make([]uuid.UUID, 0, len(collaborators))
+		for _, collaborator := range collaborators {
+			ids = append(ids, collaborator.UserID)
+		}
+		_ = s.repos.TaskWork.SetCollaborators(ctx, task.AccountID, clone.ID, task.CreatedBy, ids)
+	}
+}
+
+func nextRecurringDue(due time.Time, rule string) (time.Time, bool) {
+	nextDue := due
+	switch strings.ToLower(strings.TrimSpace(rule)) {
+	case "daily":
+		nextDue = nextDue.AddDate(0, 0, 1)
+	case "weekdays":
+		for {
+			nextDue = nextDue.AddDate(0, 0, 1)
+			if nextDue.Weekday() != time.Saturday && nextDue.Weekday() != time.Sunday {
+				break
+			}
+		}
+	case "weekly":
+		nextDue = nextDue.AddDate(0, 0, 7)
+	case "monthly":
+		nextDue = nextDue.AddDate(0, 1, 0)
+	default:
+		return due, false
+	}
+	return nextDue, true
 }
 
 func (s *TaskService) GetByID(ctx context.Context, id, accountID uuid.UUID) (*domain.Task, error) {
@@ -138,7 +241,8 @@ func (s *TaskService) ProcessOverdueTasks(ctx context.Context) {
 	}
 	for _, t := range tasks {
 		if s.hub != nil {
-			s.hub.BroadcastToAccount(t.AccountID, ws.EventTaskOverdue, map[string]interface{}{
+			targets := s.taskNotificationTargets(ctx, t.AccountID, t.ID, t.AssignedTo)
+			s.hub.BroadcastToAccountUsersWithPermission(t.AccountID, targets, domain.PermTasks, ws.EventTaskOverdue, map[string]interface{}{
 				"task_id":     t.ID.String(),
 				"title":       t.Title,
 				"type":        t.Type,
@@ -166,7 +270,8 @@ func (s *TaskService) ProcessReminders(ctx context.Context) {
 		}
 
 		if s.hub != nil {
-			s.hub.BroadcastToAccount(rem.AccountID, ws.EventTaskReminder, map[string]interface{}{
+			targets := s.taskNotificationTargets(ctx, rem.AccountID, rem.TaskID, rem.AssignedTo)
+			s.hub.BroadcastToAccountUsersWithPermission(rem.AccountID, targets, domain.PermTasks, ws.EventTaskReminder, map[string]interface{}{
 				"task_id":     rem.TaskID.String(),
 				"title":       title,
 				"type":        taskType,
@@ -180,4 +285,20 @@ func (s *TaskService) ProcessReminders(ctx context.Context) {
 			log.Printf("[TASK] Error marking reminder %s as delivered: %v", rem.ID, err)
 		}
 	}
+}
+
+func (s *TaskService) taskNotificationTargets(ctx context.Context, accountID, taskID, assignedTo uuid.UUID) []uuid.UUID {
+	targets := []uuid.UUID{assignedTo}
+	seen := map[uuid.UUID]bool{assignedTo: true}
+	collaborators, err := s.repos.TaskWork.ListCollaborators(ctx, accountID, taskID)
+	if err != nil {
+		return targets
+	}
+	for _, collaborator := range collaborators {
+		if !seen[collaborator.UserID] {
+			seen[collaborator.UserID] = true
+			targets = append(targets, collaborator.UserID)
+		}
+	}
+	return targets
 }

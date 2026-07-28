@@ -860,6 +860,144 @@ SELECT EXISTS(
 	return c.JSON(attendance)
 }
 
+func parseProgramSessionPath(c *fiber.Ctx) (uuid.UUID, uuid.UUID, error) {
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return uuid.Nil, uuid.Nil, err
+	}
+	sessionID, err := uuid.Parse(c.Params("sessionId"))
+	if err != nil {
+		return uuid.Nil, uuid.Nil, err
+	}
+	return programID, sessionID, nil
+}
+
+func (s *Server) handleGetSessionRoster(c *fiber.Ctx) error {
+	programID, sessionID, err := parseProgramSessionPath(c)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Programa o sesión inválidos")
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	roster, err := s.services.Program.GetSessionRoster(c.Context(), accountID, programID, sessionID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar la nómina de la sesión"})
+	}
+	return c.JSON(fiber.Map{"success": true, "roster": roster})
+}
+
+func parseSessionObservationPath(c *fiber.Ctx, requireObservation bool) (uuid.UUID, uuid.UUID, uuid.UUID, error) {
+	p, s, err := parseProgramSessionPath(c)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, uuid.Nil, err
+	}
+	if !requireObservation {
+		return p, s, uuid.Nil, nil
+	}
+	o, err := uuid.Parse(c.Params("observationId"))
+	return p, s, o, err
+}
+
+func sessionObservationAPIError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, repository.ErrProgramSessionObservationNotFound):
+		return fiber.NewError(fiber.StatusNotFound, "Comentario no encontrado")
+	case errors.Is(err, repository.ErrSessionNotFound):
+		return fiber.NewError(fiber.StatusNotFound, "Sesión no encontrada")
+	case errors.Is(err, repository.ErrProgramSessionObservationForbidden):
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"success": false, "error": "Solo el autor o un administrador puede modificar este comentario"})
+	case errors.Is(err, repository.ErrProgramSessionObservationConflict):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El comentario cambió; vuelve a cargarlo antes de guardar", "code": "observation_conflict"})
+	case errors.Is(err, service.ErrProgramInput):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": err.Error()})
+	default:
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo procesar el comentario"})
+	}
+}
+
+func (s *Server) handleListSessionObservations(c *fiber.Ctx) error {
+	p, se, _, err := parseSessionObservationPath(c, false)
+	if err != nil {
+		return fiber.NewError(400, "Contexto inválido")
+	}
+	a := c.Locals("account_id").(uuid.UUID)
+	u := c.Locals("user_id").(uuid.UUID)
+	items, err := s.services.Program.ListSessionObservations(c.Context(), a, p, se, u, s.isAccountAdmin(c, a, u))
+	if err != nil {
+		return sessionObservationAPIError(c, err)
+	}
+	return c.JSON(fiber.Map{"success": true, "observations": items, "total": len(items)})
+}
+func (s *Server) handleCreateSessionObservation(c *fiber.Ctx) error {
+	p, se, _, err := parseSessionObservationPath(c, false)
+	if err != nil {
+		return fiber.NewError(400, "Contexto inválido")
+	}
+	var b struct {
+		Notes string `json:"notes"`
+	}
+	if c.BodyParser(&b) != nil {
+		return fiber.NewError(400, "Solicitud inválida")
+	}
+	a := c.Locals("account_id").(uuid.UUID)
+	u := c.Locals("user_id").(uuid.UUID)
+	o, err := s.services.Program.CreateSessionObservation(c.Context(), a, p, se, u, b.Notes)
+	if err != nil {
+		return sessionObservationAPIError(c, err)
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "observation": o})
+}
+func (s *Server) handleUpdateSessionObservation(c *fiber.Ctx) error {
+	p, se, o, err := parseSessionObservationPath(c, true)
+	if err != nil {
+		return fiber.NewError(400, "Contexto inválido")
+	}
+	var b struct {
+		Notes             string    `json:"notes"`
+		ExpectedUpdatedAt time.Time `json:"expected_updated_at"`
+	}
+	if c.BodyParser(&b) != nil || b.ExpectedUpdatedAt.IsZero() {
+		return fiber.NewError(400, "Solicitud inválida")
+	}
+	a := c.Locals("account_id").(uuid.UUID)
+	u := c.Locals("user_id").(uuid.UUID)
+	item, err := s.services.Program.UpdateSessionObservation(c.Context(), a, p, se, o, u, s.isAccountAdmin(c, a, u), b.Notes, b.ExpectedUpdatedAt)
+	if err != nil {
+		return sessionObservationAPIError(c, err)
+	}
+	return c.JSON(fiber.Map{"success": true, "observation": item})
+}
+func (s *Server) handlePinSessionObservation(c *fiber.Ctx) error {
+	p, se, o, err := parseSessionObservationPath(c, true)
+	if err != nil {
+		return fiber.NewError(400, "Contexto inválido")
+	}
+	var b struct {
+		Pinned bool `json:"pinned"`
+	}
+	if c.BodyParser(&b) != nil {
+		return fiber.NewError(400, "Solicitud inválida")
+	}
+	a := c.Locals("account_id").(uuid.UUID)
+	u := c.Locals("user_id").(uuid.UUID)
+	item, err := s.services.Program.PinSessionObservation(c.Context(), a, p, se, o, u, s.isAccountAdmin(c, a, u), b.Pinned)
+	if err != nil {
+		return sessionObservationAPIError(c, err)
+	}
+	return c.JSON(fiber.Map{"success": true, "observation": item})
+}
+func (s *Server) handleDeleteSessionObservation(c *fiber.Ctx) error {
+	p, se, o, err := parseSessionObservationPath(c, true)
+	if err != nil {
+		return fiber.NewError(400, "Contexto inválido")
+	}
+	a := c.Locals("account_id").(uuid.UUID)
+	u := c.Locals("user_id").(uuid.UUID)
+	if err := s.services.Program.DeleteSessionObservation(c.Context(), a, p, se, o, u, s.isAccountAdmin(c, a, u)); err != nil {
+		return sessionObservationAPIError(c, err)
+	}
+	return c.JSON(fiber.Map{"success": true})
+}
+
 func parseAttendanceObservationPath(c *fiber.Ctx) (uuid.UUID, uuid.UUID, uuid.UUID, error) {
 	programID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
@@ -1326,6 +1464,28 @@ func parseProgramOptionalTime(value string) (*time.Time, error) {
 	return &t, nil
 }
 
+func parseProgramOptionalLifecycleDate(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	lima, err := time.LoadLocation("America/Lima")
+	if err != nil {
+		return nil, err
+	}
+	if parsed, dateErr := time.Parse("2006-01-02", value); dateErr == nil {
+		result := time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, lima)
+		return &result, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, err
+	}
+	local := parsed.In(lima)
+	result := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, lima)
+	return &result, nil
+}
+
 func (s *Server) handleGetProgramsDashboard(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	from, err := parseProgramOptionalTime(c.Query("from", ""))
@@ -1458,11 +1618,11 @@ func (s *Server) handleUpdateProgramParticipantOutcome(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	droppedAt, err := parseProgramOptionalTime(req.DroppedAt)
+	droppedAt, err := parseProgramOptionalLifecycleDate(req.DroppedAt)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid dropped_at"})
 	}
-	completedAt, err := parseProgramOptionalTime(req.CompletedAt)
+	completedAt, err := parseProgramOptionalLifecycleDate(req.CompletedAt)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid completed_at"})
 	}
@@ -1486,6 +1646,49 @@ func (s *Server) handleUpdateProgramParticipantOutcome(c *fiber.Ctx) error {
 	}
 	s.invalidateProgramsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleUpdateProgramParticipantOutcomeDate(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	programID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Programa inválido"})
+	}
+	participantID, err := uuid.Parse(c.Params("participantId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Participante inválido"})
+	}
+	var req struct {
+		EndedOn string `json:"ended_on"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	parsed, err := time.Parse("2006-01-02", strings.TrimSpace(req.EndedOn))
+	if err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La fecha de cierre debe tener el formato AAAA-MM-DD"})
+	}
+	lima, err := time.LoadLocation("America/Lima")
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo procesar la fecha"})
+	}
+	endedOn := time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, lima)
+	updated, err := s.services.Program.UpdateParticipantOutcomeDate(c.Context(), accountID, programID, participantID, endedOn)
+	switch {
+	case errors.Is(err, repository.ErrProgramParticipantNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Participante no encontrado"})
+	case errors.Is(err, repository.ErrProgramParticipantNotEnded):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Solo se puede corregir la fecha de una participación retirada o completada"})
+	case errors.Is(err, repository.ErrProgramParticipantEndBeforeEnrollment):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La fecha de retiro o finalización no puede ser anterior a la incorporación"})
+	case errors.Is(err, service.ErrProgramParticipantEndInFuture):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La fecha de retiro o finalización no puede estar en el futuro"})
+	case err != nil:
+		log.Printf("[programs] outcome date update failed account=%s program=%s participant=%s: %v", accountID, programID, participantID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo actualizar la fecha de cierre"})
+	}
+	s.invalidateProgramsCache(accountID)
+	return c.JSON(fiber.Map{"success": true, "ended_on": updated.Format("2006-01-02")})
 }
 
 func (s *Server) handleUpdateProgramParticipantEnrollment(c *fiber.Ctx) error {

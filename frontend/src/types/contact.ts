@@ -41,6 +41,13 @@ export interface Observation {
   notes: string | null
   created_by_name: string | null
   created_at: string
+  updated_at?: string
+  updated_by_name?: string | null
+  is_pinned?: boolean
+  pinned_at?: string | null
+  can_edit?: boolean
+  can_pin?: boolean
+  can_delete?: boolean
   program_id?: string | null
   program_session_id?: string | null
   program_participant_id?: string | null

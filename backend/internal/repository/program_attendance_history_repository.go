@@ -36,12 +36,12 @@ type ProgramAttendanceHistoryCounts struct {
 const getParticipantAttendanceHistorySummaryQuery = `
 	WITH participant_context AS (
 		SELECT p.account_id, p.id AS program_id, pp.id AS participant_id,
-		       pp.enrolled_at::date AS enrolled_on,
+		       pp.enrolled_at AS enrolled_on,
 		       CASE
 		         WHEN pp.dropped_at IS NULL THEN pp.completed_at
 		         WHEN pp.completed_at IS NULL THEN pp.dropped_at
 		         ELSE LEAST(pp.dropped_at, pp.completed_at)
-		       END::date AS ended_on
+		       END AS ended_on
 		FROM programs p
 		JOIN program_participants pp ON pp.program_id = p.id
 		JOIN contacts c ON c.account_id = p.account_id AND c.id = pp.contact_id
@@ -54,9 +54,9 @@ const getParticipantAttendanceHistorySummaryQuery = `
 		  ON ps.account_id = pc.account_id AND ps.program_id = pc.program_id
 		LEFT JOIN program_attendance pa
 		  ON pa.session_id = ps.id AND pa.participant_id = pc.participant_id
-		WHERE ps.date <= CURRENT_DATE
+		WHERE ps.date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date
 		  AND ps.date >= pc.enrolled_on
-		  AND (pc.ended_on IS NULL OR ps.date <= pc.ended_on)
+		  AND (pc.ended_on IS NULL OR ps.date < pc.ended_on)
 	)
 	SELECT COALESCE(
 	         (SELECT pg.attendance_goal_percent
@@ -82,12 +82,12 @@ const getParticipantAttendanceHistorySummaryQuery = `
 const getParticipantAttendanceHistoryPageQuery = `
 	WITH participant_context AS (
 		SELECT p.account_id, p.id AS program_id, pp.id AS participant_id,
-		       pp.enrolled_at::date AS enrolled_on,
+		       pp.enrolled_at AS enrolled_on,
 		       CASE
 		         WHEN pp.dropped_at IS NULL THEN pp.completed_at
 		         WHEN pp.completed_at IS NULL THEN pp.dropped_at
 		         ELSE LEAST(pp.dropped_at, pp.completed_at)
-		       END::date AS ended_on
+		       END AS ended_on
 		FROM programs p
 		JOIN program_participants pp ON pp.program_id = p.id
 		JOIN contacts c ON c.account_id = p.account_id AND c.id = pp.contact_id
@@ -151,7 +151,7 @@ const getParticipantAttendanceHistoryPageQuery = `
 	       lo.id, lo.notes, lo.created_by, lo.created_by_name, lo.created_at, lo.source_label,
 	       NOT (
 	         rs.date >= pc.enrolled_on
-	         AND (pc.ended_on IS NULL OR rs.date <= pc.ended_on)
+	         AND (pc.ended_on IS NULL OR rs.date < pc.ended_on)
 	       ) AS historical,
 	       rs.sort_start_time, rs.created_at
 	FROM ranked_sessions rs
@@ -160,11 +160,11 @@ const getParticipantAttendanceHistoryPageQuery = `
 	  ON pa.session_id = rs.id AND pa.participant_id = pc.participant_id
 	LEFT JOIN topic_rollup tr ON tr.session_id = rs.id
 	LEFT JOIN latest_observation lo ON lo.session_id = rs.id
-	WHERE rs.date <= CURRENT_DATE
+	WHERE rs.date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date
 	  AND (
 	    (
 	      rs.date >= pc.enrolled_on
-	      AND (pc.ended_on IS NULL OR rs.date <= pc.ended_on)
+	      AND (pc.ended_on IS NULL OR rs.date < pc.ended_on)
 	    )
 	    OR pa.id IS NOT NULL
 	    OR COALESCE(lo.observation_count, 0) > 0

@@ -537,6 +537,7 @@ func (s *Server) setupRoutes() {
 	programs.Get("/:id/participants/:participantId/attendance-history", s.handleGetProgramParticipantAttendanceHistory)
 	programs.Patch("/:id/participants/:participantId/enrollment", s.handleUpdateProgramParticipantEnrollment)
 	programs.Patch("/:id/participants/:participantId/outcome", s.handleUpdateProgramParticipantOutcome)
+	programs.Patch("/:id/participants/:participantId/outcome-date", s.handleUpdateProgramParticipantOutcomeDate)
 	programs.Get("/:id/participants/:participantId/notes", s.handleListProgramParticipantNotes)
 	programs.Post("/:id/participants/:participantId/notes", s.handleCreateProgramParticipantNote)
 	programs.Patch("/:id/participants/:participantId/stage", s.handleUpdateProgramParticipantStage)
@@ -547,6 +548,12 @@ func (s *Server) setupRoutes() {
 	programs.Delete("/:id/sessions/:sessionId", s.handleDeleteSession)
 
 	programs.Get("/:id/sessions/:sessionId/attendance", s.handleGetAttendance)
+	programs.Get("/:id/sessions/:sessionId/roster", s.handleGetSessionRoster)
+	programs.Get("/:id/sessions/:sessionId/observations", s.handleListSessionObservations)
+	programs.Post("/:id/sessions/:sessionId/observations", s.handleCreateSessionObservation)
+	programs.Patch("/:id/sessions/:sessionId/observations/:observationId", s.handleUpdateSessionObservation)
+	programs.Patch("/:id/sessions/:sessionId/observations/:observationId/pin", s.handlePinSessionObservation)
+	programs.Delete("/:id/sessions/:sessionId/observations/:observationId", s.handleDeleteSessionObservation)
 	programs.Post("/:id/sessions/:sessionId/attendance", s.handleMarkAttendance)
 	programs.Post("/:id/sessions/:sessionId/attendance/batch", s.handleBatchMarkAttendance)
 	programs.Get("/:id/sessions/:sessionId/attendance/filter", s.handleGetParticipantsByAttendanceStatus)
@@ -695,13 +702,25 @@ func (s *Server) setupRoutes() {
 
 	// Task routes
 	tasks := protected.Group("/tasks", s.requirePermission(domain.PermTasks))
+	tasks.Get("/hierarchy", s.handleGetTaskHierarchy)
+	tasks.Post("/folders", s.handleCreateTaskFolder)
+	tasks.Put("/folders/:folderId", s.handleUpdateTaskFolder)
+	tasks.Delete("/folders/:folderId", s.handleArchiveTaskFolder)
+	tasks.Get("/workflows", s.handleGetTaskWorkflows)
+	tasks.Post("/workflows", s.handleCreateTaskWorkflow)
+	tasks.Post("/workflows/:workflowId/statuses", s.handleCreateTaskStatus)
+	tasks.Put("/statuses/:statusId", s.handleUpdateTaskStatus)
+	tasks.Delete("/statuses/:statusId", s.handleDeleteTaskStatus)
 	tasks.Get("/lists", s.handleGetTaskLists)
 	tasks.Post("/lists", s.handleCreateTaskList)
 	tasks.Post("/lists/reorder", s.handleReorderLists)
+	tasks.Put("/lists/:listId/structure", s.handleUpdateTaskListStructure)
 	tasks.Put("/lists/:listId", s.handleUpdateTaskList)
 	tasks.Delete("/lists/:listId", s.handleDeleteTaskList)
 	tasks.Get("/calendar", s.handleGetTasksCalendar)
 	tasks.Get("/stats", s.handleGetTaskStats)
+	tasks.Get("/summary", s.handleGetTaskWorkSummary)
+	tasks.Get("/gantt", s.handleGetTaskGantt)
 	tasks.Post("/reorder", s.handleReorderTasks)
 	tasks.Post("/", s.handleCreateTask)
 	tasks.Get("/", s.handleGetTasks)
@@ -710,6 +729,21 @@ func (s *Server) setupRoutes() {
 	tasks.Delete("/:id", s.handleDeleteTask)
 	tasks.Post("/:id/complete", s.handleCompleteTask)
 	tasks.Post("/:id/star", s.handleToggleStar)
+	tasks.Post("/:id/restore", s.handleRestoreTask)
+	tasks.Get("/:id/children", s.handleGetTaskChildren)
+	tasks.Post("/:id/children", s.handleCreateTaskChild)
+	tasks.Put("/:id/collaborators", s.handleSetTaskCollaborators)
+	tasks.Get("/:id/comments", s.handleGetTaskComments)
+	tasks.Post("/:id/comments", s.handleCreateTaskComment)
+	tasks.Put("/:id/comments/:commentId", s.handleUpdateTaskComment)
+	tasks.Delete("/:id/comments/:commentId", s.handleDeleteTaskComment)
+	tasks.Get("/:id/activity", s.handleGetTaskActivity)
+	tasks.Get("/:id/attachments", s.handleGetTaskAttachments)
+	tasks.Post("/:id/attachments", s.handleAddTaskAttachment)
+	tasks.Delete("/:id/attachments/:attachmentId", s.handleDeleteTaskAttachment)
+	tasks.Get("/:id/dependencies", s.handleGetTaskDependencies)
+	tasks.Post("/:id/dependencies", s.handleAddTaskDependency)
+	tasks.Delete("/:id/dependencies/:dependencyId", s.handleDeleteTaskDependency)
 	tasks.Get("/:id/subtasks", s.handleGetSubtasks)
 	tasks.Post("/:id/subtasks", s.handleCreateSubtask)
 	tasks.Put("/:id/subtasks/:subId", s.handleUpdateSubtask)
@@ -15841,6 +15875,30 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 		return refs, err
 	}
 	avatarRows.Close()
+	attachmentRows, err := s.repos.DB().Query(ctx, `
+		SELECT ma.object_key
+		FROM task_attachments ta
+		JOIN media_assets ma ON ma.id=ta.media_asset_id AND ma.account_id=ta.account_id
+		WHERE ma.object_key<>''
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("scan task attachment references: %w", err)
+	}
+	for attachmentRows.Next() {
+		var objectKey string
+		if err := attachmentRows.Scan(&objectKey); err != nil {
+			attachmentRows.Close()
+			return refs, err
+		}
+		for _, key := range storageObjectKeyFromValue(objectKey) {
+			refs[key] = struct{}{}
+		}
+	}
+	if err := attachmentRows.Err(); err != nil {
+		attachmentRows.Close()
+		return refs, err
+	}
+	attachmentRows.Close()
 	return refs, nil
 }
 

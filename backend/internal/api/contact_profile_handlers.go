@@ -67,6 +67,8 @@ func (s *Server) registerContactProfileRoutes(protected fiber.Router) {
 	profiles.Get("/:contactId/tags", s.handleSearchContactProfileTags)
 	profiles.Get("/:contactId/observations", s.handleListContactProfileObservations)
 	profiles.Post("/:contactId/observations", s.handleCreateContactProfileObservation)
+	profiles.Patch("/:contactId/observations/:observationId", s.handleUpdateContactProfileObservation)
+	profiles.Patch("/:contactId/observations/:observationId/pin", s.handlePinContactProfileObservation)
 	profiles.Delete("/:contactId/observations/:observationId", s.handleDeleteContactProfileObservation)
 }
 
@@ -124,7 +126,17 @@ func contactProfileContextAccessError(exists bool, err error) error {
 	return nil
 }
 
-func contactProfileResponse(contact *domain.Contact, profileContext contactAvatarContext, definitions []contactProfileFieldDefinition, observationCount int, canCreateTags bool) fiber.Map {
+func contactProfileResponse(contact *domain.Contact, profileContext contactAvatarContext, definitions []contactProfileFieldDefinition, observationCount int, extras ...any) fiber.Map {
+	pinnedObservationCount := 0
+	canCreateTags := false
+	for _, extra := range extras {
+		switch value := extra.(type) {
+		case int:
+			pinnedObservationCount = value
+		case bool:
+			canCreateTags = value
+		}
+	}
 	return fiber.Map{
 		"success": true,
 		"contact": newContactProfileContactPayload(contact),
@@ -133,6 +145,7 @@ func contactProfileResponse(contact *domain.Contact, profileContext contactAvata
 		// bounded contextual search endpoint and never downloads the full catalog.
 		"available_tags":           make([]contactProfileAvailableTag, 0),
 		"observation_count":        observationCount,
+		"pinned_observation_count": pinnedObservationCount,
 		"custom_field_definitions": definitions,
 		"capabilities": contactProfileCapabilities{
 			CanView: true, CanEdit: true, CanManageAvatar: true, CanManageObservations: true, CanCreateTags: canCreateTags,
@@ -198,7 +211,11 @@ func (s *Server) handleGetContactProfile(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el resumen del historial"})
 	}
-	return c.JSON(contactProfileResponse(contact, profileContext, definitions, observationCount, s.contactAvatarCallerHasPermission(c, domain.PermTags)))
+	pinnedCount, err := s.services.ContactProfile.CountPinnedObservations(c.Context(), accountID, contactID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el resumen de fijados"})
+	}
+	return c.JSON(contactProfileResponse(contact, profileContext, definitions, observationCount, pinnedCount, s.contactAvatarCallerHasPermission(c, domain.PermTags)))
 }
 
 func (s *Server) handleSearchContactProfileTags(c *fiber.Ctx) error {
@@ -508,7 +525,11 @@ func (s *Server) handlePatchContactProfile(c *fiber.Ctx) error {
 		}
 	}
 	s.afterCanonicalContactProfileChange(accountID, contact)
-	return c.JSON(contactProfileResponse(contact, profileContext, definitions, observationCount, s.contactAvatarCallerHasPermission(c, domain.PermTags)))
+	pinnedCount, err := s.services.ContactProfile.CountPinnedObservations(c.Context(), accountID, contactID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el resumen de fijados"})
+	}
+	return c.JSON(contactProfileResponse(contact, profileContext, definitions, observationCount, pinnedCount, s.contactAvatarCallerHasPermission(c, domain.PermTags)))
 }
 
 func (s *Server) afterCanonicalContactProfileChange(accountID uuid.UUID, contact *domain.Contact) {
@@ -542,7 +563,8 @@ func (s *Server) handleListContactProfileObservations(c *fiber.Ctx) error {
 		return err
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
-	observations, err := s.services.ContactProfile.ListObservations(c.Context(), accountID, contactID, c.QueryInt("limit", 50), c.QueryInt("offset", 0))
+	userID := c.Locals("user_id").(uuid.UUID)
+	observations, err := s.services.ContactProfile.ListObservations(c.Context(), accountID, contactID, userID, s.isAccountAdmin(c, accountID, userID), c.QueryInt("limit", 50), c.QueryInt("offset", 0))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las observaciones"})
 	}
@@ -571,8 +593,8 @@ func (s *Server) handleCreateContactProfileObservation(c *fiber.Ctx) error {
 	if body.Notes == "" {
 		return fiber.NewError(fiber.StatusUnprocessableEntity, "La observación es obligatoria")
 	}
-	if utf8.RuneCountInString(body.Notes) > 10000 {
-		return fiber.NewError(fiber.StatusUnprocessableEntity, "La observación excede 10000 caracteres")
+	if utf8.RuneCountInString(body.Notes) > 4000 {
+		return fiber.NewError(fiber.StatusUnprocessableEntity, "La observación excede 4000 caracteres")
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
 	if profileContext.Type == "program_participant" {
@@ -637,7 +659,8 @@ func (s *Server) handleDeleteContactProfileObservation(c *fiber.Ctx) error {
 	} else if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo validar la observación"})
 	}
-	err = s.services.ContactProfile.DeleteObservation(c.Context(), accountID, contactID, observationID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	err = s.services.ContactProfile.DeleteObservation(c.Context(), accountID, contactID, observationID, userID, s.isAccountAdmin(c, accountID, userID))
 	switch {
 	case errors.Is(err, repository.ErrAttendanceObservationProtected):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Esta observación de asistencia solo puede eliminarse desde la asistencia", "code": "attendance_observation_protected"})
@@ -645,6 +668,8 @@ func (s *Server) handleDeleteContactProfileObservation(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Este registro histórico no es una nota eliminable", "code": "contact_history_entry_protected"})
 	case errors.Is(err, repository.ErrContactProfileObservationMissing):
 		return fiber.NewError(fiber.StatusNotFound, "Observación no encontrada")
+	case errors.Is(err, repository.ErrContactProfileObservationForbidden):
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"success": false, "error": "Solo el autor o un administrador puede eliminar esta nota"})
 	case err != nil:
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo eliminar la observación"})
 	}
@@ -659,6 +684,75 @@ func (s *Server) handleDeleteContactProfileObservation(c *fiber.Ctx) error {
 		response["total"] = total
 	}
 	return c.JSON(response)
+}
+
+func contactObservationMutationError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, repository.ErrContactProfileObservationMissing):
+		return fiber.NewError(404, "Observación no encontrada")
+	case errors.Is(err, repository.ErrContactProfileObservationForbidden):
+		return c.Status(403).JSON(fiber.Map{"success": false, "error": "Solo el autor o un administrador puede modificar esta nota"})
+	case errors.Is(err, repository.ErrContactProfileObservationConflict):
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "La nota cambió; vuelve a cargarla antes de guardar", "code": "observation_conflict"})
+	case errors.Is(err, repository.ErrContactProfileObservationLocked):
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este registro histórico no es una nota editable"})
+	default:
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo modificar la nota"})
+	}
+}
+
+func (s *Server) handleUpdateContactProfileObservation(c *fiber.Ctx) error {
+	contactID, _, err := s.resolveContactProfileRequest(c)
+	if err != nil {
+		return err
+	}
+	oid, err := uuid.Parse(strings.TrimSpace(c.Params("observationId")))
+	if err != nil {
+		return fiber.NewError(400, "Observación inválida")
+	}
+	var b struct {
+		Notes             string    `json:"notes"`
+		ExpectedUpdatedAt time.Time `json:"expected_updated_at"`
+	}
+	if c.BodyParser(&b) != nil || b.ExpectedUpdatedAt.IsZero() {
+		return fiber.NewError(400, "Solicitud inválida")
+	}
+	b.Notes = strings.TrimSpace(b.Notes)
+	if b.Notes == "" || utf8.RuneCountInString(b.Notes) > 4000 {
+		return fiber.NewError(422, "La nota debe contener entre 1 y 4000 caracteres")
+	}
+	a := c.Locals("account_id").(uuid.UUID)
+	u := c.Locals("user_id").(uuid.UUID)
+	item, err := s.services.ContactProfile.UpdateObservation(c.Context(), a, contactID, oid, u, s.isAccountAdmin(c, a, u), b.Notes, b.ExpectedUpdatedAt)
+	if err != nil {
+		return contactObservationMutationError(c, err)
+	}
+	s.afterContactProfileObservationChange(a, contactID, "updated", oid)
+	return c.JSON(fiber.Map{"success": true, "observation": item})
+}
+func (s *Server) handlePinContactProfileObservation(c *fiber.Ctx) error {
+	contactID, _, err := s.resolveContactProfileRequest(c)
+	if err != nil {
+		return err
+	}
+	oid, err := uuid.Parse(strings.TrimSpace(c.Params("observationId")))
+	if err != nil {
+		return fiber.NewError(400, "Observación inválida")
+	}
+	var b struct {
+		Pinned bool `json:"pinned"`
+	}
+	if c.BodyParser(&b) != nil {
+		return fiber.NewError(400, "Solicitud inválida")
+	}
+	a := c.Locals("account_id").(uuid.UUID)
+	u := c.Locals("user_id").(uuid.UUID)
+	item, err := s.services.ContactProfile.PinObservation(c.Context(), a, contactID, oid, u, s.isAccountAdmin(c, a, u), b.Pinned)
+	if err != nil {
+		return contactObservationMutationError(c, err)
+	}
+	s.afterContactProfileObservationChange(a, contactID, "pinned", oid)
+	return c.JSON(fiber.Map{"success": true, "observation": item})
 }
 
 func (s *Server) afterContactProfileObservationChange(accountID, contactID uuid.UUID, action string, observationID uuid.UUID) {

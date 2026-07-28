@@ -17,12 +17,14 @@ import (
 )
 
 var (
-	ErrContactProfileNotFound           = errors.New("contact profile not found")
-	ErrContactProfileContextNotFound    = errors.New("contact profile context not found")
-	ErrContactProfileCollectionInvalid  = errors.New("contact profile collection is invalid")
-	ErrAttendanceObservationProtected   = errors.New("attendance observation is protected")
-	ErrContactProfileObservationLocked  = errors.New("contact profile interaction is not a deletable note")
-	ErrContactProfileObservationMissing = errors.New("contact profile observation not found")
+	ErrContactProfileNotFound             = errors.New("contact profile not found")
+	ErrContactProfileContextNotFound      = errors.New("contact profile context not found")
+	ErrContactProfileCollectionInvalid    = errors.New("contact profile collection is invalid")
+	ErrAttendanceObservationProtected     = errors.New("attendance observation is protected")
+	ErrContactProfileObservationLocked    = errors.New("contact profile interaction is not a deletable note")
+	ErrContactProfileObservationMissing   = errors.New("contact profile observation not found")
+	ErrContactProfileObservationForbidden = errors.New("contact profile observation forbidden")
+	ErrContactProfileObservationConflict  = errors.New("contact profile observation changed")
 )
 
 type ContactProfileExtraPhonePatch struct {
@@ -881,7 +883,19 @@ func (r *ContactProfileRepository) ContextExists(ctx context.Context, accountID,
 	return exists, err
 }
 
-func (r *ContactProfileRepository) ListObservations(ctx context.Context, accountID, contactID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+func (r *ContactProfileRepository) ListObservations(ctx context.Context, accountID, contactID uuid.UUID, options ...any) ([]*domain.Interaction, error) {
+	userID := uuid.Nil
+	isAdmin := false
+	limit, offset := 50, 0
+	if len(options) == 2 {
+		limit, _ = options[0].(int)
+		offset, _ = options[1].(int)
+	} else if len(options) == 4 {
+		userID, _ = options[0].(uuid.UUID)
+		isAdmin, _ = options[1].(bool)
+		limit, _ = options[2].(int)
+		offset, _ = options[3].(int)
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -895,9 +909,11 @@ func (r *ContactProfileRepository) ListObservations(ctx context.Context, account
 		SELECT i.id,i.account_id,i.contact_id,i.lead_id,i.event_id,i.participant_id,
 		       i.program_id,i.program_session_id,i.program_participant_id,COALESCE(i.source_label,''),
 		       i.type,i.direction,i.outcome,i.notes,i.next_action,i.next_action_date,
-		       i.created_by,i.created_at,u.display_name,e.name
+		       i.created_by,i.created_at,u.display_name,e.name,i.updated_at,i.updated_by,editor.display_name,
+		       i.is_pinned,i.pinned_at,i.pinned_by
 		FROM interactions i
 		LEFT JOIN users u ON u.id=i.created_by AND u.account_id=i.account_id
+		LEFT JOIN users editor ON editor.id=i.updated_by AND editor.account_id=i.account_id
 		LEFT JOIN events e ON e.id=i.event_id AND e.account_id=i.account_id
 		WHERE i.account_id=$1 AND (
 			i.contact_id=$2
@@ -910,7 +926,7 @@ func (r *ContactProfileRepository) ListObservations(ctx context.Context, account
 			)
 			OR EXISTS(SELECT 1 FROM program_participants pp JOIN programs p ON p.id=pp.program_id AND p.account_id=$1 WHERE pp.contact_id=$2 AND pp.id=i.program_participant_id)
 		)
-		ORDER BY i.created_at DESC,i.id DESC
+		ORDER BY (i.type='note' AND i.is_pinned) DESC,i.pinned_at DESC NULLS LAST,i.created_at DESC,i.id DESC
 		LIMIT $3 OFFSET $4
 	`, accountID, contactID, limit, offset)
 	if err != nil {
@@ -925,12 +941,29 @@ func (r *ContactProfileRepository) ListObservations(ctx context.Context, account
 			&item.ProgramID, &item.ProgramSessionID, &item.ProgramParticipantID, &item.SourceLabel,
 			&item.Type, &item.Direction, &item.Outcome, &item.Notes, &item.NextAction, &item.NextActionDate,
 			&item.CreatedBy, &item.CreatedAt, &item.CreatedByName, &item.EventName,
+			&item.UpdatedAt, &item.UpdatedBy, &item.UpdatedByName, &item.IsPinned, &item.PinnedAt, &item.PinnedBy,
 		); err != nil {
 			return nil, err
+		}
+		own := item.CreatedBy != nil && *item.CreatedBy == userID
+		if item.Type == domain.InteractionTypeNote {
+			item.CanEdit = isAdmin || own
+			item.CanPin = isAdmin || own
+			item.CanDelete = isAdmin || own
 		}
 		observations = append(observations, item)
 	}
 	return observations, rows.Err()
+}
+
+func (r *ContactProfileRepository) CountPinnedObservations(ctx context.Context, accountID, contactID uuid.UUID) (int, error) {
+	var total int
+	err := r.db.QueryRow(ctx, `
+	SELECT COUNT(*) FROM interactions i WHERE i.account_id=$1 AND i.type='note' AND i.is_pinned AND (
+	 i.contact_id=$2 OR EXISTS(SELECT 1 FROM leads l WHERE l.account_id=$1 AND l.contact_id=$2 AND l.id=i.lead_id)
+	 OR EXISTS(SELECT 1 FROM event_participants ep JOIN events ev ON ev.id=ep.event_id AND ev.account_id=$1 LEFT JOIN leads l ON l.id=ep.lead_id AND l.account_id=ev.account_id WHERE COALESCE(ep.contact_id,l.contact_id)=$2 AND ep.id=i.participant_id)
+	 OR EXISTS(SELECT 1 FROM program_participants pp JOIN programs p ON p.id=pp.program_id AND p.account_id=$1 WHERE pp.contact_id=$2 AND pp.id=i.program_participant_id))`, accountID, contactID).Scan(&total)
+	return total, err
 }
 
 func (r *ContactProfileRepository) CountObservations(ctx context.Context, accountID, contactID uuid.UUID) (int, error) {
@@ -1042,15 +1075,15 @@ func (r *ContactProfileRepository) CreateObservation(ctx context.Context, accoun
 		WITH inserted AS (
 			INSERT INTO interactions (
 				id,account_id,contact_id,lead_id,event_id,participant_id,program_id,program_session_id,
-				program_participant_id,source_label,type,direction,outcome,notes,next_action,next_action_date,created_by,created_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
+				program_participant_id,source_label,type,direction,outcome,notes,next_action,next_action_date,created_by,created_at,updated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
 			RETURNING id,account_id,contact_id,lead_id,event_id,participant_id,program_id,program_session_id,
-			          program_participant_id,source_label,type,direction,outcome,notes,next_action,next_action_date,created_by,created_at
+			          program_participant_id,source_label,type,direction,outcome,notes,next_action,next_action_date,created_by,created_at,updated_at,is_pinned
 		)
 		SELECT i.id,i.account_id,i.contact_id,i.lead_id,i.event_id,i.participant_id,
 		       i.program_id,i.program_session_id,i.program_participant_id,i.source_label,
 		       i.type,i.direction,i.outcome,i.notes,i.next_action,i.next_action_date,
-		       i.created_by,i.created_at,u.display_name
+		       i.created_by,i.created_at,u.display_name,i.updated_at,i.is_pinned
 		FROM inserted i LEFT JOIN users u ON u.id=i.created_by AND u.account_id=i.account_id
 	`, interaction.ID, interaction.AccountID, interaction.ContactID, interaction.LeadID,
 		interaction.EventID, interaction.ParticipantID, interaction.ProgramID, interaction.ProgramSessionID,
@@ -1061,7 +1094,7 @@ func (r *ContactProfileRepository) CreateObservation(ctx context.Context, accoun
 		&interaction.EventID, &interaction.ParticipantID, &interaction.ProgramID, &interaction.ProgramSessionID,
 		&interaction.ProgramParticipantID, &interaction.SourceLabel, &interaction.Type, &interaction.Direction,
 		&interaction.Outcome, &interaction.Notes, &interaction.NextAction, &interaction.NextActionDate,
-		&interaction.CreatedBy, &interaction.CreatedAt, &interaction.CreatedByName,
+		&interaction.CreatedBy, &interaction.CreatedAt, &interaction.CreatedByName, &interaction.UpdatedAt, &interaction.IsPinned,
 	)
 	if err != nil {
 		return nil, err
@@ -1069,10 +1102,94 @@ func (r *ContactProfileRepository) CreateObservation(ctx context.Context, accoun
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	interaction.CanEdit = true
+	interaction.CanPin = true
+	interaction.CanDelete = true
 	return interaction, nil
 }
 
-func (r *ContactProfileRepository) DeleteObservation(ctx context.Context, accountID, contactID, observationID uuid.UUID) error {
+func (r *ContactProfileRepository) UpdateObservation(ctx context.Context, accountID, contactID, observationID, userID uuid.UUID, isAdmin bool, notes string, expected time.Time) (*domain.Interaction, error) {
+	command, err := r.db.Exec(ctx, `
+	 UPDATE interactions i SET notes=$6,updated_at=NOW(),updated_by=$4
+	 WHERE i.account_id=$1 AND i.id=$3 AND i.type='note' AND ($5 OR i.created_by=$4) AND i.updated_at=$7 AND (
+	 i.contact_id=$2 OR EXISTS(SELECT 1 FROM leads l WHERE l.account_id=$1 AND l.contact_id=$2 AND l.id=i.lead_id)
+	 OR EXISTS(SELECT 1 FROM event_participants ep JOIN events ev ON ev.id=ep.event_id AND ev.account_id=$1 LEFT JOIN leads l ON l.id=ep.lead_id AND l.account_id=ev.account_id WHERE COALESCE(ep.contact_id,l.contact_id)=$2 AND ep.id=i.participant_id)
+	 OR EXISTS(SELECT 1 FROM program_participants pp JOIN programs p ON p.id=pp.program_id AND p.account_id=$1 WHERE pp.contact_id=$2 AND pp.id=i.program_participant_id))`, accountID, contactID, observationID, userID, isAdmin, notes, expected)
+	if err != nil {
+		return nil, err
+	}
+	if command.RowsAffected() == 0 {
+		return nil, r.classifyContactObservationMutation(ctx, accountID, contactID, observationID, userID, isAdmin, &expected)
+	}
+	items, err := r.ListObservations(ctx, accountID, contactID, userID, isAdmin, 200, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, i := range items {
+		if i.ID == observationID {
+			return i, nil
+		}
+	}
+	return nil, ErrContactProfileObservationMissing
+}
+
+func (r *ContactProfileRepository) PinObservation(ctx context.Context, accountID, contactID, observationID, userID uuid.UUID, isAdmin, pinned bool) (*domain.Interaction, error) {
+	command, err := r.db.Exec(ctx, `
+	 UPDATE interactions i SET is_pinned=$6,pinned_at=CASE WHEN $6 THEN NOW() ELSE NULL END,pinned_by=CASE WHEN $6 THEN $4 ELSE NULL END
+	 WHERE i.account_id=$1 AND i.id=$3 AND i.type='note' AND ($5 OR i.created_by=$4) AND (
+	 i.contact_id=$2 OR EXISTS(SELECT 1 FROM leads l WHERE l.account_id=$1 AND l.contact_id=$2 AND l.id=i.lead_id)
+	 OR EXISTS(SELECT 1 FROM event_participants ep JOIN events ev ON ev.id=ep.event_id AND ev.account_id=$1 LEFT JOIN leads l ON l.id=ep.lead_id AND l.account_id=ev.account_id WHERE COALESCE(ep.contact_id,l.contact_id)=$2 AND ep.id=i.participant_id)
+	 OR EXISTS(SELECT 1 FROM program_participants pp JOIN programs p ON p.id=pp.program_id AND p.account_id=$1 WHERE pp.contact_id=$2 AND pp.id=i.program_participant_id))`, accountID, contactID, observationID, userID, isAdmin, pinned)
+	if err != nil {
+		return nil, err
+	}
+	if command.RowsAffected() == 0 {
+		return nil, r.classifyContactObservationMutation(ctx, accountID, contactID, observationID, userID, isAdmin, nil)
+	}
+	items, err := r.ListObservations(ctx, accountID, contactID, userID, isAdmin, 200, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, i := range items {
+		if i.ID == observationID {
+			return i, nil
+		}
+	}
+	return nil, ErrContactProfileObservationMissing
+}
+
+func (r *ContactProfileRepository) classifyContactObservationMutation(ctx context.Context, accountID, contactID, observationID, userID uuid.UUID, isAdmin bool, expected *time.Time) error {
+	var typ string
+	var creator *uuid.UUID
+	var updated time.Time
+	err := r.db.QueryRow(ctx, `SELECT i.type,i.created_by,i.updated_at FROM interactions i WHERE i.account_id=$1 AND i.id=$3 AND (i.contact_id=$2 OR EXISTS(SELECT 1 FROM leads l WHERE l.account_id=$1 AND l.contact_id=$2 AND l.id=i.lead_id) OR EXISTS(SELECT 1 FROM program_participants pp JOIN programs p ON p.id=pp.program_id AND p.account_id=$1 WHERE pp.contact_id=$2 AND pp.id=i.program_participant_id))`, accountID, contactID, observationID).Scan(&typ, &creator, &updated)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrContactProfileObservationMissing
+	}
+	if err != nil {
+		return err
+	}
+	if typ != domain.InteractionTypeNote {
+		return ErrContactProfileObservationLocked
+	}
+	if !isAdmin && (creator == nil || *creator != userID) {
+		return ErrContactProfileObservationForbidden
+	}
+	if expected != nil && !updated.Equal(*expected) {
+		return ErrContactProfileObservationConflict
+	}
+	return ErrContactProfileObservationConflict
+}
+
+func (r *ContactProfileRepository) DeleteObservation(ctx context.Context, accountID, contactID, observationID uuid.UUID, authorization ...any) error {
+	userID := uuid.Nil
+	// Legacy internal callers predate row ownership and are treated as trusted
+	// administrative paths; HTTP callers always provide explicit authorization.
+	isAdmin := len(authorization) == 0
+	if len(authorization) == 2 {
+		userID, _ = authorization[0].(uuid.UUID)
+		isAdmin, _ = authorization[1].(bool)
+	}
 	var interactionType string
 	var deleted bool
 	err := r.db.QueryRow(ctx, `
@@ -1093,11 +1210,11 @@ func (r *ContactProfileRepository) DeleteObservation(ctx context.Context, accoun
 			FOR UPDATE OF i
 		), deleted AS (
 			DELETE FROM interactions i USING target
-			WHERE i.account_id=$1 AND i.id=target.id AND target.type=$4
+			WHERE i.account_id=$1 AND i.id=target.id AND target.type=$4 AND ($6 OR i.created_by=$5)
 			RETURNING i.id
 		)
 		SELECT target.type,EXISTS(SELECT 1 FROM deleted) FROM target
-	`, accountID, contactID, observationID, domain.InteractionTypeNote).Scan(&interactionType, &deleted)
+	`, accountID, contactID, observationID, domain.InteractionTypeNote, userID, isAdmin).Scan(&interactionType, &deleted)
 	if err == pgx.ErrNoRows {
 		return ErrContactProfileObservationMissing
 	}
@@ -1109,6 +1226,9 @@ func (r *ContactProfileRepository) DeleteObservation(ctx context.Context, accoun
 	}
 	if interactionType == domain.InteractionTypeAttendance {
 		return ErrAttendanceObservationProtected
+	}
+	if interactionType == domain.InteractionTypeNote {
+		return ErrContactProfileObservationForbidden
 	}
 	return ErrContactProfileObservationLocked
 }

@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseAttendanceStatsMonths(t *testing.T) {
 	months, err := parseAttendanceStatsMonths("2026-07, 2026-06,2026-07")
@@ -15,6 +18,20 @@ func TestParseAttendanceStatsMonths(t *testing.T) {
 		if _, err := parseAttendanceStatsMonths(value); err == nil {
 			t.Fatalf("expected %q to be rejected", value)
 		}
+	}
+}
+
+func TestParseProgramOptionalLifecycleDateUsesLimaCalendarDay(t *testing.T) {
+	exact, err := parseProgramOptionalLifecycleDate("2026-07-27")
+	if err != nil || exact == nil || exact.In(time.FixedZone("PET", -5*60*60)).Format("2006-01-02") != "2026-07-27" {
+		t.Fatalf("exact lifecycle date changed day: value=%v err=%v", exact, err)
+	}
+	instant, err := parseProgramOptionalLifecycleDate("2026-07-27T02:00:00Z")
+	if err != nil || instant == nil || instant.Format("2006-01-02") != "2026-07-26" {
+		t.Fatalf("RFC3339 lifecycle date did not use Lima: value=%v err=%v", instant, err)
+	}
+	if _, err := parseProgramOptionalLifecycleDate("27/07/2026"); err == nil {
+		t.Fatal("invalid lifecycle date was accepted")
 	}
 }
 

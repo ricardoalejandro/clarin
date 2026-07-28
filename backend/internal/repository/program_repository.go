@@ -30,8 +30,12 @@ var (
 	ErrProgramParticipantHasActivity         = errors.New("program participant has activity")
 	ErrProgramParticipantOutsideWindow       = errors.New("program participant is outside the session participation window")
 	ErrProgramParticipantAlreadyEnded        = errors.New("program participant already ended")
+	ErrProgramParticipantNotEnded            = errors.New("program participant has no editable outcome date")
 	ErrProgramParticipantEndBeforeEnrollment = errors.New("program participant end date is before enrollment")
 	ErrProgramParticipantStageInvalid        = errors.New("program participant stage does not belong to the program pipeline and account")
+	ErrProgramSessionObservationNotFound     = errors.New("program session observation not found")
+	ErrProgramSessionObservationForbidden    = errors.New("program session observation forbidden")
+	ErrProgramSessionObservationConflict     = errors.New("program session observation changed")
 )
 
 // --- Programs ---
@@ -588,7 +592,11 @@ func (r *ProgramRepository) ListSessions(ctx context.Context, accountID, program
 		       ps.location, ps.created_at, ps.updated_at,
 		       c.id, c.name, ct.title,
 		       COALESCE(att.present_count, 0), COALESCE(att.absent_count, 0),
-		       COALESCE(att.late_count, 0)
+		       COALESCE(att.late_count, 0),
+		       COALESCE(obs.observation_count, 0), COALESCE(obs.pinned_count, 0),
+		       obs.id, obs.notes, obs.created_by, obs.created_by_name, obs.created_at,
+		       obs.updated_at, obs.updated_by, obs.updated_by_name, obs.is_pinned,
+		       obs.pinned_at, obs.pinned_by
 		FROM program_sessions ps
 		JOIN programs p ON p.id = ps.program_id AND p.account_id = $1
 		LEFT JOIN course_topics ct ON ct.id = ps.course_topic_id AND ct.account_id = p.account_id
@@ -604,7 +612,23 @@ func (r *ProgramRepository) ListSessions(ctx context.Context, accountID, program
 			JOIN contacts participant_contact
 			  ON participant_contact.id = pp.contact_id AND participant_contact.account_id = p.account_id
 			WHERE pa.session_id = ps.id
+			  AND ps.date >= pp.enrolled_at
+			  AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+			       OR ps.date < LEAST(pp.dropped_at, pp.completed_at))
 		) att ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT o.id, o.notes, o.created_by, creator.display_name AS created_by_name,
+			       o.created_at, o.updated_at, o.updated_by, editor.display_name AS updated_by_name,
+			       o.is_pinned, o.pinned_at, o.pinned_by,
+			       COUNT(*) OVER ()::int AS observation_count,
+			       COUNT(*) FILTER (WHERE o.is_pinned) OVER ()::int AS pinned_count
+			FROM program_session_observations o
+			LEFT JOIN users creator ON creator.id = o.created_by AND creator.account_id = o.account_id
+			LEFT JOIN users editor ON editor.id = o.updated_by AND editor.account_id = o.account_id
+			WHERE o.account_id = ps.account_id AND o.session_id = ps.id
+			ORDER BY o.is_pinned DESC, o.pinned_at DESC NULLS LAST, o.created_at DESC, o.id DESC
+			LIMIT 1
+		) obs ON TRUE
 		WHERE ps.program_id = $2
 		ORDER BY ps.date ASC, ps.created_at ASC
 	`, accountID, programID)
@@ -618,13 +642,37 @@ func (r *ProgramRepository) ListSessions(ctx context.Context, accountID, program
 	for rows.Next() {
 		s := &domain.ProgramSession{Topics: make([]*domain.ProgramSessionTopic, 0)}
 		var present, absent, late int
+		var observationID *uuid.UUID
+		var observationNotes, observationCreatedByName, observationUpdatedByName *string
+		var observationCreatedBy, observationUpdatedBy, observationPinnedBy *uuid.UUID
+		var observationCreatedAt, observationUpdatedAt, observationPinnedAt *time.Time
+		var observationPinned *bool
 		if err := rows.Scan(
 			&s.ID, &s.ProgramID, &s.Date, &s.Title, &s.Topic, &s.CourseTopicID,
 			&s.SessionType, &s.StartTime, &s.EndTime, &s.Location, &s.CreatedAt, &s.UpdatedAt,
 			&s.CourseID, &s.CourseName, &s.CourseTopicTitle,
-			&present, &absent, &late,
+			&present, &absent, &late, &s.ObservationCount, &s.PinnedObservationCount,
+			&observationID, &observationNotes, &observationCreatedBy, &observationCreatedByName, &observationCreatedAt,
+			&observationUpdatedAt, &observationUpdatedBy, &observationUpdatedByName, &observationPinned,
+			&observationPinnedAt, &observationPinnedBy,
 		); err != nil {
 			return nil, err
+		}
+		if observationID != nil {
+			preview := &domain.ProgramSessionObservation{ID: *observationID, SessionID: s.ID, CreatedBy: observationCreatedBy, CreatedByName: observationCreatedByName, UpdatedBy: observationUpdatedBy, UpdatedByName: observationUpdatedByName, PinnedAt: observationPinnedAt, PinnedBy: observationPinnedBy}
+			if observationNotes != nil {
+				preview.Notes = *observationNotes
+			}
+			if observationCreatedAt != nil {
+				preview.CreatedAt = *observationCreatedAt
+			}
+			if observationUpdatedAt != nil {
+				preview.UpdatedAt = *observationUpdatedAt
+			}
+			if observationPinned != nil {
+				preview.IsPinned = *observationPinned
+			}
+			s.ObservationPreview = preview
 		}
 		s.AttendanceStats = make(map[string]int)
 		for status, count := range map[string]int{
@@ -732,17 +780,12 @@ const participantEligibleForSessionQuery = `
 	SELECT 1
 	FROM program_participants pp
 	JOIN programs p ON p.id = pp.program_id
+	JOIN program_sessions ps ON ps.account_id = p.account_id AND ps.program_id = p.id AND ps.id = $4
 	JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
 	WHERE p.account_id = $1 AND pp.program_id = $2 AND pp.id = $3
-	  AND $4::date >= pp.enrolled_at::date
-	  AND $4::date <= COALESCE(
-		CASE
-		  WHEN pp.dropped_at IS NULL THEN pp.completed_at
-		  WHEN pp.completed_at IS NULL THEN pp.dropped_at
-		  ELSE LEAST(pp.dropped_at, pp.completed_at)
-		END::date,
-		'infinity'::date
-	  )
+	  AND ps.date >= pp.enrolled_at
+	  AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+	       OR ps.date < LEAST(pp.dropped_at, pp.completed_at))
 	)
 `
 
@@ -767,7 +810,7 @@ func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, accountID, 
 
 	for _, a := range attendances {
 		var participantEligible bool
-		if err := tx.QueryRow(ctx, participantEligibleForSessionQuery, accountID, programID, a.ParticipantID, sessionDate).Scan(&participantEligible); err != nil {
+		if err := tx.QueryRow(ctx, participantEligibleForSessionQuery, accountID, programID, a.ParticipantID, sessionID).Scan(&participantEligible); err != nil {
 			return err
 		}
 		if !participantEligible {
@@ -813,6 +856,201 @@ func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, accountID, 
 	}
 
 	return tx.Commit(ctx)
+}
+
+func (r *ProgramRepository) GetSessionRoster(ctx context.Context, accountID, programID, sessionID uuid.UUID) ([]*domain.ProgramSessionRosterEntry, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT pp.id, pp.contact_id,
+		       COALESCE(NULLIF(c.custom_name,''),NULLIF(c.name,''),NULLIF(c.push_name,''),NULLIF(c.phone,''),'Sin nombre'),
+		       c.phone, c.avatar_url, COALESCE(c.avatar_revision,0), pp.status, pp.enrolled_at,
+		       pp.dropped_at, pp.completed_at, COALESCE(pa.status,''),
+		       latest.id, latest.notes, latest.created_by, latest.created_by_name,
+		       latest.created_at, latest.source_label, COALESCE(latest.observation_count,0)
+		FROM program_sessions ps
+		JOIN programs p ON p.account_id=$1 AND p.id=$2 AND ps.account_id=p.account_id AND ps.program_id=p.id AND ps.id=$3
+		JOIN program_participants pp ON pp.program_id=p.id
+		JOIN contacts c ON c.account_id=p.account_id AND c.id=pp.contact_id
+		LEFT JOIN program_attendance pa ON pa.session_id=ps.id AND pa.participant_id=pp.id
+		LEFT JOIN LATERAL (
+			SELECT i.id, COALESCE(i.notes,'') notes, i.created_by, u.display_name created_by_name,
+			       i.created_at, COALESCE(i.source_label,'') source_label,
+			       COUNT(*) OVER ()::int observation_count
+			FROM interactions i LEFT JOIN users u ON u.id=i.created_by
+			WHERE i.account_id=p.account_id AND i.type='attendance' AND i.program_id=p.id
+			  AND i.program_session_id=ps.id AND i.program_participant_id=pp.id
+			ORDER BY i.created_at DESC, i.id DESC LIMIT 1
+		) latest ON TRUE
+		WHERE ps.date >= pp.enrolled_at
+		  AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+		       OR ps.date < LEAST(pp.dropped_at, pp.completed_at))
+		ORDER BY LOWER(COALESCE(c.custom_name,c.name,c.push_name,c.phone,'')), pp.id
+	`, accountID, programID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]*domain.ProgramSessionRosterEntry, 0)
+	for rows.Next() {
+		entry := &domain.ProgramSessionRosterEntry{ObservationPreview: make([]*domain.ProgramAttendanceObservation, 0)}
+		var oid *uuid.UUID
+		var notes, byName, source *string
+		var by *uuid.UUID
+		var created *time.Time
+		if err := rows.Scan(&entry.ParticipantID, &entry.ContactID, &entry.ContactName, &entry.ContactPhone, &entry.AvatarURL, &entry.AvatarRevision,
+			&entry.ParticipationStatus, &entry.EnrolledAt, &entry.DroppedAt, &entry.CompletedAt, &entry.AttendanceStatus,
+			&oid, &notes, &by, &byName, &created, &source, &entry.ObservationCount); err != nil {
+			return nil, err
+		}
+		if oid != nil {
+			o := &domain.ProgramAttendanceObservation{ID: *oid, CreatedBy: by, CreatedByName: byName}
+			if notes != nil {
+				o.Notes = *notes
+			}
+			if created != nil {
+				o.CreatedAt = *created
+			}
+			if source != nil {
+				o.SourceLabel = *source
+			}
+			entry.ObservationPreview = append(entry.ObservationPreview, o)
+		}
+		result = append(result, entry)
+	}
+	return result, rows.Err()
+}
+
+func (r *ProgramRepository) ListSessionObservations(ctx context.Context, accountID, programID, sessionID, userID uuid.UUID, isAdmin bool) ([]*domain.ProgramSessionObservation, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT o.id,o.account_id,o.session_id,o.notes,o.created_by,creator.display_name,o.created_at,
+		       o.updated_at,o.updated_by,editor.display_name,o.is_pinned,o.pinned_at,o.pinned_by
+		FROM program_session_observations o
+		JOIN program_sessions ps ON ps.account_id=o.account_id AND ps.id=o.session_id
+		JOIN programs p ON p.account_id=o.account_id AND p.id=ps.program_id
+		LEFT JOIN users creator ON creator.id=o.created_by AND creator.account_id=o.account_id
+		LEFT JOIN users editor ON editor.id=o.updated_by AND editor.account_id=o.account_id
+		WHERE o.account_id=$1 AND p.id=$2 AND ps.id=$3
+		ORDER BY o.is_pinned DESC,o.pinned_at DESC NULLS LAST,o.created_at DESC,o.id DESC
+	`, accountID, programID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]*domain.ProgramSessionObservation, 0)
+	for rows.Next() {
+		o := &domain.ProgramSessionObservation{}
+		if err := rows.Scan(&o.ID, &o.AccountID, &o.SessionID, &o.Notes, &o.CreatedBy, &o.CreatedByName, &o.CreatedAt, &o.UpdatedAt, &o.UpdatedBy, &o.UpdatedByName, &o.IsPinned, &o.PinnedAt, &o.PinnedBy); err != nil {
+			return nil, err
+		}
+		own := o.CreatedBy != nil && *o.CreatedBy == userID
+		o.CanEdit = isAdmin || own
+		o.CanPin = isAdmin || own
+		o.CanDelete = isAdmin || own
+		items = append(items, o)
+	}
+	return items, rows.Err()
+}
+
+func (r *ProgramRepository) CreateSessionObservation(ctx context.Context, accountID, programID, sessionID, userID uuid.UUID, notes string) (*domain.ProgramSessionObservation, error) {
+	o := &domain.ProgramSessionObservation{}
+	err := r.db.QueryRow(ctx, `
+		WITH inserted AS (
+		 INSERT INTO program_session_observations(account_id,session_id,notes,created_by)
+		 SELECT $1,ps.id,$4,$5 FROM program_sessions ps JOIN programs p ON p.account_id=ps.account_id AND p.id=ps.program_id
+		 WHERE ps.account_id=$1 AND p.id=$2 AND ps.id=$3
+		 RETURNING *
+		)
+		SELECT i.id,i.account_id,i.session_id,i.notes,i.created_by,u.display_name,i.created_at,i.updated_at,i.updated_by,NULL::text,i.is_pinned,i.pinned_at,i.pinned_by
+		FROM inserted i LEFT JOIN users u ON u.id=i.created_by AND u.account_id=i.account_id
+	`, accountID, programID, sessionID, notes, userID).Scan(&o.ID, &o.AccountID, &o.SessionID, &o.Notes, &o.CreatedBy, &o.CreatedByName, &o.CreatedAt, &o.UpdatedAt, &o.UpdatedBy, &o.UpdatedByName, &o.IsPinned, &o.PinnedAt, &o.PinnedBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	o.CanEdit = true
+	o.CanPin = true
+	o.CanDelete = true
+	return o, nil
+}
+
+func (r *ProgramRepository) UpdateSessionObservation(ctx context.Context, accountID, programID, sessionID, observationID, userID uuid.UUID, isAdmin bool, notes string, expected time.Time) (*domain.ProgramSessionObservation, error) {
+	command, err := r.db.Exec(ctx, `
+		UPDATE program_session_observations o SET notes=$7,updated_at=NOW(),updated_by=$5
+		FROM program_sessions ps JOIN programs p ON p.account_id=ps.account_id AND p.id=ps.program_id
+		WHERE o.account_id=$1 AND o.id=$4 AND o.session_id=$3 AND ps.account_id=o.account_id AND ps.id=o.session_id AND p.id=$2
+		  AND ($6 OR o.created_by=$5) AND o.updated_at=$8
+	`, accountID, programID, sessionID, observationID, userID, isAdmin, notes, expected)
+	if err != nil {
+		return nil, err
+	}
+	if command.RowsAffected() == 0 {
+		return nil, r.classifySessionObservationMutation(ctx, accountID, programID, sessionID, observationID, userID, isAdmin, &expected)
+	}
+	items, err := r.ListSessionObservations(ctx, accountID, programID, sessionID, userID, isAdmin)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range items {
+		if o.ID == observationID {
+			return o, nil
+		}
+	}
+	return nil, ErrProgramSessionObservationNotFound
+}
+
+func (r *ProgramRepository) PinSessionObservation(ctx context.Context, accountID, programID, sessionID, observationID, userID uuid.UUID, isAdmin, pinned bool) (*domain.ProgramSessionObservation, error) {
+	command, err := r.db.Exec(ctx, `
+		UPDATE program_session_observations o SET is_pinned=$7,pinned_at=CASE WHEN $7 THEN NOW() ELSE NULL END,pinned_by=CASE WHEN $7 THEN $5 ELSE NULL END
+		FROM program_sessions ps JOIN programs p ON p.account_id=ps.account_id AND p.id=ps.program_id
+		WHERE o.account_id=$1 AND o.id=$4 AND o.session_id=$3 AND ps.account_id=o.account_id AND ps.id=o.session_id AND p.id=$2 AND ($6 OR o.created_by=$5)
+	`, accountID, programID, sessionID, observationID, userID, isAdmin, pinned)
+	if err != nil {
+		return nil, err
+	}
+	if command.RowsAffected() == 0 {
+		return nil, r.classifySessionObservationMutation(ctx, accountID, programID, sessionID, observationID, userID, isAdmin, nil)
+	}
+	items, err := r.ListSessionObservations(ctx, accountID, programID, sessionID, userID, isAdmin)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range items {
+		if o.ID == observationID {
+			return o, nil
+		}
+	}
+	return nil, ErrProgramSessionObservationNotFound
+}
+
+func (r *ProgramRepository) DeleteSessionObservation(ctx context.Context, accountID, programID, sessionID, observationID, userID uuid.UUID, isAdmin bool) error {
+	command, err := r.db.Exec(ctx, `DELETE FROM program_session_observations o USING program_sessions ps,programs p WHERE o.account_id=$1 AND o.id=$4 AND o.session_id=$3 AND ps.account_id=o.account_id AND ps.id=o.session_id AND p.account_id=ps.account_id AND p.id=ps.program_id AND p.id=$2 AND ($6 OR o.created_by=$5)`, accountID, programID, sessionID, observationID, userID, isAdmin)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return r.classifySessionObservationMutation(ctx, accountID, programID, sessionID, observationID, userID, isAdmin, nil)
+	}
+	return nil
+}
+
+func (r *ProgramRepository) classifySessionObservationMutation(ctx context.Context, accountID, programID, sessionID, observationID, userID uuid.UUID, isAdmin bool, expected *time.Time) error {
+	var creator *uuid.UUID
+	var updated time.Time
+	err := r.db.QueryRow(ctx, `SELECT o.created_by,o.updated_at FROM program_session_observations o JOIN program_sessions ps ON ps.account_id=o.account_id AND ps.id=o.session_id JOIN programs p ON p.account_id=ps.account_id AND p.id=ps.program_id WHERE o.account_id=$1 AND p.id=$2 AND ps.id=$3 AND o.id=$4`, accountID, programID, sessionID, observationID).Scan(&creator, &updated)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrProgramSessionObservationNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !isAdmin && (creator == nil || *creator != userID) {
+		return ErrProgramSessionObservationForbidden
+	}
+	if expected != nil && !updated.Equal(*expected) {
+		return ErrProgramSessionObservationConflict
+	}
+	return ErrProgramSessionObservationConflict
 }
 
 const getAttendanceBySessionQuery = `
@@ -1067,15 +1305,9 @@ JOIN program_sessions s ON s.id = $3 AND s.program_id = p.id AND s.account_id = 
 JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
 JOIN program_attendance a ON a.participant_id = pp.id AND a.session_id = s.id
 WHERE pp.program_id = $2 AND a.status = $4
-	  AND s.date >= pp.enrolled_at::date
-	  AND s.date <= COALESCE(
-		CASE
-		  WHEN pp.dropped_at IS NULL THEN pp.completed_at
-		  WHEN pp.completed_at IS NULL THEN pp.dropped_at
-		  ELSE LEAST(pp.dropped_at, pp.completed_at)
-		END::date,
-		'infinity'::date
-	  )
+	  AND s.date >= pp.enrolled_at
+	  AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+	       OR s.date < LEAST(pp.dropped_at, pp.completed_at))
 `
 
 	// If status is "unmarked", we need to find participants who don't have an attendance record for this session
@@ -1089,15 +1321,9 @@ JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
 JOIN program_sessions s ON s.program_id = p.id AND s.account_id = p.account_id
 LEFT JOIN program_attendance a ON a.participant_id = pp.id AND a.session_id = s.id
 WHERE pp.program_id = $2 AND s.id = $3 AND (a.id IS NULL OR a.status IS NULL)
-	  AND s.date >= pp.enrolled_at::date
-	  AND s.date <= COALESCE(
-		CASE
-		  WHEN pp.dropped_at IS NULL THEN pp.completed_at
-		  WHEN pp.completed_at IS NULL THEN pp.dropped_at
-		  ELSE LEAST(pp.dropped_at, pp.completed_at)
-		END::date,
-		'infinity'::date
-	  )
+	  AND s.date >= pp.enrolled_at
+	  AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+	       OR s.date < LEAST(pp.dropped_at, pp.completed_at))
 `
 		rows, err := r.db.Query(ctx, query, accountID, programID, sessionID)
 		if err != nil {
@@ -1657,7 +1883,7 @@ func (r *ProgramFolderRepository) MoveProgram(ctx context.Context, programID uui
 // --- Attendance Stats ---
 
 func (r *ProgramRepository) GetAttendanceStats(ctx context.Context, accountID, programID uuid.UUID, months []time.Time) ([]*domain.ProgramSessionAttendanceStat, []*domain.ProgramParticipantAttendanceStat, error) {
-	dateFilter := "AND ps.date <= CURRENT_DATE"
+	dateFilter := "AND ps.date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date"
 	args := []interface{}{accountID, programID}
 	if len(months) > 0 {
 		parts := make([]string, 0, len(months))
@@ -1671,7 +1897,7 @@ func (r *ProgramRepository) GetAttendanceStats(ctx context.Context, accountID, p
 
 	filteredSessions := fmt.Sprintf(`
 		WITH filtered_sessions AS (
-			SELECT ps.id, ps.title, ps.topic, ps.date
+			SELECT ps.id, ps.title, ps.topic, ps.date, ps.start_time
 			FROM program_sessions ps
 			JOIN programs p ON p.id = ps.program_id AND p.account_id = $1 AND ps.account_id = p.account_id
 			WHERE p.id = $2 %s
@@ -1686,15 +1912,9 @@ func (r *ProgramRepository) GetAttendanceStats(ctx context.Context, accountID, p
 		FROM filtered_sessions fs
 		LEFT JOIN program_participants pp
 		  ON pp.program_id = $2
-		 AND fs.date >= pp.enrolled_at::date
-		 AND fs.date <= COALESCE(
-			CASE
-			  WHEN pp.dropped_at IS NULL THEN pp.completed_at
-			  WHEN pp.completed_at IS NULL THEN pp.dropped_at
-			  ELSE LEAST(pp.dropped_at, pp.completed_at)
-			END::date,
-			'infinity'::date
-		 )
+		 AND fs.date >= pp.enrolled_at
+		 AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+		      OR fs.date < LEAST(pp.dropped_at, pp.completed_at))
 		LEFT JOIN contacts c ON c.id = pp.contact_id AND c.account_id = $1
 		LEFT JOIN program_attendance pa ON pa.session_id = fs.id AND pa.participant_id = pp.id
 		GROUP BY fs.id, fs.title, fs.topic, fs.date
@@ -1736,15 +1956,9 @@ func (r *ProgramRepository) GetAttendanceStats(ctx context.Context, accountID, p
 		JOIN programs p ON p.id = pp.program_id AND p.account_id = $1
 		JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
 		LEFT JOIN filtered_sessions fs
-		  ON fs.date >= pp.enrolled_at::date
-		 AND fs.date <= COALESCE(
-			CASE
-			  WHEN pp.dropped_at IS NULL THEN pp.completed_at
-			  WHEN pp.completed_at IS NULL THEN pp.dropped_at
-			  ELSE LEAST(pp.dropped_at, pp.completed_at)
-			END::date,
-			'infinity'::date
-		 )
+		  ON fs.date >= pp.enrolled_at
+		 AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+		      OR fs.date < LEAST(pp.dropped_at, pp.completed_at))
 		LEFT JOIN program_attendance pa ON pa.participant_id = pp.id AND pa.session_id = fs.id
 		WHERE pp.program_id = $2 AND pp.status = 'active'
 		GROUP BY pp.id, c.custom_name, c.name, c.push_name, c.phone
@@ -1904,8 +2118,20 @@ func (r *ProgramRepository) UpdateParticipantOutcome(ctx context.Context, accoun
 	if status == "dropped" {
 		endedAt = droppedAt
 	}
-	if endedAt == nil || endedAt.Before(time.Date(enrolledAt.Year(), enrolledAt.Month(), enrolledAt.Day(), 0, 0, 0, 0, enrolledAt.Location())) {
+	var endDate time.Time
+	if endedAt != nil {
+		endDate = time.Date(endedAt.Year(), endedAt.Month(), endedAt.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	enrolledDate := time.Date(enrolledAt.Year(), enrolledAt.Month(), enrolledAt.Day(), 0, 0, 0, 0, time.UTC)
+	if endedAt == nil || endDate.Before(enrolledDate) {
 		return ErrProgramParticipantEndBeforeEnrollment
+	}
+	if status == "dropped" {
+		droppedAt = &endDate
+		completedAt = nil
+	} else {
+		completedAt = &endDate
+		droppedAt = nil
 	}
 
 	command, err := tx.Exec(ctx, `
@@ -1930,6 +2156,56 @@ func (r *ProgramRepository) UpdateParticipantOutcome(ctx context.Context, accoun
 		return ErrProgramParticipantNotFound
 	}
 	return tx.Commit(ctx)
+}
+
+// UpdateParticipantOutcomeDate corrects only the calendar day that closes an
+// existing historical participation. It never changes status, reason, notes,
+// transfer metadata, attendance or observations.
+func (r *ProgramRepository) UpdateParticipantOutcomeDate(ctx context.Context, accountID, programID, participantID uuid.UUID, endedOn time.Time) (time.Time, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status string
+	var enrolledAt time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT pp.status, pp.enrolled_at
+		FROM program_participants pp
+		JOIN programs p ON p.id = pp.program_id AND p.account_id = $1
+		WHERE pp.program_id = $2 AND pp.id = $3
+		FOR UPDATE OF pp
+	`, accountID, programID, participantID).Scan(&status, &enrolledAt); errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrProgramParticipantNotFound
+	} else if err != nil {
+		return time.Time{}, err
+	}
+	if status != "dropped" && status != "completed" {
+		return time.Time{}, ErrProgramParticipantNotEnded
+	}
+	endedOn = time.Date(endedOn.Year(), endedOn.Month(), endedOn.Day(), 0, 0, 0, 0, time.UTC)
+	enrolledOn := time.Date(enrolledAt.Year(), enrolledAt.Month(), enrolledAt.Day(), 0, 0, 0, 0, time.UTC)
+	if endedOn.Before(enrolledOn) {
+		return time.Time{}, ErrProgramParticipantEndBeforeEnrollment
+	}
+
+	var updated time.Time
+	if err := tx.QueryRow(ctx, `
+		UPDATE program_participants pp
+		SET dropped_at = CASE WHEN pp.status = 'dropped' THEN $1::date ELSE pp.dropped_at END,
+		    completed_at = CASE WHEN pp.status = 'completed' THEN $1::date ELSE pp.completed_at END
+		FROM programs p
+		WHERE p.id = pp.program_id AND p.account_id = $2
+		  AND pp.program_id = $3 AND pp.id = $4
+		RETURNING CASE WHEN pp.status = 'dropped' THEN pp.dropped_at ELSE pp.completed_at END
+	`, endedOn, accountID, programID, participantID).Scan(&updated); err != nil {
+		return time.Time{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return time.Time{}, err
+	}
+	return updated, nil
 }
 
 func (r *ProgramRepository) CreateParticipantNote(ctx context.Context, note *domain.ProgramParticipantNote) error {
@@ -1995,7 +2271,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 	if err := r.db.QueryRow(ctx, `
 		SELECT COUNT(*), COUNT(*) FILTER (WHERE session_type = 'recovery')
 		FROM program_sessions
-		WHERE account_id = $1 AND program_id = $2 AND date <= CURRENT_DATE
+		WHERE account_id = $1 AND program_id = $2 AND date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date
 	`, accountID, programID).Scan(&sessionCount, &recoverySessionCount); err != nil {
 		return nil, err
 	}
@@ -2029,16 +2305,10 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 		JOIN contacts c ON c.id = pp.contact_id AND c.account_id = p.account_id
 		LEFT JOIN program_sessions ps
 		  ON ps.account_id = p.account_id AND ps.program_id = pp.program_id
-		 AND ps.date <= CURRENT_DATE
-		 AND ps.date >= pp.enrolled_at::date
-		 AND ps.date <= COALESCE(
-			CASE
-			  WHEN pp.dropped_at IS NULL THEN pp.completed_at
-			  WHEN pp.completed_at IS NULL THEN pp.dropped_at
-			  ELSE LEAST(pp.dropped_at, pp.completed_at)
-			END::date,
-			'infinity'::date
-		 )
+		 AND ps.date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date
+		 AND ps.date >= pp.enrolled_at
+		 AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+		      OR ps.date < LEAST(pp.dropped_at, pp.completed_at))
 		LEFT JOIN program_attendance pa ON pa.session_id = ps.id AND pa.participant_id = pp.id
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*)::int AS notes_count, MAX(event.created_at) AS last_note_at
@@ -2184,7 +2454,7 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 				FROM program_sessions ps
 				JOIN fp ON fp.id = ps.program_id
 				WHERE ps.account_id = $1
-				  AND ps.date <= CURRENT_DATE
+				  AND ps.date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date
 				  AND ($2::date IS NULL OR ps.date >= $2::date)
 				  AND ($3::date IS NULL OR ps.date <= $3::date)
 				GROUP BY ps.program_id
@@ -2195,18 +2465,12 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 				JOIN fp ON fp.id = ps.program_id AND ps.account_id = fp.account_id
 				JOIN program_participants pp ON pp.program_id = ps.program_id AND pp.status = 'active'
 				LEFT JOIN program_attendance pa ON pa.session_id = ps.id AND pa.participant_id = pp.id
-				WHERE ps.date <= CURRENT_DATE
+				WHERE ps.date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date
 				  AND ($2::date IS NULL OR ps.date >= $2::date)
 				  AND ($3::date IS NULL OR ps.date <= $3::date)
-				  AND ps.date >= pp.enrolled_at::date
-				  AND ps.date <= COALESCE(
-					CASE
-					  WHEN pp.dropped_at IS NULL THEN pp.completed_at
-					  WHEN pp.completed_at IS NULL THEN pp.dropped_at
-					  ELSE LEAST(pp.dropped_at, pp.completed_at)
-					END::date,
-					'infinity'::date
-				  )
+				  AND ps.date >= pp.enrolled_at
+				  AND (LEAST(pp.dropped_at, pp.completed_at) IS NULL
+				       OR ps.date < LEAST(pp.dropped_at, pp.completed_at))
 			),
 			participant_att AS (
 				SELECT program_id, participant_id,

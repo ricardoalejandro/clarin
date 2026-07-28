@@ -87,7 +87,7 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 			otherContactID, otherAccountID, otherContactID.String() + "@test",
 		}},
 		{`INSERT INTO program_participants (id,program_id,contact_id,enrolled_at) VALUES
-			($1,$2,$3,'2026-07-15T00:00:00Z'),($4,$2,$5,'2026-07-15T00:00:00Z')`, []any{
+			($1,$2,$3,'2026-07-15'),($4,$2,$5,'2026-07-15')`, []any{
 			participantID, programID, contactID, legacyParticipantID, legacyContactID,
 		}},
 		{`INSERT INTO courses (id,account_id,name,status) VALUES ($1,$2,'Plan histórico','active')`, []any{courseID, accountID}},
@@ -128,6 +128,15 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	}
 	if err := Migrate(db); err != nil {
 		t.Fatalf("idempotent migrate: %v", err)
+	}
+	for _, column := range []string{"enrolled_at", "dropped_at", "completed_at"} {
+		var dataType string
+		if err := db.QueryRow(ctx, `
+			SELECT data_type FROM information_schema.columns
+			WHERE table_schema='public' AND table_name='program_participants' AND column_name=$1
+		`, column).Scan(&dataType); err != nil || dataType != "date" {
+			t.Fatalf("program participant %s must be DATE after migration: type=%q err=%v", column, dataType, err)
+		}
 	}
 
 	assertProgramSessionTitle(t, db, sessionID, "Clase de apertura")
@@ -383,13 +392,12 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 		t.Fatalf("cross-account session read leaked rows: rows=%#v err=%v", isolated, err)
 	}
 
-	// The individual timeline counts only held sessions inside the inclusive
-	// enrollment window. Real records on either side remain visible as history
-	// and must never change the P/F/T summary.
-	beforeEnrollmentSessionID, afterEnrollmentSessionID := uuid.New(), uuid.New()
+	// Enrollment is inclusive while withdrawal/completion are the first day
+	// outside the window. Real records outside it remain visible as history.
+	beforeEnrollmentSessionID, enrollmentSessionID, afterEnrollmentSessionID := uuid.New(), uuid.New(), uuid.New()
 	if _, err := db.Exec(ctx, `
 		UPDATE program_participants
-		SET enrolled_at='2026-07-20T00:00:00Z',status='dropped',dropped_at='2026-07-21T23:59:59Z'
+		SET enrolled_at='2026-07-20',status='dropped',dropped_at='2026-07-21'
 		WHERE id=$1 AND program_id=$2
 	`, participantID, programID); err != nil {
 		t.Fatalf("set attendance-history enrollment window: %v", err)
@@ -397,14 +405,15 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	if _, err := db.Exec(ctx, `
 		INSERT INTO program_sessions (id,account_id,program_id,title,date,start_time) VALUES
 			($1,$3,$4,'Antes de la inscripción','2026-07-19','08:00'),
-			($2,$3,$4,'Después del retiro','2026-07-22','08:00')
-	`, beforeEnrollmentSessionID, afterEnrollmentSessionID, accountID, programID); err != nil {
+			($2,$3,$4,'Día de la inscripción','2026-07-20','08:00'),
+			($5,$3,$4,'Después del retiro','2026-07-22','08:00')
+	`, beforeEnrollmentSessionID, enrollmentSessionID, accountID, programID, afterEnrollmentSessionID); err != nil {
 		t.Fatalf("insert out-of-window history sessions: %v", err)
 	}
 	if _, err := db.Exec(ctx, `
 		INSERT INTO program_attendance (session_id,participant_id,status) VALUES
-			($1,$3,'absent'),($2,$3,'late')
-	`, beforeEnrollmentSessionID, afterEnrollmentSessionID, participantID); err != nil {
+			($1,$4,'absent'),($2,$4,'present'),($3,$4,'late')
+	`, beforeEnrollmentSessionID, enrollmentSessionID, afterEnrollmentSessionID, participantID); err != nil {
 		t.Fatalf("insert out-of-window attendance: %v", err)
 	}
 	historyCounts, historyRows, err := repos.Program.GetParticipantAttendanceHistory(
@@ -413,7 +422,7 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get individual attendance history: %v", err)
 	}
-	if historyCounts.EligibleSessions != 2 || historyCounts.MarkedSessions != 1 ||
+	if historyCounts.EligibleSessions != 1 || historyCounts.MarkedSessions != 1 ||
 		historyCounts.Present != 1 || historyCounts.Absent != 0 || historyCounts.Late != 0 {
 		t.Fatalf("out-of-window attendance polluted summary: %#v", historyCounts)
 	}
@@ -429,7 +438,7 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 			eligibleRows++
 		}
 	}
-	if eligibleRows != 2 || historicalRows != 2 ||
+	if eligibleRows != 1 || historicalRows != 3 ||
 		!historicalStatuses[domain.AttendanceStatusAbsent] || !historicalStatuses[domain.AttendanceStatusLate] {
 		t.Fatalf("unexpected individual timeline split: eligible=%d historical=%d statuses=%#v rows=%#v", eligibleRows, historicalRows, historicalStatuses, historyRows)
 	}

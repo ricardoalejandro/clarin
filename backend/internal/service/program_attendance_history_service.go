@@ -154,8 +154,8 @@ func buildProgramAttendanceHistoryResponse(
 }
 
 // GetParticipantAttendanceHistory returns held sessions only. Eligible
-// sessions are those inside the inclusive enrollment window; real attendance
-// or observations outside it are retained separately and never affect rates.
+// sessions use an inclusive enrollment day and an exclusive closure day; real
+// attendance or observations outside that window stay visible without rates.
 func (s *ProgramService) GetParticipantAttendanceHistory(
 	ctx context.Context,
 	accountID, programID, participantID uuid.UUID,

@@ -73,6 +73,7 @@ export function useContactProfile({
 
   const [observations, setObservations] = useState<Observation[]>([])
   const [observationCount, setObservationCount] = useState(0)
+  const [pinnedObservationCount, setPinnedObservationCount] = useState(0)
   const [observationsLoaded, setObservationsLoaded] = useState(false)
   const [observationsLoading, setObservationsLoading] = useState(false)
   const [observationsError, setObservationsError] = useState('')
@@ -129,6 +130,7 @@ export function useContactProfile({
         setCapabilities(result.data.capabilities || emptyCapabilities)
         setAvailableTags(Array.isArray(result.data.available_tags) ? result.data.available_tags : [])
         setObservationCount(Math.max(0, Number(result.data.observation_count) || 0))
+        setPinnedObservationCount(Math.max(0, Number(result.data.pinned_observation_count) || 0))
         setCustomFieldDefinitions(Array.isArray(result.data.custom_field_definitions) ? result.data.custom_field_definitions : [])
         onContactChangeRef.current?.(next)
       }
@@ -158,6 +160,7 @@ export function useContactProfile({
       const next = Array.isArray(result.data.observations) ? result.data.observations : []
       setObservations(next)
       setObservationCount(Math.max(0, Number(result.data.total) || next.length))
+      setPinnedObservationCount(next.filter(item => item.type === 'note' && item.is_pinned).length)
       setObservationsLoaded(true)
     }
     setObservationsLoading(false)
@@ -178,6 +181,7 @@ export function useContactProfile({
     setSaving(false)
     setObservations([])
     setObservationCount(0)
+    setPinnedObservationCount(0)
     setObservationsLoaded(false)
     setObservationsError('')
     setSavingObservation(false)
@@ -235,10 +239,11 @@ export function useContactProfile({
     setCapabilities(result.data.capabilities || capabilities)
     setAvailableTags(Array.isArray(result.data.available_tags) ? result.data.available_tags : availableTags)
     setObservationCount(Math.max(0, Number(result.data.observation_count) || observationCount))
+    setPinnedObservationCount(Math.max(0, Number(result.data.pinned_observation_count) || pinnedObservationCount))
     setCustomFieldDefinitions(Array.isArray(result.data.custom_field_definitions) ? result.data.custom_field_definitions : customFieldDefinitions)
     onContactChangeRef.current?.(next)
     return { success: true, contact: next }
-  }, [activeKey, availableTags, capabilities, contactId, contextId, customFieldDefinitions, enabled, observationCount, query])
+  }, [activeKey, availableTags, capabilities, contactId, contextId, customFieldDefinitions, enabled, observationCount, pinnedObservationCount, query])
 
   const updateAvatarLocally = useCallback((avatar: { avatar_url?: string | null; revision?: number }) => {
     setContact(current => {
@@ -283,7 +288,7 @@ export function useContactProfile({
     if (!result.success || !result.data?.success || !result.data.observation) {
       return { success: false, error: result.error || 'No se pudo guardar la observación.' }
     }
-    setObservations(current => [result.data!.observation, ...current.filter(item => item.id !== result.data!.observation.id)])
+    setObservations(current => [result.data!.observation, ...current.filter(item => item.id !== result.data!.observation.id)].sort((a,b) => Number(Boolean(b.is_pinned))-Number(Boolean(a.is_pinned)) || Date.parse(b.pinned_at || b.created_at)-Date.parse(a.pinned_at || a.created_at)))
     setObservationCount(current => typeof result.data!.total === 'number' ? Math.max(0, result.data!.total) : current + 1)
     return { success: true }
   }, [activeKey, capabilities.can_manage_observations, contactId, query])
@@ -300,9 +305,28 @@ export function useContactProfile({
       return { success: false, error: result.error || 'No se pudo eliminar la observación.' }
     }
     setObservations(current => current.filter(item => item.id !== observationId))
+	setPinnedObservationCount(current => observationsRef.current.find(item => item.id === observationId)?.is_pinned ? Math.max(0, current - 1) : current)
     setObservationCount(current => typeof result.data!.total === 'number' ? Math.max(0, result.data!.total) : Math.max(0, current - 1))
     return { success: true }
   }, [activeKey, capabilities.can_manage_observations, contactId, query])
+
+  const updateObservation = useCallback(async (observation: Observation, notes: string): Promise<{ success: boolean; error?: string }> => {
+    const cleanNotes = notes.trim()
+    if (!cleanNotes || cleanNotes.length > 4000) return { success: false, error: 'La nota debe contener entre 1 y 4000 caracteres.' }
+    const result = await api<ContactProfileObservationResponse>(`/api/contact-profiles/${contactId}/observations/${observation.id}?${query}`, { method: 'PATCH', body: JSON.stringify({ notes: cleanNotes, expected_updated_at: observation.updated_at || observation.created_at }) })
+    if (!result.success || !result.data?.observation) return { success: false, error: result.error || 'No se pudo editar la nota.' }
+    setObservations(current => current.map(item => item.id === observation.id ? result.data!.observation : item))
+    return { success: true }
+  }, [contactId, query])
+
+  const setObservationPinned = useCallback(async (observation: Observation, pinned: boolean): Promise<{ success: boolean; error?: string }> => {
+    const result = await api<ContactProfileObservationResponse>(`/api/contact-profiles/${contactId}/observations/${observation.id}/pin?${query}`, { method: 'PATCH', body: JSON.stringify({ pinned }) })
+    if (!result.success || !result.data?.observation) return { success: false, error: result.error || 'No se pudo cambiar el fijado.' }
+    const updated = result.data.observation
+    setObservations(current => [updated, ...current.filter(item => item.id !== updated.id)].sort((a,b) => Number(Boolean(b.is_pinned))-Number(Boolean(a.is_pinned)) || Date.parse(b.pinned_at || b.created_at)-Date.parse(a.pinned_at || a.created_at)))
+    setPinnedObservationCount(current => Math.max(0, current + (pinned ? 1 : -1)))
+    return { success: true }
+  }, [contactId, query])
 
   return {
     contact,
@@ -319,6 +343,7 @@ export function useContactProfile({
     updateGoogleSyncLocally,
     observations,
     observationCount,
+    pinnedObservationCount,
     observationsLoaded,
     observationsLoading,
     observationsError,
@@ -326,5 +351,7 @@ export function useContactProfile({
     refreshObservations: () => fetchObservations({ silent: observations.length > 0 }),
     createObservation,
     deleteObservation,
+    updateObservation,
+    setObservationPinned,
   }
 }

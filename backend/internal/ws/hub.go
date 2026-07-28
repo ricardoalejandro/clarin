@@ -63,6 +63,7 @@ type Message struct {
 	DeviceID           string      `json:"device_id,omitempty"`
 	Data               interface{} `json:"data"`
 	RequiredPermission string      `json:"-"`
+	TargetUserIDs      []uuid.UUID `json:"-"`
 }
 
 // Client represents a connected WebSocket client
@@ -93,7 +94,18 @@ func clientCanReceive(client *Client, msg *Message) bool {
 	if msg.Event == EventWhatsAppStatus {
 		required = domain.PermChats
 	}
-	return client.HasPermission(required)
+	if !client.HasPermission(required) {
+		return false
+	}
+	if len(msg.TargetUserIDs) > 0 {
+		for _, userID := range msg.TargetUserIDs {
+			if client.UserID == userID {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 // Hub maintains the set of active clients and broadcasts messages
@@ -255,6 +267,18 @@ func (h *Hub) BroadcastToAccountWithPermission(accountID uuid.UUID, permission, 
 		AccountID:          accountID.String(),
 		Data:               data,
 		RequiredPermission: permission,
+	}
+}
+
+// BroadcastToAccountUsersWithPermission targets only the selected users in an
+// account and still enforces the module permission on each live socket.
+func (h *Hub) BroadcastToAccountUsersWithPermission(accountID uuid.UUID, userIDs []uuid.UUID, permission, event string, data interface{}) {
+	h.broadcast <- &Message{
+		Event:              event,
+		AccountID:          accountID.String(),
+		Data:               data,
+		RequiredPermission: permission,
+		TargetUserIDs:      userIDs,
 	}
 }
 

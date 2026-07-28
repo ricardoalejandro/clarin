@@ -322,12 +322,31 @@ func (s *ProgramService) UpdateParticipantEnrollmentDate(ctx context.Context, ac
 
 func normalizeParticipantEnrollmentDate(enrolledAt, now time.Time) (time.Time, error) {
 	enrolledOn := time.Date(enrolledAt.Year(), enrolledAt.Month(), enrolledAt.Day(), 0, 0, 0, 0, time.UTC)
-	now = now.UTC()
+	lima, err := time.LoadLocation("America/Lima")
+	if err != nil {
+		return time.Time{}, err
+	}
+	now = now.In(lima)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	if enrolledOn.After(today) {
 		return time.Time{}, programInputError("enrollment date cannot be in the future")
 	}
 	return enrolledOn, nil
+}
+
+func normalizeParticipantLifecycleDate(value, now time.Time) (time.Time, error) {
+	lima, err := time.LoadLocation("America/Lima")
+	if err != nil {
+		return time.Time{}, err
+	}
+	localValue := value.In(lima)
+	endedOn := time.Date(localValue.Year(), localValue.Month(), localValue.Day(), 0, 0, 0, 0, time.UTC)
+	localNow := now.In(lima)
+	today := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, time.UTC)
+	if endedOn.After(today) {
+		return time.Time{}, ErrProgramParticipantEndInFuture
+	}
+	return endedOn, nil
 }
 
 func (s *ProgramService) RemoveParticipant(ctx context.Context, accountID, programID, participantID uuid.UUID) error {
@@ -510,6 +529,34 @@ func (s *ProgramService) BatchMarkAttendance(ctx context.Context, accountID, use
 
 func (s *ProgramService) GetAttendanceBySession(ctx context.Context, accountID, sessionID uuid.UUID) ([]*domain.ProgramAttendance, error) {
 	return s.repo.Program.GetAttendanceBySession(ctx, accountID, sessionID)
+}
+
+func (s *ProgramService) GetSessionRoster(ctx context.Context, accountID, programID, sessionID uuid.UUID) ([]*domain.ProgramSessionRosterEntry, error) {
+	return s.repo.Program.GetSessionRoster(ctx, accountID, programID, sessionID)
+}
+
+func (s *ProgramService) ListSessionObservations(ctx context.Context, accountID, programID, sessionID, userID uuid.UUID, isAdmin bool) ([]*domain.ProgramSessionObservation, error) {
+	return s.repo.Program.ListSessionObservations(ctx, accountID, programID, sessionID, userID, isAdmin)
+}
+func (s *ProgramService) CreateSessionObservation(ctx context.Context, accountID, programID, sessionID, userID uuid.UUID, notes string) (*domain.ProgramSessionObservation, error) {
+	notes = strings.TrimSpace(notes)
+	if notes == "" || len([]rune(notes)) > 4000 {
+		return nil, programInputError("session observation must contain between 1 and 4000 characters")
+	}
+	return s.repo.Program.CreateSessionObservation(ctx, accountID, programID, sessionID, userID, notes)
+}
+func (s *ProgramService) UpdateSessionObservation(ctx context.Context, accountID, programID, sessionID, observationID, userID uuid.UUID, isAdmin bool, notes string, expected time.Time) (*domain.ProgramSessionObservation, error) {
+	notes = strings.TrimSpace(notes)
+	if notes == "" || len([]rune(notes)) > 4000 {
+		return nil, programInputError("session observation must contain between 1 and 4000 characters")
+	}
+	return s.repo.Program.UpdateSessionObservation(ctx, accountID, programID, sessionID, observationID, userID, isAdmin, notes, expected)
+}
+func (s *ProgramService) PinSessionObservation(ctx context.Context, accountID, programID, sessionID, observationID, userID uuid.UUID, isAdmin, pinned bool) (*domain.ProgramSessionObservation, error) {
+	return s.repo.Program.PinSessionObservation(ctx, accountID, programID, sessionID, observationID, userID, isAdmin, pinned)
+}
+func (s *ProgramService) DeleteSessionObservation(ctx context.Context, accountID, programID, sessionID, observationID, userID uuid.UUID, isAdmin bool) error {
+	return s.repo.Program.DeleteSessionObservation(ctx, accountID, programID, sessionID, observationID, userID, isAdmin)
 }
 
 func (s *ProgramService) ListAttendanceObservations(ctx context.Context, accountID, programID, sessionID, participantID uuid.UUID) ([]*domain.ProgramAttendanceObservation, error) {
@@ -712,16 +759,35 @@ func (s *ProgramService) UpdateParticipantOutcome(ctx context.Context, accountID
 		transferredToLevel = ""
 		transferredAt = nil
 	}
-	// An outcome changes roster membership immediately, so accepting a future
-	// date would hide an otherwise active participant before that date arrives.
-	// Keep a small tolerance for harmless clock skew between clients and API.
-	latestAllowed := time.Now().Add(time.Minute)
-	if (droppedAt != nil && droppedAt.After(latestAllowed)) ||
-		(completedAt != nil && completedAt.After(latestAllowed)) ||
-		(transferredAt != nil && transferredAt.After(latestAllowed)) {
+	now := time.Now()
+	if droppedAt != nil {
+		normalized, err := normalizeParticipantLifecycleDate(*droppedAt, now)
+		if err != nil {
+			return err
+		}
+		droppedAt = &normalized
+	}
+	if completedAt != nil {
+		normalized, err := normalizeParticipantLifecycleDate(*completedAt, now)
+		if err != nil {
+			return err
+		}
+		completedAt = &normalized
+	}
+	// Transfer metadata remains an instant and retains a small clock-skew
+	// tolerance; participation closure itself is strictly a Lima calendar day.
+	if transferredAt != nil && transferredAt.After(now.Add(time.Minute)) {
 		return ErrProgramParticipantEndInFuture
 	}
 	return s.repo.Program.UpdateParticipantOutcome(ctx, accountID, programID, participantID, status, droppedAt, dropReason, dropNotes, completedAt, transferredToLevel, transferredAt)
+}
+
+func (s *ProgramService) UpdateParticipantOutcomeDate(ctx context.Context, accountID, programID, participantID uuid.UUID, endedOn time.Time) (time.Time, error) {
+	normalized, err := normalizeParticipantLifecycleDate(endedOn, time.Now())
+	if err != nil {
+		return time.Time{}, err
+	}
+	return s.repo.Program.UpdateParticipantOutcomeDate(ctx, accountID, programID, participantID, normalized)
 }
 
 func (s *ProgramService) CreateParticipantNote(ctx context.Context, note *domain.ProgramParticipantNote) error {
