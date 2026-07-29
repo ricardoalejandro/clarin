@@ -28,6 +28,13 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS starred BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS sort_order INT NOT NULL DEFAULT 0`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_list_id ON tasks(list_id) WHERE list_id IS NOT NULL`,
+		`DELETE FROM task_reminders WHERE id IN (
+			SELECT id FROM (
+				SELECT id,ROW_NUMBER() OVER(PARTITION BY task_id ORDER BY delivered ASC,reminder_at DESC,id DESC) AS position
+				FROM task_reminders
+			) ranked WHERE ranked.position>1
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_reminders_task_id ON task_reminders(task_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_starred ON tasks(account_id,starred) WHERE starred`,
 		`CREATE TABLE IF NOT EXISTS task_workflows (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -102,6 +109,13 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_tasks_account_parent ON tasks(account_id, parent_task_id, deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_account_status_due ON tasks(account_id, status_id, due_at) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_account_list_order_v2 ON tasks(account_id, list_id, sort_order) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_board_order ON tasks(account_id, list_id, sort_order, id) WHERE deleted_at IS NULL AND parent_task_id IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_child_order ON tasks(account_id, parent_task_id, sort_order, id) WHERE deleted_at IS NULL AND parent_task_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_created_filter ON tasks(account_id, created_at, id) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_completed_filter ON tasks(account_id, completed_at, id) WHERE deleted_at IS NULL AND completed_at IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_priority_filter ON tasks(account_id, priority) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_type_filter ON tasks(account_id, type) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_account_creator_filter ON tasks(account_id, created_by) WHERE deleted_at IS NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_recurring_occurrence ON tasks(account_id, recurrence_parent_id, due_at) WHERE recurrence_parent_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS task_collaborators (
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -183,6 +197,41 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			FOREIGN KEY(account_id,task_id,attachment_id) REFERENCES task_attachments(account_id,task_id,id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_comment_attachments_comment ON task_comment_attachments(account_id,task_id,comment_id,created_at)`,
+		`CREATE TABLE IF NOT EXISTS task_saved_views (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name VARCHAR(120) NOT NULL,
+			scope_type VARCHAR(20) NOT NULL DEFAULT 'all',
+			scope_id UUID,
+			view_mode VARCHAR(20) NOT NULL DEFAULT 'board',
+			filters JSONB NOT NULL DEFAULT '{}',
+			collapsed_status_ids TEXT[] NOT NULL DEFAULT '{}',
+			is_default BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT task_saved_views_scope_check CHECK (scope_type IN ('all','folder','list')),
+			CONSTRAINT task_saved_views_mode_check CHECK (view_mode IN ('list','board','calendar','gantt','summary')),
+			CONSTRAINT task_saved_views_scope_id_check CHECK (
+				(scope_type='all' AND scope_id IS NULL) OR
+				(scope_type IN ('folder','list') AND scope_id IS NOT NULL)
+			),
+			UNIQUE(account_id,user_id,name),
+			FOREIGN KEY(account_id,user_id) REFERENCES user_accounts(account_id,user_id) ON DELETE CASCADE
+		)`,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema='public' AND table_name='task_saved_views'
+				  AND column_name='collapsed_status_ids' AND udt_name='_uuid'
+			) THEN
+				ALTER TABLE task_saved_views ALTER COLUMN collapsed_status_ids DROP DEFAULT;
+				ALTER TABLE task_saved_views ALTER COLUMN collapsed_status_ids TYPE TEXT[] USING collapsed_status_ids::text[];
+				ALTER TABLE task_saved_views ALTER COLUMN collapsed_status_ids SET DEFAULT '{}'::text[];
+			END IF;
+		END $$`,
+		`CREATE INDEX IF NOT EXISTS idx_task_saved_views_owner ON task_saved_views(account_id,user_id,updated_at DESC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_saved_views_default ON task_saved_views(account_id,user_id) WHERE is_default`,
 		`DO $$ BEGIN ALTER TABLE task_statuses ADD CONSTRAINT task_statuses_workflow_account_fk
 			FOREIGN KEY (account_id,workflow_id) REFERENCES task_workflows(account_id,id) NOT VALID;
 		EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
@@ -303,6 +352,28 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 	`); err != nil {
 		return fmt.Errorf("task work default statuses migration failed: %w", err)
 	}
+	if _, err := db.Exec(ctx, `
+		UPDATE task_statuses SET is_default=FALSE,updated_at=NOW()
+		WHERE is_default AND category<>'not_started'
+	`); err != nil {
+		return fmt.Errorf("task work invalid default status repair failed: %w", err)
+	}
+	if _, err := db.Exec(ctx, `
+		WITH candidates AS (
+			SELECT id,workflow_id,ROW_NUMBER() OVER(PARTITION BY workflow_id ORDER BY sort_order,created_at,id) AS position
+			FROM task_statuses WHERE category='not_started'
+		), missing AS (
+			SELECT candidate.id FROM candidates candidate
+			WHERE candidate.position=1 AND NOT EXISTS(
+				SELECT 1 FROM task_statuses current_default
+				WHERE current_default.workflow_id=candidate.workflow_id AND current_default.is_default
+			)
+		)
+		UPDATE task_statuses status SET is_default=TRUE,updated_at=NOW()
+		FROM missing WHERE status.id=missing.id
+	`); err != nil {
+		return fmt.Errorf("task work missing default status repair failed: %w", err)
+	}
 
 	// Reuse an existing root list named Bandeja general when possible, then
 	// create exactly one durable default list for every account membership.
@@ -421,6 +492,35 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		  AND NOT EXISTS (SELECT 1 FROM tasks collision WHERE collision.id=s.id)
 	`); err != nil {
 		return fmt.Errorf("legacy subtask promotion failed: %w", err)
+	}
+
+	// Legacy clients historically wrote zero-based or repeated positions. Only
+	// repair groups that are demonstrably invalid; healthy user-defined order is
+	// left untouched. Gaps make normal insertions and board moves inexpensive.
+	if _, err := db.Exec(ctx, `
+		WITH invalid_groups AS (
+			SELECT account_id,list_id,parent_task_id
+			FROM tasks
+			WHERE deleted_at IS NULL
+			GROUP BY account_id,list_id,parent_task_id
+			HAVING MIN(sort_order) <= 0 OR COUNT(*) <> COUNT(DISTINCT sort_order)
+		), ranked AS (
+			SELECT task.id,
+				(ROW_NUMBER() OVER (
+					PARTITION BY task.account_id,task.list_id,task.parent_task_id
+					ORDER BY task.sort_order,task.created_at,task.id
+				) * 1024)::int AS repaired_order
+			FROM tasks task
+			JOIN invalid_groups invalid
+			  ON invalid.account_id=task.account_id
+			 AND invalid.list_id IS NOT DISTINCT FROM task.list_id
+			 AND invalid.parent_task_id IS NOT DISTINCT FROM task.parent_task_id
+			WHERE task.deleted_at IS NULL
+		)
+		UPDATE tasks task SET sort_order=ranked.repaired_order
+		FROM ranked WHERE ranked.id=task.id AND task.sort_order IS DISTINCT FROM ranked.repaired_order
+	`); err != nil {
+		return fmt.Errorf("task board order normalization failed: %w", err)
 	}
 
 	return nil

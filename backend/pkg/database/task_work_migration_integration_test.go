@@ -2,12 +2,16 @@ package database
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 )
 
 func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
@@ -77,12 +81,15 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		t.Fatalf("new account membership did not receive a default task list: %v", err)
 	}
 
-	listID, taskID, subtaskID, unlistedTaskID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	listID, taskID, orderConflictID, subtaskID, unlistedTaskID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if _, err := db.Exec(ctx, `INSERT INTO task_lists(id,account_id,workflow_id,name,color,created_by) VALUES($1,$2,$3,'Lista','#10b981',$4)`, listID, accountA, workflowA, userA); err != nil {
 		t.Fatalf("insert list: %v", err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO tasks(id,account_id,created_by,assigned_to,title,type,priority,status,list_id,due_at) VALUES($1,$2,$3,$3,'Legacy','reminder','medium','pending',$4,NOW())`, taskID, accountA, userA, listID); err != nil {
 		t.Fatalf("insert task: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO tasks(id,account_id,created_by,assigned_to,title,type,priority,status,list_id,sort_order,due_at) VALUES($1,$2,$3,$3,'Duplicate order','reminder','medium','pending',$4,0,NOW())`, orderConflictID, accountA, userA, listID); err != nil {
+		t.Fatalf("insert duplicate task order: %v", err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO tasks(id,account_id,created_by,assigned_to,title,type,priority,status,due_at) VALUES($1,$2,$3,$3,'Without list','reminder','medium','pending',NOW())`, unlistedTaskID, accountA, userA); err != nil {
 		t.Fatalf("insert task without list: %v", err)
@@ -96,12 +103,208 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if err := migrateTaskWork(ctx, db); err != nil {
 		t.Fatalf("compatibility migrate: %v", err)
 	}
+	var firstOrderA, firstOrderB int
+	if err := db.QueryRow(ctx, `SELECT MIN(sort_order),MAX(sort_order) FROM tasks WHERE account_id=$1 AND list_id=$2 AND parent_task_id IS NULL AND deleted_at IS NULL`, accountA, listID).Scan(&firstOrderA, &firstOrderB); err != nil {
+		t.Fatalf("load normalized board order: %v", err)
+	}
+	if firstOrderA <= 0 || firstOrderB <= firstOrderA || firstOrderA%1024 != 0 || firstOrderB%1024 != 0 {
+		t.Fatalf("invalid normalized board order: %d,%d", firstOrderA, firstOrderB)
+	}
 	if err := migrateTaskWork(ctx, db); err != nil {
 		t.Fatalf("idempotent migrate: %v", err)
 	}
-	var promotedParent uuid.UUID
-	if err := db.QueryRow(ctx, `SELECT parent_task_id FROM tasks WHERE account_id=$1 AND legacy_subtask_id=$2`, accountA, subtaskID).Scan(&promotedParent); err != nil || promotedParent != taskID {
+	var invalidDefaultWorkflows int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM (
+		SELECT workflow.id
+		FROM task_workflows workflow
+		LEFT JOIN task_statuses status ON status.workflow_id=workflow.id AND status.is_default
+		GROUP BY workflow.id
+		HAVING COUNT(status.id)<>1 OR BOOL_OR(status.category<>'not_started')
+	) invalid`).Scan(&invalidDefaultWorkflows); err != nil || invalidDefaultWorkflows != 0 {
+		t.Fatalf("workflow default status invariant failed: invalid=%d err=%v", invalidDefaultWorkflows, err)
+	}
+	var reminderIndexExists bool
+	if err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_indexes
+		WHERE schemaname='public' AND indexname='uq_task_reminders_task_id')`).Scan(&reminderIndexExists); err != nil || !reminderIndexExists {
+		t.Fatalf("unique task reminder contract missing: exists=%v err=%v", reminderIndexExists, err)
+	}
+	var collapsedType string
+	if err := db.QueryRow(ctx, `SELECT udt_name FROM information_schema.columns
+		WHERE table_schema='public' AND table_name='task_saved_views' AND column_name='collapsed_status_ids'`).Scan(&collapsedType); err != nil || collapsedType != "_text" {
+		t.Fatalf("saved-view collapsed statuses type=%q err=%v, want _text", collapsedType, err)
+	}
+	var secondOrderA, secondOrderB int
+	if err := db.QueryRow(ctx, `SELECT MIN(sort_order),MAX(sort_order) FROM tasks WHERE account_id=$1 AND list_id=$2 AND parent_task_id IS NULL AND deleted_at IS NULL`, accountA, listID).Scan(&secondOrderA, &secondOrderB); err != nil || secondOrderA != firstOrderA || secondOrderB != firstOrderB {
+		t.Fatalf("idempotent migration changed healthy order: before=%d,%d after=%d,%d err=%v", firstOrderA, firstOrderB, secondOrderA, secondOrderB, err)
+	}
+	repos := repository.NewRepositories(db)
+	firstReminderAt := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	secondReminderAt := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Microsecond)
+	if err := repos.Task.CreateReminder(ctx, &domain.TaskReminder{TaskID: taskID, AccountID: accountA, AssignedTo: userA, ReminderAt: firstReminderAt}); err != nil {
+		t.Fatalf("create first canonical reminder: %v", err)
+	}
+	if err := repos.Task.CreateReminder(ctx, &domain.TaskReminder{TaskID: taskID, AccountID: accountA, AssignedTo: userA, ReminderAt: secondReminderAt}); err != nil {
+		t.Fatalf("replace canonical reminder: %v", err)
+	}
+	var reminderCount int
+	var persistedReminderAt time.Time
+	if err := db.QueryRow(ctx, `SELECT COUNT(*),MAX(reminder_at) FROM task_reminders WHERE task_id=$1`, taskID).Scan(&reminderCount, &persistedReminderAt); err != nil || reminderCount != 1 || !persistedReminderAt.Equal(secondReminderAt) {
+		t.Fatalf("reminder upsert is not idempotent: count=%d at=%s err=%v", reminderCount, persistedReminderAt, err)
+	}
+	task, err := repos.Task.GetByID(ctx, taskID, accountA)
+	if err != nil {
+		t.Fatalf("load task for completion transition: %v", err)
+	}
+	var doneStatusID, activeStatusID uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT id FROM task_statuses WHERE account_id=$1 AND workflow_id=$2 AND category='done' ORDER BY sort_order LIMIT 1`, accountA, workflowA).Scan(&doneStatusID); err != nil {
+		t.Fatalf("load done status: %v", err)
+	}
+	if err := db.QueryRow(ctx, `SELECT id FROM task_statuses WHERE account_id=$1 AND workflow_id=$2 AND category='active' ORDER BY sort_order LIMIT 1`, accountA, workflowA).Scan(&activeStatusID); err != nil {
+		t.Fatalf("load active status: %v", err)
+	}
+	completedAt := time.Now().UTC().Truncate(time.Microsecond)
+	task.StatusID, task.Status, task.Progress = &doneStatusID, domain.TaskStatusCompleted, 100
+	task.CompletedAt, task.CompletedBy = &completedAt, &userA
+	if err := repos.Task.Update(ctx, task); err != nil {
+		t.Fatalf("persist active to done transition: %v", err)
+	}
+	var persistedCompletedAt *time.Time
+	var persistedCompletedBy *uuid.UUID
+	var persistedProgress int
+	if err := db.QueryRow(ctx, `SELECT completed_at,completed_by,progress FROM tasks WHERE account_id=$1 AND id=$2`, accountA, taskID).Scan(&persistedCompletedAt, &persistedCompletedBy, &persistedProgress); err != nil || persistedCompletedAt == nil || persistedCompletedBy == nil || *persistedCompletedBy != userA || persistedProgress != 100 {
+		t.Fatalf("done transition was not persisted: at=%v by=%v progress=%d err=%v", persistedCompletedAt, persistedCompletedBy, persistedProgress, err)
+	}
+	doneTask, err := repos.Task.GetByID(ctx, taskID, accountA)
+	if err != nil {
+		t.Fatalf("reload done task for progress invariant: %v", err)
+	}
+	doneTask.Progress = 25
+	if err := repos.Task.Update(ctx, doneTask); err != nil {
+		t.Fatalf("enforce done progress invariant: %v", err)
+	}
+	if err := db.QueryRow(ctx, `SELECT progress FROM tasks WHERE account_id=$1 AND id=$2`, accountA, taskID).Scan(&persistedProgress); err != nil || persistedProgress != 100 {
+		t.Fatalf("done task accepted partial progress: progress=%d err=%v", persistedProgress, err)
+	}
+	task, err = repos.Task.GetByID(ctx, taskID, accountA)
+	if err != nil {
+		t.Fatalf("reload completed task: %v", err)
+	}
+	task.StatusID, task.Status, task.Progress = &activeStatusID, domain.TaskStatusPending, 0
+	task.CompletedAt, task.CompletedBy = nil, nil
+	if err := repos.Task.Update(ctx, task); err != nil {
+		t.Fatalf("persist done to active transition: %v", err)
+	}
+	var clearedAt *time.Time
+	var clearedBy *uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT completed_at,completed_by FROM tasks WHERE account_id=$1 AND id=$2`, accountA, taskID).Scan(&clearedAt, &clearedBy); err != nil || clearedAt != nil || clearedBy != nil {
+		t.Fatalf("active transition did not clear completion: at=%v by=%v err=%v", clearedAt, clearedBy, err)
+	}
+	task, err = repos.Task.GetByID(ctx, taskID, accountA)
+	if err != nil {
+		t.Fatalf("reload active task for list move: %v", err)
+	}
+	task.ListID = &defaultListA
+	if err := repos.Task.Update(ctx, task); err != nil {
+		t.Fatalf("move task to another list: %v", err)
+	}
+	var duplicateOrders int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*)-COUNT(DISTINCT sort_order) FROM tasks WHERE account_id=$1 AND list_id=$2 AND parent_task_id IS NULL AND deleted_at IS NULL`, accountA, defaultListA).Scan(&duplicateOrders); err != nil || duplicateOrders != 0 {
+		t.Fatalf("list move introduced duplicate order: duplicates=%d err=%v", duplicateOrders, err)
+	}
+	doneCategory := domain.TaskStatusCategoryDone
+	if err := repos.TaskWork.UpdateStatus(ctx, accountA, activeStatusID, nil, nil, &doneCategory, nil); !errors.Is(err, repository.ErrTaskStatusInUse) {
+		t.Fatalf("in-use active status changed category: %v", err)
+	}
+	if err := repos.TaskWork.DeleteStatus(ctx, accountA, activeStatusID, &doneStatusID); !errors.Is(err, repository.ErrTaskStatusInUse) {
+		t.Fatalf("cross-category status replacement was accepted: %v", err)
+	}
+	var defaultStatusID uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT id FROM task_statuses WHERE account_id=$1 AND workflow_id=$2 AND is_default`, accountA, workflowA).Scan(&defaultStatusID); err != nil {
+		t.Fatalf("load workflow default status: %v", err)
+	}
+	activeCategory := domain.TaskStatusCategoryActive
+	if err := repos.TaskWork.UpdateStatus(ctx, accountA, defaultStatusID, nil, nil, &activeCategory, nil); !errors.Is(err, repository.ErrTaskWorkflowInvalid) {
+		t.Fatalf("default status category changed: %v", err)
+	}
+	if err := repos.TaskWork.DeleteStatus(ctx, accountA, defaultStatusID, nil); !errors.Is(err, repository.ErrTaskWorkflowInvalid) {
+		t.Fatalf("default status was deleted: %v", err)
+	}
+
+	cycleTaskID := uuid.New()
+	if _, err := db.Exec(ctx, `INSERT INTO tasks(id,account_id,created_by,assigned_to,title,type,priority,status,status_id,list_id,due_at)
+		VALUES($1,$2,$3,$3,'Cycle D','reminder','medium','pending',$4,$5,NOW())`, cycleTaskID, accountA, userA, activeStatusID, defaultListA); err != nil {
+		t.Fatalf("insert dependency cycle task: %v", err)
+	}
+	for _, dependency := range []*domain.TaskDependency{
+		{AccountID: accountA, PredecessorTaskID: orderConflictID, SuccessorTaskID: unlistedTaskID, CreatedBy: &userA},
+		{AccountID: accountA, PredecessorTaskID: cycleTaskID, SuccessorTaskID: taskID, CreatedBy: &userA},
+	} {
+		if err := repos.TaskWork.AddDependency(ctx, dependency); err != nil {
+			t.Fatalf("seed dependency graph: %v", err)
+		}
+	}
+	cycleResults := make(chan error, 2)
+	go func() {
+		cycleResults <- repos.TaskWork.AddDependency(ctx, &domain.TaskDependency{AccountID: accountA, PredecessorTaskID: taskID, SuccessorTaskID: orderConflictID, CreatedBy: &userA})
+	}()
+	go func() {
+		cycleResults <- repos.TaskWork.AddDependency(ctx, &domain.TaskDependency{AccountID: accountA, PredecessorTaskID: unlistedTaskID, SuccessorTaskID: cycleTaskID, CreatedBy: &userA})
+	}()
+	firstCycleErr, secondCycleErr := <-cycleResults, <-cycleResults
+	if (firstCycleErr == nil) == (secondCycleErr == nil) || (!errors.Is(firstCycleErr, repository.ErrTaskDependencyCycle) && !errors.Is(secondCycleErr, repository.ErrTaskDependencyCycle)) {
+		t.Fatalf("concurrent graph cycle was not serialized: first=%v second=%v", firstCycleErr, secondCycleErr)
+	}
+	targetWorkflowID := uuid.New()
+	if _, err := db.Exec(ctx, `INSERT INTO task_workflows(id,account_id,name,created_by) VALUES($1,$2,'Limited workflow',$3)`, targetWorkflowID, accountA, userA); err != nil {
+		t.Fatalf("insert target workflow: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO task_statuses(account_id,workflow_id,name,color,category,sort_order,is_default) VALUES
+		($1,$2,'To do','#64748b','not_started',0,TRUE),($1,$2,'Done','#10b981','done',1,FALSE)`, accountA, targetWorkflowID); err != nil {
+		t.Fatalf("insert target workflow statuses: %v", err)
+	}
+	notInherited := false
+	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, nil, false, &targetWorkflowID, &notInherited, nil, nil, nil); !errors.Is(err, repository.ErrTaskStatusMappingInvalid) {
+		t.Fatalf("list accepted a workflow without equivalent active status: %v", err)
+	}
+	folder := &domain.TaskFolder{AccountID: accountA, WorkflowID: &targetWorkflowID, Name: "General contract", CreatedBy: userA}
+	if err := repos.TaskWork.CreateFolder(ctx, folder); err != nil {
+		t.Fatalf("create folder for default workflow contract: %v", err)
+	}
+	if err := repos.TaskWork.UpdateFolder(ctx, accountA, folder.ID, nil, nil, nil, nil, true); err != nil {
+		t.Fatalf("reset folder to default workflow: %v", err)
+	}
+	var folderWorkflowID uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT workflow_id FROM task_folders WHERE account_id=$1 AND id=$2`, accountA, folder.ID).Scan(&folderWorkflowID); err != nil || folderWorkflowID != workflowA {
+		t.Fatalf("folder did not resolve explicit null to default workflow: workflow=%s err=%v", folderWorkflowID, err)
+	}
+	if err := repos.Task.DeleteList(ctx, listID, accountA); !errors.Is(err, repository.ErrTaskContainerNotEmpty) {
+		t.Fatalf("list with active tasks was archived: %v", err)
+	}
+	if err := repos.TaskWork.SoftDeleteTask(ctx, accountA, orderConflictID, userA); err != nil {
+		t.Fatalf("soft-delete task before archiving list: %v", err)
+	}
+	if err := repos.Task.DeleteList(ctx, listID, accountA); err != nil {
+		t.Fatalf("archive list containing only deleted tasks: %v", err)
+	}
+	if err := repos.TaskWork.RestoreTask(ctx, accountA, orderConflictID); err != nil {
+		t.Fatalf("restore task from archived list into default list: %v", err)
+	}
+	var restoredListID uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT list_id FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountA, orderConflictID).Scan(&restoredListID); err != nil || restoredListID != defaultListA {
+		t.Fatalf("restored task remained hidden in archived list: list=%s err=%v", restoredListID, err)
+	}
+	var promotedChildID, promotedParent uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT id,parent_task_id FROM tasks WHERE account_id=$1 AND legacy_subtask_id=$2`, accountA, subtaskID).Scan(&promotedChildID, &promotedParent); err != nil || promotedParent != taskID {
 		t.Fatalf("legacy subtask was not promoted safely: parent=%s err=%v", promotedParent, err)
+	}
+	if err := repos.TaskWork.SoftDeleteTask(ctx, accountA, taskID, userA); err != nil {
+		t.Fatalf("archive parent and promoted child: %v", err)
+	}
+	if err := repos.TaskWork.RestoreTask(ctx, accountA, promotedChildID); !errors.Is(err, repository.ErrTaskParentArchived) {
+		t.Fatalf("child restored below archived parent: %v", err)
+	}
+	if err := repos.TaskWork.RestoreTask(ctx, accountA, taskID); err != nil {
+		t.Fatalf("restore parent tree: %v", err)
 	}
 	var backfilledList uuid.UUID
 	if err := db.QueryRow(ctx, `SELECT list_id FROM tasks WHERE account_id=$1 AND id=$2`, accountA, unlistedTaskID).Scan(&backfilledList); err != nil || backfilledList != defaultListA {
@@ -118,5 +321,14 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	_, err = db.Exec(ctx, `INSERT INTO task_collaborators(account_id,task_id,user_id,created_by) VALUES($1,$2,$3,$4)`, accountA, taskID, userB, userA)
 	if err == nil {
 		t.Fatal("cross-account collaborator insert unexpectedly succeeded")
+	}
+	if belongs, err := repos.TaskWork.TaskBelongsToAccount(ctx, accountB, taskID); err != nil || belongs {
+		t.Fatalf("cross-account task visibility leaked: belongs=%v err=%v", belongs, err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO task_saved_views(account_id,user_id,name,scope_type,view_mode) VALUES($1,$2,'Mi tablero','all','board')`, accountA, userA); err != nil {
+		t.Fatalf("insert private saved view: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO task_saved_views(account_id,user_id,name,scope_type,view_mode) VALUES($1,$2,'Cross account','all','board')`, accountA, userB); err == nil {
+		t.Fatal("cross-account saved view unexpectedly succeeded")
 	}
 }

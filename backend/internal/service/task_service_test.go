@@ -44,4 +44,47 @@ func TestTaskReminderScheduleChanged(t *testing.T) {
 	if !taskReminderScheduleChanged(before, &after) {
 		t.Fatal("a due-date change must recreate the reminder schedule")
 	}
+	terminal := after
+	terminal.Status = domain.TaskStatusCompleted
+	if !taskReminderScheduleChanged(&after, &terminal) {
+		t.Fatal("completing a task must remove its pending reminder")
+	}
+	if taskCanScheduleReminder(&terminal) {
+		t.Fatal("a completed task must never schedule a reminder")
+	}
+	terminal.Status = domain.TaskStatusCancelled
+	if taskCanScheduleReminder(&terminal) {
+		t.Fatal("a cancelled task must never schedule a reminder")
+	}
+	activeStatus := &domain.TaskStatus{Category: domain.TaskStatusCategoryActive}
+	terminal.StatusDetail = activeStatus
+	if !taskCanScheduleReminder(&terminal) {
+		t.Fatal("canonical workflow category must permit a reopened active task reminder")
+	}
+}
+
+func TestAssignTaskCollaboratorsKeepsCanonicalUsers(t *testing.T) {
+	withUsers, empty := uuid.New(), uuid.New()
+	userID := uuid.New()
+	tasks := []*domain.Task{{ID: withUsers}, {ID: empty}}
+	assignTaskCollaborators(tasks, map[uuid.UUID][]*domain.TaskCollaborator{
+		withUsers: {{UserID: userID, DisplayName: "Ada"}},
+	})
+	if len(tasks[0].Collaborators) != 1 || tasks[0].Collaborators[0].UserID != userID {
+		t.Fatalf("canonical collaborators were not attached: %#v", tasks[0].Collaborators)
+	}
+	if tasks[1].Collaborators == nil || len(tasks[1].Collaborators) != 0 {
+		t.Fatalf("empty collaborator list must be explicit: %#v", tasks[1].Collaborators)
+	}
+}
+
+func TestTaskSubtasksUpdatedPayloadCarriesCanonicalParent(t *testing.T) {
+	parent := &domain.Task{ID: uuid.New(), SubtaskCount: 4, SubtaskDone: 2}
+	payload := taskSubtasksUpdatedPayload(parent)
+	if payload["action"] != "subtasks_updated" || payload["task_id"] != parent.ID.String() {
+		t.Fatalf("unexpected realtime routing payload: %#v", payload)
+	}
+	if payload["task"] != parent {
+		t.Fatalf("canonical parent is missing from realtime payload: %#v", payload)
+	}
 }

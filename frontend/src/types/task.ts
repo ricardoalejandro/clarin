@@ -86,8 +86,56 @@ export interface Task {
   // Subtask counts
   subtask_count?: number
   subtask_done?: number
+  comment_count?: number
+  attachment_count?: number
+  dependency_count?: number
   // Populated on demand
   subtasks?: Subtask[]
+}
+
+export type TaskDueFilter = '' | 'overdue' | 'today' | 'this_week' | 'no_date'
+
+export interface TaskFilters {
+  status_ids: string[]
+  assigned_to_ids: string[]
+  collaborator_ids: string[]
+  priorities: TaskPriority[]
+  types: TaskType[]
+  creator_ids: string[]
+  due: TaskDueFilter
+  created_from: string
+  created_to: string
+  completed_from: string
+  completed_to: string
+  has_subtasks?: boolean
+  has_comments?: boolean
+  has_attachments?: boolean
+  has_dependencies?: boolean
+  starred?: boolean
+}
+
+export interface TaskSavedView {
+  id: string
+  account_id: string
+  user_id: string
+  name: string
+  scope_type: 'all' | 'folder' | 'list'
+  scope_id?: string
+  view_mode: TaskViewMode
+  filters: TaskFilters
+  collapsed_status_ids: string[]
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskMoveResponse {
+  task: Task
+  operation_id: string
+  order?: {
+    list_id: string
+    task_ids: string[]
+  }
 }
 
 export interface Subtask {
@@ -240,4 +288,5 @@ export interface TaskGanttData {
   dependencies: TaskDependency[]
   critical_task_ids: string[]
   slack_minutes: Record<string, number>
+  unscheduled_count: number
 }

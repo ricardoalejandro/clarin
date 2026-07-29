@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -40,6 +39,37 @@ func validTaskRecurrenceRule(value string) bool {
 	default:
 		return false
 	}
+}
+
+var taskQueryFilterKeys = []string{
+	"status", "status_ids", "type", "types", "assigned_to", "assigned_to_ids", "collaborator_ids",
+	"priority", "priorities", "created_by", "creator_ids", "due", "lead_id", "event_id", "program_id",
+	"contact_id", "list_id", "folder_id", "parent_task_id", "include_subtasks", "starred", "from", "to",
+	"created_from", "created_to", "completed_from", "completed_to", "has_subtasks", "has_comments",
+	"has_attachments", "has_dependencies", "search", "deleted",
+}
+
+func taskQueryFilters(c *fiber.Ctx) map[string]string {
+	filters := make(map[string]string)
+	for _, key := range taskQueryFilterKeys {
+		if value := c.Query(key); value != "" {
+			filters[key] = value
+		}
+	}
+	return filters
+}
+
+func invalidTaskQueryDateFilter(filters map[string]string) string {
+	for _, key := range []string{"from", "to", "created_from", "created_to", "completed_from", "completed_to"} {
+		if value := strings.TrimSpace(filters[key]); value != "" {
+			if _, dateErr := time.Parse("2006-01-02", value); dateErr != nil {
+				if _, timestampErr := time.Parse(time.RFC3339, value); timestampErr != nil {
+					return key
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func legacyTaskStatus(category string) string {
@@ -115,6 +145,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		RecurrenceRule  string   `json:"recurrence_rule"`
 		ReminderMinutes *int     `json:"reminder_minutes"`
 		Notes           string   `json:"notes"`
+		Placement       string   `json:"placement"`
 	}
 
 	if err := c.BodyParser(&req); err != nil {
@@ -178,6 +209,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		Notes:           req.Notes,
 		Progress:        req.Progress,
 		IsMilestone:     req.IsMilestone,
+		Placement:       strings.ToLower(strings.TrimSpace(req.Placement)),
 	}
 
 	if req.Type == "" {
@@ -191,6 +223,9 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	}
 	if !validTaskRecurrenceRule(task.RecurrenceRule) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Recurrencia inválida"})
+	}
+	if task.Placement != "" && task.Placement != "top" && task.Placement != "bottom" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Posición inicial inválida"})
 	}
 
 	if req.DueEndAt != nil && *req.DueEndAt != "" {
@@ -289,6 +324,12 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	}
 	task.StatusID = &resolvedStatus.ID
 	task.Status = legacyTaskStatus(resolvedStatus.Category)
+	if resolvedStatus.Category == domain.TaskStatusCategoryDone {
+		now := time.Now()
+		task.Progress = 100
+		task.CompletedAt = &now
+		task.CompletedBy = &userID
+	}
 
 	// Auto-link contact_id from lead if not explicitly set
 	if task.LeadID != nil && task.ContactID == nil {
@@ -330,13 +371,12 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 			collaboratorIDs = append(collaboratorIDs, id)
 		}
 	}
+	task.CollaboratorIDs = collaboratorIDs
+	task.CollaboratorsSet = true
+	task.CollaboratorsActor = &userID
+	task.MutationActor = &userID
 	if err := s.services.Task.Create(c.Context(), task); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to create task"})
-	}
-	if len(collaboratorIDs) > 0 {
-		if err := s.repos.TaskWork.SetCollaborators(c.Context(), accountID, task.ID, userID, collaboratorIDs); err != nil {
-			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Uno de los colaboradores no pertenece a la cuenta"})
-		}
+		return taskWorkError(c, err)
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, task.ID, &userID, "created", fiber.Map{"status_id": task.StatusID})
 
@@ -396,7 +436,6 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	if err != nil {
 		return c.JSON(fiber.Map{"success": true, "task": task})
 	}
-
 	s.invalidateTasksCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "task": full})
 }
@@ -405,28 +444,14 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 func (s *Server) handleGetTasks(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
-	limit, _ := strconv.Atoi(c.Query("limit", "50"))
-	offset, _ := strconv.Atoi(c.Query("offset", "0"))
-	if limit > 200 {
-		limit = 200
+	limit, offset, pageErr := parseTaskListPage(c.Query("limit", "50"), c.Query("offset", "0"))
+	if pageErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Paginación inválida"})
 	}
 
-	filters := map[string]string{}
-	for _, key := range []string{"status", "type", "assigned_to", "lead_id", "event_id", "program_id", "contact_id", "list_id", "folder_id", "parent_task_id", "include_subtasks", "starred", "from", "to", "search", "deleted"} {
-		if v := c.Query(key); v != "" {
-			filters[key] = v
-		}
-	}
-
-	// Redis cache for default load (no filters) — 30s TTL
-	isDefaultTasksLoad := len(filters) == 0
-	tasksCacheKey := ""
-	if isDefaultTasksLoad && s.cache != nil {
-		tasksCacheKey = fmt.Sprintf("tasks:%s:%d:%d", accountID.String(), limit, offset)
-		if cached, err := s.cache.Get(c.Context(), tasksCacheKey); err == nil && cached != nil {
-			c.Set("Content-Type", "application/json")
-			return c.Send(cached)
-		}
+	filters := taskQueryFilters(c)
+	if key := invalidTaskQueryDateFilter(filters); key != "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Filtro de fecha inválido", "field": key})
 	}
 
 	tasks, total, err := s.services.Task.GetByAccount(c.Context(), accountID, filters, limit, offset)
@@ -442,13 +467,19 @@ func (s *Server) handleGetTasks(c *fiber.Ctx) error {
 		"offset":  offset,
 	}
 
-	if tasksCacheKey != "" && s.cache != nil {
-		if data, err := json.Marshal(result); err == nil {
-			_ = s.cache.Set(c.Context(), tasksCacheKey, data, 30*time.Second)
-		}
-	}
-
 	return c.JSON(result)
+}
+
+func parseTaskListPage(limitRaw, offsetRaw string) (int, int, error) {
+	limit, limitErr := strconv.Atoi(limitRaw)
+	offset, offsetErr := strconv.Atoi(offsetRaw)
+	if limitErr != nil || offsetErr != nil || limit < 1 || offset < 0 {
+		return 0, 0, errors.New("invalid task pagination")
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	return limit, offset, nil
 }
 
 // handleGetTask returns a single task
@@ -460,10 +491,9 @@ func (s *Server) handleGetTask(c *fiber.Ctx) error {
 	}
 
 	task, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
-	if err != nil {
+	if err != nil || task.DeletedAt != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Task not found"})
 	}
-	task.Collaborators, _ = s.repos.TaskWork.ListCollaborators(c.Context(), accountID, taskID)
 
 	return c.JSON(fiber.Map{"success": true, "task": task})
 }
@@ -471,13 +501,14 @@ func (s *Server) handleGetTask(c *fiber.Ctx) error {
 // handleUpdateTask updates a task
 func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	taskID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid task ID"})
 	}
 
 	existing, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
-	if err != nil {
+	if err != nil || existing.DeletedAt != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Task not found"})
 	}
 	if existing.ProgramID != nil {
@@ -488,29 +519,30 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	wasDone := existing.Status == domain.TaskStatusCompleted || (existing.StatusDetail != nil && existing.StatusDetail.Category == domain.TaskStatusCategoryDone)
 
 	var req struct {
-		Title           *string `json:"title"`
-		Description     *string `json:"description"`
-		Type            *string `json:"type"`
-		StartAt         *string `json:"start_at"`
-		DueAt           *string `json:"due_at"`
-		DueEndAt        *string `json:"due_end_at"`
-		IsAllDay        *bool   `json:"is_all_day"`
-		Priority        *string `json:"priority"`
-		Status          *string `json:"status"`
-		StatusID        *string `json:"status_id"`
-		AssignedTo      *string `json:"assigned_to"`
-		LeadID          *string `json:"lead_id"`
-		EventID         *string `json:"event_id"`
-		ProgramID       *string `json:"program_id"`
-		ContactID       *string `json:"contact_id"`
-		ListID          *string `json:"list_id"`
-		ParentTaskID    *string `json:"parent_task_id"`
-		Progress        *int    `json:"progress"`
-		IsMilestone     *bool   `json:"is_milestone"`
-		Version         *int64  `json:"version"`
-		RecurrenceRule  *string `json:"recurrence_rule"`
-		ReminderMinutes *int    `json:"reminder_minutes"`
-		Notes           *string `json:"notes"`
+		Title           *string   `json:"title"`
+		Description     *string   `json:"description"`
+		Type            *string   `json:"type"`
+		StartAt         *string   `json:"start_at"`
+		DueAt           *string   `json:"due_at"`
+		DueEndAt        *string   `json:"due_end_at"`
+		IsAllDay        *bool     `json:"is_all_day"`
+		Priority        *string   `json:"priority"`
+		Status          *string   `json:"status"`
+		StatusID        *string   `json:"status_id"`
+		AssignedTo      *string   `json:"assigned_to"`
+		CollaboratorIDs *[]string `json:"collaborator_ids"`
+		LeadID          *string   `json:"lead_id"`
+		EventID         *string   `json:"event_id"`
+		ProgramID       *string   `json:"program_id"`
+		ContactID       *string   `json:"contact_id"`
+		ListID          *string   `json:"list_id"`
+		ParentTaskID    *string   `json:"parent_task_id"`
+		Progress        *int      `json:"progress"`
+		IsMilestone     *bool     `json:"is_milestone"`
+		Version         *int64    `json:"version"`
+		RecurrenceRule  *string   `json:"recurrence_rule"`
+		ReminderMinutes *int      `json:"reminder_minutes"`
+		Notes           *string   `json:"notes"`
 	}
 
 	if err := c.BodyParser(&req); err != nil {
@@ -597,6 +629,35 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		}
 		existing.AssignedTo = id
 	}
+	if req.CollaboratorIDs != nil {
+		ids := make([]uuid.UUID, 0, len(*req.CollaboratorIDs))
+		seen := make(map[uuid.UUID]struct{}, len(*req.CollaboratorIDs))
+		for _, raw := range *req.CollaboratorIDs {
+			id, parseErr := uuid.Parse(raw)
+			if parseErr != nil {
+				return c.Status(400).JSON(fiber.Map{"success": false, "error": "Colaborador inválido"})
+			}
+			if id == existing.AssignedTo {
+				continue
+			}
+			if _, duplicate := seen[id]; duplicate {
+				continue
+			}
+			seen[id] = struct{}{}
+			valid, validationErr := s.repos.TaskWork.UserBelongsToAccount(c.Context(), accountID, id)
+			if validationErr != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el colaborador"})
+			}
+			if !valid {
+				return c.Status(422).JSON(fiber.Map{"success": false, "error": "Uno de los colaboradores no pertenece a la cuenta"})
+			}
+			ids = append(ids, id)
+		}
+		existing.CollaboratorIDs = ids
+		existing.CollaboratorsSet = true
+		existing.CollaboratorsActor = &userID
+	}
+	existing.MutationActor = &userID
 	if req.Progress != nil {
 		if *req.Progress < 0 || *req.Progress > 100 {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Progreso inválido"})
@@ -692,18 +753,16 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		}
 	}
 	if req.ParentTaskID != nil {
-		if *req.ParentTaskID == "" {
-			existing.ParentTaskID = nil
-		} else {
-			id, parseErr := uuid.Parse(*req.ParentTaskID)
+		var requestedParentID *uuid.UUID
+		if strings.TrimSpace(*req.ParentTaskID) != "" {
+			id, parseErr := uuid.Parse(strings.TrimSpace(*req.ParentTaskID))
 			if parseErr != nil || id == taskID {
 				return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea padre inválida"})
 			}
-			parent, parentErr := s.services.Task.GetByID(c.Context(), id, accountID)
-			if parentErr != nil || parent.ParentTaskID != nil {
-				return c.Status(422).JSON(fiber.Map{"success": false, "error": "Sólo se permite un nivel de subtareas"})
-			}
-			existing.ParentTaskID = &id
+			requestedParentID = &id
+		}
+		if !taskRequestUUIDPointersEqual(existing.ParentTaskID, requestedParentID) {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La jerarquía de una tarea no se puede cambiar después de crearla", "code": "task_parent_immutable"})
 		}
 	}
 	if existing.ParentTaskID != nil {
@@ -736,10 +795,14 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		existing.StatusID = &status.ID
 		existing.Status = legacyTaskStatus(status.Category)
 		if status.Category == domain.TaskStatusCategoryDone {
-			now := time.Now()
-			existing.CompletedAt = &now
-			uid := c.Locals("user_id").(uuid.UUID)
-			existing.CompletedBy = &uid
+			if !wasDone || existing.CompletedAt == nil {
+				now := time.Now()
+				existing.CompletedAt = &now
+			}
+			if !wasDone || existing.CompletedBy == nil {
+				uid := c.Locals("user_id").(uuid.UUID)
+				existing.CompletedBy = &uid
+			}
 			existing.Progress = 100
 		} else {
 			existing.CompletedAt = nil
@@ -762,10 +825,14 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		existing.StatusID = &status.ID
 		existing.Status = legacyTaskStatus(status.Category)
 		if category == domain.TaskStatusCategoryDone {
-			now := time.Now()
-			existing.CompletedAt = &now
-			uid := c.Locals("user_id").(uuid.UUID)
-			existing.CompletedBy = &uid
+			if !wasDone || existing.CompletedAt == nil {
+				now := time.Now()
+				existing.CompletedAt = &now
+			}
+			if !wasDone || existing.CompletedBy == nil {
+				uid := c.Locals("user_id").(uuid.UUID)
+				existing.CompletedBy = &uid
+			}
 			existing.Progress = 100
 		} else {
 			existing.CompletedAt = nil
@@ -806,13 +873,9 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Task.Update(c.Context(), existing); err != nil {
-		if errors.Is(err, repository.ErrTaskVersionConflict) {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La tarea cambió en otra sesión", "code": "version_conflict"})
-		}
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update task"})
+		return taskWorkError(c, err)
 	}
-	actorID := c.Locals("user_id").(uuid.UUID)
-	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, existing.ID, &actorID, "updated", fiber.Map{"version": existing.Version})
+	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, existing.ID, &userID, "updated", fiber.Map{"version": existing.Version})
 
 	full, err := s.services.Task.GetByID(c.Context(), existing.ID, accountID)
 	if err != nil {
@@ -827,6 +890,13 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "task": full})
 }
 
+func taskRequestUUIDPointersEqual(left, right *uuid.UUID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
 // handleDeleteTask deletes a task
 func (s *Server) handleDeleteTask(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -835,7 +905,7 @@ func (s *Server) handleDeleteTask(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid task ID"})
 	}
 	existing, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
-	if err != nil {
+	if err != nil || existing.DeletedAt != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Task not found"})
 	}
 	if existing.ProgramID != nil {
@@ -851,8 +921,25 @@ func (s *Server) handleDeleteTask(c *fiber.Ctx) error {
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "archived", fiber.Map{})
 
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "deleted", fiber.Map{"task_id": taskID})
-	return c.JSON(fiber.Map{"success": true})
+	archivedTask, loadErr := s.services.Task.GetByID(c.Context(), taskID, accountID)
+	if loadErr != nil {
+		archivedTask = taskDeleteTombstone(existing, userID)
+	}
+	deletePayload := fiber.Map{"task_id": taskID, "task": archivedTask, "version": archivedTask.Version}
+	s.broadcastTaskWork(accountID, "deleted", deletePayload)
+	if existing.ParentTaskID != nil {
+		s.services.Task.NotifySubtasksUpdated(c.Context(), accountID, *existing.ParentTaskID)
+	}
+	return c.JSON(fiber.Map{"success": true, "task": archivedTask, "version": archivedTask.Version})
+}
+
+func taskDeleteTombstone(task *domain.Task, deletedBy uuid.UUID) *domain.Task {
+	copy := *task
+	now := time.Now()
+	copy.DeletedAt = &now
+	copy.DeletedBy = &deletedBy
+	copy.Version++
+	return &copy
 }
 
 // handleCompleteTask marks a task as completed
@@ -864,7 +951,7 @@ func (s *Server) handleCompleteTask(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid task ID"})
 	}
 	existing, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
-	if err != nil {
+	if err != nil || existing.DeletedAt != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Task not found"})
 	}
 	if existing.ProgramID != nil {
@@ -874,12 +961,19 @@ func (s *Server) handleCompleteTask(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Task.Complete(c.Context(), taskID, accountID, userID); err != nil {
+		if errors.Is(err, repository.ErrTaskWorkNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Task not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to complete task"})
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "completed", fiber.Map{})
+	full, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to reload task"})
+	}
 
 	s.invalidateTasksCache(accountID)
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "task": full})
 }
 
 // handleGetTasksCalendar returns tasks for a date range (calendar view)
@@ -1001,7 +1095,8 @@ func (s *Server) handleCreateSubtask(c *fiber.Ctx) error {
 	if statusErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to resolve task status"})
 	}
-	child := &domain.Task{AccountID: accountID, CreatedBy: c.Locals("user_id").(uuid.UUID), AssignedTo: parent.AssignedTo, Title: strings.TrimSpace(req.Title), Type: domain.TaskTypeReminder, Priority: domain.TaskPriorityMedium, Status: domain.TaskStatusPending, StatusID: &status.ID, ListID: parent.ListID, ParentTaskID: &taskID}
+	userID := c.Locals("user_id").(uuid.UUID)
+	child := &domain.Task{AccountID: accountID, CreatedBy: userID, AssignedTo: parent.AssignedTo, Title: strings.TrimSpace(req.Title), Type: domain.TaskTypeReminder, Priority: domain.TaskPriorityMedium, Status: domain.TaskStatusPending, StatusID: &status.ID, ListID: parent.ListID, ParentTaskID: &taskID, MutationActor: &userID}
 	if err := s.services.Task.Create(c.Context(), child); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to create subtask"})
 	}
@@ -1011,14 +1106,7 @@ func (s *Server) handleCreateSubtask(c *fiber.Ctx) error {
 	}
 	sub := legacySubtaskFromTask(full)
 
-	// Broadcast task update so subtask counts refresh
-	if s.hub != nil {
-		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
-			"action":  "subtask_created",
-			"task_id": taskID.String(),
-		})
-	}
-
+	s.invalidateTasksCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "subtask": sub})
 }
 
@@ -1079,6 +1167,8 @@ func (s *Server) handleUpdateSubtask(c *fiber.Ctx) error {
 	if req.SortOrder != nil {
 		child.SortOrder = *req.SortOrder
 	}
+	userID := c.Locals("user_id").(uuid.UUID)
+	child.MutationActor = &userID
 
 	if err := s.services.Task.Update(c.Context(), child); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update subtask"})
@@ -1088,6 +1178,7 @@ func (s *Server) handleUpdateSubtask(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to load subtask"})
 	}
 	sub := legacySubtaskFromTask(full)
+	s.invalidateTasksCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "subtask": sub})
 }
 
@@ -1103,18 +1194,19 @@ func (s *Server) handleDeleteSubtask(c *fiber.Ctx) error {
 	if parentErr != nil || loadErr != nil || child.ParentTaskID == nil || *child.ParentTaskID != parentID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Subtask not found"})
 	}
-	if err := s.repos.TaskWork.SoftDeleteTask(c.Context(), accountID, subID, c.Locals("user_id").(uuid.UUID)); err != nil {
+	userID := c.Locals("user_id").(uuid.UUID)
+	if err := s.repos.TaskWork.SoftDeleteTask(c.Context(), accountID, subID, userID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to delete subtask"})
 	}
-
-	if s.hub != nil {
-		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
-			"action":  "subtask_deleted",
-			"task_id": c.Params("id"),
-		})
+	s.invalidateTasksCache(accountID)
+	archivedTask, archivedLoadErr := s.services.Task.GetByID(c.Context(), subID, accountID)
+	if archivedLoadErr != nil {
+		archivedTask = taskDeleteTombstone(child, userID)
 	}
-
-	return c.JSON(fiber.Map{"success": true})
+	deletePayload := fiber.Map{"task_id": subID, "parent_task_id": parentID, "task": archivedTask, "version": archivedTask.Version}
+	s.broadcastTaskWork(accountID, "deleted", deletePayload)
+	s.services.Task.NotifySubtasksUpdated(c.Context(), accountID, parentID)
+	return c.JSON(fiber.Map{"success": true, "task": archivedTask, "version": archivedTask.Version})
 }
 
 func (s *Server) handleToggleSubtask(c *fiber.Ctx) error {
@@ -1151,6 +1243,8 @@ func (s *Server) handleToggleSubtask(c *fiber.Ctx) error {
 		child.CompletedBy = nil
 		child.Progress = 0
 	}
+	userID := c.Locals("user_id").(uuid.UUID)
+	child.MutationActor = &userID
 	if err := s.services.Task.Update(c.Context(), child); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to toggle subtask"})
 	}
@@ -1159,14 +1253,7 @@ func (s *Server) handleToggleSubtask(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to load subtask"})
 	}
 	sub := legacySubtaskFromTask(full)
-
-	if s.hub != nil {
-		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
-			"action":  "subtask_toggled",
-			"task_id": parentID.String(),
-		})
-	}
-
+	s.invalidateTasksCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "subtask": sub})
 }
 
@@ -1257,6 +1344,7 @@ func (s *Server) handleUpdateTaskList(c *fiber.Ctx) error {
 	if err := s.repos.Task.UpdateList(c.Context(), listID, accountID, req.Name, req.Color, req.SortOrder); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update task list"})
 	}
+	s.invalidateTasksCache(accountID)
 
 	if s.hub != nil {
 		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
@@ -1278,6 +1366,9 @@ func (s *Server) handleDeleteTaskList(c *fiber.Ctx) error {
 		if errors.Is(err, repository.ErrDefaultTaskList) {
 			return c.Status(409).JSON(fiber.Map{"success": false, "error": "La Bandeja general es la lista predeterminada y no se puede archivar"})
 		}
+		if errors.Is(err, repository.ErrTaskContainerNotEmpty) {
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "Mueve o elimina las tareas antes de archivar", "code": "task_container_not_empty"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to delete task list"})
 	}
 
@@ -1297,13 +1388,28 @@ func (s *Server) handleToggleStar(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid task ID"})
 	}
+	existing, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Task not found"})
+	}
+	if existing.ProgramID != nil {
+		if handled, guardErr := s.validateTaskProgramMutation(c, accountID, *existing.ProgramID); handled {
+			return guardErr
+		}
+	}
 
 	starred, err := s.repos.Task.ToggleStar(c.Context(), taskID, accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to toggle star"})
 	}
+	full, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to reload task"})
+	}
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(accountID, "starred_updated", fiber.Map{"task_id": taskID, "task": full})
 
-	return c.JSON(fiber.Map{"success": true, "starred": starred})
+	return c.JSON(fiber.Map{"success": true, "starred": starred, "task": full})
 }
 
 func (s *Server) handleReorderLists(c *fiber.Ctx) error {
@@ -1376,8 +1482,9 @@ func (s *Server) handleReorderTasks(c *fiber.Ctx) error {
 	}
 
 	if err := s.repos.Task.ReorderTasks(c.Context(), accountID, uuids); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to reorder tasks"})
+		return taskWorkError(c, err)
 	}
-
-	return c.JSON(fiber.Map{"success": true})
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(accountID, "reordered", fiber.Map{"order": fiber.Map{"task_ids": uuids}})
+	return c.JSON(fiber.Map{"success": true, "order": fiber.Map{"task_ids": uuids}})
 }

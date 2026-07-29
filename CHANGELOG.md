@@ -1,5 +1,22 @@
 # Changelog — Clarin CRM
 
+## 2026-07-29
+
+### Build 2 — Clarin Work ordena, filtra y coordina el trabajo
+- ✨ El tablero Kanban permite mover tareas entre estados con mouse, pulsación táctil prolongada o teclado, incluso hacia columnas vacías o contraídas.
+- 🔄 El orden manual y el cambio de estado se guardan como una sola operación, se reconcilian en tiempo real y se recuperan con seguridad ante conflictos.
+- ✨ Los filtros combinables y las vistas privadas guardadas permiten enfocar responsables, colaboradores, fechas, prioridad, tipo y contenido sin perder el ámbito elegido.
+- ✨ La creación rápida conserva lista, responsable buscable, fecha y prioridad; la creación completa mantiene el borrador y las tareas aparecen de inmediato en su lista o carpeta.
+- 💄 Las tarjetas, columnas, estados vacíos, métricas y superficies responsivas hacen de Clarin Work un espacio más claro, compacto y agradable de usar.
+- 🔒 Las listas, flujos, estados, vistas y movimientos validan cuenta, versión y orden durable, también cuando un tablero reúne varios flujos.
+- 🔧 Se documentaron los contratos de Clarin Work y su matriz de verificación en una skill local obligatoria para futuras modificaciones.
+
+### Build 1 — Conversaciones y detalle profesional de tareas
+- ✨ Cada tarea incorpora actividad, comentarios, menciones, archivos, dependencias y subtareas reales dentro del mismo contexto de trabajo.
+- ✨ El responsable se elige mediante búsqueda y los colaboradores permanecen diferenciados del dueño de la tarea.
+- 💄 El detalle puede acoplarse, moverse, redimensionarse o maximizarse, y recuerda su geometría sin bloquear innecesariamente el tablero.
+- 🐛 Escape cierra la creación y cancela ediciones en curso sin guardar cambios accidentales.
+
 ## 2026-07-22
 
 ### Build 3 — Google Sync vuelve a la ficha única

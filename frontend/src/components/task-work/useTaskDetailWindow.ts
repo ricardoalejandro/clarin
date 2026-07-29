@@ -7,7 +7,7 @@ export type TaskDetailWindowMode = 'docked' | 'floating' | 'maximized'
 export type TaskDetailResizeEdge = 'n' | 'e' | 's' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 type Geometry = { x: number; y: number; width: number; height: number }
 
-const STORAGE_KEY = 'clarin:tasks:detail-window:v1'
+const STORAGE_KEY = 'clarin:tasks:detail-window:v2'
 const MARGIN = 12
 const MIN_WIDTH = 440
 const MIN_HEIGHT = 460
@@ -39,15 +39,19 @@ export default function useTaskDetailWindow() {
 
   useEffect(() => {
     try {
-      const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as { mode?: TaskDetailWindowMode; geometry?: Geometry } | null
-      if (value?.mode && ['docked', 'floating', 'maximized'].includes(value.mode)) setModeState(value.mode)
+      const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as { mode?: TaskDetailWindowMode; restoreMode?: Exclude<TaskDetailWindowMode, 'maximized'>; geometry?: Geometry } | null
+      if (value?.restoreMode && ['docked', 'floating'].includes(value.restoreMode)) restoreModeRef.current = value.restoreMode
+      if (value?.mode && ['docked', 'floating', 'maximized'].includes(value.mode)) {
+        setModeState(value.mode)
+        if (value.mode !== 'maximized') restoreModeRef.current = value.mode
+      }
       if (value?.geometry && Object.values(value.geometry).every(Number.isFinite)) setGeometry(clampGeometry(value.geometry))
     } catch {}
     setHydrated(true)
   }, [])
   useEffect(() => {
     if (!hydrated) return
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ mode, geometry }))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ mode, restoreMode: restoreModeRef.current, geometry }))
   }, [geometry, hydrated, mode])
   useEffect(() => {
     const resize = () => { setIsMobile(window.innerWidth < 768); setGeometry(current => clampGeometry(current)) }
@@ -57,6 +61,7 @@ export default function useTaskDetailWindow() {
   }, [])
 
   const effectiveMode: TaskDetailWindowMode = isMobile ? 'maximized' : mode
+  const isModal = effectiveMode === 'maximized'
   const setMode = useCallback((next: TaskDetailWindowMode) => {
     if (next !== 'maximized') restoreModeRef.current = next
     setModeState(next)
@@ -116,5 +121,5 @@ export default function useTaskDetailWindow() {
     return { left: geometry.x, top: geometry.y, width: geometry.width, height: geometry.height }
   }, [effectiveMode, geometry, isMobile])
 
-  return { effectiveMode, isMobile, panelStyle, setMode, toggleMaximized, beginDrag, beginResize }
+  return { effectiveMode, isMobile, isModal, panelStyle, setMode, toggleMaximized, beginDrag, beginResize }
 }

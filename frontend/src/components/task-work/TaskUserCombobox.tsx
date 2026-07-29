@@ -44,10 +44,10 @@ export default function TaskUserCombobox({ users, value, onChange, placeholder =
     const position = () => {
       const rect = triggerRef.current?.getBoundingClientRect()
       if (!rect) return
-      const width = Math.max(280, rect.width)
+      const width = Math.min(Math.max(280, rect.width), window.innerWidth - 24)
       const roomBelow = window.innerHeight - rect.bottom
       const openAbove = roomBelow < 330 && rect.top > roomBelow
-      setStyle({ left: Math.min(rect.left, window.innerWidth - width - 12), width, ...(openAbove ? { bottom: window.innerHeight - rect.top + 6 } : { top: rect.bottom + 6 }) })
+      setStyle({ left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)), width, ...(openAbove ? { bottom: window.innerHeight - rect.top + 6 } : { top: rect.bottom + 6 }) })
     }
     position()
     window.addEventListener('resize', position)
@@ -75,7 +75,15 @@ export default function TaskUserCombobox({ users, value, onChange, placeholder =
     </button>
     {open && typeof document !== 'undefined' && createPortal(<>
       <button type="button" aria-label="Cerrar selector" className="fixed inset-0 z-[109] cursor-default" onMouseDown={() => close(false)} />
-      <div style={style} className="fixed z-[110] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15">
+      <div data-task-user-combobox-portal style={style} onKeyDown={event => {
+        if (event.key !== 'Tab') return
+        const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled]),[tabindex]:not([tabindex="-1"])'))
+        if (!focusable.length) return
+        const first = focusable[0]
+        const last = focusable[focusable.length - 1]
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+      }} className="fixed z-[110] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15">
         <div className="relative border-b border-slate-100 p-2.5"><Search className="absolute left-5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input ref={inputRef} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
           if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close() }
           if (event.key === 'ArrowDown') { event.preventDefault(); setHighlighted(index => Math.min(filtered.length - 1, index + 1)) }

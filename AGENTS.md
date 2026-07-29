@@ -32,6 +32,7 @@ Before changing any area below, read the matching local skill completely:
 - Kommo import/status tags/phone normalization/compatibility fields: `.codex/skills/clarin-kommo-integration/SKILL.md`
 - MCP server, MCP admin UI, credentials, sessions, audit, tools, or docs: `.codex/skills/clarin-mcp-security/SKILL.md`
 - Chats, WhatsApp devices/capabilities, messages/replies, chat details, contact avatars, statuses, stickers, or realtime chat UX: `.codex/skills/clarin-chat-whatsapp-experience/SKILL.md` plus every matching layer skill above.
+- Clarin Work, tasks, Kanban, task folders/lists/workflows/statuses, ordering, filters/saved views, task detail, subtasks, comments, dependencies, Gantt/calendar, or task realtime behavior: `.codex/skills/clarin-task-work-experience/SKILL.md` plus every matching layer skill above.
 
 If a task touches multiple areas, read all matching skills before editing.
 
@@ -54,6 +55,24 @@ If a task touches multiple areas, read all matching skills before editing.
 - Program survey applications belong to one Program and freeze their recipient audience at launch. Link each recipient and response to the canonical Contact and the specific `program_participant_id` so the same Contact can participate independently in multiple Programs.
 - Editing a template must never mutate published applications, questions, answers, exports or analytics. Preserve existing public slugs and legacy responses during migrations; do not use delete-and-reinsert question flows once answers exist.
 - Results are instance-specific. Template-level analytics may compare or aggregate instances only with explicit origin/revision filters and must never silently mix incompatible question revisions.
+
+## Clarin Work Product Invariants
+
+- Every task read, write, reorder, filter, saved view and WebSocket event is account-scoped. A task belongs to one real list; use the account default list only as a compatibility fallback.
+- Folders contain lists, lists resolve workflows and workflows own statuses. Never assign a task a status from another workflow.
+- Persist manual top-level task order inside its list and child order inside its parent. Creating, restoring, changing lists and moving on a board must allocate a safe durable position.
+- Move task status and order atomically with optimistic concurrency. Never combine unrelated reorder and status calls or replace the order with only filtered/visible cards.
+- Aggregate boards group heterogeneous workflows by category and map a drop to the task's real equivalent status. Disable destinations without a valid equivalent.
+- Keep one responsible owner plus optional collaborators unless a deliberate full-stack migration introduces multi-owner semantics.
+- Real subtasks are one-level child tasks in the parent's list and compatible workflow. Do not expose the legacy checklist table as a second editable source.
+- Archive task lists/folders only when they contain no active tasks. Child restore requires an active parent; concurrent structure/task mutations must lock and revalidate their dependencies inside one transaction.
+- Aggregate Kanban anchors are same-list and same workflow category, not necessarily the same concrete status. Workflow changes must remap every affected task by category atomically or reject without partial changes.
+- Treat task comments, mentions, attachments, activity and dependencies as task-scoped account data. Keep comment drafts, scroll and edits stable during realtime reconciliation.
+- Page older task comments explicitly and preserve chronological order and scroll; never hide history behind a fixed unannounced limit.
+- Patch task/order WebSocket events by stable ID/version/operation ID. Do not replace a populated board with skeletons or reload hierarchy for ordinary task/comment events.
+- Base task detail layout on measured available surface width. Docked/floating modes leave the workspace interactive; maximized/mobile modes may block it.
+- Keep task labels separate from Contact tags. Never reuse Contact identity metadata as task metadata without an explicit task model.
+- Ship only task controls that work end to end across success, loading, empty, conflict, permission and failure states.
 
 ## Chat And WhatsApp Product Invariants
 

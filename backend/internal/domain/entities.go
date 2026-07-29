@@ -1366,41 +1366,46 @@ type TaskFolder struct {
 
 // Task represents a scheduled action (call, follow-up, meeting, reminder)
 type Task struct {
-	ID                 uuid.UUID  `json:"id"`
-	AccountID          uuid.UUID  `json:"account_id"`
-	CreatedBy          uuid.UUID  `json:"created_by"`
-	AssignedTo         uuid.UUID  `json:"assigned_to"`
-	Title              string     `json:"title"`
-	Description        string     `json:"description,omitempty"`
-	Type               string     `json:"type"` // call, whatsapp, meeting, reminder
-	StartAt            *time.Time `json:"start_at,omitempty"`
-	DueAt              *time.Time `json:"due_at,omitempty"`
-	DueEndAt           *time.Time `json:"due_end_at,omitempty"`
-	IsAllDay           bool       `json:"is_all_day"`
-	Priority           string     `json:"priority"` // low, medium, high, urgent
-	Status             string     `json:"status"`   // pending, completed, overdue, cancelled
-	StatusID           *uuid.UUID `json:"status_id,omitempty"`
-	CompletedAt        *time.Time `json:"completed_at,omitempty"`
-	CompletedBy        *uuid.UUID `json:"completed_by,omitempty"`
-	LeadID             *uuid.UUID `json:"lead_id,omitempty"`
-	EventID            *uuid.UUID `json:"event_id,omitempty"`
-	ProgramID          *uuid.UUID `json:"program_id,omitempty"`
-	ContactID          *uuid.UUID `json:"contact_id,omitempty"`
-	ListID             *uuid.UUID `json:"list_id,omitempty"`
-	ParentTaskID       *uuid.UUID `json:"parent_task_id,omitempty"`
-	Starred            bool       `json:"starred"`
-	SortOrder          int        `json:"sort_order"`
-	Progress           int        `json:"progress"`
-	IsMilestone        bool       `json:"is_milestone"`
-	DeletedAt          *time.Time `json:"deleted_at,omitempty"`
-	DeletedBy          *uuid.UUID `json:"deleted_by,omitempty"`
-	Version            int64      `json:"version"`
-	RecurrenceRule     string     `json:"recurrence_rule,omitempty"`
-	RecurrenceParentID *uuid.UUID `json:"recurrence_parent_id,omitempty"`
-	ReminderMinutes    *int       `json:"reminder_minutes,omitempty"`
-	Notes              string     `json:"notes,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                 uuid.UUID   `json:"id"`
+	AccountID          uuid.UUID   `json:"account_id"`
+	CreatedBy          uuid.UUID   `json:"created_by"`
+	AssignedTo         uuid.UUID   `json:"assigned_to"`
+	Title              string      `json:"title"`
+	Description        string      `json:"description,omitempty"`
+	Type               string      `json:"type"` // call, whatsapp, meeting, reminder
+	StartAt            *time.Time  `json:"start_at,omitempty"`
+	DueAt              *time.Time  `json:"due_at,omitempty"`
+	DueEndAt           *time.Time  `json:"due_end_at,omitempty"`
+	IsAllDay           bool        `json:"is_all_day"`
+	Priority           string      `json:"priority"` // low, medium, high, urgent
+	Status             string      `json:"status"`   // pending, completed, overdue, cancelled
+	StatusID           *uuid.UUID  `json:"status_id,omitempty"`
+	CompletedAt        *time.Time  `json:"completed_at,omitempty"`
+	CompletedBy        *uuid.UUID  `json:"completed_by,omitempty"`
+	LeadID             *uuid.UUID  `json:"lead_id,omitempty"`
+	EventID            *uuid.UUID  `json:"event_id,omitempty"`
+	ProgramID          *uuid.UUID  `json:"program_id,omitempty"`
+	ContactID          *uuid.UUID  `json:"contact_id,omitempty"`
+	ListID             *uuid.UUID  `json:"list_id,omitempty"`
+	ParentTaskID       *uuid.UUID  `json:"parent_task_id,omitempty"`
+	Starred            bool        `json:"starred"`
+	SortOrder          int         `json:"sort_order"`
+	Progress           int         `json:"progress"`
+	IsMilestone        bool        `json:"is_milestone"`
+	DeletedAt          *time.Time  `json:"deleted_at,omitempty"`
+	DeletedBy          *uuid.UUID  `json:"deleted_by,omitempty"`
+	Version            int64       `json:"version"`
+	RecurrenceRule     string      `json:"recurrence_rule,omitempty"`
+	RecurrenceParentID *uuid.UUID  `json:"recurrence_parent_id,omitempty"`
+	ReminderMinutes    *int        `json:"reminder_minutes,omitempty"`
+	Notes              string      `json:"notes,omitempty"`
+	Placement          string      `json:"-"`
+	CollaboratorIDs    []uuid.UUID `json:"-"`
+	CollaboratorsSet   bool        `json:"-"`
+	CollaboratorsActor *uuid.UUID  `json:"-"`
+	MutationActor      *uuid.UUID  `json:"-"`
+	CreatedAt          time.Time   `json:"created_at"`
+	UpdatedAt          time.Time   `json:"updated_at"`
 
 	// Populated on demand (JOINs)
 	AssignedToName string              `json:"assigned_to_name,omitempty"`
@@ -1416,8 +1421,28 @@ type Task struct {
 	Collaborators  []*TaskCollaborator `json:"collaborators,omitempty"`
 
 	// Subtask counts (populated via subqueries)
-	SubtaskCount int `json:"subtask_count"`
-	SubtaskDone  int `json:"subtask_done"`
+	SubtaskCount    int `json:"subtask_count"`
+	SubtaskDone     int `json:"subtask_done"`
+	CommentCount    int `json:"comment_count"`
+	AttachmentCount int `json:"attachment_count"`
+}
+
+// TaskSavedView is a private, account-scoped task view owned by one user.
+// Filters stay as JSON so the UI can evolve its filter vocabulary without a
+// schema migration while the owner/account boundary remains relational.
+type TaskSavedView struct {
+	ID                 uuid.UUID       `json:"id"`
+	AccountID          uuid.UUID       `json:"account_id"`
+	UserID             uuid.UUID       `json:"user_id"`
+	Name               string          `json:"name"`
+	ScopeType          string          `json:"scope_type"`
+	ScopeID            *uuid.UUID      `json:"scope_id,omitempty"`
+	ViewMode           string          `json:"view_mode"`
+	Filters            json.RawMessage `json:"filters"`
+	CollapsedStatusIDs []string        `json:"collapsed_status_ids"`
+	IsDefault          bool            `json:"is_default"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
 }
 
 type TaskCollaborator struct {
