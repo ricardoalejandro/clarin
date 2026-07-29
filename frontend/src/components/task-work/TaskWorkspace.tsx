@@ -443,8 +443,14 @@ export default function TaskWorkspace() {
   useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.target as HTMLElement)?.matches('input,textarea,select,[contenteditable="true"]')) return; if (event.key.toLowerCase() === 'n') { event.preventDefault(); if (scope.type === 'trash') setError('Sal de la papelera para crear una tarea.'); else if (scope.type === 'folder' && !activeFolder?.lists.length) { setError('Esta carpeta todavía no tiene listas. Crea una lista antes de añadir tareas.'); setStructureOpen(true) } else { setSubtaskParent(null); setEditingTask(null); setEditorOpen(true) } } if (event.key === '/') { event.preventDefault(); document.getElementById('task-search')?.focus() } }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener) }, [activeFolder, scope.type])
 
   const defaultWorkflow = workflows.find(item => item.is_default) || workflows[0]
-  const scopedLists = scope.type === 'list' ? (activeList ? [activeList] : []) : scope.type === 'folder' ? (activeFolder?.lists || []) : scope.type === 'all' ? lists : []
-  const scopedWorkflowIds = Array.from(new Set(scopedLists.map(list => list.workflow_id || defaultWorkflow?.id).filter((id): id is string => Boolean(id))))
+  const scopedLists = useMemo(() => scope.type === 'list'
+    ? (activeList ? [activeList] : [])
+    : scope.type === 'folder'
+      ? (activeFolder?.lists || [])
+      : scope.type === 'all' ? lists : [], [activeFolder, activeList, lists, scope.type])
+  const scopedWorkflowIds = useMemo(() => Array.from(new Set(scopedLists
+    .map(list => list.workflow_id || defaultWorkflow?.id)
+    .filter((id): id is string => Boolean(id)))), [defaultWorkflow?.id, scopedLists])
   const scopeWorkflow = workflows.find(item => item.id === (scopedWorkflowIds[0] || activeFolder?.workflow_id)) || defaultWorkflow
   const statuses = useMemo(() => {
     const source = [...(scopeWorkflow?.statuses || [])]

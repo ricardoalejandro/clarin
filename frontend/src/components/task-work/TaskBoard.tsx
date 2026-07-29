@@ -208,9 +208,10 @@ function TaskBoardCard({
   onStar: () => void
   onComplete?: () => void
 }) {
+  const sortableData = useMemo(() => ({ type: 'task', columnId }), [columnId])
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
-    data: { type: 'task', columnId },
+    data: sortableData,
   })
   const overdue = Boolean(task.due_at && new Date(task.due_at) < new Date() && !['done', 'cancelled'].includes(task.status_detail?.category || ''))
   const done = task.status_detail?.category === 'done'
@@ -397,7 +398,8 @@ function BoardColumn({
   const expanded = !collapsed || temporarilyExpanded
   const defaultList = lists.find(item => item.id === defaultListId)
   const canReceive = !activeTask || Boolean(resolvedStatus(activeTask, status, allStatuses))
-  const { setNodeRef, isOver } = useDroppable({ id: `column:${status.id}`, data: { type: 'column', columnId: status.id }, disabled: !canReceive })
+  const droppableData = useMemo(() => ({ type: 'column', columnId: status.id }), [status.id])
+  const { setNodeRef, isOver } = useDroppable({ id: `column:${status.id}`, data: droppableData, disabled: !canReceive })
   const [menuOpen, setMenuOpen] = useState(false)
   const statusColor = status.color || '#64748b'
 
@@ -481,6 +483,7 @@ export default function TaskBoard({
   const [overColumnId, setOverColumnId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<{ message: string; retry: () => void } | null>(null)
   const snapshotRef = useRef<{ tasks: Task[]; orders: ColumnOrders } | null>(null)
+  const orderFrameRef = useRef<number | null>(null)
   const lastDragEndRef = useRef(0)
   const tasksById = useMemo(() => new Map(localTasks.map(task => [task.id, task])), [localTasks])
   const activeTask = activeId ? tasksById.get(activeId) : undefined
@@ -493,11 +496,36 @@ export default function TaskBoard({
 
   useEffect(() => {
     if (activeId) return
+    if (orderFrameRef.current !== null) {
+      cancelAnimationFrame(orderFrameRef.current)
+      orderFrameRef.current = null
+    }
     const nextOrders = initialOrders(tasks, statuses, lists, groupByList)
     setLocalTasks(tasks)
     setOrders(nextOrders)
     ordersRef.current = nextOrders
   }, [activeId, groupByList, lists, statuses, tasks])
+
+  useEffect(() => () => {
+    if (orderFrameRef.current !== null) cancelAnimationFrame(orderFrameRef.current)
+  }, [])
+
+  const renderQueuedOrders = useCallback((nextOrders: ColumnOrders) => {
+    ordersRef.current = nextOrders
+    if (orderFrameRef.current !== null) return
+    orderFrameRef.current = requestAnimationFrame(() => {
+      orderFrameRef.current = null
+      setOrders(ordersRef.current)
+    })
+  }, [])
+
+  const flushQueuedOrders = useCallback(() => {
+    if (orderFrameRef.current !== null) {
+      cancelAnimationFrame(orderFrameRef.current)
+      orderFrameRef.current = null
+    }
+    setOrders(ordersRef.current)
+  }, [])
 
   const suppressOpen = useCallback(() => Date.now() - lastDragEndRef.current < 160, [])
   const toggleCollapsed = (statusId: string) => onCollapsedStatusIdsChange(collapsedStatusIds.includes(statusId) ? collapsedStatusIds.filter(id => id !== statusId) : [...collapsedStatusIds, statusId])
@@ -511,6 +539,10 @@ export default function TaskBoard({
   }
 
   const rollback = (snapshot: { tasks: Task[]; orders: ColumnOrders }) => {
+    if (orderFrameRef.current !== null) {
+      cancelAnimationFrame(orderFrameRef.current)
+      orderFrameRef.current = null
+    }
     setLocalTasks(snapshot.tasks)
     setOrders(snapshot.orders)
     ordersRef.current = snapshot.orders
@@ -596,7 +628,7 @@ export default function TaskBoard({
   const handleDragOver = (event: DragOverEvent) => {
     if (!activeId || !event.over) return
     const destination = destinationFromEvent(event)
-    if (!destination || !orders[destination]) return
+    if (!destination || !ordersRef.current[destination]) return
     const task = tasksById.get(activeId)
     const boardStatus = statuses.find(status => status.id === destination)
     if (!task || !boardStatus || !resolvedStatus(task, boardStatus, allStatuses)) return
@@ -632,8 +664,7 @@ export default function TaskBoard({
     nextDestination.splice(destinationIndex, 0, activeId)
     if (source === destination && current[source].join('|') === nextDestination.join('|')) return
     const next = { ...current, [source]: sourceItems, [destination]: nextDestination }
-    ordersRef.current = next
-    setOrders(next)
+    renderQueuedOrders(next)
   }
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -641,6 +672,7 @@ export default function TaskBoard({
     const destination = destinationFromEvent(event)
     const snapshot = snapshotRef.current
     let nextOrders = ordersRef.current
+    flushQueuedOrders()
     resetDrag()
     if (!event.over || !destination || !snapshot) {
       if (snapshot) rollback(snapshot)
@@ -721,13 +753,11 @@ export default function TaskBoard({
               void onRefresh()
               return
             }
-            setLocalTasks(current => {
-              const next = upsertTask(current, task)
-              const nextOrders = initialOrders(next, statuses, lists, groupByList)
-              setOrders(nextOrders)
-              ordersRef.current = nextOrders
-              return next
-            })
+            const next = upsertTask(localTasks, task)
+            const nextOrders = initialOrders(next, statuses, lists, groupByList)
+            setLocalTasks(next)
+            setOrders(nextOrders)
+            ordersRef.current = nextOrders
             onTasksChange(current => upsertTask(current, task))
           }}
           onCreateFull={onCreateFull}

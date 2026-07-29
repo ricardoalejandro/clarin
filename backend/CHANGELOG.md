@@ -2,6 +2,11 @@
 
 ## 2026-07-29
 
+### Build 3 — Kanban estable al arrastrar tareas
+- 🐛 Mover fichas repetidamente entre columnas ya no puede provocar un ciclo de medición de React ni cerrar la sección con un error del cliente.
+- ⚡ La previsualización del orden se agrupa por cuadro de animación y conserva un arrastre fluido, incluso al cruzar estados rápidamente.
+- 🔧 Los lineamientos de Clarin Work incorporan estabilidad referencial y una prueba de estrés obligatoria para límites entre columnas.
+
 ### Build 2 — Clarin Work ordena, filtra y coordina el trabajo
 - ✨ El tablero Kanban permite mover tareas entre estados con mouse, pulsación táctil prolongada o teclado, incluso hacia columnas vacías o contraídas.
 - 🔄 El orden manual y el cambio de estado se guardan como una sola operación, se reconcilian en tiempo real y se recuperan con seguridad ante conflictos.
