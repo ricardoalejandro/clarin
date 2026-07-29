@@ -1310,6 +1310,7 @@ type TaskList struct {
 	FolderID          *uuid.UUID `json:"folder_id,omitempty"`
 	WorkflowID        *uuid.UUID `json:"workflow_id,omitempty"`
 	WorkflowInherited bool       `json:"workflow_inherited"`
+	IsDefault         bool       `json:"is_default"`
 	Name              string     `json:"name"`
 	Description       string     `json:"description,omitempty"`
 	Color             string     `json:"color,omitempty"`
@@ -1440,15 +1441,25 @@ type TaskDependency struct {
 }
 
 type TaskComment struct {
-	ID         uuid.UUID  `json:"id"`
-	AccountID  uuid.UUID  `json:"account_id"`
-	TaskID     uuid.UUID  `json:"task_id"`
-	AuthorID   uuid.UUID  `json:"author_id"`
-	AuthorName string     `json:"author_name"`
-	Body       string     `json:"body"`
-	EditedAt   *time.Time `json:"edited_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ID          uuid.UUID             `json:"id"`
+	AccountID   uuid.UUID             `json:"account_id"`
+	TaskID      uuid.UUID             `json:"task_id"`
+	AuthorID    uuid.UUID             `json:"author_id"`
+	AuthorName  string                `json:"author_name"`
+	Body        string                `json:"body"`
+	EditedAt    *time.Time            `json:"edited_at,omitempty"`
+	CreatedAt   time.Time             `json:"created_at"`
+	UpdatedAt   time.Time             `json:"updated_at"`
+	Mentions    []*TaskCommentMention `json:"mentions"`
+	Attachments []*TaskAttachment     `json:"attachments"`
+	CanEdit     bool                  `json:"can_edit"`
+	CanDelete   bool                  `json:"can_delete"`
+}
+
+type TaskCommentMention struct {
+	UserID      uuid.UUID `json:"user_id"`
+	DisplayName string    `json:"display_name"`
+	Username    string    `json:"username"`
 }
 
 type TaskActivity struct {

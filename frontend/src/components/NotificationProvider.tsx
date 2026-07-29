@@ -71,6 +71,9 @@ export default function NotificationProvider({ accountId, children }: Props) {
       if (msg.event === 'task_overdue') {
         handleTaskOverdue(msg.data as { title?: string; due_at?: string })
       }
+      if (msg.event === 'task_mention') {
+        handleTaskMention(msg.data as { task_id?: string; task_title?: string; author_name?: string })
+      }
     })
 
     return () => {
@@ -132,6 +135,17 @@ export default function NotificationProvider({ accountId, children }: Props) {
     if (s?.browser_notifications) {
       showBrowserNotification('⚠️ Tarea vencida', data.title || 'Una tarea ha vencido', () => {
         window.location.href = '/dashboard/tasks'
+      })
+    }
+  }, [])
+
+  const handleTaskMention = useCallback((data: { task_id?: string; task_title?: string; author_name?: string }) => {
+    const s = settingsRef.current
+    if (s?.sound_enabled && s.sound_type !== 'none') playNotificationSound(s.sound_type, s.sound_volume)
+    if (s?.browser_notifications) {
+      const body = `${data.author_name || 'Alguien'} te mencionó en ${data.task_title || 'una tarea'}`
+      showBrowserNotification('💬 Nueva mención', body, () => {
+        window.location.href = `/dashboard/tasks${data.task_id ? `?task=${data.task_id}` : ''}`
       })
     }
   }, [])

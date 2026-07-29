@@ -139,6 +139,7 @@ export interface TaskList {
   folder_id?: string
   workflow_id?: string
   workflow_inherited?: boolean
+  is_default?: boolean
   name: string
   description?: string
   color: string
@@ -175,6 +176,16 @@ export interface TaskComment {
   edited_at?: string
   created_at: string
   updated_at: string
+  mentions: TaskCommentMention[]
+  attachments: TaskAttachment[]
+  can_edit?: boolean
+  can_delete?: boolean
+}
+
+export interface TaskCommentMention {
+  user_id: string
+  display_name: string
+  username: string
 }
 
 export interface TaskActivity {

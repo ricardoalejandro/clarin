@@ -169,6 +169,7 @@ export default function TaskWorkspace() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [subtaskParent, setSubtaskParent] = useState<Task | null>(null)
   const [createStatusId, setCreateStatusId] = useState('')
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [structureOpen, setStructureOpen] = useState(false)
@@ -222,8 +223,12 @@ export default function TaskWorkspace() {
   useEffect(() => { const timer = setTimeout(() => setDebouncedSearch(search.trim()), 250); return () => clearTimeout(timer) }, [search])
   useEffect(() => { void loadTasks(true) }, [loadTasks])
   useEffect(() => { localStorage.setItem('tasks:view', view) }, [view])
+  useEffect(() => {
+    const taskFromURL = new URLSearchParams(window.location.search).get('task')
+    if (taskFromURL) setSelectedTaskId(taskFromURL)
+  }, [])
   useEffect(() => subscribeWebSocket(raw => { const message = raw as { event?: string }; if (message.event !== 'task_update' && message.event !== 'task_overdue') return; if (refreshTimer.current) clearTimeout(refreshTimer.current); refreshTimer.current = setTimeout(() => { void loadTasks(false); void loadStructure() }, 180) }), [loadTasks, loadStructure])
-  useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.target as HTMLElement)?.matches('input,textarea,select')) return; if (event.key.toLowerCase() === 'n') { event.preventDefault(); setEditingTask(null); setEditorOpen(true) } if (event.key === '/') { event.preventDefault(); document.getElementById('task-search')?.focus() } }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener) }, [])
+  useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.target as HTMLElement)?.matches('input,textarea,select')) return; if (event.key.toLowerCase() === 'n') { event.preventDefault(); setSubtaskParent(null); setEditingTask(null); setEditorOpen(true) } if (event.key === '/') { event.preventDefault(); document.getElementById('task-search')?.focus() } }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener) }, [])
 
   const scopeWorkflow = workflows.find(item => item.id === (activeList?.workflow_id || activeFolder?.workflow_id)) || workflows.find(item => item.is_default) || workflows[0]
   const statuses = useMemo(() => {
@@ -250,7 +255,12 @@ export default function TaskWorkspace() {
   const toggleStar = async (task: Task) => { const result = await apiPost<{ starred: boolean }>(`/api/tasks/${task.id}/star`, {}); if (result.success) setTasks(current => current.map(item => item.id === task.id ? { ...item, starred: result.data?.starred } : item)) }
   const restoreTask = async (task: Task) => { const result = await apiPost(`/api/tasks/${task.id}/restore`, {}); if (result.success) setTasks(current => current.filter(item => item.id !== task.id)); else setError(result.error || 'No se pudo restaurar la tarea') }
   const selectScope = (next: Scope) => { setScope(next); setSidebarOpen(false) }
-  const openCreate = (statusId?: string) => { setEditingTask(null); setCreateStatusId(statusId || ''); setEditorOpen(true) }
+  const openCreate = (statusId?: string) => { setSubtaskParent(null); setEditingTask(null); setCreateStatusId(statusId || ''); setEditorOpen(true) }
+  const closeTaskDetail = () => {
+    setSelectedTaskId(null)
+    const url = new URL(window.location.href)
+    if (url.searchParams.has('task')) { url.searchParams.delete('task'); window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`) }
+  }
   const moveToBoardStatus = (task: Task, statusId: string) => {
     if (!statusId.startsWith('category:')) { void updateTask(task, { status_id: statusId }); return }
     const category = statusId.replace('category:', '')
@@ -278,7 +288,7 @@ export default function TaskWorkspace() {
 
     <main className="flex min-w-0 flex-1 flex-col">
       <header className="border-b border-slate-200 bg-white px-3 py-3 sm:px-5">
-        <div className="flex items-center gap-3"><button onClick={() => setSidebarOpen(true)} className="rounded-xl p-2 text-slate-500 hover:bg-slate-100 lg:hidden"><Menu className="h-5 w-5" /></button><div className="min-w-0"><div className="flex items-center gap-1 text-[10px] text-slate-400"><span>Clarin Work</span>{activeFolder && <><ChevronRight className="h-3 w-3" /><span>{activeFolder.name}</span></>}</div><h1 className="truncate text-lg font-black text-slate-900">{scopeName}</h1></div><div className="ml-auto flex items-center gap-2"><button onClick={() => setStructureOpen(true)} className="hidden rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-slate-50 sm:block"><Settings2 className="h-4 w-4" /></button>{scope.type !== 'trash' && <button onClick={() => { setEditingTask(null); setEditorOpen(true) }} className="flex items-center gap-2 rounded-xl bg-slate-900 px-3.5 py-2.5 text-sm font-bold text-white shadow-lg shadow-slate-200 transition hover:bg-emerald-700"><Plus className="h-4 w-4" /><span className="hidden sm:inline">Nueva tarea</span></button>}</div></div>
+        <div className="flex items-center gap-3"><button onClick={() => setSidebarOpen(true)} className="rounded-xl p-2 text-slate-500 hover:bg-slate-100 lg:hidden"><Menu className="h-5 w-5" /></button><div className="min-w-0"><div className="flex items-center gap-1 text-[10px] text-slate-400"><span>Clarin Work</span>{activeFolder && <><ChevronRight className="h-3 w-3" /><span>{activeFolder.name}</span></>}</div><h1 className="truncate text-lg font-black text-slate-900">{scopeName}</h1></div><div className="ml-auto flex items-center gap-2"><button onClick={() => setStructureOpen(true)} className="hidden rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-slate-50 sm:block"><Settings2 className="h-4 w-4" /></button>{scope.type !== 'trash' && <button onClick={() => openCreate()} className="flex items-center gap-2 rounded-xl bg-slate-900 px-3.5 py-2.5 text-sm font-bold text-white shadow-lg shadow-slate-200 transition hover:bg-emerald-700"><Plus className="h-4 w-4" /><span className="hidden sm:inline">Nueva tarea</span></button>}</div></div>
         <div className="mt-3 flex flex-wrap items-center gap-2"><div className="relative min-w-[180px] flex-1 sm:max-w-sm"><Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" /><input id="task-search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Buscar tareas…  /" className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm outline-none focus:border-emerald-300 focus:bg-white" /></div>{scope.type !== 'trash' && <><select value={statusFilter} onChange={event => setStatusFilter(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600"><option value="">Todos los estados</option><option value="overdue">Vencidas</option>{statuses.map(status => <option key={status.id} value={status.id}>{status.name}</option>)}</select><select value={ownerFilter} onChange={event => setOwnerFilter(event.target.value)} className="hidden rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 sm:block"><option value="">Todo el equipo</option>{users.map(user => <option key={user.id} value={user.id}>{user.display_name || user.username}</option>)}</select><button onClick={() => setStarredOnly(value => !value)} className={`rounded-xl border p-2 ${starredOnly ? 'border-amber-200 bg-amber-50 text-amber-500' : 'border-slate-200 bg-white text-slate-400'}`}><Star className={`h-4 w-4 ${starredOnly ? 'fill-current' : ''}`} /></button></>}</div>
         {scope.type !== 'trash' && <div className="mt-3 flex overflow-x-auto rounded-xl bg-slate-100 p-1 sm:w-fit">{viewOptions.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setView(option.id)} className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold transition ${view === option.id ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}><Icon className="h-3.5 w-3.5" />{option.label}</button> })}</div>}
       </header>
@@ -296,8 +306,13 @@ export default function TaskWorkspace() {
       </div>
     </main>
 
-    <TaskEditorModal open={editorOpen} task={editingTask?.id ? editingTask : null} defaultListId={activeList?.id || activeFolder?.lists[0]?.id} defaultStatusId={createStatusId} defaultOwnerId={currentUserId} lists={lists} workflows={workflows} users={users} onClose={() => { setEditorOpen(false); setEditingTask(null); setCreateStatusId('') }} onSaved={saved => { setTasks(current => { const exists = current.some(item => item.id === saved.id); return exists ? current.map(item => item.id === saved.id ? saved : item) : [saved, ...current] }); void loadTasks(false) }} />
-    <TaskDetailDrawer taskId={selectedTaskId} allTasks={tasks} users={users} lists={lists} workflows={workflows} onClose={() => setSelectedTaskId(null)} onEdit={task => { setEditingTask(task); setEditorOpen(true) }} onChanged={changed => { if (changed) setTasks(current => current.map(item => item.id === changed.id ? changed : item)); void loadTasks(false) }} onDeleted={id => setTasks(current => current.filter(item => item.id !== id))} />
+    <TaskEditorModal open={editorOpen} task={editingTask?.id ? editingTask : null} parentTaskId={subtaskParent?.id} parentTaskTitle={subtaskParent?.title} defaultListId={subtaskParent?.list_id || activeList?.id || activeFolder?.lists[0]?.id || lists.find(list => list.is_default)?.id || lists[0]?.id} defaultStatusId={createStatusId} defaultOwnerId={subtaskParent?.assigned_to || currentUserId} lists={lists} workflows={workflows} users={users} onClose={() => { setEditorOpen(false); setEditingTask(null); setSubtaskParent(null); setCreateStatusId('') }} onSaved={saved => {
+      setTasks(current => { const exists = current.some(item => item.id === saved.id); return exists ? current.map(item => item.id === saved.id ? saved : item) : [saved, ...current] })
+      if (subtaskParent) { setSelectedTaskId(subtaskParent.id); void loadTasks(false); return }
+      if (!editingTask && saved.list_id) { setSearch(''); setDebouncedSearch(''); setStatusFilter(''); setOwnerFilter(''); setStarredOnly(false); setScope({ type: 'list', id: saved.list_id }) }
+      else void loadTasks(false)
+    }} />
+    <TaskDetailDrawer taskId={selectedTaskId} allTasks={tasks} users={users} lists={lists} workflows={workflows} onClose={closeTaskDetail} onEdit={task => { setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onOpenTask={setSelectedTaskId} onCreateSubtask={task => { setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setEditorOpen(true) }} onChanged={changed => { if (changed) setTasks(current => current.map(item => item.id === changed.id ? changed : item)); void loadTasks(false) }} onDeleted={id => setTasks(current => current.filter(item => item.id !== id))} />
     <TaskStructureModal open={structureOpen} folders={folders} lists={lists} workflows={workflows} onClose={() => setStructureOpen(false)} onChanged={loadStructure} />
   </div>
 }

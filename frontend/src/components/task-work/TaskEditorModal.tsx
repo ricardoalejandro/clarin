@@ -14,6 +14,7 @@ import {
   TaskType,
   TaskWorkflow,
 } from '@/types/task'
+import TaskUserCombobox from './TaskUserCombobox'
 
 export interface TaskAccountUser {
   id: string
@@ -28,6 +29,8 @@ interface Props {
   defaultListId?: string
   defaultStatusId?: string
   defaultOwnerId?: string
+  parentTaskId?: string
+  parentTaskTitle?: string
   lists: TaskList[]
   workflows: TaskWorkflow[]
   users: TaskAccountUser[]
@@ -44,7 +47,7 @@ function localDateTime(value?: string) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
 }
 
-export default function TaskEditorModal({ open, task, defaultListId, defaultStatusId, defaultOwnerId, lists, workflows, users, onClose, onSaved }: Props) {
+export default function TaskEditorModal({ open, task, defaultListId, defaultStatusId, defaultOwnerId, parentTaskId, parentTaskTitle, lists, workflows, users, onClose, onSaved }: Props) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<TaskType>('reminder')
@@ -73,9 +76,9 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
     setDescription(task?.description || '')
     setType(task?.type || 'reminder')
     setPriority(task?.priority || 'medium')
-    setListId(task?.list_id || defaultListId || '')
+    setListId(task?.list_id || defaultListId || lists.find(item => item.is_default)?.id || lists[0]?.id || '')
     setStatusId(task?.status_id || defaultStatusId || '')
-    setOwnerId(task?.assigned_to || defaultOwnerId || users[0]?.id || '')
+    setOwnerId(task?.assigned_to || defaultOwnerId || '')
     setCollaboratorIds(task?.collaborators?.map(item => item.user_id) || [])
     setStartAt(localDateTime(task?.start_at))
     setDueAt(localDateTime(task?.due_at))
@@ -85,7 +88,31 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
     setRecurrence(task?.recurrence_rule || '')
     setReminder(task?.reminder_minutes || 0)
     setError('')
-  }, [open, task, defaultListId, defaultStatusId, defaultOwnerId, users])
+  // Initialize only when the dialog/task changes. Late structure/user loads
+  // are filled by the focused effects below and never wipe what was typed.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, task?.id])
+
+  useEffect(() => {
+    if (!open || listId || !lists.length) return
+    setListId(defaultListId || lists.find(item => item.is_default)?.id || lists[0].id)
+  }, [defaultListId, listId, lists, open])
+
+  useEffect(() => {
+    if (!open || ownerId || !users.length) return
+    setOwnerId(defaultOwnerId || users[0].id)
+  }, [defaultOwnerId, open, ownerId, users])
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || saving) return
+      event.preventDefault()
+      onClose()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose, open, saving])
 
   useEffect(() => {
     if (!open || statusId || !statuses.length) return
@@ -100,7 +127,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
   }, [listId, statusId, statuses, task?.status_detail?.category])
 
   const owner = users.find(user => user.id === ownerId)
-  const canSave = title.trim() && ownerId && (!startAt || !dueAt || new Date(dueAt) >= new Date(startAt))
+  const canSave = title.trim() && ownerId && listId && (!startAt || !dueAt || new Date(dueAt) >= new Date(startAt))
   const collaboratorUsers = useMemo(() => users.filter(user => user.id !== ownerId), [users, ownerId])
 
   const save = async () => {
@@ -115,6 +142,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
       due_at: dueAt ? new Date(dueAt).toISOString() : '',
       is_all_day: allDay, progress, is_milestone: milestone,
       recurrence_rule: recurrence, reminder_minutes: reminder || 0,
+      ...(parentTaskId && !task ? { parent_task_id: parentTaskId } : {}),
       ...(task ? { version: task.version } : {}),
     }
     const result = task
@@ -136,12 +164,13 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
 
   if (!open || typeof document === 'undefined') return null
   return createPortal(
-    <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/45 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={event => event.target === event.currentTarget && onClose()}>
-      <div className="flex max-h-[96vh] w-full max-w-4xl flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:rounded-3xl">
+    <div data-task-editor-modal className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/45 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={event => event.target === event.currentTarget && onClose()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="task-editor-title" className="flex max-h-[96vh] w-full max-w-4xl flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:rounded-3xl">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-7">
           <div>
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-600"><Sparkles className="h-3.5 w-3.5" /> Clarin Work</div>
-            <h2 className="mt-1 text-xl font-bold text-slate-900">{task ? 'Editar tarea' : 'Crear una tarea'}</h2>
+            <h2 id="task-editor-title" className="mt-1 text-xl font-bold text-slate-900">{task ? 'Editar tarea' : parentTaskId ? 'Crear subtarea' : 'Crear una tarea'}</h2>
+            {parentTaskTitle && !task && <p className="mt-1 max-w-lg truncate text-xs text-slate-400">Dentro de {parentTaskTitle}</p>}
           </div>
           <button onClick={onClose} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
         </div>
@@ -153,7 +182,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
           <div className="mt-5 grid gap-4 lg:grid-cols-2">
             <section className="space-y-4 rounded-2xl border border-slate-200 p-4">
               <div className="grid grid-cols-2 gap-3">
-                <label className="text-xs font-semibold text-slate-500">Lista<select value={listId} onChange={event => setListId(event.target.value)} className={`${inputClass} mt-1.5`}><option value="">Bandeja general</option>{lists.map(list => <option key={list.id} value={list.id}>{list.name}</option>)}</select></label>
+                <label className="text-xs font-semibold text-slate-500">Lista<select disabled={Boolean(parentTaskId || task?.parent_task_id)} value={listId} onChange={event => setListId(event.target.value)} className={`${inputClass} mt-1.5 disabled:bg-slate-100 disabled:text-slate-500`}>{lists.map(list => <option key={list.id} value={list.id}>{list.name}{list.is_default ? ' · predeterminada' : ''}</option>)}</select></label>
                 <label className="text-xs font-semibold text-slate-500">Estado<select value={statusId} onChange={event => setStatusId(event.target.value)} className={`${inputClass} mt-1.5`}>{statuses.map(status => <option key={status.id} value={status.id}>{status.name}</option>)}</select></label>
               </div>
               <div>
@@ -164,7 +193,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
                 <div className="mb-2 text-xs font-semibold text-slate-500">Prioridad</div>
                 <div className="grid grid-cols-4 gap-1.5">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(key => <button key={key} onClick={() => setPriority(key)} className={`rounded-xl px-2 py-2 text-xs font-medium transition ${priority === key ? `${TASK_PRIORITY_CONFIG[key].bg} ${TASK_PRIORITY_CONFIG[key].color} ring-1 ring-current` : 'bg-slate-100 text-slate-500'}`}>{TASK_PRIORITY_CONFIG[key].label}</button>)}</div>
               </div>
-              <label className="text-xs font-semibold text-slate-500">Responsable<select value={ownerId} onChange={event => setOwnerId(event.target.value)} className={`${inputClass} mt-1.5`}><option value="">Selecciona una persona</option>{users.map(user => <option key={user.id} value={user.id}>{user.display_name || user.username}</option>)}</select></label>
+              <label className="block text-xs font-semibold text-slate-500">Responsable<span className="mt-1.5 block"><TaskUserCombobox users={users} value={ownerId} onChange={setOwnerId} /></span></label>
               <div>
                 <div className="mb-2 text-xs font-semibold text-slate-500">Colaboradores</div>
                 <div className="flex max-h-32 flex-wrap gap-2 overflow-y-auto">{collaboratorUsers.map(user => { const active = collaboratorIds.includes(user.id); return <button key={user.id} onClick={() => setCollaboratorIds(current => active ? current.filter(id => id !== user.id) : [...current, user.id])} className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs ${active ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600'}`}>{active && <Check className="h-3 w-3" />}{user.display_name || user.username}</button> })}{!collaboratorUsers.length && <span className="text-xs text-slate-400">{owner ? 'No hay más usuarios disponibles' : 'Selecciona primero un responsable'}</span>}</div>

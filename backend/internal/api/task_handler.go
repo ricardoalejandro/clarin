@@ -264,9 +264,16 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Sólo se permite un nivel de subtareas"})
 		}
 		task.ParentTaskID = &id
-		if task.ListID == nil {
-			task.ListID = parent.ListID
+		// A subtask is always part of the same list as its parent. Ignore a
+		// conflicting client value instead of allowing an invisible split tree.
+		task.ListID = parent.ListID
+	}
+	if task.ListID == nil {
+		defaultListID, defaultListErr := s.repos.TaskWork.EnsureDefaultList(c.Context(), accountID, userID)
+		if defaultListErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo resolver la Bandeja general"})
 		}
+		task.ListID = defaultListID
 	}
 	var requestedStatusID *uuid.UUID
 	if req.StatusID != nil && *req.StatusID != "" {
@@ -698,6 +705,20 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 			}
 			existing.ParentTaskID = &id
 		}
+	}
+	if existing.ParentTaskID != nil {
+		parent, parentErr := s.services.Task.GetByID(c.Context(), *existing.ParentTaskID, accountID)
+		if parentErr != nil || parent.ParentTaskID != nil {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Tarea padre inválida"})
+		}
+		existing.ListID = parent.ListID
+	}
+	if existing.ListID == nil {
+		defaultListID, defaultListErr := s.repos.TaskWork.EnsureDefaultList(c.Context(), accountID, c.Locals("user_id").(uuid.UUID))
+		if defaultListErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo resolver la Bandeja general"})
+		}
+		existing.ListID = defaultListID
 	}
 	if req.StatusID != nil {
 		var requested *uuid.UUID
@@ -1254,6 +1275,9 @@ func (s *Server) handleDeleteTaskList(c *fiber.Ctx) error {
 	}
 
 	if err := s.repos.Task.DeleteList(c.Context(), listID, accountID); err != nil {
+		if errors.Is(err, repository.ErrDefaultTaskList) {
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "La Bandeja general es la lista predeterminada y no se puede archivar"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to delete task list"})
 	}
 

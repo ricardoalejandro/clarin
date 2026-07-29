@@ -79,7 +79,9 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS workflow_inherited BOOLEAN NOT NULL DEFAULT TRUE`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_lists_account_id ON task_lists(account_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_lists_default ON task_lists(account_id) WHERE is_default AND archived_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_task_lists_folder_order ON task_lists(account_id, folder_id, archived_at, sort_order)`,
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS status_id UUID REFERENCES task_statuses(id) ON DELETE RESTRICT`,
 		`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_at TIMESTAMPTZ`,
@@ -157,6 +159,30 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			UNIQUE(task_id, media_asset_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(account_id, task_id, created_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_comments_account_task_id ON task_comments(account_id,task_id,id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_attachments_account_task_id ON task_attachments(account_id,task_id,id)`,
+		`CREATE TABLE IF NOT EXISTS task_comment_mentions (
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			task_id UUID NOT NULL,
+			comment_id UUID NOT NULL,
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(comment_id,user_id),
+			FOREIGN KEY(account_id,task_id,comment_id) REFERENCES task_comments(account_id,task_id,id) ON DELETE CASCADE,
+			FOREIGN KEY(account_id,user_id) REFERENCES user_accounts(account_id,user_id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_comment_mentions_user ON task_comment_mentions(account_id,user_id,created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS task_comment_attachments (
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			task_id UUID NOT NULL,
+			comment_id UUID NOT NULL,
+			attachment_id UUID NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(comment_id,attachment_id),
+			FOREIGN KEY(account_id,task_id,comment_id) REFERENCES task_comments(account_id,task_id,id) ON DELETE CASCADE,
+			FOREIGN KEY(account_id,task_id,attachment_id) REFERENCES task_attachments(account_id,task_id,id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_comment_attachments_comment ON task_comment_attachments(account_id,task_id,comment_id,created_at)`,
 		`DO $$ BEGIN ALTER TABLE task_statuses ADD CONSTRAINT task_statuses_workflow_account_fk
 			FOREIGN KEY (account_id,workflow_id) REFERENCES task_workflows(account_id,id) NOT VALID;
 		EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
@@ -225,6 +251,22 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 				FOR EACH ROW EXECUTE FUNCTION ensure_account_task_workflow();
 			END IF;
 		END $$`,
+		`CREATE OR REPLACE FUNCTION ensure_account_task_default_list() RETURNS TRIGGER AS $$
+		BEGIN
+			INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,sort_order,created_by,is_default)
+			SELECT NEW.account_id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981',0,NEW.user_id,TRUE
+			FROM task_workflows w
+			WHERE w.account_id=NEW.account_id AND w.is_default
+			ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_user_accounts_task_default_list') THEN
+				CREATE TRIGGER trg_user_accounts_task_default_list AFTER INSERT ON user_accounts
+				FOR EACH ROW EXECUTE FUNCTION ensure_account_task_default_list();
+			END IF;
+		END $$`,
 	}
 
 	for _, statement := range statements {
@@ -260,6 +302,59 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		  AND NOT EXISTS (SELECT 1 FROM task_statuses s WHERE s.workflow_id=w.id AND s.name=seed.name)
 	`); err != nil {
 		return fmt.Errorf("task work default statuses migration failed: %w", err)
+	}
+
+	// Reuse an existing root list named Bandeja general when possible, then
+	// create exactly one durable default list for every account membership.
+	if _, err := db.Exec(ctx, `
+		WITH ranked AS (
+			SELECT id,account_id,ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY created_at,id) AS position
+			FROM task_lists
+			WHERE folder_id IS NULL AND archived_at IS NULL AND LOWER(BTRIM(name))='bandeja general'
+		), missing AS (
+			SELECT ranked.id FROM ranked
+			WHERE ranked.position=1
+			  AND NOT EXISTS (SELECT 1 FROM task_lists current_default WHERE current_default.account_id=ranked.account_id AND current_default.is_default AND current_default.archived_at IS NULL)
+		)
+		UPDATE task_lists list SET is_default=TRUE,updated_at=NOW()
+		FROM missing WHERE list.id=missing.id
+	`); err != nil {
+		return fmt.Errorf("task work default list adoption failed: %w", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,sort_order,created_by,is_default)
+		SELECT a.id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981',0,owner.user_id,TRUE
+		FROM accounts a
+		JOIN task_workflows w ON w.account_id=a.id AND w.is_default
+		JOIN LATERAL (
+			SELECT candidate.user_id
+			FROM (
+				SELECT ua.user_id,u.created_at FROM user_accounts ua JOIN users u ON u.id=ua.user_id WHERE ua.account_id=a.id
+				UNION ALL
+				SELECT u.id,u.created_at FROM users u WHERE u.account_id=a.id
+			) candidate
+			ORDER BY candidate.created_at,candidate.user_id LIMIT 1
+		) owner ON TRUE
+		WHERE NOT EXISTS (SELECT 1 FROM task_lists existing WHERE existing.account_id=a.id AND existing.is_default AND existing.archived_at IS NULL)
+		ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING
+	`); err != nil {
+		return fmt.Errorf("task work default list creation failed: %w", err)
+	}
+	if _, err := db.Exec(ctx, `
+		UPDATE tasks task SET list_id=list.id,updated_at=NOW()
+		FROM task_lists list
+		WHERE list.account_id=task.account_id AND list.is_default AND list.archived_at IS NULL
+		  AND task.parent_task_id IS NULL AND task.list_id IS NULL
+	`); err != nil {
+		return fmt.Errorf("task work default list backfill failed: %w", err)
+	}
+	if _, err := db.Exec(ctx, `
+		UPDATE tasks child SET list_id=parent.list_id,updated_at=NOW()
+		FROM tasks parent
+		WHERE child.account_id=parent.account_id AND child.parent_task_id=parent.id
+		  AND child.list_id IS DISTINCT FROM parent.list_id
+	`); err != nil {
+		return fmt.Errorf("task work child list backfill failed: %w", err)
 	}
 
 	if _, err := db.Exec(ctx, `

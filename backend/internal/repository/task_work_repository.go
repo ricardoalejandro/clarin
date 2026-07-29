@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
@@ -35,6 +36,23 @@ func (r *TaskWorkRepository) TaskBelongsToAccount(ctx context.Context, accountID
 	var ok bool
 	err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL)`, accountID, taskID).Scan(&ok)
 	return ok, err
+}
+
+func (r *TaskWorkRepository) EnsureDefaultList(ctx context.Context, accountID, userID uuid.UUID) (*uuid.UUID, error) {
+	if _, err := r.db.Exec(ctx, `
+		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,is_default,name,description,color,sort_order,created_by)
+		SELECT $1,w.id,TRUE,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981',0,$2
+		FROM task_workflows w
+		WHERE w.account_id=$1 AND w.is_default
+		ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING
+	`, accountID, userID); err != nil {
+		return nil, err
+	}
+	var id uuid.UUID
+	if err := r.db.QueryRow(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND is_default AND archived_at IS NULL LIMIT 1`, accountID).Scan(&id); err != nil {
+		return nil, err
+	}
+	return &id, nil
 }
 
 func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUID) ([]*domain.TaskFolder, []*domain.TaskList, error) {
@@ -167,13 +185,25 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, folde
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND folder_id=$2 AND archived_at IS NULL`, accountID, folderID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE task_lists SET folder_id=NULL,workflow_inherited=TRUE,updated_at=NOW() WHERE account_id=$1 AND folder_id=$2 AND is_default AND archived_at IS NULL`, accountID, folderID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND folder_id=$2 AND NOT is_default AND archived_at IS NULL`, accountID, folderID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
 func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, listID uuid.UUID, folderID *uuid.UUID, folderProvided bool, workflowID *uuid.UUID, inherited *bool, description *string) error {
+	if folderProvided && folderID != nil {
+		var isDefault bool
+		if err := r.db.QueryRow(ctx, `SELECT is_default FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NULL`, accountID, listID).Scan(&isDefault); err != nil {
+			return err
+		}
+		if isDefault {
+			return ErrDefaultTaskList
+		}
+	}
 	if folderID != nil {
 		var valid bool
 		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_folders WHERE account_id=$1 AND id=$2 AND archived_at IS NULL)`, accountID, folderID).Scan(&valid); err != nil {
@@ -561,32 +591,202 @@ func (r *TaskWorkRepository) ListComments(ctx context.Context, accountID, taskID
 	defer rows.Close()
 	result := []*domain.TaskComment{}
 	for rows.Next() {
-		item := &domain.TaskComment{}
+		item := &domain.TaskComment{Mentions: []*domain.TaskCommentMention{}, Attachments: []*domain.TaskAttachment{}}
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.TaskID, &item.AuthorID, &item.AuthorName, &item.Body,
 			&item.EditedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.hydrateCommentRelations(ctx, accountID, taskID, result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func (r *TaskWorkRepository) CreateComment(ctx context.Context, comment *domain.TaskComment) error {
+func (r *TaskWorkRepository) hydrateCommentRelations(ctx context.Context, accountID, taskID uuid.UUID, comments []*domain.TaskComment) error {
+	if len(comments) == 0 {
+		return nil
+	}
+	byID := make(map[uuid.UUID]*domain.TaskComment, len(comments))
+	for _, comment := range comments {
+		byID[comment.ID] = comment
+	}
+	mentionRows, err := r.db.Query(ctx, `SELECT mention.comment_id,u.id,COALESCE(u.display_name,u.username,''),u.username
+		FROM task_comment_mentions mention JOIN users u ON u.id=mention.user_id
+		WHERE mention.account_id=$1 AND mention.task_id=$2 ORDER BY mention.created_at`, accountID, taskID)
+	if err != nil {
+		return err
+	}
+	for mentionRows.Next() {
+		var commentID uuid.UUID
+		mention := &domain.TaskCommentMention{}
+		if err := mentionRows.Scan(&commentID, &mention.UserID, &mention.DisplayName, &mention.Username); err != nil {
+			mentionRows.Close()
+			return err
+		}
+		if comment := byID[commentID]; comment != nil {
+			comment.Mentions = append(comment.Mentions, mention)
+		}
+	}
+	if err := mentionRows.Err(); err != nil {
+		mentionRows.Close()
+		return err
+	}
+	mentionRows.Close()
+
+	attachmentRows, err := r.db.Query(ctx, `SELECT relation.comment_id,attachment.id,attachment.account_id,attachment.task_id,attachment.media_asset_id,
+		media.filename,media.content_type,media.media_type,media.size_bytes,media.object_key,attachment.uploaded_by,attachment.created_at
+		FROM task_comment_attachments relation
+		JOIN task_attachments attachment ON attachment.account_id=relation.account_id AND attachment.task_id=relation.task_id AND attachment.id=relation.attachment_id
+		JOIN media_assets media ON media.account_id=attachment.account_id AND media.id=attachment.media_asset_id AND media.status='active'
+		WHERE relation.account_id=$1 AND relation.task_id=$2 ORDER BY relation.created_at`, accountID, taskID)
+	if err != nil {
+		return err
+	}
+	defer attachmentRows.Close()
+	for attachmentRows.Next() {
+		var commentID uuid.UUID
+		var key string
+		attachment := &domain.TaskAttachment{}
+		if err := attachmentRows.Scan(&commentID, &attachment.ID, &attachment.AccountID, &attachment.TaskID, &attachment.MediaAssetID,
+			&attachment.Filename, &attachment.ContentType, &attachment.MediaType, &attachment.SizeBytes, &key, &attachment.UploadedBy, &attachment.CreatedAt); err != nil {
+			return err
+		}
+		attachment.URL = "/api/media/file/" + key
+		if comment := byID[commentID]; comment != nil {
+			comment.Attachments = append(comment.Attachments, attachment)
+		}
+	}
+	return attachmentRows.Err()
+}
+
+func (r *TaskWorkRepository) GetComment(ctx context.Context, accountID, taskID, commentID uuid.UUID) (*domain.TaskComment, error) {
+	comment := &domain.TaskComment{Mentions: []*domain.TaskCommentMention{}, Attachments: []*domain.TaskAttachment{}}
+	err := r.db.QueryRow(ctx, `SELECT c.id,c.account_id,c.task_id,c.author_id,COALESCE(u.display_name,u.username,''),c.body,c.edited_at,c.created_at,c.updated_at
+		FROM task_comments c JOIN users u ON u.id=c.author_id
+		WHERE c.account_id=$1 AND c.task_id=$2 AND c.id=$3 AND c.deleted_at IS NULL`, accountID, taskID, commentID).
+		Scan(&comment.ID, &comment.AccountID, &comment.TaskID, &comment.AuthorID, &comment.AuthorName, &comment.Body,
+			&comment.EditedAt, &comment.CreatedAt, &comment.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTaskWorkNotFound
+		}
+		return nil, err
+	}
+	if err := r.hydrateCommentRelations(ctx, accountID, taskID, []*domain.TaskComment{comment}); err != nil {
+		return nil, err
+	}
+	return comment, nil
+}
+
+func (r *TaskWorkRepository) CreateComment(ctx context.Context, comment *domain.TaskComment, mentionIDs, attachmentIDs []uuid.UUID) error {
 	comment.ID = uuid.New()
 	comment.CreatedAt = time.Now()
 	comment.UpdatedAt = comment.CreatedAt
-	return r.db.QueryRow(ctx, `INSERT INTO task_comments(id,account_id,task_id,author_id,body,created_at,updated_at)
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := tx.QueryRow(ctx, `INSERT INTO task_comments(id,account_id,task_id,author_id,body,created_at,updated_at)
 		SELECT $1,$2,$3,$4,$5,$6,$6 WHERE EXISTS(SELECT 1 FROM tasks WHERE account_id=$2 AND id=$3 AND deleted_at IS NULL)
-		RETURNING id`, comment.ID, comment.AccountID, comment.TaskID, comment.AuthorID, comment.Body, comment.CreatedAt).Scan(&comment.ID)
+		RETURNING id`, comment.ID, comment.AccountID, comment.TaskID, comment.AuthorID, comment.Body, comment.CreatedAt).Scan(&comment.ID); err != nil {
+		return err
+	}
+	seenMentions := map[uuid.UUID]struct{}{}
+	for _, userID := range mentionIDs {
+		if userID == comment.AuthorID {
+			continue
+		}
+		if _, exists := seenMentions[userID]; exists {
+			continue
+		}
+		seenMentions[userID] = struct{}{}
+		command, err := tx.Exec(ctx, `INSERT INTO task_comment_mentions(account_id,task_id,comment_id,user_id)
+			SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$4)`, comment.AccountID, comment.TaskID, comment.ID, userID)
+		if err != nil || command.RowsAffected() == 0 {
+			if err != nil {
+				return err
+			}
+			return ErrTaskWorkNotFound
+		}
+	}
+	seenAttachments := map[uuid.UUID]struct{}{}
+	for _, attachmentID := range attachmentIDs {
+		if _, exists := seenAttachments[attachmentID]; exists {
+			continue
+		}
+		seenAttachments[attachmentID] = struct{}{}
+		command, err := tx.Exec(ctx, `INSERT INTO task_comment_attachments(account_id,task_id,comment_id,attachment_id)
+			SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$4)`, comment.AccountID, comment.TaskID, comment.ID, attachmentID)
+		if err != nil || command.RowsAffected() == 0 {
+			if err != nil {
+				return err
+			}
+			return ErrTaskWorkNotFound
+		}
+	}
+	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) UpdateComment(ctx context.Context, accountID, taskID, commentID, actorID uuid.UUID, body string, admin bool) error {
-	command, err := r.db.Exec(ctx, `UPDATE task_comments SET body=$4,edited_at=NOW(),updated_at=NOW()
+func (r *TaskWorkRepository) UpdateComment(ctx context.Context, accountID, taskID, commentID, actorID uuid.UUID, body string, admin bool, mentionIDs, attachmentIDs []uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	command, err := tx.Exec(ctx, `UPDATE task_comments SET body=$4,edited_at=NOW(),updated_at=NOW()
 		WHERE account_id=$1 AND task_id=$6 AND id=$2 AND deleted_at IS NULL AND (author_id=$3 OR $5)`, accountID, commentID, actorID, body, admin, taskID)
 	if err == nil && command.RowsAffected() == 0 {
 		return ErrTaskWorkNotFound
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM task_comment_mentions WHERE account_id=$1 AND task_id=$2 AND comment_id=$3`, accountID, taskID, commentID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM task_comment_attachments WHERE account_id=$1 AND task_id=$2 AND comment_id=$3`, accountID, taskID, commentID); err != nil {
+		return err
+	}
+	seenMentions := map[uuid.UUID]struct{}{}
+	for _, userID := range mentionIDs {
+		if userID == actorID {
+			continue
+		}
+		if _, exists := seenMentions[userID]; exists {
+			continue
+		}
+		seenMentions[userID] = struct{}{}
+		inserted, err := tx.Exec(ctx, `INSERT INTO task_comment_mentions(account_id,task_id,comment_id,user_id)
+			SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$4)`, accountID, taskID, commentID, userID)
+		if err != nil || inserted.RowsAffected() == 0 {
+			if err != nil {
+				return err
+			}
+			return ErrTaskWorkNotFound
+		}
+	}
+	seenAttachments := map[uuid.UUID]struct{}{}
+	for _, attachmentID := range attachmentIDs {
+		if _, exists := seenAttachments[attachmentID]; exists {
+			continue
+		}
+		seenAttachments[attachmentID] = struct{}{}
+		inserted, err := tx.Exec(ctx, `INSERT INTO task_comment_attachments(account_id,task_id,comment_id,attachment_id)
+			SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$4)`, accountID, taskID, commentID, attachmentID)
+		if err != nil || inserted.RowsAffected() == 0 {
+			if err != nil {
+				return err
+			}
+			return ErrTaskWorkNotFound
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *TaskWorkRepository) DeleteComment(ctx context.Context, accountID, taskID, commentID, actorID uuid.UUID, admin bool) error {

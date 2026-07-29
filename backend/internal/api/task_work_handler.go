@@ -26,8 +26,35 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El flujo debe conservar al menos un estado inicial y uno completado", "code": "workflow_invariant"})
 	case errors.Is(err, repository.ErrTaskVersionConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La tarea cambió en otra sesión; recarga antes de guardar", "code": "version_conflict"})
+	case errors.Is(err, repository.ErrDefaultTaskList):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La Bandeja general debe permanecer como lista raíz predeterminada", "code": "default_list_invariant"})
 	default:
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo completar la operación"})
+	}
+}
+
+func parseTaskUUIDList(values []string) ([]uuid.UUID, error) {
+	result := make([]uuid.UUID, 0, len(values))
+	seen := make(map[uuid.UUID]struct{}, len(values))
+	for _, value := range values {
+		id, err := uuid.Parse(value)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result, nil
+}
+
+func (s *Server) setTaskCommentPermissions(c *fiber.Ctx, accountID, userID uuid.UUID, comments []*domain.TaskComment) {
+	admin := s.isAccountAdmin(c, accountID, userID)
+	for _, comment := range comments {
+		comment.CanEdit = admin || comment.AuthorID == userID
+		comment.CanDelete = comment.CanEdit
 	}
 }
 
@@ -471,6 +498,7 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 
 func (s *Server) handleGetTaskComments(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	taskID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
@@ -479,6 +507,7 @@ func (s *Server) handleGetTaskComments(c *fiber.Ctx) error {
 	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.setTaskCommentPermissions(c, accountID, userID, items)
 	return c.JSON(fiber.Map{"success": true, "comments": items})
 }
 func (s *Server) handleCreateTaskComment(c *fiber.Ctx) error {
@@ -489,18 +518,47 @@ func (s *Server) handleCreateTaskComment(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
 	var req struct {
-		Body string `json:"body"`
+		Body             string   `json:"body"`
+		MentionedUserIDs []string `json:"mentioned_user_ids"`
+		AttachmentIDs    []string `json:"attachment_ids"`
 	}
 	if err := c.BodyParser(&req); err != nil || strings.TrimSpace(req.Body) == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El comentario está vacío"})
 	}
+	mentionIDs, parseErr := parseTaskUUIDList(req.MentionedUserIDs)
+	if parseErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Mención inválida"})
+	}
+	attachmentIDs, parseErr := parseTaskUUIDList(req.AttachmentIDs)
+	if parseErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Adjunto inválido"})
+	}
 	comment := &domain.TaskComment{AccountID: accountID, TaskID: taskID, AuthorID: userID, Body: strings.TrimSpace(req.Body)}
-	if err := s.repos.TaskWork.CreateComment(c.Context(), comment); err != nil {
+	if err := s.repos.TaskWork.CreateComment(c.Context(), comment, mentionIDs, attachmentIDs); err != nil {
 		return taskWorkError(c, err)
 	}
+	full, err := s.repos.TaskWork.GetComment(c.Context(), accountID, taskID, comment.ID)
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	s.setTaskCommentPermissions(c, accountID, userID, []*domain.TaskComment{full})
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "comment_created", fiber.Map{"comment_id": comment.ID})
 	s.broadcastTaskWork(accountID, "comment_created", fiber.Map{"task_id": taskID, "comment_id": comment.ID})
-	return c.Status(201).JSON(fiber.Map{"success": true, "comment": comment})
+	if s.hub != nil && len(full.Mentions) > 0 {
+		task, _ := s.services.Task.GetByID(c.Context(), taskID, accountID)
+		title := "Tarea"
+		if task != nil {
+			title = task.Title
+		}
+		targetIDs := make([]uuid.UUID, 0, len(full.Mentions))
+		for _, mention := range full.Mentions {
+			targetIDs = append(targetIDs, mention.UserID)
+		}
+		s.hub.BroadcastToAccountUsersWithPermission(accountID, targetIDs, domain.PermTasks, ws.EventTaskMention, fiber.Map{
+			"task_id": taskID, "comment_id": comment.ID, "task_title": title, "author_name": full.AuthorName,
+		})
+	}
+	return c.Status(201).JSON(fiber.Map{"success": true, "comment": full})
 }
 func (s *Server) handleUpdateTaskComment(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -514,15 +572,57 @@ func (s *Server) handleUpdateTaskComment(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Comentario inválido"})
 	}
 	var req struct {
-		Body string `json:"body"`
+		Body             string   `json:"body"`
+		MentionedUserIDs []string `json:"mentioned_user_ids"`
+		AttachmentIDs    []string `json:"attachment_ids"`
 	}
 	if err := c.BodyParser(&req); err != nil || strings.TrimSpace(req.Body) == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El comentario está vacío"})
 	}
-	if err := s.repos.TaskWork.UpdateComment(c.Context(), accountID, taskID, commentID, userID, strings.TrimSpace(req.Body), s.isAccountAdmin(c, accountID, userID)); err != nil {
+	mentionIDs, parseErr := parseTaskUUIDList(req.MentionedUserIDs)
+	if parseErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Mención inválida"})
+	}
+	attachmentIDs, parseErr := parseTaskUUIDList(req.AttachmentIDs)
+	if parseErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Adjunto inválido"})
+	}
+	previous, err := s.repos.TaskWork.GetComment(c.Context(), accountID, taskID, commentID)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
-	return c.JSON(fiber.Map{"success": true})
+	previousMentionIDs := make(map[uuid.UUID]struct{}, len(previous.Mentions))
+	for _, mention := range previous.Mentions {
+		previousMentionIDs[mention.UserID] = struct{}{}
+	}
+	if err := s.repos.TaskWork.UpdateComment(c.Context(), accountID, taskID, commentID, userID, strings.TrimSpace(req.Body), s.isAccountAdmin(c, accountID, userID), mentionIDs, attachmentIDs); err != nil {
+		return taskWorkError(c, err)
+	}
+	full, err := s.repos.TaskWork.GetComment(c.Context(), accountID, taskID, commentID)
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	s.setTaskCommentPermissions(c, accountID, userID, []*domain.TaskComment{full})
+	s.broadcastTaskWork(accountID, "comment_updated", fiber.Map{"task_id": taskID, "comment_id": commentID})
+	if s.hub != nil {
+		newMentionIDs := make([]uuid.UUID, 0, len(full.Mentions))
+		for _, mention := range full.Mentions {
+			if _, existed := previousMentionIDs[mention.UserID]; !existed {
+				newMentionIDs = append(newMentionIDs, mention.UserID)
+			}
+		}
+		if len(newMentionIDs) > 0 {
+			task, _ := s.services.Task.GetByID(c.Context(), taskID, accountID)
+			title := "Tarea"
+			if task != nil {
+				title = task.Title
+			}
+			s.hub.BroadcastToAccountUsersWithPermission(accountID, newMentionIDs, domain.PermTasks, ws.EventTaskMention, fiber.Map{
+				"task_id": taskID, "comment_id": commentID, "task_title": title, "author_name": full.AuthorName,
+			})
+		}
+	}
+	return c.JSON(fiber.Map{"success": true, "comment": full})
 }
 func (s *Server) handleDeleteTaskComment(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -538,6 +638,7 @@ func (s *Server) handleDeleteTaskComment(c *fiber.Ctx) error {
 	if err := s.repos.TaskWork.DeleteComment(c.Context(), accountID, taskID, commentID, userID, s.isAccountAdmin(c, accountID, userID)); err != nil {
 		return taskWorkError(c, err)
 	}
+	s.broadcastTaskWork(accountID, "comment_deleted", fiber.Map{"task_id": taskID, "comment_id": commentID})
 	return c.JSON(fiber.Map{"success": true})
 }
 

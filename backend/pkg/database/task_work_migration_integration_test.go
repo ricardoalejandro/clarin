@@ -72,13 +72,20 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if statusCount != 4 {
 		t.Fatalf("new account received %d statuses, want 4", statusCount)
 	}
+	var defaultListA uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND is_default AND archived_at IS NULL`, accountA).Scan(&defaultListA); err != nil {
+		t.Fatalf("new account membership did not receive a default task list: %v", err)
+	}
 
-	listID, taskID, subtaskID := uuid.New(), uuid.New(), uuid.New()
+	listID, taskID, subtaskID, unlistedTaskID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if _, err := db.Exec(ctx, `INSERT INTO task_lists(id,account_id,workflow_id,name,color,created_by) VALUES($1,$2,$3,'Lista','#10b981',$4)`, listID, accountA, workflowA, userA); err != nil {
 		t.Fatalf("insert list: %v", err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO tasks(id,account_id,created_by,assigned_to,title,type,priority,status,list_id,due_at) VALUES($1,$2,$3,$3,'Legacy','reminder','medium','pending',$4,NOW())`, taskID, accountA, userA, listID); err != nil {
 		t.Fatalf("insert task: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO tasks(id,account_id,created_by,assigned_to,title,type,priority,status,due_at) VALUES($1,$2,$3,$3,'Without list','reminder','medium','pending',NOW())`, unlistedTaskID, accountA, userA); err != nil {
+		t.Fatalf("insert task without list: %v", err)
 	}
 	if _, err := db.Exec(ctx, `UPDATE tasks SET status_id=NULL WHERE id=$1`, taskID); err != nil {
 		t.Fatalf("clear migrated status: %v", err)
@@ -95,6 +102,17 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	var promotedParent uuid.UUID
 	if err := db.QueryRow(ctx, `SELECT parent_task_id FROM tasks WHERE account_id=$1 AND legacy_subtask_id=$2`, accountA, subtaskID).Scan(&promotedParent); err != nil || promotedParent != taskID {
 		t.Fatalf("legacy subtask was not promoted safely: parent=%s err=%v", promotedParent, err)
+	}
+	var backfilledList uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT list_id FROM tasks WHERE account_id=$1 AND id=$2`, accountA, unlistedTaskID).Scan(&backfilledList); err != nil || backfilledList != defaultListA {
+		t.Fatalf("task without list was not moved to default list: list=%s err=%v", backfilledList, err)
+	}
+	commentID := uuid.New()
+	if _, err := db.Exec(ctx, `INSERT INTO task_comments(id,account_id,task_id,author_id,body) VALUES($1,$2,$3,$4,'Mention test')`, commentID, accountA, taskID, userA); err != nil {
+		t.Fatalf("insert task comment: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO task_comment_mentions(account_id,task_id,comment_id,user_id) VALUES($1,$2,$3,$4)`, accountA, taskID, commentID, userB); err == nil {
+		t.Fatal("cross-account task comment mention unexpectedly succeeded")
 	}
 
 	_, err = db.Exec(ctx, `INSERT INTO task_collaborators(account_id,task_id,user_id,created_by) VALUES($1,$2,$3,$4)`, accountA, taskID, userB, userA)

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
+
+var ErrDefaultTaskList = errors.New("the default task list cannot be archived")
 
 type TaskRepository struct {
 	db *pgxpool.Pool
@@ -145,6 +148,30 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM task_collaborators WHERE account_id=$1 AND task_id=$2 AND user_id=$3`, t.AccountID, t.ID, t.AssignedTo); err != nil {
 		return err
+	}
+	if t.ParentTaskID == nil && t.ListID != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE tasks child SET
+				list_id=$3,
+				status_id=COALESCE((
+					SELECT target.id
+					FROM task_statuses current_status
+					JOIN task_lists target_list ON target_list.account_id=child.account_id AND target_list.id=$3
+					JOIN task_statuses target ON target.account_id=target_list.account_id AND target.workflow_id=target_list.workflow_id AND target.category=current_status.category
+					WHERE current_status.account_id=child.account_id AND current_status.id=child.status_id
+					ORDER BY target.is_default DESC,target.sort_order LIMIT 1
+				),(
+					SELECT target.id FROM task_lists target_list
+					JOIN task_statuses target ON target.account_id=target_list.account_id AND target.workflow_id=target_list.workflow_id
+					WHERE target_list.account_id=child.account_id AND target_list.id=$3
+					ORDER BY target.is_default DESC,target.sort_order LIMIT 1
+				)),
+				updated_at=$4,version=COALESCE(child.version,1)+1
+			WHERE child.account_id=$1 AND child.parent_task_id=$2 AND child.deleted_at IS NULL
+			  AND child.list_id IS DISTINCT FROM $3
+		`, t.AccountID, t.ID, t.ListID, t.UpdatedAt); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
@@ -598,9 +625,9 @@ func (r *TaskRepository) GetSubtasksByTask(ctx context.Context, taskID uuid.UUID
 
 func (r *TaskRepository) GetListsByAccount(ctx context.Context, accountID uuid.UUID) ([]*domain.TaskList, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT tl.id, tl.account_id, tl.folder_id, tl.workflow_id, COALESCE(tl.workflow_inherited,TRUE), tl.name, COALESCE(tl.description,''), tl.color,
+		SELECT tl.id, tl.account_id, tl.folder_id, tl.workflow_id, COALESCE(tl.workflow_inherited,TRUE), COALESCE(tl.is_default,FALSE), tl.name, COALESCE(tl.description,''), tl.color,
 			tl.sort_order, tl.created_by, tl.archived_at, tl.created_at, tl.updated_at,
-			COALESCE((SELECT COUNT(*) FROM tasks t WHERE t.list_id = tl.id AND t.status NOT IN ('completed','cancelled')), 0) AS task_count
+			COALESCE((SELECT COUNT(*) FROM tasks t WHERE t.account_id=tl.account_id AND t.list_id=tl.id AND t.parent_task_id IS NULL AND t.deleted_at IS NULL), 0) AS task_count
 		FROM task_lists tl
 		WHERE tl.account_id=$1 AND tl.archived_at IS NULL
 		ORDER BY tl.sort_order, tl.created_at
@@ -613,7 +640,7 @@ func (r *TaskRepository) GetListsByAccount(ctx context.Context, accountID uuid.U
 	var lists []*domain.TaskList
 	for rows.Next() {
 		l := &domain.TaskList{}
-		if err := rows.Scan(&l.ID, &l.AccountID, &l.FolderID, &l.WorkflowID, &l.WorkflowInherited, &l.Name, &l.Description, &l.Color,
+		if err := rows.Scan(&l.ID, &l.AccountID, &l.FolderID, &l.WorkflowID, &l.WorkflowInherited, &l.IsDefault, &l.Name, &l.Description, &l.Color,
 			&l.SortOrder, &l.CreatedBy, &l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt, &l.TaskCount); err != nil {
 			return nil, err
 		}
@@ -664,9 +691,9 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 		return ErrTaskWorkNotFound
 	}
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO task_lists (id, account_id, folder_id, workflow_id, workflow_inherited, name, description, color, sort_order, created_by, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-	`, l.ID, l.AccountID, l.FolderID, l.WorkflowID, l.WorkflowInherited, l.Name, l.Description, l.Color, l.SortOrder, l.CreatedBy, l.CreatedAt, l.UpdatedAt)
+		INSERT INTO task_lists (id, account_id, folder_id, workflow_id, workflow_inherited, is_default, name, description, color, sort_order, created_by, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	`, l.ID, l.AccountID, l.FolderID, l.WorkflowID, l.WorkflowInherited, l.IsDefault, l.Name, l.Description, l.Color, l.SortOrder, l.CreatedBy, l.CreatedAt, l.UpdatedAt)
 	return err
 }
 
@@ -700,8 +727,20 @@ func (r *TaskRepository) UpdateList(ctx context.Context, id, accountID uuid.UUID
 func (r *TaskRepository) DeleteList(ctx context.Context, id, accountID uuid.UUID) error {
 	// Lists are archived so their tasks, history and reporting context remain
 	// intact. A future restore can simply clear archived_at.
-	_, err := r.db.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(), updated_at=NOW() WHERE id=$1 AND account_id=$2`, id, accountID)
-	return err
+	result, err := r.db.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(), updated_at=NOW() WHERE id=$1 AND account_id=$2 AND NOT is_default`, id, accountID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		var isDefault bool
+		if err := r.db.QueryRow(ctx, `SELECT is_default FROM task_lists WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&isDefault); err != nil {
+			return err
+		}
+		if isDefault {
+			return ErrDefaultTaskList
+		}
+	}
+	return nil
 }
 
 func (r *TaskRepository) ToggleStar(ctx context.Context, id, accountID uuid.UUID) (bool, error) {
