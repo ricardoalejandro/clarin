@@ -477,7 +477,7 @@ func Migrate(db *pgxpool.Pool) error {
 			program_id UUID NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
 			contact_id UUID NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
 			status VARCHAR(50) DEFAULT 'enrolled',
-			enrolled_at TIMESTAMPTZ DEFAULT NOW(),
+			enrolled_at DATE DEFAULT ((CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date),
 			UNIQUE(program_id, contact_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_program_participants_program ON program_participants(program_id)`,
@@ -2701,17 +2701,70 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_program_participants_stage ON program_participants(stage_id)`,
 
 		// ─── Programs: course health, goals, transfer and bitacora ─────────
-		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS dropped_at TIMESTAMPTZ`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS dropped_at DATE`,
 		`ALTER TABLE program_participants ALTER COLUMN status SET DEFAULT 'active'`,
 		`UPDATE program_participants SET status = 'active' WHERE status IS NULL OR status IN ('', 'enrolled')`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS drop_reason TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS drop_notes TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
+		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS completed_at DATE`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS transferred_to_level TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE program_participants ADD COLUMN IF NOT EXISTS transferred_at TIMESTAMPTZ`,
 		`CREATE INDEX IF NOT EXISTS idx_program_participants_status ON program_participants(program_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_program_participants_roster_window ON program_participants(program_id, status, enrolled_at, dropped_at, completed_at, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_program_participants_transfer ON program_participants(program_id) WHERE transferred_to_level <> ''`,
+		// Enrollment is a business calendar day in Lima, not an instant. Historical
+		// automatic values are converted through Lima; explicit UTC-midnight date
+		// corrections retain their written day.
+		`DO $$
+		DECLARE current_type TEXT;
+		BEGIN
+			SELECT data_type INTO current_type
+			FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'program_participants' AND column_name = 'enrolled_at';
+			IF current_type IS NOT NULL AND current_type <> 'date' THEN
+				ALTER TABLE program_participants ALTER COLUMN enrolled_at DROP DEFAULT;
+				ALTER TABLE program_participants ALTER COLUMN enrolled_at TYPE DATE USING (
+					CASE
+						WHEN (enrolled_at AT TIME ZONE 'UTC')::time = TIME '00:00:00' THEN (enrolled_at AT TIME ZONE 'UTC')::date
+						ELSE (enrolled_at AT TIME ZONE 'America/Lima')::date
+					END
+				);
+			END IF;
+			ALTER TABLE program_participants ALTER COLUMN enrolled_at
+				SET DEFAULT ((CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date);
+		END $$`,
+		// Withdrawal and completion are the first calendar day outside the
+		// participation window. Preserve the Lima calendar day from historical
+		// timestamps while removing the obsolete time component.
+		`DO $$
+		DECLARE dropped_type TEXT;
+		DECLARE completed_type TEXT;
+		BEGIN
+			SELECT data_type INTO dropped_type
+			FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'program_participants' AND column_name = 'dropped_at';
+			IF dropped_type IS NOT NULL AND dropped_type <> 'date' THEN
+				ALTER TABLE program_participants ALTER COLUMN dropped_at TYPE DATE
+				USING ((dropped_at AT TIME ZONE 'America/Lima')::date);
+			END IF;
+
+			SELECT data_type INTO completed_type
+			FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'program_participants' AND column_name = 'completed_at';
+			IF completed_type IS NOT NULL AND completed_type <> 'date' THEN
+				ALTER TABLE program_participants ALTER COLUMN completed_at TYPE DATE
+				USING ((completed_at AT TIME ZONE 'America/Lima')::date);
+			END IF;
+		END $$`,
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ`,
+		`UPDATE interactions SET updated_at = created_at WHERE updated_at IS NULL`,
+		`ALTER TABLE interactions ALTER COLUMN updated_at SET DEFAULT NOW()`,
+		`ALTER TABLE interactions ALTER COLUMN updated_at SET NOT NULL`,
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS updated_by UUID REFERENCES users(id) ON DELETE SET NULL`,
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ`,
+		`ALTER TABLE interactions ADD COLUMN IF NOT EXISTS pinned_by UUID REFERENCES users(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_interactions_contact_pinned ON interactions(account_id, contact_id, is_pinned DESC, pinned_at DESC, created_at DESC)`,
 		`ALTER TABLE program_sessions ADD COLUMN IF NOT EXISTS session_type TEXT NOT NULL DEFAULT 'regular'`,
 		`CREATE INDEX IF NOT EXISTS idx_program_sessions_type ON program_sessions(program_id, session_type)`,
 
@@ -2815,6 +2868,25 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_program_sessions_course_topic ON program_sessions(course_topic_id, account_id) WHERE course_topic_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_program_sessions_account_program_date ON program_sessions(account_id, program_id, date, start_time, created_at, id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_program_sessions_account_id ON program_sessions(account_id, id)`,
+		`CREATE TABLE IF NOT EXISTS program_session_observations (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			session_id UUID NOT NULL,
+			notes TEXT NOT NULL,
+			created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+			pinned_at TIMESTAMPTZ,
+			pinned_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			CONSTRAINT program_session_observations_account_session_fkey
+				FOREIGN KEY (account_id, session_id) REFERENCES program_sessions(account_id, id) ON DELETE CASCADE,
+			CONSTRAINT program_session_observations_notes_check
+				CHECK (char_length(BTRIM(notes)) BETWEEN 1 AND 4000)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_program_session_observations_order
+			ON program_session_observations(account_id, session_id, is_pinned DESC, pinned_at DESC, created_at DESC, id DESC)`,
 		`CREATE TABLE IF NOT EXISTS program_session_topics (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -3808,6 +3880,9 @@ func Migrate(db *pgxpool.Pool) error {
 	}
 	if err := migrateLegacyProgramEvents(ctx, db); err != nil {
 		return fmt.Errorf("program event retirement migration failed: %w", err)
+	}
+	if err := migrateTaskWork(ctx, db); err != nil {
+		return err
 	}
 
 	return nil

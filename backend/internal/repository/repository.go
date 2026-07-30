@@ -61,6 +61,7 @@ type Repositories struct {
 	SurveyTemplate     *SurveyTemplateRepository
 	Dynamic            *DynamicRepository
 	Task               *TaskRepository
+	TaskWork           *TaskWorkRepository
 	DocumentTemplate   *DocumentTemplateRepository
 	CustomField        *CustomFieldRepository
 	WhatsAppAPI        *WhatsAppAPIRepository
@@ -117,6 +118,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		SurveyTemplate:     NewSurveyTemplateRepository(db),
 		Dynamic:            &DynamicRepository{db: db},
 		Task:               &TaskRepository{db: db},
+		TaskWork:           &TaskWorkRepository{db: db},
 		DocumentTemplate:   &DocumentTemplateRepository{db: db},
 		CustomField:        &CustomFieldRepository{db: db},
 		WhatsAppAPI:        &WhatsAppAPIRepository{db: db},

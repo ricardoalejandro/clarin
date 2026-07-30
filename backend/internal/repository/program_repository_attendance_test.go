@@ -113,21 +113,23 @@ func TestAttendanceQueryIsSingleAccountScopedLateralRead(t *testing.T) {
 	}
 }
 
-func TestAttendanceWriteRequiresAccountScopedInclusiveParticipationWindow(t *testing.T) {
+func TestAttendanceWriteRequiresAccountScopedInclusiveStartExclusiveEndWindow(t *testing.T) {
 	required := []string{
 		"p.account_id = $1",
 		"pp.program_id = $2",
 		"pp.id = $3",
-		"$4::date >= pp.enrolled_at::date",
-		"WHEN pp.dropped_at IS NULL THEN pp.completed_at",
-		"WHEN pp.completed_at IS NULL THEN pp.dropped_at",
-		"ELSE LEAST(pp.dropped_at, pp.completed_at)",
-		"'infinity'::date",
+		"ps.id = $4",
+		"ps.date >= pp.enrolled_at",
+		"LEAST(pp.dropped_at, pp.completed_at) IS NULL",
+		"ps.date < LEAST(pp.dropped_at, pp.completed_at)",
 	}
 	for _, fragment := range required {
 		if !strings.Contains(participantEligibleForSessionQuery, fragment) {
 			t.Fatalf("attendance eligibility query is missing %q", fragment)
 		}
+	}
+	if strings.Contains(participantEligibleForSessionQuery, "ps.date <= LEAST") {
+		t.Fatal("attendance eligibility must exclude the withdrawal/completion day")
 	}
 }
 

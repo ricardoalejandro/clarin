@@ -59,3 +59,19 @@ func TestParticipantOutcomeRejectsFutureLifecycleDates(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeParticipantLifecycleDateUsesDateOnlyAndAllowsToday(t *testing.T) {
+	lima, err := time.LoadLocation("America/Lima")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 27, 20, 0, 0, 0, lima)
+	value := time.Date(2026, time.July, 27, 8, 45, 0, 0, lima)
+	got, err := normalizeParticipantLifecycleDate(value, now)
+	if err != nil {
+		t.Fatalf("normalize today's closure: %v", err)
+	}
+	if got.Format(time.RFC3339) != "2026-07-27T00:00:00Z" {
+		t.Fatalf("closure was not normalized to a date-only value: %s", got.Format(time.RFC3339))
+	}
+}

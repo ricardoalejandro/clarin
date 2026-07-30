@@ -22,6 +22,7 @@ import {
   MapPin,
   MessageCircle,
   Phone,
+  Pin,
   Plus,
   RefreshCw,
   Save,
@@ -234,6 +235,8 @@ export default function ContactDetailSurface({
   const [newObservation, setNewObservation] = useState('')
   const [observationActionError, setObservationActionError] = useState('')
   const [visibleObservations, setVisibleObservations] = useState(5)
+  const [editingObservation, setEditingObservation] = useState<Observation | null>(null)
+  const [editingObservationDraft, setEditingObservationDraft] = useState('')
   const [editMode, setEditMode] = useState(false)
   const [editDraft, setEditDraft] = useState<ContactEditDraft | null>(null)
   const [editDirty, setEditDirty] = useState(false)
@@ -248,6 +251,8 @@ export default function ContactDetailSurface({
     setNewObservation('')
     setObservationActionError('')
     setVisibleObservations(5)
+    setEditingObservation(null)
+    setEditingObservationDraft('')
     setEditMode(false)
     setEditDraft(null)
     setEditDirty(false)
@@ -438,6 +443,21 @@ export default function ContactDetailSurface({
     else onObservationChange?.()
   }
 
+  const saveObservationEdit = async () => {
+    if (!editingObservation) return
+    setObservationActionError('')
+    const result = await profile.updateObservation(editingObservation, editingObservationDraft)
+    if (!result.success) return setObservationActionError(result.error || 'No se pudo editar la nota.')
+    setEditingObservation(null); setEditingObservationDraft(''); onObservationChange?.()
+  }
+
+  const toggleObservationPin = async (observation: Observation) => {
+    setObservationActionError('')
+    const result = await profile.setObservationPinned(observation, !observation.is_pinned)
+    if (!result.success) return setObservationActionError(result.error || 'No se pudo cambiar el fijado.')
+    onObservationChange?.()
+  }
+
   const requestGoogleDesync = () => {
     if (!window.confirm('¿Quitar este contacto de Google Contacts? Dejará de recibir actualizaciones automáticas desde Clarin.')) return
     void googleSync.desync()
@@ -581,7 +601,7 @@ export default function ContactDetailSurface({
                 <section className="space-y-4 border-b border-slate-200 px-4 py-4"><div><div className="mb-2 flex items-center gap-2"><Tag className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Etiquetas del contacto</h4></div>{profile.contact.structured_tags.length > 0 ? <div className="flex flex-wrap gap-1.5">{profile.contact.structured_tags.map(tag => <span key={tag.id} className="rounded-full px-2.5 py-1 text-xs font-semibold text-white" style={{ backgroundColor: tag.color || '#64748b' }}>{tag.name}</span>)}</div> : <p className="text-xs italic text-slate-400">Sin etiquetas registradas.</p>}</div>{customFields.length > 0 && <div><div className="mb-2 flex items-center gap-2"><SlidersHorizontal className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Campos personalizados</h4></div><div className="divide-y divide-slate-100 rounded-xl bg-slate-50 px-3">{customFields.map(({ value, display }) => <div key={value.id || value.field_id} className="flex min-h-11 items-center justify-between gap-3 py-2 text-xs"><span className="min-w-0 truncate text-slate-500">{value.field_name || value.field_slug || 'Campo personalizado'}</span><span className={`max-w-[55%] break-words text-right font-semibold ${display ? 'text-slate-700' : 'italic text-slate-400'}`}>{display || 'Sin valor'}</span></div>)}</div></div>}<div><div className="mb-2 flex items-center gap-2"><FileText className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Notas del contacto</h4></div><p className={`whitespace-pre-wrap rounded-xl bg-slate-50 px-3 py-2.5 text-sm leading-relaxed ${cleanText(profile.contact.notes) ? 'text-slate-700' : 'italic text-slate-400'}`}>{cleanText(profile.contact.notes) || 'Sin notas registradas.'}</p></div></section>
 
             <section className="border-b border-slate-200 px-4 py-4" aria-labelledby="canonical-contact-history-title">
-              <div className="flex min-w-0 items-center gap-2"><Clock3 className="h-4 w-4 shrink-0 text-slate-400" /><div><h4 id="canonical-contact-history-title" className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Historial del contacto</h4><p className="text-[10px] text-slate-400">{profile.observationCount} registro{profile.observationCount === 1 ? '' : 's'}</p></div></div>
+              <div className="flex min-w-0 items-center gap-2"><Clock3 className="h-4 w-4 shrink-0 text-slate-400" /><div><h4 id="canonical-contact-history-title" className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Historial del contacto</h4><p className="text-[10px] text-slate-400">{profile.observationCount} registro{profile.observationCount === 1 ? '' : 's'}{profile.pinnedObservationCount > 0 && ` · ${profile.pinnedObservationCount} fijado${profile.pinnedObservationCount === 1 ? '' : 's'}`}</p></div></div>
               <div className={`mt-3 grid gap-2 ${canManageObservations ? 'grid-cols-2' : 'grid-cols-1'}`}>
                 <button type="button" onClick={toggleHistory} aria-expanded={historyOpen} className="inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-600 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">{historyOpen ? <ChevronUp className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}<span className="truncate">{historyOpen ? 'Ocultar historial' : 'Ver historial'}</span></button>
                 {canManageObservations && <button type="button" onClick={() => { setShowObservationComposer(value => !value); setObservationActionError('') }} aria-expanded={showObservationComposer} className="inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-white px-2 text-xs font-bold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">{showObservationComposer ? <ChevronUp className="h-4 w-4 shrink-0" /> : <Plus className="h-4 w-4 shrink-0" />}<span className="truncate">{showObservationComposer ? 'Ocultar formulario' : 'Añadir observación'}</span></button>}
@@ -600,8 +620,8 @@ export default function ContactDetailSurface({
               {historyOpen && (profile.observationsLoading ? <div className="flex min-h-24 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-emerald-600" aria-label="Cargando historial" /></div> : profile.observations.length === 0 ? <div className="mt-3 rounded-2xl border border-dashed border-slate-200 px-4 py-7 text-center"><FileText className="mx-auto h-6 w-6 text-slate-300" /><p className="mt-2 text-xs text-slate-400">No hay observaciones registradas.</p></div> : (
                 <div className="mt-3 space-y-2">
                   {profile.observations.slice(0, visibleObservations).map(observation => (
-                    <article key={observation.id} className="group rounded-2xl border border-slate-200 bg-white p-3">
-                      <div className="flex items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${observationTypeClass(observation.type)}`}>{observationTypeLabel(observation.type)}</span><time className="text-[10px] text-slate-400">{observationDate(observation.created_at)}</time></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">{cleanText(observation.notes) || '(sin contenido)'}</p>{observation.source_label && <p className="mt-2 text-[10px] font-semibold text-emerald-700">{observation.source_label}</p>}{observation.created_by_name && <p className="mt-1 text-[10px] text-slate-400">Registrado por {observation.created_by_name}</p>}</div>{canManageObservations && observation.type === 'note' && <button type="button" onClick={() => void removeObservation(observation)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-300 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100" aria-label="Eliminar observación"><Trash2 className="h-4 w-4" /></button>}</div>
+                    <article key={observation.id} className={`group rounded-2xl border bg-white p-3 ${observation.is_pinned ? 'border-amber-200 ring-1 ring-amber-100' : 'border-slate-200'}`}>
+                      {editingObservation?.id === observation.id ? <><textarea autoFocus rows={3} maxLength={4000} value={editingObservationDraft} onChange={event => setEditingObservationDraft(event.target.value)} className="w-full resize-y rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-emerald-500"/><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={() => { setEditingObservation(null); setEditingObservationDraft('') }} className="inline-flex min-h-10 items-center gap-1 rounded-lg px-3 text-xs font-semibold text-slate-600"><X className="h-4 w-4"/>Cancelar</button><button type="button" disabled={!editingObservationDraft.trim()} onClick={() => void saveObservationEdit()} className="inline-flex min-h-10 items-center gap-1 rounded-lg bg-emerald-600 px-3 text-xs font-bold text-white disabled:opacity-50"><Save className="h-4 w-4"/>Guardar</button></div></> : <div className="flex items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${observationTypeClass(observation.type)}`}>{observationTypeLabel(observation.type)}</span>{observation.is_pinned && <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700"><Pin className="h-3 w-3"/>Fijado</span>}<time className="text-[10px] text-slate-400">{observationDate(observation.created_at)}</time></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">{cleanText(observation.notes) || '(sin contenido)'}</p>{observation.source_label && <p className="mt-2 text-[10px] font-semibold text-emerald-700">{observation.source_label}</p>}{observation.created_by_name && <p className="mt-1 text-[10px] text-slate-400">Registrado por {observation.created_by_name}{observation.updated_at && observation.updated_at !== observation.created_at && ` · editado ${observationDate(observation.updated_at)}${observation.updated_by_name ? ` por ${observation.updated_by_name}` : ''}`}</p>}</div>{observation.type === 'note' && <div className="flex shrink-0 gap-1">{observation.can_pin && <button type="button" onClick={() => void toggleObservationPin(observation)} className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-amber-50 hover:text-amber-700" aria-label={observation.is_pinned ? 'Desfijar nota' : 'Fijar nota'}><Pin className="h-4 w-4"/></button>}{observation.can_edit && <button type="button" onClick={() => { setEditingObservation(observation); setEditingObservationDraft(observation.notes || '') }} className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Editar nota"><Edit2 className="h-4 w-4"/></button>}{observation.can_delete && <button type="button" onClick={() => void removeObservation(observation)} className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600" aria-label="Eliminar observación"><Trash2 className="h-4 w-4" /></button>}</div>}</div>}
                     </article>
                   ))}
                   {profile.observations.length > visibleObservations && <button type="button" onClick={() => setVisibleObservations(value => value + 10)} className="inline-flex min-h-11 w-full items-center justify-center rounded-xl text-sm font-bold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Mostrar {Math.min(10, profile.observations.length - visibleObservations)} más</button>}

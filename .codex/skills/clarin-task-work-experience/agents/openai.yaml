@@ -1,0 +1,4 @@
+interface:
+  display_name: "Clarin Task Work Experience"
+  short_description: "Kanban, tareas y colaboración de Clarin"
+  default_prompt: "Use $clarin-task-work-experience to improve Clarin Work without breaking task ordering, workflows, or realtime behavior."

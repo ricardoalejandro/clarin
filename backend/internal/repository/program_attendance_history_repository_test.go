@@ -70,8 +70,9 @@ func TestParticipantAttendanceHistoryQueriesAreAccountScopedAndSetBased(t *testi
 		"p.id = $2",
 		"pp.id = $3",
 		"ps.account_id = pc.account_id",
-		"ps.date <= CURRENT_DATE",
+		"ps.date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date",
 		"ps.date >= pc.enrolled_on",
+		"ps.date < pc.ended_on",
 		"COUNT(es.status)",
 	}
 	for _, fragment := range summaryFragments {
@@ -86,6 +87,7 @@ func TestParticipantAttendanceHistoryQueriesAreAccountScopedAndSetBased(t *testi
 		"pst.account_id",
 		"OR pa.id IS NOT NULL",
 		"OR COALESCE(lo.observation_count, 0) > 0",
+		"rs.date < pc.ended_on",
 		"$4::date IS NULL",
 		"LIMIT $8",
 	}

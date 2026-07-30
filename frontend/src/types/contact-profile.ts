@@ -122,6 +122,7 @@ export interface ContactProfileResponse {
   capabilities: ContactProfileCapabilities
   available_tags?: ContactProfileAvailableTag[]
   observation_count?: number
+  pinned_observation_count?: number
   custom_field_definitions?: ContactProfileCustomFieldDefinition[]
 }
 

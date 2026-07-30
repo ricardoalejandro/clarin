@@ -11,7 +11,7 @@ import {
 import { api, subscribeWebSocket } from '@/lib/api';
 import { contactIdFromRealtimeEvent } from '@/lib/contactProfileEvents';
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher';
-import { Program, ProgramParticipant, ProgramSession, ProgramSessionTopic, ProgramAttendance, ProgramAttendanceObservation, ProgramGoal, ProgramHealthSummary, ProgramAttendanceStatsResponse, ProgramAcademicConfig } from '@/types/program';
+import { Program, ProgramParticipant, ProgramSession, ProgramSessionTopic, ProgramAttendanceObservation, ProgramGoal, ProgramHealthSummary, ProgramAttendanceStatsResponse, ProgramAcademicConfig, ProgramSessionRosterEntry } from '@/types/program';
 import { Chat } from '@/types/chat';
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector';
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal';
@@ -21,14 +21,16 @@ import ContactPhotoPreview from '@/components/ContactPhotoPreview';
 import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface';
 import ProgramParticipantAttendanceSection from '@/components/programs/ProgramParticipantAttendanceSection';
 import ProgramParticipantEnrollmentDate from '@/components/programs/ProgramParticipantEnrollmentDate';
+import ProgramParticipantOutcomeDate from '@/components/programs/ProgramParticipantOutcomeDate';
 import type { ContactProfileContact, ContactProfileResponse } from '@/types/contact-profile';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
-import { calendarDateKey, formatCalendarDate, localDateInputValue } from '@/utils/calendarDate';
+import { calendarDateKey, formatCalendarDate, limaDateInputValue, localDateInputValue } from '@/utils/calendarDate';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
 import ProgramAcademicConfigPanel from '@/components/programs/ProgramAcademicConfigPanel';
 import ProgramSurveyPanel from '@/components/programs/ProgramSurveyPanel';
 import SessionTopicField, { normalizedSessionTopics, pendingActiveCourseTopics } from '@/components/programs/SessionTopicField';
+import SessionObservationPanel from '@/components/programs/SessionObservationPanel';
 
 const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : '';
 
@@ -71,17 +73,6 @@ const suggestedSessionTitle = (topics: ProgramSessionTopic[]) => topics[0]?.titl
 
 const sessionDisplayTitle = (session: ProgramSession, fallback: string) =>
   session.title?.trim() || session.topic?.trim() || suggestedSessionTitle(normalizedSessionTopics(session)) || fallback;
-
-const participantBelongsToSession = (participant: ProgramParticipant, session: ProgramSession) => {
-  const sessionDate = calendarDateKey(session.date);
-  const enrolledAt = calendarDateKey(participant.enrolled_at);
-  if (!sessionDate || !enrolledAt || sessionDate < enrolledAt) return false;
-  const endDates = [participant.dropped_at, participant.completed_at]
-    .map(calendarDateKey)
-    .filter(Boolean)
-    .sort();
-  return endDates.length === 0 || sessionDate <= endDates[0];
-};
 
 function ProgramParticipantHistoryList({
   participants,
@@ -234,6 +225,7 @@ export default function ProgramDetailPage() {
   const [newSessionTitleEdited, setNewSessionTitleEdited] = useState(false);
   const [selectedSession, setSelectedSession] = useState<ProgramSession | null>(null);
   const [attendanceData, setAttendanceData] = useState<Record<string, { status: string; observation_count: number; observation_preview: ProgramAttendanceObservation[] }>>({});
+  const [attendanceParticipants, setAttendanceParticipants] = useState<ProgramParticipant[]>([]);
   const [attendanceDirty, setAttendanceDirty] = useState<Record<string, boolean>>({});
   const [attendanceLoadState, setAttendanceLoadState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [attendanceLoadError, setAttendanceLoadError] = useState('');
@@ -390,7 +382,7 @@ export default function ProgramDetailPage() {
   const observationHistoryRequestRef = useRef<AbortController | null>(null);
   const observationHistoryRequestSequence = useRef(0);
   const [outcomeParticipant, setOutcomeParticipant] = useState<ProgramParticipant | null>(null);
-  const [outcomeForm, setOutcomeForm] = useState({ status: 'completed', transferred_to_level: '', drop_reason: '', drop_notes: '' });
+  const [outcomeForm, setOutcomeForm] = useState({ status: 'completed', ended_on: limaDateInputValue(), transferred_to_level: '', drop_reason: '', drop_notes: '' });
   const [savingOutcome, setSavingOutcome] = useState(false);
 
   const normalizedParticipantQuery = useMemo(
@@ -411,10 +403,6 @@ export default function ProgramDetailPage() {
     if (!normalizedParticipantQuery) return lifecycleParticipants;
     return lifecycleParticipants.filter(participant => normalizeParticipantSearch(`${participant.contact_name || ''} ${participant.contact_phone || ''}`).includes(normalizedParticipantQuery));
   }, [lifecycleParticipants, normalizedParticipantQuery]);
-  const eligibleAttendanceParticipants = useMemo(
-    () => selectedSession ? participants.filter(participant => participantBelongsToSession(participant, selectedSession)) : [],
-    [participants, selectedSession],
-  );
   const pendingCourseTopics = useMemo(
     () => pendingActiveCourseTopics(academicConfig?.courses || [], sessions),
     [academicConfig?.courses, sessions],
@@ -444,6 +432,7 @@ export default function ProgramDetailPage() {
     attendanceObservationRequestSequence.current += 1;
     setIsAttendanceOpen(false);
     setSelectedSession(null);
+    setAttendanceParticipants([]);
     setAttendanceDirty({});
     setAttendanceLoadState('idle');
     setAttendanceLoadError('');
@@ -892,6 +881,7 @@ export default function ProgramDetailPage() {
     setOutcomeParticipant(participant);
     setOutcomeForm({
       status,
+      ended_on: limaDateInputValue(),
       transferred_to_level: participant.transferred_to_level || '',
       drop_reason: participant.drop_reason || '',
       drop_notes: participant.drop_notes || '',
@@ -905,13 +895,13 @@ export default function ProgramDetailPage() {
       const payload = outcomeForm.status === 'completed'
         ? {
             status: 'completed',
-            completed_at: new Date().toISOString(),
+            completed_at: outcomeForm.ended_on,
             transferred_to_level: outcomeForm.transferred_to_level,
             transferred_at: outcomeForm.transferred_to_level ? new Date().toISOString() : '',
           }
         : {
             status: 'dropped',
-            dropped_at: new Date().toISOString(),
+            dropped_at: outcomeForm.ended_on,
             drop_reason: outcomeForm.drop_reason,
             drop_notes: outcomeForm.drop_notes,
           };
@@ -1193,6 +1183,19 @@ export default function ProgramDetailPage() {
     }
   }, [activeTab, fetchHealth, fetchStats, selectedMonthsKey]);
 
+  const handleParticipantOutcomeDateChange = (participantID: string, endedOn: string) => {
+    setParticipants(current => current.map(participant => {
+      if (participant.id !== participantID) return participant;
+      return participant.status === 'dropped'
+        ? { ...participant, dropped_at: endedOn }
+        : { ...participant, completed_at: endedOn };
+    }));
+    showToast('Fecha de cierre actualizada; el periodo y las métricas fueron recalculados.', 'success');
+    void fetchProgramData();
+    void fetchHealth();
+    if (activeTab === 'stats') void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
+  };
+
   useEffect(() => {
     const contexts = new Map<string, string>();
     participants.forEach(participant => {
@@ -1433,23 +1436,26 @@ export default function ProgramDetailPage() {
     const requestID = ++attendanceRequestSequence.current;
     setSelectedSession(session);
     setAttendanceData({});
+    setAttendanceParticipants([]);
     setAttendanceDirty({});
     setAttendanceLoadError('');
     setAttendanceLoadState('loading');
     setIsAttendanceOpen(true);
     try {
-      const response = await api<ProgramAttendance[]>(`/api/programs/${programId}/sessions/${session.id}/attendance`, { signal: controller.signal });
+      const response = await api<{ success: boolean; roster: ProgramSessionRosterEntry[] }>(`/api/programs/${programId}/sessions/${session.id}/roster`, { signal: controller.signal });
       if (controller.signal.aborted || requestID !== attendanceRequestSequence.current) return;
       const attMap: Record<string, { status: string; observation_count: number; observation_preview: ProgramAttendanceObservation[] }> = {};
 
-      if (response.success && (response.data == null || Array.isArray(response.data))) {
-        (response.data || []).forEach((a: ProgramAttendance) => {
-          attMap[a.participant_id] = {
-            status: a.status || '',
-            observation_count: a.observation_count || 0,
-            observation_preview: Array.isArray(a.observation_preview) ? a.observation_preview : [],
+      if (response.success && response.data?.success && Array.isArray(response.data.roster)) {
+        const roster = response.data.roster;
+        roster.forEach((entry) => {
+          attMap[entry.participant_id] = {
+            status: entry.attendance_status || '',
+            observation_count: entry.observation_count || 0,
+            observation_preview: Array.isArray(entry.observation_preview) ? entry.observation_preview : [],
           };
         });
+        setAttendanceParticipants(roster.map(entry => ({ id: entry.participant_id, program_id: programId, contact_id: entry.contact_id, status: entry.participation_status, enrolled_at: entry.enrolled_at, dropped_at: entry.dropped_at || undefined, completed_at: entry.completed_at || undefined, contact_name: entry.contact_name, contact_phone: entry.contact_phone || undefined, avatar_url: entry.avatar_url || null, avatar_revision: entry.avatar_revision })));
       } else {
         throw new Error(response.error || 'No se pudo cargar la asistencia');
       }
@@ -2757,6 +2763,7 @@ export default function ProgramDetailPage() {
                             </span>
                           )}
                         </div>
+                        {(session.observation_count || 0) > 0 && <div className="mt-2 flex min-w-0 items-start gap-1.5 text-xs text-slate-500"><MessageSquare className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600"/><div className="min-w-0"><span className="font-semibold text-slate-600">{session.observation_count} comentario{session.observation_count === 1 ? '' : 's'}</span>{session.observation_preview?.notes && <p className="line-clamp-2 leading-5">{session.observation_preview.is_pinned ? '📌 ' : ''}{session.observation_preview.notes}</p>}</div></div>}
                       </div>
 
                       {/* Attendance stats */}
@@ -3509,6 +3516,11 @@ export default function ProgramDetailPage() {
             </div>
 
             <div className="flex-1 overflow-y-auto pr-1">
+              <section className="mb-4 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-3 sm:p-4">
+                <h3 className="flex items-center gap-2 text-sm font-bold text-emerald-900"><BookOpen className="h-4 w-4"/>Temas programados</h3>
+                {normalizedSessionTopics(selectedSession).length === 0 ? <p className="mt-2 text-xs text-emerald-800/70">No hay temas programados para esta sesión.</p> : <div className="mt-2 flex flex-wrap gap-2">{normalizedSessionTopics(selectedSession).map(topic => <span key={topic.id || topic.course_topic_id || topic.title} className="rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-emerald-800">{topic.course_name ? `${topic.course_name} · ` : ''}{topic.title}</span>)}</div>}
+              </section>
+              <SessionObservationPanel programId={programId} sessionId={selectedSession.id} onChanged={() => void fetchProgramData()} />
               {attendanceLoadState === 'loading' ? (
                 <div className="flex min-h-64 items-center justify-center px-4 py-10 text-center" role="status">
                   <div><Loader2 className="mx-auto h-8 w-8 animate-spin text-emerald-600" /><p className="mt-3 text-sm font-semibold text-slate-700">Cargando asistencia…</p><p className="mt-1 text-xs text-slate-500">Puedes permanecer aquí mientras preparamos la lista.</p></div>
@@ -3519,9 +3531,9 @@ export default function ProgramDetailPage() {
                 </div>
               ) : (
                 <>
-              {eligibleAttendanceParticipants.length === 0 && <div className="flex min-h-48 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 text-center text-sm leading-6 text-slate-500">No hay participantes cuyo periodo de incorporación incluya esta sesión.</div>}
+              {attendanceParticipants.length === 0 && <div className="flex min-h-48 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 text-center text-sm leading-6 text-slate-500">No hay participantes cuyo periodo de incorporación incluya esta sesión.</div>}
               <div className="space-y-3 md:hidden">
-                {eligibleAttendanceParticipants.map(p => (
+                {attendanceParticipants.map(p => (
                   <div key={p.id} className="rounded-xl border border-slate-200 p-3">
                     <div className="flex items-center gap-2">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">{(p.contact_name || '?').charAt(0).toUpperCase()}</div>
@@ -3552,7 +3564,7 @@ export default function ProgramDetailPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {eligibleAttendanceParticipants.map((p) => (
+                  {attendanceParticipants.map((p) => (
                     <tr key={p.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
@@ -3702,11 +3714,23 @@ export default function ProgramDetailPage() {
                 </div>
               </div>
             )}
+            <div className="mt-4">
+              <label className="mb-1.5 block text-sm font-medium text-slate-700">{outcomeForm.status === 'completed' ? 'Fecha de finalización' : 'Fecha de retiro'}</label>
+              <input
+                type="date"
+                value={outcomeForm.ended_on}
+                min={calendarDateKey(outcomeParticipant.enrolled_at)}
+                max={limaDateInputValue()}
+                onChange={(event) => setOutcomeForm(prev => ({ ...prev, ended_on: event.target.value }))}
+                className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 sm:text-sm"
+              />
+              <p className="mt-2 text-xs leading-5 text-slate-500">Es el primer día fuera del programa. Si existe una sesión en esa fecha, el participante no aparecerá en su lista.</p>
+            </div>
             <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-4 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">
               <button onClick={() => setOutcomeParticipant(null)} disabled={savingOutcome} className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:opacity-50 sm:flex-none">
                 Cancelar
               </button>
-              <button onClick={saveParticipantOutcome} disabled={savingOutcome} className={`min-h-11 flex-1 rounded-xl px-5 py-2.5 font-medium text-white shadow-sm transition-all disabled:cursor-wait disabled:opacity-60 sm:flex-none ${outcomeForm.status === 'dropped' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+              <button onClick={saveParticipantOutcome} disabled={savingOutcome || !outcomeForm.ended_on || outcomeForm.ended_on < calendarDateKey(outcomeParticipant.enrolled_at) || outcomeForm.ended_on > limaDateInputValue()} className={`min-h-11 flex-1 rounded-xl px-5 py-2.5 font-medium text-white shadow-sm transition-all disabled:cursor-not-allowed disabled:opacity-60 sm:flex-none ${outcomeForm.status === 'dropped' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
                 {savingOutcome ? 'Guardando…' : outcomeForm.status === 'dropped' ? 'Retirar y conservar historial' : 'Completar'}
               </button>
             </div>
@@ -3879,18 +3903,7 @@ export default function ProgramDetailPage() {
                         {selectedProgramParticipant && (
                           <div className="mt-3 grid grid-cols-1 gap-2 text-xs text-slate-600 sm:grid-cols-2">
                             <ProgramParticipantEnrollmentDate programId={programId} participant={selectedProgramParticipant} onChange={enrolledAt => handleParticipantEnrollmentChange(selectedProgramParticipant.id, enrolledAt)} />
-                            {selectedProgramParticipant.completed_at && (
-                              <div className="rounded-xl bg-slate-50 px-3 py-2">
-                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Finalización</p>
-                                <p className="mt-0.5 font-semibold text-slate-700">{formatCalendarDate(selectedProgramParticipant.completed_at, 'dd MMM yyyy', { locale: es })}</p>
-                              </div>
-                            )}
-                            {selectedProgramParticipant.dropped_at && (
-                              <div className="rounded-xl bg-slate-50 px-3 py-2">
-                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Retiro</p>
-                                <p className="mt-0.5 font-semibold text-slate-700">{formatCalendarDate(selectedProgramParticipant.dropped_at, 'dd MMM yyyy', { locale: es })}</p>
-                              </div>
-                            )}
+                            <ProgramParticipantOutcomeDate programId={programId} participant={selectedProgramParticipant} onChange={endedOn => handleParticipantOutcomeDateChange(selectedProgramParticipant.id, endedOn)} />
                           </div>
                         )}
                         {selectedProgramParticipant?.status === 'active' ? (

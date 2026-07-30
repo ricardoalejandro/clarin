@@ -32,6 +32,7 @@ Before changing any area below, read the matching local skill completely:
 - Kommo import/status tags/phone normalization/compatibility fields: `.codex/skills/clarin-kommo-integration/SKILL.md`
 - MCP server, MCP admin UI, credentials, sessions, audit, tools, or docs: `.codex/skills/clarin-mcp-security/SKILL.md`
 - Chats, WhatsApp devices/capabilities, messages/replies, chat details, contact avatars, statuses, stickers, or realtime chat UX: `.codex/skills/clarin-chat-whatsapp-experience/SKILL.md` plus every matching layer skill above.
+- Clarin Work, tasks, Kanban, task folders/lists/workflows/statuses, ordering, filters/saved views, task detail, subtasks, comments, dependencies, Gantt/calendar, or task realtime behavior: `.codex/skills/clarin-task-work-experience/SKILL.md` plus every matching layer skill above.
 
 If a task touches multiple areas, read all matching skills before editing.
 
@@ -39,11 +40,11 @@ If a task touches multiple areas, read all matching skills before editing.
 
 - `ContactDetailSurface` is the canonical identity surface for Contactos, Leads, Chats, Eventos and Programas. Keep identity, phones, email, photo, tags, notes, custom fields and contact history single-sourced from `Contact`; module sections must contain only contextual data.
 - `program_participants.enrolled_at` represents the participant's real start date in the program. New participants receive it automatically, but authorized users must be able to correct it explicitly; never infer or move it automatically from attendance rows.
-- Individual attendance counts only held sessions inside the inclusive participation window from `enrolled_at` through the earliest of `dropped_at` or `completed_at`. Preserve real out-of-window attendance as clearly labelled history and never include it in rates.
+- Individual attendance counts only held sessions in the calendar-date window `enrolled_at <= session.date < earliest(dropped_at, completed_at)`. Enrollment is inclusive; withdrawal and completion are the first excluded day. Preserve real out-of-window attendance as clearly labelled history and never include it in rates.
 - A Contact may participate in many Programs, but enrollment dates, lifecycle status, attendance, observations, outcomes and rates belong to the specific `program_participant_id`. Never merge or present one unqualified attendance score across Programs.
 - Operational Program rosters default to active participants. Retired and completed participation remains available as history, is excluded from current headcount and current health, and still contributes to historical session metrics only when the session date was inside its participation window.
 - `Retirar` is a lifecycle transition, not a deletion. Never physically delete a Program participation that has attendance, observations, notes or other activity; an administrative enrollment annulment is only valid for a proven empty enrollment created by mistake.
-- Session attendance rosters and writes must enforce eligibility for that session date in both frontend and backend. A later withdrawal must not rewrite historical rosters or past rates, and pending attendance is never an absence.
+- Session attendance rosters and writes must enforce calendar-date eligibility in both frontend and backend. A session on the enrollment date is included; a session on the withdrawal/completion date is excluded. Corrections never delete attendance, and pending attendance is never an absence.
 - Programs are groups of classes. New event workflows belong exclusively to the full Eventos module; do not reintroduce `type=event` creation inside Programas or duplicate Evento capabilities there.
 - Contact tag editing must remain usable for very large catalogs: render assigned tags immediately, search a bounded server-side result set, and gate creation of global tags with `PermTags`; never load or render the entire tag catalog in every contact detail.
 - Contact observation history must be user-expandable and lazy-loaded. Keep its count and add action available while collapsed, and keep the observation composer independent from the history list.
@@ -54,6 +55,26 @@ If a task touches multiple areas, read all matching skills before editing.
 - Program survey applications belong to one Program and freeze their recipient audience at launch. Link each recipient and response to the canonical Contact and the specific `program_participant_id` so the same Contact can participate independently in multiple Programs.
 - Editing a template must never mutate published applications, questions, answers, exports or analytics. Preserve existing public slugs and legacy responses during migrations; do not use delete-and-reinsert question flows once answers exist.
 - Results are instance-specific. Template-level analytics may compare or aggregate instances only with explicit origin/revision filters and must never silently mix incompatible question revisions.
+
+## Clarin Work Product Invariants
+
+- Every task read, write, reorder, filter, saved view and WebSocket event is account-scoped. A task belongs to one real list; use the account default list only as a compatibility fallback.
+- Folders contain lists, lists resolve workflows and workflows own statuses. Never assign a task a status from another workflow.
+- Persist manual top-level task order inside its list and child order inside its parent. Creating, restoring, changing lists and moving on a board must allocate a safe durable position.
+- Move task status and order atomically with optimistic concurrency. Never combine unrelated reorder and status calls or replace the order with only filtered/visible cards.
+- Aggregate boards group heterogeneous workflows by category and map a drop to the task's real equivalent status. Disable destinations without a valid equivalent.
+- Keep one responsible owner plus optional collaborators unless a deliberate full-stack migration introduces multi-owner semantics.
+- Treat list hierarchy drag as one structural transaction: validate same-account folder/anchor, remap inherited workflows completely, persist destination order once, and roll back the whole operation on any incompatibility. The default task list remains fixed at the root.
+- An explicit empty collaborator collection is canonical. Frontend reconciliation must not preserve stale collaborators when the last participant is removed.
+- Real subtasks are one-level child tasks in the parent's list and compatible workflow. Do not expose the legacy checklist table as a second editable source.
+- Archive task lists/folders only when they contain no active tasks. Child restore requires an active parent; concurrent structure/task mutations must lock and revalidate their dependencies inside one transaction.
+- Aggregate Kanban anchors are same-list and same workflow category, not necessarily the same concrete status. Workflow changes must remap every affected task by category atomically or reject without partial changes.
+- Treat task comments, mentions, attachments, activity and dependencies as task-scoped account data. Keep comment drafts, scroll and edits stable during realtime reconciliation.
+- Page older task comments explicitly and preserve chronological order and scroll; never hide history behind a fixed unannounced limit.
+- Patch task/order WebSocket events by stable ID/version/operation ID. Do not replace a populated board with skeletons or reload hierarchy for ordinary task/comment events.
+- Base task detail layout on measured available surface width. Docked/floating modes leave the workspace interactive; maximized/mobile modes may block it.
+- Keep task labels separate from Contact tags. Never reuse Contact identity metadata as task metadata without an explicit task model.
+- Ship only task controls that work end to end across success, loading, empty, conflict, permission and failure states.
 
 ## Chat And WhatsApp Product Invariants
 

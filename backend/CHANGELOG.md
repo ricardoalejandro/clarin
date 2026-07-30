@@ -1,5 +1,41 @@
 # Changelog — Clarin CRM
 
+## 2026-07-30
+
+### Build 2 — Clarin Work aprovecha el espacio y ordena proyectos visualmente
+- ✨ Las listas se arrastran entre carpetas, se reordenan y regresan a “Sin carpeta” con previsualización, teclado, confirmación de flujo y rollback exacto.
+- 💄 Las vistas principales ocupan una barra estable de dos filas; la búsqueda se expande sin desplazar el lienzo y Tablero, Calendario y Gantt aprovechan toda la superficie.
+- ✨ Estado y prioridad usan selectores accesibles con color y significado, mientras los colaboradores se buscan y administran como participantes adicionales.
+- 🐛 Retirar el último colaborador representa correctamente la colección vacía devuelta por el servidor.
+- 🔒 Ubicación, orden, herencia de flujo y remapeo de estados se resuelven en una única transacción aislada por cuenta.
+
+### Build 1 — Kanban estable incluso durante arrastres prolongados
+- 🐛 La tarjeta activa deja de participar como destino de su propia colisión, eliminando el parpadeo y el error React #185 al mantenerla entre columnas.
+- ⚡ El tablero transfiere una tarjeta una sola vez al cruzar de columna y confirma su posición final al soltar, conservando la animación fluida sin ciclos de índices.
+- ✅ Una prueba de navegador estresa 90 tareas, mouse, teclado, Escape, soltado exterior, columnas vacías/contraídas y rollback ante errores o conflictos.
+
+## 2026-07-29
+
+### Build 3 — Mitigación inicial del arrastre Kanban
+- 🐛 Se redujo la frecuencia del ciclo de medición que aparecía al mover fichas repetidamente entre columnas.
+- ⚡ La previsualización del orden se agrupó por cuadro de animación como primera protección mientras se investigaba la oscilación de índices.
+- 🔧 Los lineamientos de Clarin Work incorporan estabilidad referencial y una prueba de estrés obligatoria para límites entre columnas.
+
+### Build 2 — Clarin Work ordena, filtra y coordina el trabajo
+- ✨ El tablero Kanban permite mover tareas entre estados con mouse, pulsación táctil prolongada o teclado, incluso hacia columnas vacías o contraídas.
+- 🔄 El orden manual y el cambio de estado se guardan como una sola operación, se reconcilian en tiempo real y se recuperan con seguridad ante conflictos.
+- ✨ Los filtros combinables y las vistas privadas guardadas permiten enfocar responsables, colaboradores, fechas, prioridad, tipo y contenido sin perder el ámbito elegido.
+- ✨ La creación rápida conserva lista, responsable buscable, fecha y prioridad; la creación completa mantiene el borrador y las tareas aparecen de inmediato en su lista o carpeta.
+- 💄 Las tarjetas, columnas, estados vacíos, métricas y superficies responsivas hacen de Clarin Work un espacio más claro, compacto y agradable de usar.
+- 🔒 Las listas, flujos, estados, vistas y movimientos validan cuenta, versión y orden durable, también cuando un tablero reúne varios flujos.
+- 🔧 Se documentaron los contratos de Clarin Work y su matriz de verificación en una skill local obligatoria para futuras modificaciones.
+
+### Build 1 — Conversaciones y detalle profesional de tareas
+- ✨ Cada tarea incorpora actividad, comentarios, menciones, archivos, dependencias y subtareas reales dentro del mismo contexto de trabajo.
+- ✨ El responsable se elige mediante búsqueda y los colaboradores permanecen diferenciados del dueño de la tarea.
+- 💄 El detalle puede acoplarse, moverse, redimensionarse o maximizarse, y recuerda su geometría sin bloquear innecesariamente el tablero.
+- 🐛 Escape cierra la creación y cancela ediciones en curso sin guardar cambios accidentales.
+
 ## 2026-07-22
 
 ### Build 3 — Google Sync vuelve a la ficha única

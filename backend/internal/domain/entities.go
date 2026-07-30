@@ -1265,6 +1265,15 @@ type Interaction struct {
 	NextActionDate       *time.Time `json:"next_action_date,omitempty"`
 	CreatedBy            *uuid.UUID `json:"created_by,omitempty"`
 	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+	UpdatedBy            *uuid.UUID `json:"updated_by,omitempty"`
+	UpdatedByName        *string    `json:"updated_by_name,omitempty"`
+	IsPinned             bool       `json:"is_pinned"`
+	PinnedAt             *time.Time `json:"pinned_at,omitempty"`
+	PinnedBy             *uuid.UUID `json:"pinned_by,omitempty"`
+	CanEdit              bool       `json:"can_edit"`
+	CanPin               bool       `json:"can_pin"`
+	CanDelete            bool       `json:"can_delete"`
 	KommoCallSlot        *int       `json:"kommo_call_slot,omitempty"`
 
 	// Populated on demand
@@ -1296,58 +1305,211 @@ const (
 
 // TaskList represents a named grouping for tasks
 type TaskList struct {
-	ID        uuid.UUID `json:"id"`
-	AccountID uuid.UUID `json:"account_id"`
-	Name      string    `json:"name"`
-	Color     string    `json:"color,omitempty"`
-	SortOrder int       `json:"sort_order"`
-	CreatedBy uuid.UUID `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	TaskCount int       `json:"task_count"`
+	ID                uuid.UUID  `json:"id"`
+	AccountID         uuid.UUID  `json:"account_id"`
+	FolderID          *uuid.UUID `json:"folder_id,omitempty"`
+	WorkflowID        *uuid.UUID `json:"workflow_id,omitempty"`
+	WorkflowInherited bool       `json:"workflow_inherited"`
+	IsDefault         bool       `json:"is_default"`
+	Name              string     `json:"name"`
+	Description       string     `json:"description,omitempty"`
+	Color             string     `json:"color,omitempty"`
+	SortOrder         int        `json:"sort_order"`
+	CreatedBy         uuid.UUID  `json:"created_by"`
+	ArchivedAt        *time.Time `json:"archived_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	TaskCount         int        `json:"task_count"`
+}
+
+// TaskWorkflow owns an ordered set of task statuses. Lists inherit their
+// folder workflow unless they explicitly point at another one.
+type TaskWorkflow struct {
+	ID        uuid.UUID     `json:"id"`
+	AccountID uuid.UUID     `json:"account_id"`
+	Name      string        `json:"name"`
+	IsDefault bool          `json:"is_default"`
+	CreatedBy *uuid.UUID    `json:"created_by,omitempty"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
+	Statuses  []*TaskStatus `json:"statuses"`
+}
+
+type TaskStatus struct {
+	ID         uuid.UUID `json:"id"`
+	AccountID  uuid.UUID `json:"account_id"`
+	WorkflowID uuid.UUID `json:"workflow_id"`
+	Name       string    `json:"name"`
+	Color      string    `json:"color"`
+	Category   string    `json:"category"`
+	SortOrder  int       `json:"sort_order"`
+	IsDefault  bool      `json:"is_default"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type TaskFolder struct {
+	ID          uuid.UUID   `json:"id"`
+	AccountID   uuid.UUID   `json:"account_id"`
+	WorkflowID  *uuid.UUID  `json:"workflow_id,omitempty"`
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Color       string      `json:"color"`
+	SortOrder   int         `json:"sort_order"`
+	CreatedBy   uuid.UUID   `json:"created_by"`
+	ArchivedAt  *time.Time  `json:"archived_at,omitempty"`
+	CreatedAt   time.Time   `json:"created_at"`
+	UpdatedAt   time.Time   `json:"updated_at"`
+	TaskCount   int         `json:"task_count"`
+	Lists       []*TaskList `json:"lists"`
 }
 
 // Task represents a scheduled action (call, follow-up, meeting, reminder)
 type Task struct {
-	ID                 uuid.UUID  `json:"id"`
-	AccountID          uuid.UUID  `json:"account_id"`
-	CreatedBy          uuid.UUID  `json:"created_by"`
-	AssignedTo         uuid.UUID  `json:"assigned_to"`
-	Title              string     `json:"title"`
-	Description        string     `json:"description,omitempty"`
-	Type               string     `json:"type"` // call, whatsapp, meeting, reminder
-	DueAt              *time.Time `json:"due_at,omitempty"`
-	DueEndAt           *time.Time `json:"due_end_at,omitempty"`
-	Priority           string     `json:"priority"` // low, medium, high, urgent
-	Status             string     `json:"status"`   // pending, completed, overdue, cancelled
-	CompletedAt        *time.Time `json:"completed_at,omitempty"`
-	CompletedBy        *uuid.UUID `json:"completed_by,omitempty"`
-	LeadID             *uuid.UUID `json:"lead_id,omitempty"`
-	EventID            *uuid.UUID `json:"event_id,omitempty"`
-	ProgramID          *uuid.UUID `json:"program_id,omitempty"`
-	ContactID          *uuid.UUID `json:"contact_id,omitempty"`
-	ListID             *uuid.UUID `json:"list_id,omitempty"`
-	Starred            bool       `json:"starred"`
-	SortOrder          int        `json:"sort_order"`
-	RecurrenceRule     string     `json:"recurrence_rule,omitempty"`
-	RecurrenceParentID *uuid.UUID `json:"recurrence_parent_id,omitempty"`
-	ReminderMinutes    *int       `json:"reminder_minutes,omitempty"`
-	Notes              string     `json:"notes,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                 uuid.UUID   `json:"id"`
+	AccountID          uuid.UUID   `json:"account_id"`
+	CreatedBy          uuid.UUID   `json:"created_by"`
+	AssignedTo         uuid.UUID   `json:"assigned_to"`
+	Title              string      `json:"title"`
+	Description        string      `json:"description,omitempty"`
+	Type               string      `json:"type"` // call, whatsapp, meeting, reminder
+	StartAt            *time.Time  `json:"start_at,omitempty"`
+	DueAt              *time.Time  `json:"due_at,omitempty"`
+	DueEndAt           *time.Time  `json:"due_end_at,omitempty"`
+	IsAllDay           bool        `json:"is_all_day"`
+	Priority           string      `json:"priority"` // low, medium, high, urgent
+	Status             string      `json:"status"`   // pending, completed, overdue, cancelled
+	StatusID           *uuid.UUID  `json:"status_id,omitempty"`
+	CompletedAt        *time.Time  `json:"completed_at,omitempty"`
+	CompletedBy        *uuid.UUID  `json:"completed_by,omitempty"`
+	LeadID             *uuid.UUID  `json:"lead_id,omitempty"`
+	EventID            *uuid.UUID  `json:"event_id,omitempty"`
+	ProgramID          *uuid.UUID  `json:"program_id,omitempty"`
+	ContactID          *uuid.UUID  `json:"contact_id,omitempty"`
+	ListID             *uuid.UUID  `json:"list_id,omitempty"`
+	ParentTaskID       *uuid.UUID  `json:"parent_task_id,omitempty"`
+	Starred            bool        `json:"starred"`
+	SortOrder          int         `json:"sort_order"`
+	Progress           int         `json:"progress"`
+	IsMilestone        bool        `json:"is_milestone"`
+	DeletedAt          *time.Time  `json:"deleted_at,omitempty"`
+	DeletedBy          *uuid.UUID  `json:"deleted_by,omitempty"`
+	Version            int64       `json:"version"`
+	RecurrenceRule     string      `json:"recurrence_rule,omitempty"`
+	RecurrenceParentID *uuid.UUID  `json:"recurrence_parent_id,omitempty"`
+	ReminderMinutes    *int        `json:"reminder_minutes,omitempty"`
+	Notes              string      `json:"notes,omitempty"`
+	Placement          string      `json:"-"`
+	CollaboratorIDs    []uuid.UUID `json:"-"`
+	CollaboratorsSet   bool        `json:"-"`
+	CollaboratorsActor *uuid.UUID  `json:"-"`
+	MutationActor      *uuid.UUID  `json:"-"`
+	CreatedAt          time.Time   `json:"created_at"`
+	UpdatedAt          time.Time   `json:"updated_at"`
 
 	// Populated on demand (JOINs)
-	AssignedToName string `json:"assigned_to_name,omitempty"`
-	CreatedByName  string `json:"created_by_name,omitempty"`
-	LeadName       string `json:"lead_name,omitempty"`
-	EventName      string `json:"event_name,omitempty"`
-	ProgramName    string `json:"program_name,omitempty"`
-	ContactName    string `json:"contact_name,omitempty"`
-	ListName       string `json:"list_name,omitempty"`
+	AssignedToName string              `json:"assigned_to_name,omitempty"`
+	CreatedByName  string              `json:"created_by_name,omitempty"`
+	LeadName       string              `json:"lead_name,omitempty"`
+	EventName      string              `json:"event_name,omitempty"`
+	ProgramName    string              `json:"program_name,omitempty"`
+	ContactName    string              `json:"contact_name,omitempty"`
+	ListName       string              `json:"list_name,omitempty"`
+	FolderID       *uuid.UUID          `json:"folder_id,omitempty"`
+	FolderName     string              `json:"folder_name,omitempty"`
+	StatusDetail   *TaskStatus         `json:"status_detail,omitempty"`
+	Collaborators  []*TaskCollaborator `json:"collaborators,omitempty"`
 
 	// Subtask counts (populated via subqueries)
-	SubtaskCount int `json:"subtask_count"`
-	SubtaskDone  int `json:"subtask_done"`
+	SubtaskCount    int `json:"subtask_count"`
+	SubtaskDone     int `json:"subtask_done"`
+	CommentCount    int `json:"comment_count"`
+	AttachmentCount int `json:"attachment_count"`
+}
+
+// TaskSavedView is a private, account-scoped task view owned by one user.
+// Filters stay as JSON so the UI can evolve its filter vocabulary without a
+// schema migration while the owner/account boundary remains relational.
+type TaskSavedView struct {
+	ID                 uuid.UUID       `json:"id"`
+	AccountID          uuid.UUID       `json:"account_id"`
+	UserID             uuid.UUID       `json:"user_id"`
+	Name               string          `json:"name"`
+	ScopeType          string          `json:"scope_type"`
+	ScopeID            *uuid.UUID      `json:"scope_id,omitempty"`
+	ViewMode           string          `json:"view_mode"`
+	Filters            json.RawMessage `json:"filters"`
+	CollapsedStatusIDs []string        `json:"collapsed_status_ids"`
+	IsDefault          bool            `json:"is_default"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+}
+
+type TaskCollaborator struct {
+	UserID      uuid.UUID `json:"user_id"`
+	DisplayName string    `json:"display_name"`
+	Username    string    `json:"username"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type TaskDependency struct {
+	ID                uuid.UUID  `json:"id"`
+	AccountID         uuid.UUID  `json:"account_id"`
+	PredecessorTaskID uuid.UUID  `json:"predecessor_task_id"`
+	SuccessorTaskID   uuid.UUID  `json:"successor_task_id"`
+	DependencyType    string     `json:"dependency_type"`
+	LagMinutes        int        `json:"lag_minutes"`
+	PredecessorTitle  string     `json:"predecessor_title,omitempty"`
+	SuccessorTitle    string     `json:"successor_title,omitempty"`
+	CreatedBy         *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+}
+
+type TaskComment struct {
+	ID          uuid.UUID             `json:"id"`
+	AccountID   uuid.UUID             `json:"account_id"`
+	TaskID      uuid.UUID             `json:"task_id"`
+	AuthorID    uuid.UUID             `json:"author_id"`
+	AuthorName  string                `json:"author_name"`
+	Body        string                `json:"body"`
+	EditedAt    *time.Time            `json:"edited_at,omitempty"`
+	CreatedAt   time.Time             `json:"created_at"`
+	UpdatedAt   time.Time             `json:"updated_at"`
+	Mentions    []*TaskCommentMention `json:"mentions"`
+	Attachments []*TaskAttachment     `json:"attachments"`
+	CanEdit     bool                  `json:"can_edit"`
+	CanDelete   bool                  `json:"can_delete"`
+}
+
+type TaskCommentMention struct {
+	UserID      uuid.UUID `json:"user_id"`
+	DisplayName string    `json:"display_name"`
+	Username    string    `json:"username"`
+}
+
+type TaskActivity struct {
+	ID        uuid.UUID       `json:"id"`
+	AccountID uuid.UUID       `json:"account_id"`
+	TaskID    uuid.UUID       `json:"task_id"`
+	ActorID   *uuid.UUID      `json:"actor_id,omitempty"`
+	ActorName string          `json:"actor_name,omitempty"`
+	Action    string          `json:"action"`
+	Metadata  json.RawMessage `json:"metadata"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type TaskAttachment struct {
+	ID           uuid.UUID  `json:"id"`
+	AccountID    uuid.UUID  `json:"account_id"`
+	TaskID       uuid.UUID  `json:"task_id"`
+	MediaAssetID uuid.UUID  `json:"media_asset_id"`
+	Filename     string     `json:"filename"`
+	ContentType  string     `json:"content_type"`
+	MediaType    string     `json:"media_type"`
+	SizeBytes    int64      `json:"size_bytes"`
+	URL          string     `json:"url"`
+	UploadedBy   *uuid.UUID `json:"uploaded_by,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 // TaskReminder represents a scheduled reminder for a task
@@ -1380,6 +1542,13 @@ const (
 	TaskTypeWhatsApp = "whatsapp"
 	TaskTypeMeeting  = "meeting"
 	TaskTypeReminder = "reminder"
+)
+
+const (
+	TaskStatusCategoryNotStarted = "not_started"
+	TaskStatusCategoryActive     = "active"
+	TaskStatusCategoryDone       = "done"
+	TaskStatusCategoryCancelled  = "cancelled"
 )
 
 // Task priority constants
@@ -1605,26 +1774,66 @@ type ProgramAcademicConfig struct {
 
 // ProgramSession represents a single class or session within a program
 type ProgramSession struct {
-	ID               uuid.UUID              `json:"id"`
-	ProgramID        uuid.UUID              `json:"program_id"`
-	Date             time.Time              `json:"date"`
-	Title            string                 `json:"title"`
-	TitleProvided    bool                   `json:"-"`
-	Topic            *string                `json:"topic,omitempty"`
-	CourseTopicID    *uuid.UUID             `json:"course_topic_id"`
-	SessionType      string                 `json:"session_type"`         // regular | recovery
-	StartTime        *string                `json:"start_time,omitempty"` // "HH:MM" format
-	EndTime          *string                `json:"end_time,omitempty"`   // "HH:MM" format
-	Location         *string                `json:"location,omitempty"`
-	CreatedAt        time.Time              `json:"created_at"`
-	UpdatedAt        time.Time              `json:"updated_at"`
-	CourseID         *uuid.UUID             `json:"course_id"`
-	CourseName       *string                `json:"course_name"`
-	CourseTopicTitle *string                `json:"course_topic_title"`
-	Topics           []*ProgramSessionTopic `json:"topics"`
+	ID                     uuid.UUID                  `json:"id"`
+	ProgramID              uuid.UUID                  `json:"program_id"`
+	Date                   time.Time                  `json:"date"`
+	Title                  string                     `json:"title"`
+	TitleProvided          bool                       `json:"-"`
+	Topic                  *string                    `json:"topic,omitempty"`
+	CourseTopicID          *uuid.UUID                 `json:"course_topic_id"`
+	SessionType            string                     `json:"session_type"`         // regular | recovery
+	StartTime              *string                    `json:"start_time,omitempty"` // "HH:MM" format
+	EndTime                *string                    `json:"end_time,omitempty"`   // "HH:MM" format
+	Location               *string                    `json:"location,omitempty"`
+	CreatedAt              time.Time                  `json:"created_at"`
+	UpdatedAt              time.Time                  `json:"updated_at"`
+	CourseID               *uuid.UUID                 `json:"course_id"`
+	CourseName             *string                    `json:"course_name"`
+	CourseTopicTitle       *string                    `json:"course_topic_title"`
+	Topics                 []*ProgramSessionTopic     `json:"topics"`
+	ObservationCount       int                        `json:"observation_count"`
+	PinnedObservationCount int                        `json:"pinned_observation_count"`
+	ObservationPreview     *ProgramSessionObservation `json:"observation_preview,omitempty"`
 
 	// Populated on demand
 	AttendanceStats map[string]int `json:"attendance_stats,omitempty"`
+}
+
+// ProgramSessionObservation is a general class log entry. It is deliberately
+// separate from participant attendance observations.
+type ProgramSessionObservation struct {
+	ID            uuid.UUID  `json:"id"`
+	AccountID     uuid.UUID  `json:"-"`
+	SessionID     uuid.UUID  `json:"session_id"`
+	Notes         string     `json:"notes"`
+	CreatedBy     *uuid.UUID `json:"created_by,omitempty"`
+	CreatedByName *string    `json:"created_by_name,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	UpdatedBy     *uuid.UUID `json:"updated_by,omitempty"`
+	UpdatedByName *string    `json:"updated_by_name,omitempty"`
+	IsPinned      bool       `json:"is_pinned"`
+	PinnedAt      *time.Time `json:"pinned_at,omitempty"`
+	PinnedBy      *uuid.UUID `json:"pinned_by,omitempty"`
+	CanEdit       bool       `json:"can_edit"`
+	CanPin        bool       `json:"can_pin"`
+	CanDelete     bool       `json:"can_delete"`
+}
+
+type ProgramSessionRosterEntry struct {
+	ParticipantID       uuid.UUID                       `json:"participant_id"`
+	ContactID           uuid.UUID                       `json:"contact_id"`
+	ContactName         string                          `json:"contact_name"`
+	ContactPhone        *string                         `json:"contact_phone,omitempty"`
+	AvatarURL           *string                         `json:"avatar_url,omitempty"`
+	AvatarRevision      int64                           `json:"avatar_revision"`
+	ParticipationStatus string                          `json:"participation_status"`
+	EnrolledAt          time.Time                       `json:"enrolled_at"`
+	DroppedAt           *time.Time                      `json:"dropped_at,omitempty"`
+	CompletedAt         *time.Time                      `json:"completed_at,omitempty"`
+	AttendanceStatus    string                          `json:"attendance_status"`
+	ObservationCount    int                             `json:"observation_count"`
+	ObservationPreview  []*ProgramAttendanceObservation `json:"observation_preview"`
 }
 
 // ProgramSessionTopic is the immutable topic snapshot attached to a session.
