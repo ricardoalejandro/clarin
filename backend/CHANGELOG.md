@@ -2,6 +2,13 @@
 
 ## 2026-07-30
 
+### Build 3 — Jerarquía visual, creación profesional y retirada segura de Navegador
+- ✨ Bandeja general queda fija arriba; las listas independientes y carpetas muestran una jerarquía clara, reordenable con mouse, touch o teclado y recuperable ante conflictos.
+- 💄 Carpetas y listas se personalizan con nombre, paleta de contraste e iconos de catálogo, visibles también en selectores agrupados y breadcrumbs.
+- ✨ Crear una tarea ahora abre una ventana flotante, movible, redimensionable, acoplable y maximizable que recuerda su geometría y protege borradores al cerrar.
+- 🔒 Orden, ubicación, herencia de flujo e iconos se validan por cuenta y se persisten con una sola escritura estructural por gesto.
+- 🗄️ El Navegador compartido se retira de frontend, API, permisos e infraestructura; su información y volumen se respaldan fuera de Git antes de eliminar el estado productivo.
+
 ### Build 2 — Clarin Work aprovecha el espacio y ordena proyectos visualmente
 - ✨ Las listas se arrastran entre carpetas, se reordenan y regresan a “Sin carpeta” con previsualización, teclado, confirmación de flujo y rollback exacto.
 - 💄 Las vistas principales ocupan una barra estable de dos filas; la búsqueda se expande sin desplazar el lienzo y Tablero, Calendario y Gantt aprovechan toda la superficie.
