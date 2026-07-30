@@ -2,6 +2,13 @@
 
 ## 2026-07-30
 
+### Build 7 — Destinos laterales claros, selección mínima y capas coherentes
+- 🐛 Las carpetas activas ya pueden permanecer contraídas: el clic en su fila selecciona y alterna el acordeón, mientras el chevron solo expande o contrae.
+- ✨ Arrastrar una o varias tareas hacia la navegación usa la posición real del puntero, resalta con claridad listas y carpetas, autoexpande destinos intencionales y mantiene una sola escritura atómica.
+- 💄 La selección del tablero deja visible únicamente el control de completar; seleccionar aparece en hover, foco, modo múltiple, modificadores de teclado o pulsación táctil prolongada.
+- 💄 Calendario, creación, detalle y propiedades comparten un contrato de capas portaled; los pickers permanecen por encima de su diálogo y la ventana flotante usa un velo sutil no bloqueante.
+- ✅ Nuevas pruebas unitarias cubren acordeones, selección adaptativa, histéresis/autoscroll lateral, capas y densidad responsiva; Playwright verifica los flujos integrados.
+
 ### Build 6 — Movimientos profesionales, mazos y creación desde calendario
 - ✨ El detalle permite trasladar tareas entre listas con un selector buscable; padre y subtareas cambian juntos y conservan la categoría equivalente del flujo.
 - ✨ El tablero incorpora selección por checkbox y rango con Shift, barra de acciones masivas y un mazo animado de hasta tres cartas que representa todo el grupo.
