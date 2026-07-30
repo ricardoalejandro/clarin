@@ -5,12 +5,17 @@ import {
   DndContext,
   DragOverlay,
   KeyboardSensor,
+  MeasuringStrategy,
   MouseSensor,
   TouchSensor,
   closestCenter,
+  getFirstCollision,
+  pointerWithin,
+  rectIntersection,
   useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragCancelEvent,
   type DragEndEvent,
   type DragOverEvent,
@@ -18,9 +23,11 @@ import {
 } from '@dnd-kit/core'
 import {
   SortableContext,
+  defaultAnimateLayoutChanges,
   sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
+  type AnimateLayoutChanges,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import {
@@ -91,6 +98,9 @@ interface Props {
 type ColumnOrders = Record<string, string[]>
 
 const dueFormatter = new Intl.DateTimeFormat('es', { day: 'numeric', month: 'short' })
+const animateTaskLayoutChanges: AnimateLayoutChanges = args => args.previousItems !== args.items
+  ? false
+  : defaultAnimateLayoutChanges(args)
 
 function isSyntheticStatus(status: TaskWorkflowStatus) {
   return status.id.startsWith('category:')
@@ -138,6 +148,77 @@ function initialOrders(tasks: Task[], statuses: TaskWorkflowStatus[], lists: Tas
 
 function findColumn(orders: ColumnOrders, taskId: string) {
   return Object.keys(orders).find(columnId => orders[columnId]?.includes(taskId))
+}
+
+function sameOrder(left: string[] | undefined, right: string[] | undefined) {
+  if (left === right) return true
+  if (!left || !right || left.length !== right.length) return false
+  return left.every((id, index) => id === right[index])
+}
+
+function isBelowTarget(event: DragOverEvent | DragEndEvent) {
+  if (event.activatorEvent.type === 'keydown') return event.delta.y > 0 || (event.delta.y === 0 && event.delta.x > 0)
+  return Boolean(event.active.rect.current.translated && event.active.rect.current.translated.top > event.over!.rect.top + event.over!.rect.height / 2)
+}
+
+function insertTaskInColumn({
+  orders,
+  activeId,
+  destination,
+  overId,
+  below,
+  groupByList,
+  tasksById,
+  lists,
+}: {
+  orders: ColumnOrders
+  activeId: string
+  destination: string
+  overId?: string
+  below: boolean
+  groupByList: boolean
+  tasksById: Map<string, Task>
+  lists: TaskList[]
+}) {
+  const source = findColumn(orders, activeId)
+  const task = tasksById.get(activeId)
+  if (!source || !task || !orders[destination]) return orders
+
+  const sourceItems = orders[source].filter(id => id !== activeId)
+  const destinationItems = (source === destination ? sourceItems : orders[destination]).filter(id => id !== activeId)
+  const overIndex = overId && overId !== activeId ? destinationItems.indexOf(overId) : -1
+  let destinationIndex = destinationItems.length
+
+  if (groupByList) {
+    const overTask = overId ? tasksById.get(overId) : undefined
+    if (overIndex >= 0 && overTask?.list_id === task.list_id) {
+      destinationIndex = overIndex + (below ? 1 : 0)
+    } else {
+      const sameListIndexes = destinationItems.flatMap((id, index) => tasksById.get(id)?.list_id === task.list_id ? [index] : [])
+      if (sameListIndexes.length) {
+        destinationIndex = sameListIndexes[sameListIndexes.length - 1] + 1
+      } else {
+        const taskListRank = lists.findIndex(list => list.id === task.list_id)
+        const nextListIndex = destinationItems.findIndex(id => {
+          const candidateListRank = lists.findIndex(list => list.id === tasksById.get(id)?.list_id)
+          return candidateListRank >= 0 && (taskListRank < 0 || candidateListRank > taskListRank)
+        })
+        if (nextListIndex >= 0) destinationIndex = nextListIndex
+      }
+    }
+  } else if (overIndex >= 0) {
+    destinationIndex = overIndex + (below ? 1 : 0)
+  }
+
+  const nextDestination = [...destinationItems]
+  nextDestination.splice(destinationIndex, 0, activeId)
+  if (source === destination && sameOrder(orders[source], nextDestination)) return orders
+
+  return {
+    ...orders,
+    [source]: sourceItems,
+    [destination]: nextDestination,
+  }
 }
 
 function updateTaskStatus(task: Task, status: TaskWorkflowStatus): Task {
@@ -208,10 +289,11 @@ function TaskBoardCard({
   onStar: () => void
   onComplete?: () => void
 }) {
-  const sortableData = useMemo(() => ({ type: 'task', columnId }), [columnId])
+  const sortableData = useMemo(() => ({ type: 'task', columnId, listId: task.list_id }), [columnId, task.list_id])
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
     data: sortableData,
+    animateLayoutChanges: animateTaskLayoutChanges,
   })
   const overdue = Boolean(task.due_at && new Date(task.due_at) < new Date() && !['done', 'cancelled'].includes(task.status_detail?.category || ''))
   const done = task.status_detail?.category === 'done'
@@ -219,6 +301,8 @@ function TaskBoardCard({
 
   return <article
     ref={setNodeRef}
+    data-task-id={task.id}
+    data-task-column-id={columnId}
     style={{ transform: CSS.Transform.toString(transform), transition }}
     {...attributes}
     {...listeners}
@@ -403,7 +487,7 @@ function BoardColumn({
   const [menuOpen, setMenuOpen] = useState(false)
   const statusColor = status.color || '#64748b'
 
-  if (!expanded) return <section ref={setNodeRef} className={`flex h-full w-12 shrink-0 flex-col items-center overflow-hidden rounded-2xl border bg-white shadow-sm transition ${isOver && canReceive ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'}`}>
+  if (!expanded) return <section ref={setNodeRef} data-task-column-id={status.id} data-task-column-collapsed="true" className={`flex h-full w-12 shrink-0 flex-col items-center overflow-hidden rounded-2xl border bg-white shadow-sm transition ${isOver && canReceive ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'}`}>
     <button type="button" onClick={onCollapse} className="flex h-full w-full flex-col items-center gap-3 py-3 text-slate-500 hover:bg-slate-50" title={`Expandir ${status.name}`}>
       <ChevronLeft className="h-4 w-4 rotate-180" />
       <span className="flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-100 px-1 text-[10px] font-bold">{taskIds.length}</span>
@@ -411,7 +495,7 @@ function BoardColumn({
     </button>
   </section>
 
-  return <section ref={setNodeRef} className={`flex h-full min-h-[360px] w-[300px] shrink-0 flex-col overflow-hidden rounded-2xl border shadow-sm transition ${isOver && canReceive ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'}`} style={{ background: `color-mix(in srgb, ${statusColor} 6%, #f8fafc)` }}>
+  return <section ref={setNodeRef} data-task-column-id={status.id} data-task-column-collapsed="false" className={`flex h-full min-h-[360px] w-[300px] shrink-0 flex-col overflow-hidden rounded-2xl border shadow-sm transition ${isOver && canReceive ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'}`} style={{ background: `color-mix(in srgb, ${statusColor} 6%, #f8fafc)` }}>
     <header className="relative flex shrink-0 items-center gap-2 border-b border-white/80 bg-white/85 px-3 py-2.5 backdrop-blur">
       <span className="h-2.5 w-2.5 shrink-0 rounded-full ring-4 ring-slate-100" style={{ backgroundColor: statusColor }} />
       <h3 className="min-w-0 truncate text-xs font-black uppercase tracking-[.08em] text-slate-700">{status.name}</h3>
@@ -483,7 +567,11 @@ export default function TaskBoard({
   const [overColumnId, setOverColumnId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<{ message: string; retry: () => void } | null>(null)
   const snapshotRef = useRef<{ tasks: Task[]; orders: ColumnOrders } | null>(null)
-  const orderFrameRef = useRef<number | null>(null)
+  const boardViewportRef = useRef<HTMLDivElement | null>(null)
+  const lastOverIdRef = useRef<string | null>(null)
+  const validDestinationColumnIdsRef = useRef<Set<string>>(new Set(statuses.map(status => status.id)))
+  const recentlyMovedToNewColumnRef = useRef(false)
+  const recentlyMovedFrameRef = useRef<number | null>(null)
   const lastDragEndRef = useRef(0)
   const tasksById = useMemo(() => new Map(localTasks.map(task => [task.id, task])), [localTasks])
   const activeTask = activeId ? tasksById.get(activeId) : undefined
@@ -496,10 +584,6 @@ export default function TaskBoard({
 
   useEffect(() => {
     if (activeId) return
-    if (orderFrameRef.current !== null) {
-      cancelAnimationFrame(orderFrameRef.current)
-      orderFrameRef.current = null
-    }
     const nextOrders = initialOrders(tasks, statuses, lists, groupByList)
     setLocalTasks(tasks)
     setOrders(nextOrders)
@@ -507,30 +591,87 @@ export default function TaskBoard({
   }, [activeId, groupByList, lists, statuses, tasks])
 
   useEffect(() => () => {
-    if (orderFrameRef.current !== null) cancelAnimationFrame(orderFrameRef.current)
+    if (recentlyMovedFrameRef.current !== null) cancelAnimationFrame(recentlyMovedFrameRef.current)
   }, [])
 
-  const renderQueuedOrders = useCallback((nextOrders: ColumnOrders) => {
-    ordersRef.current = nextOrders
-    if (orderFrameRef.current !== null) return
-    orderFrameRef.current = requestAnimationFrame(() => {
-      orderFrameRef.current = null
-      setOrders(ordersRef.current)
+  const markRecentlyMovedToNewColumn = useCallback(() => {
+    recentlyMovedToNewColumnRef.current = true
+    if (recentlyMovedFrameRef.current !== null) cancelAnimationFrame(recentlyMovedFrameRef.current)
+    recentlyMovedFrameRef.current = requestAnimationFrame(() => {
+      recentlyMovedToNewColumnRef.current = false
+      recentlyMovedFrameRef.current = null
     })
   }, [])
 
-  const flushQueuedOrders = useCallback(() => {
-    if (orderFrameRef.current !== null) {
-      cancelAnimationFrame(orderFrameRef.current)
-      orderFrameRef.current = null
+  const collisionDetectionStrategy = useCallback<CollisionDetection>(args => {
+    const activeIdentifier = String(args.active.id)
+    const boardRect = boardViewportRef.current?.getBoundingClientRect()
+    if (args.pointerCoordinates && boardRect) {
+      const { x, y } = args.pointerCoordinates
+      if (x < boardRect.left || x > boardRect.right || y < boardRect.top || y > boardRect.bottom) {
+        lastOverIdRef.current = null
+        return []
+      }
     }
-    setOrders(ordersRef.current)
+
+    const allowedContainers = args.droppableContainers.filter(container => {
+      if (String(container.id) === activeIdentifier) return false
+      const columnId = container.data.current?.columnId as string | undefined
+      return !columnId || validDestinationColumnIdsRef.current.has(columnId)
+    })
+    const taskContainers = allowedContainers.filter(container => container.data.current?.type === 'task')
+    const columnContainers = allowedContainers.filter(container => container.data.current?.type === 'column')
+
+    let overId: string | null = null
+    if (args.pointerCoordinates) {
+      const taskCollisions = pointerWithin({ ...args, droppableContainers: taskContainers })
+      overId = getFirstCollision(taskCollisions, 'id')?.toString() || null
+      if (!overId) {
+        const columnCollisions = pointerWithin({ ...args, droppableContainers: columnContainers })
+        overId = getFirstCollision(columnCollisions, 'id')?.toString() || null
+      }
+    } else {
+      const intersections = rectIntersection({ ...args, droppableContainers: allowedContainers })
+      overId = getFirstCollision(intersections, 'id')?.toString() || null
+      if (!overId) {
+        const closest = closestCenter({ ...args, droppableContainers: allowedContainers })
+        overId = getFirstCollision(closest, 'id')?.toString() || null
+      }
+    }
+
+    if (overId?.startsWith('column:')) {
+      const columnId = overId.slice(7)
+      const itemIds = new Set((ordersRef.current[columnId] || []).filter(id => id !== activeIdentifier))
+      const itemContainers = taskContainers.filter(container => itemIds.has(String(container.id)))
+      if (itemContainers.length) {
+        const closestItem = closestCenter({ ...args, droppableContainers: itemContainers })
+        overId = getFirstCollision(closestItem, 'id')?.toString() || overId
+      }
+    }
+
+    if (overId) {
+      lastOverIdRef.current = overId
+      return [{ id: overId }]
+    }
+    if (recentlyMovedToNewColumnRef.current && lastOverIdRef.current) {
+      const lastOverStillExists = allowedContainers.some(container => String(container.id) === lastOverIdRef.current)
+      if (lastOverStillExists) return [{ id: lastOverIdRef.current }]
+    }
+    lastOverIdRef.current = null
+    return []
   }, [])
 
   const suppressOpen = useCallback(() => Date.now() - lastDragEndRef.current < 160, [])
   const toggleCollapsed = (statusId: string) => onCollapsedStatusIdsChange(collapsedStatusIds.includes(statusId) ? collapsedStatusIds.filter(id => id !== statusId) : [...collapsedStatusIds, statusId])
 
   const resetDrag = () => {
+    if (recentlyMovedFrameRef.current !== null) {
+      cancelAnimationFrame(recentlyMovedFrameRef.current)
+      recentlyMovedFrameRef.current = null
+    }
+    recentlyMovedToNewColumnRef.current = false
+    lastOverIdRef.current = null
+    validDestinationColumnIdsRef.current = new Set(statuses.map(status => status.id))
     setActiveId(null)
     setOverColumnId(null)
     snapshotRef.current = null
@@ -539,10 +680,6 @@ export default function TaskBoard({
   }
 
   const rollback = (snapshot: { tasks: Task[]; orders: ColumnOrders }) => {
-    if (orderFrameRef.current !== null) {
-      cancelAnimationFrame(orderFrameRef.current)
-      orderFrameRef.current = null
-    }
     setLocalTasks(snapshot.tasks)
     setOrders(snapshot.orders)
     ordersRef.current = snapshot.orders
@@ -614,6 +751,10 @@ export default function TaskBoard({
 
   const handleDragStart = (event: DragStartEvent) => {
     const id = String(event.active.id)
+    const task = tasksById.get(id)
+    validDestinationColumnIdsRef.current = new Set(statuses.filter(status => !task || Boolean(resolvedStatus(task, status, allStatuses))).map(status => status.id))
+    lastOverIdRef.current = null
+    recentlyMovedToNewColumnRef.current = false
     snapshotRef.current = { tasks: localTasks, orders: Object.fromEntries(Object.entries(ordersRef.current).map(([key, ids]) => [key, [...ids]])) }
     setActiveId(id)
     setMoveError(null)
@@ -626,71 +767,54 @@ export default function TaskBoard({
   }
 
   const handleDragOver = (event: DragOverEvent) => {
-    if (!activeId || !event.over) return
+    if (!event.over) return
+    const taskId = String(event.active.id)
+    const overId = String(event.over.id)
+    if (overId === taskId) return
     const destination = destinationFromEvent(event)
     if (!destination || !ordersRef.current[destination]) return
-    const task = tasksById.get(activeId)
+    const task = tasksById.get(taskId)
     const boardStatus = statuses.find(status => status.id === destination)
     if (!task || !boardStatus || !resolvedStatus(task, boardStatus, allStatuses)) return
-    setOverColumnId(destination)
+    setOverColumnId(current => current === destination ? current : destination)
 
     const current = ordersRef.current
-    const source = findColumn(current, activeId)
-    if (!source) return
-    const overId = String(event.over.id)
-    const sourceItems = current[source].filter(id => id !== activeId)
-    const destinationItems = source === destination ? sourceItems : current[destination].filter(id => id !== activeId)
-    let destinationIndex = destinationItems.length
-    const overIndex = destinationItems.indexOf(overId)
-    const below = Boolean(event.active.rect.current.translated && event.active.rect.current.translated.top > event.over.rect.top + event.over.rect.height / 2)
-    if (groupByList) {
-      const overTask = tasksById.get(overId)
-      if (overIndex >= 0 && overTask?.list_id === task.list_id) {
-        destinationIndex = overIndex + (below ? 1 : 0)
-      } else {
-        const sameListIndexes = destinationItems.flatMap((id, index) => tasksById.get(id)?.list_id === task.list_id ? [index] : [])
-        if (sameListIndexes.length) destinationIndex = sameListIndexes[sameListIndexes.length - 1] + 1
-        else {
-          const taskListRank = lists.findIndex(list => list.id === task.list_id)
-          const nextListIndex = destinationItems.findIndex(id => {
-            const candidateListRank = lists.findIndex(list => list.id === tasksById.get(id)?.list_id)
-            return candidateListRank >= 0 && (taskListRank < 0 || candidateListRank > taskListRank)
-          })
-          if (nextListIndex >= 0) destinationIndex = nextListIndex
-        }
-      }
-    } else if (overIndex >= 0) destinationIndex = overIndex + (below ? 1 : 0)
-    const nextDestination = [...destinationItems]
-    nextDestination.splice(destinationIndex, 0, activeId)
-    if (source === destination && current[source].join('|') === nextDestination.join('|')) return
-    const next = { ...current, [source]: sourceItems, [destination]: nextDestination }
-    renderQueuedOrders(next)
+    const source = findColumn(current, taskId)
+    if (!source || source === destination) return
+    const below = isBelowTarget(event)
+    const next = insertTaskInColumn({ orders: current, activeId: taskId, destination, overId, below, groupByList, tasksById, lists })
+    if (next === current) return
+    ordersRef.current = next
+    setOrders(next)
+    markRecentlyMovedToNewColumn()
   }
 
   const handleDragEnd = (event: DragEndEvent) => {
     const taskId = String(event.active.id)
     const destination = destinationFromEvent(event)
     const snapshot = snapshotRef.current
-    let nextOrders = ordersRef.current
-    flushQueuedOrders()
-    resetDrag()
     if (!event.over || !destination || !snapshot) {
       if (snapshot) rollback(snapshot)
+      resetDrag()
       return
     }
-    if (!nextOrders[destination]?.includes(taskId)) {
-      const sourceColumn = findColumn(nextOrders, taskId)
-      nextOrders = {
-        ...nextOrders,
-        ...(sourceColumn ? { [sourceColumn]: nextOrders[sourceColumn].filter(id => id !== taskId) } : {}),
-        [destination]: [...(nextOrders[destination] || []), taskId],
-      }
+    const overId = String(event.over.id)
+    if (overId === taskId) {
+      rollback(snapshot)
+      resetDrag()
+      return
+    }
+    const below = isBelowTarget(event)
+    const current = ordersRef.current
+    const nextOrders = insertTaskInColumn({ orders: current, activeId: taskId, destination, overId, below, groupByList, tasksById, lists })
+    if (nextOrders !== current) {
       ordersRef.current = nextOrders
       setOrders(nextOrders)
     }
     const source = findColumn(snapshot.orders, taskId)
     const sourceIndex = source ? snapshot.orders[source]?.indexOf(taskId) : -1
     const targetIndex = nextOrders[destination]?.indexOf(taskId)
+    resetDrag()
     if (source === destination && sourceIndex === targetIndex) return
     void move(taskId, destination, nextOrders, snapshot)
   }
@@ -722,7 +846,8 @@ export default function TaskBoard({
     {moveError && <div className="mb-2 flex shrink-0 items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700"><span className="min-w-0 flex-1">{moveError.message}</span><button type="button" onClick={moveError.retry} className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-white px-2.5 py-1.5 font-bold shadow-sm"><RotateCcw className="h-3 w-3" />Reintentar</button><button type="button" onClick={() => setMoveError(null)} aria-label="Cerrar" className="rounded p-1 hover:bg-white"><X className="h-3.5 w-3.5" /></button></div>}
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCenter}
+      collisionDetection={collisionDetectionStrategy}
+      measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
       autoScroll
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
@@ -730,7 +855,7 @@ export default function TaskBoard({
       onDragCancel={handleDragCancel}
       accessibility={{ screenReaderInstructions: { draggable: 'Presiona espacio para tomar una tarea, usa las flechas para moverla, espacio para soltarla o Escape para cancelar.' } }}
     >
-      <div className="flex min-h-0 flex-1 items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-2 [scrollbar-width:thin]">
+      <div ref={boardViewportRef} data-testid="task-board-viewport" className="flex min-h-0 flex-1 items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-2 [scrollbar-width:thin]">
         {statuses.map(status => <BoardColumn
           key={status.id}
           status={status}

@@ -30,7 +30,9 @@ Read the sections relevant to the requested task change before editing.
 
 - Support mouse activation distance, touch long-press tolerance, keyboard pickup/drop, Escape cancellation, empty-column drop, insertion preview, and horizontal/vertical auto-scroll.
 - Snapshot local board state at drag start. Update optimistically, then either reconcile the canonical response or restore the exact snapshot with retry feedback.
-- Keep sortable item arrays, droppable metadata, and scope-derived lists referentially stable between unrelated renders. Never synchronously change sortable topology from a collision callback: deduplicate identical orders and schedule visual reordering at most once per animation frame so measurement cannot enter a React update loop.
+- Keep sortable item arrays, droppable metadata, and scope-derived lists referentially stable between unrelated renders. A multi-column board must use a container-aware collision strategy; global `closestCenter` alone is not sufficient, and the active draggable must never be returned as its own collision target.
+- Never change sortable topology from a collision callback. `onDragOver` may transfer the active task exactly once when its source and destination containers differ, but it must not physically reorder tasks already in the same column; calculate and persist that final order once in `onDragEnd`, deduplicate identical arrays, and disable derived layout animation for the one render in which container membership changes.
+- A completed drop sends at most one atomic move request. Dropping outside, pressing Escape, hitting an incompatible workflow, or receiving an HTTP failure/conflict restores the exact drag-start snapshot without duplicating or losing the task.
 - Use the entire card as a discoverable drag surface while keeping an accessible handle and excluding buttons, inputs, links, menus, and selects.
 - A short click opens the detail. Completing, starring, editing, archiving, and adding a subtask never initiate drag.
 - Keep status columns compact, colored from the real status, collapsible, and droppable. Collapsed columns must remain understandable and expand on intentional drag hover.

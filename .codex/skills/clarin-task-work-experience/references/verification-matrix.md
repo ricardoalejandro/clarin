@@ -19,6 +19,7 @@
 - Drag across off-screen columns and long columns; verify horizontal and vertical auto-scroll.
 - Move before the first card, between cards, to the end, and into an empty/collapsed column.
 - Repeatedly cross the same column boundary in both directions before dropping, including populated, empty, and collapsed targets. Confirm there is no React maximum-update-depth error, page crash, flicker loop, duplicate card, or lost card.
+- Hold a card over one populated destination for at least three seconds with small pointer jitter. Confirm the DOM order stops changing after the container transfer, the active card is never its own collision target, and the final drop emits exactly one move request with the correct status and stable anchor.
 - Confirm click opens detail and card buttons do not drag.
 - Simulate HTTP failure and `409`; verify exact rollback, retry, and reconciliation.
 - Use two sessions; confirm no duplicate card, skeleton flash, scroll reset, or stale status/order.

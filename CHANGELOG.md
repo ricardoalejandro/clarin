@@ -1,10 +1,17 @@
 # Changelog — Clarin CRM
 
+## 2026-07-30
+
+### Build 1 — Kanban estable incluso durante arrastres prolongados
+- 🐛 La tarjeta activa deja de participar como destino de su propia colisión, eliminando el parpadeo y el error React #185 al mantenerla entre columnas.
+- ⚡ El tablero transfiere una tarjeta una sola vez al cruzar de columna y confirma su posición final al soltar, conservando la animación fluida sin ciclos de índices.
+- ✅ Una prueba de navegador estresa 90 tareas, mouse, teclado, Escape, soltado exterior, columnas vacías/contraídas y rollback ante errores o conflictos.
+
 ## 2026-07-29
 
-### Build 3 — Kanban estable al arrastrar tareas
-- 🐛 Mover fichas repetidamente entre columnas ya no puede provocar un ciclo de medición de React ni cerrar la sección con un error del cliente.
-- ⚡ La previsualización del orden se agrupa por cuadro de animación y conserva un arrastre fluido, incluso al cruzar estados rápidamente.
+### Build 3 — Mitigación inicial del arrastre Kanban
+- 🐛 Se redujo la frecuencia del ciclo de medición que aparecía al mover fichas repetidamente entre columnas.
+- ⚡ La previsualización del orden se agrupó por cuadro de animación como primera protección mientras se investigaba la oscilación de índices.
 - 🔧 Los lineamientos de Clarin Work incorporan estabilidad referencial y una prueba de estrés obligatoria para límites entre columnas.
 
 ### Build 2 — Clarin Work ordena, filtra y coordina el trabajo
