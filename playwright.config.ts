@@ -1,5 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const runLiveTests = process.env.CLARIN_E2E_LIVE === '1';
+const startLocalFrontend = process.env.PLAYWRIGHT_LOCAL_SERVER === '1';
+const liveTestPattern = /reaction-(filter|iquitos)\.spec\.ts/;
+const standardTestIgnore = runLiveTests
+  ? [/responsive-dashboard\.spec\.ts/]
+  : [/responsive-dashboard\.spec\.ts/, liveTestPattern];
+
 /**
  * Read environment variables from file.
  * https://github.com/motdotla/dotenv
@@ -36,19 +43,19 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      testIgnore: /responsive-dashboard\.spec\.ts/,
+      testIgnore: standardTestIgnore,
       use: { ...devices['Desktop Chrome'] },
     },
 
     {
       name: 'firefox',
-      testIgnore: /responsive-dashboard\.spec\.ts/,
+      testIgnore: standardTestIgnore,
       use: { ...devices['Desktop Firefox'] },
     },
 
     {
       name: 'webkit',
-      testIgnore: /responsive-dashboard\.spec\.ts/,
+      testIgnore: standardTestIgnore,
       use: { ...devices['Desktop Safari'] },
     },
 
@@ -89,10 +96,10 @@ export default defineConfig({
     // },
   ],
 
-  /* Run your local dev server before starting the tests */
-  // webServer: {
-  //   command: 'npm run start',
-  //   url: 'http://localhost:3000',
-  //   reuseExistingServer: !process.env.CI,
-  // },
+  webServer: startLocalFrontend ? {
+    command: 'npm --prefix frontend run start -- -p 3011',
+    url: 'http://127.0.0.1:3011/login',
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+  } : undefined,
 });

@@ -1,9 +1,9 @@
 import { test, expect, Page } from '@playwright/test';
 
 const BASE = process.env.BASE_URL || 'http://localhost:3000';
-const USERNAME = 'ricardo';
-const PASSWORD = 'Ricardo123@';
-const ACCOUNT_NAME = 'difusion_iquitos';
+const USERNAME = process.env.CLARIN_E2E_USERNAME;
+const PASSWORD = process.env.CLARIN_E2E_PASSWORD;
+const ACCOUNT_NAME = process.env.CLARIN_E2E_ACCOUNT;
 
 async function login(page: Page) {
   await page.goto(BASE + '/');
@@ -12,8 +12,8 @@ async function login(page: Page) {
   // Login fields - try common selectors
   const userInput = page.locator('input[name="username"], input[type="text"], input[placeholder*="usuario" i], input[placeholder*="user" i], input[placeholder*="email" i]').first();
   const passInput = page.locator('input[type="password"]').first();
-  await userInput.fill(USERNAME);
-  await passInput.fill(PASSWORD);
+  await userInput.fill(USERNAME!);
+  await passInput.fill(PASSWORD!);
   await page.locator('button[type="submit"], button:has-text("Iniciar"), button:has-text("Ingresar"), button:has-text("Login")').first().click();
   await page.waitForURL(/\/dashboard/, { timeout: 15000 });
 }
@@ -30,11 +30,12 @@ async function selectAccount(page: Page, accountName: string) {
 }
 
 test.describe('Chat reaction filter', () => {
+  test.skip(!USERNAME || !PASSWORD || !ACCOUNT_NAME, 'Define credenciales y cuenta E2E para ejecutar las pruebas live de reacciones');
   test.setTimeout(90_000);
 
   test('1. Login & navigate to chats', async ({ page }) => {
     await login(page);
-    await selectAccount(page, ACCOUNT_NAME);
+    await selectAccount(page, ACCOUNT_NAME!);
     await page.goto(BASE + '/dashboard/chats');
     await page.waitForLoadState('networkidle');
     await expect(page.locator('[data-testid="filter-reaction-toggle"]')).toBeVisible();
@@ -43,7 +44,7 @@ test.describe('Chat reaction filter', () => {
 
   test('2. Toggle reaction filter shows advanced panel and filters list', async ({ page }) => {
     await login(page);
-    await selectAccount(page, ACCOUNT_NAME);
+    await selectAccount(page, ACCOUNT_NAME!);
     await page.goto(BASE + '/dashboard/chats');
     await page.waitForLoadState('networkidle');
 
@@ -78,7 +79,7 @@ test.describe('Chat reaction filter', () => {
 
   test('3. Backend API: has_reaction=true returns chats with reactions', async ({ page }) => {
     await login(page);
-    await selectAccount(page, ACCOUNT_NAME);
+    await selectAccount(page, ACCOUNT_NAME!);
     await page.goto(BASE + '/dashboard/chats');
     await page.waitForLoadState('networkidle');
 
@@ -120,7 +121,7 @@ test.describe('Chat reaction filter', () => {
 
   test('4. UI: clicking emoji and from-me options updates query', async ({ page }) => {
     await login(page);
-    await selectAccount(page, ACCOUNT_NAME);
+    await selectAccount(page, ACCOUNT_NAME!);
     await page.goto(BASE + '/dashboard/chats');
     await page.waitForLoadState('networkidle');
 
@@ -159,7 +160,7 @@ test.describe('Chat reaction filter', () => {
 
   test('5. Disabling toggle restores full list', async ({ page }) => {
     await login(page);
-    await selectAccount(page, ACCOUNT_NAME);
+    await selectAccount(page, ACCOUNT_NAME!);
     await page.goto(BASE + '/dashboard/chats');
     await page.waitForLoadState('networkidle');
 

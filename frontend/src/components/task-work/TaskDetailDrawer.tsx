@@ -463,7 +463,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
   useEffect(() => {
     if (!taskOpen) return
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || document.querySelector('[data-task-editor-modal],[data-task-structure-modal]')) return
+      if (event.key !== 'Escape' || document.querySelector('[data-task-editor-modal],[data-task-structure-modal],[data-task-property-picker-portal]')) return
       event.preventDefault()
       onCloseRef.current()
     }

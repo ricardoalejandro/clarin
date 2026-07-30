@@ -1,30 +1,34 @@
 import { test, expect } from '@playwright/test';
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:3001';
+const USERNAME = process.env.CLARIN_E2E_USERNAME;
+const PASSWORD = process.env.CLARIN_E2E_PASSWORD;
+const ACCOUNT_NAME = process.env.CLARIN_E2E_ACCOUNT;
 
 test('Reaction filter on difusion_iquitos with screenshots', async ({ page }) => {
+  test.skip(!USERNAME || !PASSWORD || !ACCOUNT_NAME, 'Define credenciales y cuenta E2E para ejecutar esta prueba live');
   test.setTimeout(60_000);
 
   // Login
   await page.goto(BASE + '/');
   await page.waitForLoadState('networkidle');
-  await page.locator('input[type="text"], input[type="email"]').first().fill('ricardo');
-  await page.locator('input[type="password"]').first().fill('Ricardo123@');
+  await page.locator('input[type="text"], input[type="email"]').first().fill(USERNAME!);
+  await page.locator('input[type="password"]').first().fill(PASSWORD!);
   await page.locator('button[type="submit"]').first().click();
   await page.waitForURL(/\/dashboard/, { timeout: 15000 });
 
   // Switch to difusion_iquitos via API directly to bypass UI
-  const switched = await page.evaluate(async () => {
+  const switched = await page.evaluate(async ({ username, password, accountName }) => {
     const token = localStorage.getItem('token');
     // Get account list by re-calling login (it returns accounts array)
     const loginRes = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'ricardo', password: 'Ricardo123@' }),
+      body: JSON.stringify({ username, password }),
     }).then(r => r.json());
     const accounts = loginRes.accounts || [];
-    const target = accounts.find((a: any) => a.account_name === 'difusion_iquitos');
-    if (!target) return { ok: false, reason: 'difusion_iquitos not found', accounts };
+    const target = accounts.find((a: any) => a.account_name === accountName);
+    if (!target) return { ok: false, reason: 'account not found', accounts };
     const r = await fetch('/api/auth/switch-account', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -36,7 +40,7 @@ test('Reaction filter on difusion_iquitos with screenshots', async ({ page }) =>
       if (d.user) localStorage.setItem('user', JSON.stringify(d.user));
     }
     return { ok: d.success, account_id: target.account_id, name: target.account_name };
-  });
+  }, { username: USERNAME!, password: PASSWORD!, accountName: ACCOUNT_NAME! });
   console.log('Switch result:', switched);
 
   await page.goto(BASE + '/dashboard/chats');
