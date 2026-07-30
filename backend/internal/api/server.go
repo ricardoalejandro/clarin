@@ -736,6 +736,7 @@ func (s *Server) setupRoutes() {
 	tasks.Put("/saved-views/:viewId", s.handleUpdateTaskSavedView)
 	tasks.Delete("/saved-views/:viewId", s.handleDeleteTaskSavedView)
 	tasks.Post("/reorder", s.handleReorderTasks)
+	tasks.Post("/bulk-move", s.handleBulkMoveTasks)
 	tasks.Post("/", s.handleCreateTask)
 	tasks.Get("/", s.handleGetTasks)
 	tasks.Get("/:id", s.handleGetTask)

@@ -32,6 +32,7 @@ var (
 	ErrTaskStatusOrderInvalid       = errors.New("task status order does not match workflow statuses")
 	ErrTaskContainerNotEmpty        = errors.New("task folder or list contains active tasks")
 	ErrTaskParentArchived           = errors.New("task parent must be restored first")
+	ErrTaskBulkMoveInvalid          = errors.New("task bulk move is invalid")
 )
 
 type TaskMoveResult struct {
@@ -39,6 +40,16 @@ type TaskMoveResult struct {
 	StatusID uuid.UUID
 	TaskIDs  []uuid.UUID
 	Version  int64
+}
+
+type TaskBulkMoveItem struct {
+	ID      uuid.UUID
+	Version int64
+}
+
+type TaskBulkMoveResult struct {
+	TaskIDs []uuid.UUID
+	Orders  map[uuid.UUID][]uuid.UUID
 }
 
 func taskMoveStatusMatches(workflowID *uuid.UUID, category *string, targetWorkflowID uuid.UUID, targetCategory string) bool {
@@ -1358,6 +1369,315 @@ func (r *TaskWorkRepository) MoveTask(ctx context.Context, accountID, taskID, st
 		return nil, err
 	}
 	return &TaskMoveResult{ListID: *listID, StatusID: statusID, TaskIDs: orderedIDs, Version: nextVersion}, nil
+}
+
+// BulkMoveTasks changes the list and/or workflow category of several top-level
+// tasks as one account-scoped transaction. The request order is the stable
+// relative order used at the destination; children follow their parent when a
+// list transfer occurs.
+func normalizeTaskBulkMoveRequest(items []TaskBulkMoveItem, destinationListID *uuid.UUID, destinationCategory string) ([]uuid.UUID, map[uuid.UUID]int64, error) {
+	if len(items) == 0 || len(items) > 200 || (destinationListID == nil && destinationCategory == "") {
+		return nil, nil, ErrTaskBulkMoveInvalid
+	}
+	validCategory := destinationCategory == "" || destinationCategory == domain.TaskStatusCategoryNotStarted || destinationCategory == domain.TaskStatusCategoryActive || destinationCategory == domain.TaskStatusCategoryDone || destinationCategory == domain.TaskStatusCategoryCancelled
+	if !validCategory {
+		return nil, nil, ErrTaskBulkMoveInvalid
+	}
+	requestedIDs := make([]uuid.UUID, 0, len(items))
+	expectedVersions := make(map[uuid.UUID]int64, len(items))
+	for _, item := range items {
+		if item.ID == uuid.Nil || item.Version < 1 {
+			return nil, nil, ErrTaskBulkMoveInvalid
+		}
+		if _, exists := expectedVersions[item.ID]; exists {
+			return nil, nil, ErrTaskBulkMoveInvalid
+		}
+		expectedVersions[item.ID] = item.Version
+		requestedIDs = append(requestedIDs, item.ID)
+	}
+	return requestedIDs, expectedVersions, nil
+}
+
+func (r *TaskWorkRepository) BulkMoveTasks(ctx context.Context, accountID, actorID uuid.UUID, items []TaskBulkMoveItem, destinationListID *uuid.UUID, destinationCategory, operationID string) (*TaskBulkMoveResult, error) {
+	requestedIDs, expectedVersions, err := normalizeTaskBulkMoveRequest(items, destinationListID, destinationCategory)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	type lockedTask struct {
+		id        uuid.UUID
+		listID    uuid.UUID
+		statusID  *uuid.UUID
+		category  string
+		version   int64
+		programID *uuid.UUID
+	}
+	readTasks := func(lock bool) (map[uuid.UUID]lockedTask, error) {
+		query := `SELECT task.id,task.list_id,task.status_id,
+			COALESCE(status.category,CASE task.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END),
+			COALESCE(task.version,1),task.program_id
+			FROM tasks task
+			LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+			WHERE task.account_id=$1 AND task.id=ANY($2::uuid[]) AND task.deleted_at IS NULL AND task.parent_task_id IS NULL
+			ORDER BY task.id`
+		if lock {
+			query += ` FOR UPDATE OF task`
+		}
+		rows, queryErr := tx.Query(ctx, query, accountID, requestedIDs)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		defer rows.Close()
+		result := make(map[uuid.UUID]lockedTask, len(items))
+		for rows.Next() {
+			item := lockedTask{}
+			if scanErr := rows.Scan(&item.id, &item.listID, &item.statusID, &item.category, &item.version, &item.programID); scanErr != nil {
+				return nil, scanErr
+			}
+			result[item.id] = item
+		}
+		return result, rows.Err()
+	}
+	observed, err := readTasks(false)
+	if err != nil {
+		return nil, err
+	}
+	if len(observed) != len(items) {
+		return nil, ErrTaskBulkMoveInvalid
+	}
+
+	listSet := make(map[uuid.UUID]struct{}, len(items)+1)
+	for _, item := range observed {
+		if item.version != expectedVersions[item.id] {
+			return nil, ErrTaskVersionConflict
+		}
+		if item.programID != nil {
+			return nil, ErrTaskBulkMoveInvalid
+		}
+		listSet[item.listID] = struct{}{}
+	}
+	if destinationListID != nil {
+		listSet[*destinationListID] = struct{}{}
+	}
+	listIDs := make([]uuid.UUID, 0, len(listSet))
+	for id := range listSet {
+		listIDs = append(listIDs, id)
+	}
+	sort.Slice(listIDs, func(i, j int) bool { return listIDs[i].String() < listIDs[j].String() })
+	listRows, err := tx.Query(ctx, `SELECT id,workflow_id FROM task_lists
+		WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL ORDER BY id FOR UPDATE`, accountID, listIDs)
+	if err != nil {
+		return nil, err
+	}
+	listWorkflows := make(map[uuid.UUID]uuid.UUID, len(listIDs))
+	for listRows.Next() {
+		var listID, workflowID uuid.UUID
+		if err := listRows.Scan(&listID, &workflowID); err != nil {
+			listRows.Close()
+			return nil, err
+		}
+		listWorkflows[listID] = workflowID
+	}
+	if err := listRows.Err(); err != nil {
+		listRows.Close()
+		return nil, err
+	}
+	listRows.Close()
+	if len(listWorkflows) != len(listIDs) {
+		return nil, ErrTaskBulkMoveInvalid
+	}
+
+	locked, err := readTasks(true)
+	if err != nil {
+		return nil, err
+	}
+	if len(locked) != len(items) {
+		return nil, ErrTaskBulkMoveInvalid
+	}
+	for id, item := range locked {
+		before := observed[id]
+		statusChanged := (item.statusID == nil) != (before.statusID == nil) || (item.statusID != nil && before.statusID != nil && *item.statusID != *before.statusID)
+		if item.version != expectedVersions[id] || item.listID != before.listID || statusChanged {
+			return nil, ErrTaskVersionConflict
+		}
+	}
+
+	workflowIDs := make([]uuid.UUID, 0, len(listWorkflows))
+	workflowSeen := map[uuid.UUID]struct{}{}
+	for _, workflowID := range listWorkflows {
+		if _, exists := workflowSeen[workflowID]; !exists {
+			workflowSeen[workflowID] = struct{}{}
+			workflowIDs = append(workflowIDs, workflowID)
+		}
+	}
+	type statusKey struct {
+		workflowID uuid.UUID
+		category   string
+	}
+	statusByCategory := make(map[statusKey]uuid.UUID)
+	statusRows, err := tx.Query(ctx, `SELECT id,workflow_id,category FROM task_statuses
+		WHERE account_id=$1 AND workflow_id=ANY($2::uuid[])
+		ORDER BY workflow_id,category,is_default DESC,sort_order,id FOR SHARE`, accountID, workflowIDs)
+	if err != nil {
+		return nil, err
+	}
+	for statusRows.Next() {
+		var id, workflowID uuid.UUID
+		var category string
+		if err := statusRows.Scan(&id, &workflowID, &category); err != nil {
+			statusRows.Close()
+			return nil, err
+		}
+		key := statusKey{workflowID: workflowID, category: category}
+		if _, exists := statusByCategory[key]; !exists {
+			statusByCategory[key] = id
+		}
+	}
+	if err := statusRows.Err(); err != nil {
+		statusRows.Close()
+		return nil, err
+	}
+	statusRows.Close()
+
+	type childMove struct {
+		id, destinationListID, statusID uuid.UUID
+		category                        string
+	}
+	childMoves := make([]childMove, 0)
+	if destinationListID != nil {
+		childRows, childErr := tx.Query(ctx, `SELECT child.id,child.parent_task_id,
+			COALESCE(status.category,CASE child.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END)
+			FROM tasks child LEFT JOIN task_statuses status ON status.account_id=child.account_id AND status.id=child.status_id
+			WHERE child.account_id=$1 AND child.parent_task_id=ANY($2::uuid[]) AND child.deleted_at IS NULL
+			ORDER BY child.id FOR UPDATE OF child`, accountID, requestedIDs)
+		if childErr != nil {
+			return nil, childErr
+		}
+		for childRows.Next() {
+			var childID, parentID uuid.UUID
+			var category string
+			if err := childRows.Scan(&childID, &parentID, &category); err != nil {
+				childRows.Close()
+				return nil, err
+			}
+			targetStatusID, exists := statusByCategory[statusKey{workflowID: listWorkflows[*destinationListID], category: category}]
+			if !exists || locked[parentID].id == uuid.Nil {
+				childRows.Close()
+				return nil, ErrTaskStatusMappingInvalid
+			}
+			childMoves = append(childMoves, childMove{id: childID, destinationListID: *destinationListID, statusID: targetStatusID, category: category})
+		}
+		if err := childRows.Err(); err != nil {
+			childRows.Close()
+			return nil, err
+		}
+		childRows.Close()
+	}
+
+	affectedListSet := make(map[uuid.UUID]struct{}, len(listIDs))
+	nextOrder := make(map[uuid.UUID]int)
+	for _, requestedID := range requestedIDs {
+		item := locked[requestedID]
+		targetListID := item.listID
+		if destinationListID != nil {
+			targetListID = *destinationListID
+		}
+		targetCategory := item.category
+		if destinationCategory != "" {
+			targetCategory = destinationCategory
+		}
+		targetStatusID, exists := statusByCategory[statusKey{workflowID: listWorkflows[targetListID], category: targetCategory}]
+		if !exists {
+			return nil, ErrTaskStatusMappingInvalid
+		}
+		if _, initialized := nextOrder[targetListID]; !initialized {
+			var maximum int
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(sort_order),0) FROM tasks
+				WHERE account_id=$1 AND list_id=$2 AND parent_task_id IS NULL AND deleted_at IS NULL AND NOT (id=ANY($3::uuid[]))`, accountID, targetListID, requestedIDs).Scan(&maximum); err != nil {
+				return nil, err
+			}
+			nextOrder[targetListID] = maximum
+		}
+		nextOrder[targetListID] += 1024
+		legacyStatus := domain.TaskStatusPending
+		if targetCategory == domain.TaskStatusCategoryDone {
+			legacyStatus = domain.TaskStatusCompleted
+		}
+		if targetCategory == domain.TaskStatusCategoryCancelled {
+			legacyStatus = domain.TaskStatusCancelled
+		}
+		command, err := tx.Exec(ctx, `UPDATE tasks SET list_id=$3,status_id=$4,status=$5,sort_order=$6,
+			progress=CASE WHEN $7::text='done' THEN 100 WHEN status='completed' AND progress=100 THEN 0 ELSE progress END,
+			completed_at=CASE WHEN $7::text='done' THEN COALESCE(completed_at,NOW()) ELSE NULL END,
+			completed_by=CASE WHEN $7::text='done' THEN COALESCE(completed_by,$8::uuid) ELSE NULL END,
+			overdue_notified_at=NULL,updated_at=NOW(),version=COALESCE(version,1)+1
+			WHERE account_id=$1 AND id=$2 AND COALESCE(version,1)=$9`, accountID, item.id, targetListID, targetStatusID, legacyStatus, nextOrder[targetListID], targetCategory, actorID, item.version)
+		if err != nil {
+			return nil, err
+		}
+		if command.RowsAffected() != 1 {
+			return nil, ErrTaskVersionConflict
+		}
+		metadata, err := json.Marshal(map[string]any{"from_list_id": item.listID, "to_list_id": targetListID, "to_category": targetCategory, "operation_id": operationID})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO task_activity(account_id,task_id,actor_id,action,metadata) VALUES($1,$2,$3,'bulk_moved',$4::jsonb)`, accountID, item.id, actorID, metadata); err != nil {
+			return nil, err
+		}
+		affectedListSet[item.listID] = struct{}{}
+		affectedListSet[targetListID] = struct{}{}
+	}
+
+	for _, child := range childMoves {
+		legacyStatus := domain.TaskStatusPending
+		if child.category == domain.TaskStatusCategoryDone {
+			legacyStatus = domain.TaskStatusCompleted
+		}
+		if child.category == domain.TaskStatusCategoryCancelled {
+			legacyStatus = domain.TaskStatusCancelled
+		}
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET list_id=$3,status_id=$4,status=$5,
+			progress=CASE WHEN $6::text='done' THEN 100 WHEN status='completed' AND progress=100 THEN 0 ELSE progress END,
+			completed_at=CASE WHEN $6::text='done' THEN COALESCE(completed_at,NOW()) ELSE NULL END,
+			completed_by=CASE WHEN $6::text='done' THEN COALESCE(completed_by,$7::uuid) ELSE NULL END,
+			overdue_notified_at=NULL,updated_at=NOW(),version=COALESCE(version,1)+1 WHERE account_id=$1 AND id=$2`, accountID, child.id, child.destinationListID, child.statusID, legacyStatus, child.category, actorID); err != nil {
+			return nil, err
+		}
+	}
+
+	affectedListIDs := make([]uuid.UUID, 0, len(affectedListSet))
+	for id := range affectedListSet {
+		affectedListIDs = append(affectedListIDs, id)
+	}
+	orders := make(map[uuid.UUID][]uuid.UUID, len(affectedListIDs))
+	orderRows, err := tx.Query(ctx, `SELECT list_id,id FROM tasks WHERE account_id=$1 AND list_id=ANY($2::uuid[]) AND parent_task_id IS NULL AND deleted_at IS NULL ORDER BY list_id,sort_order,id`, accountID, affectedListIDs)
+	if err != nil {
+		return nil, err
+	}
+	for orderRows.Next() {
+		var listID, taskID uuid.UUID
+		if err := orderRows.Scan(&listID, &taskID); err != nil {
+			orderRows.Close()
+			return nil, err
+		}
+		orders[listID] = append(orders[listID], taskID)
+	}
+	if err := orderRows.Err(); err != nil {
+		orderRows.Close()
+		return nil, err
+	}
+	orderRows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &TaskBulkMoveResult{TaskIDs: requestedIDs, Orders: orders}, nil
 }
 
 func (r *TaskWorkRepository) SavedViewScopeExists(ctx context.Context, accountID uuid.UUID, scopeType string, scopeID *uuid.UUID) (bool, error) {

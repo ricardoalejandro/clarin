@@ -25,9 +25,18 @@ Frontend:
 
 ```bash
 cd frontend
+npm run test:unit -- --run
 npx tsc --noEmit
 npm run build
 ```
+
+## Unit-Test Contract
+
+- Every functional behavior change must add or update a deterministic unit test at the nearest stable layer: repository/service for backend invariants, and pure helper/reducer/hook/component boundary for frontend state.
+- Extract pure helpers instead of testing timing, geometry, selection, ordering, reconciliation, or payload rules only through a browser.
+- A build, TypeScript pass, manual click-through, or Playwright scenario never substitutes for the nearest-layer unit test.
+- Verify success, empty, conflict/error and rollback behavior when the change can mutate persisted state. Multi-item operations must also prove atomicity, deduplication and one-write semantics.
+- Keep focused browser tests for integration, animation, accessibility, drag sensors and real layout; do not duplicate every pure permutation there.
 
 General:
 

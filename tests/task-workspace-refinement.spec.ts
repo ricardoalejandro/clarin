@@ -230,6 +230,21 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(page.locator('[data-task-hierarchy-container="container:folder-client"] [data-task-hierarchy-list="list-work"]')).toBeVisible()
   })
 
+  test('creates directly from a calendar day and preserves a concrete list destination', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByRole('button', { name: 'Calendario' }).click()
+    await expect(page.locator('[data-task-calendar]')).toBeVisible()
+    await page.locator('[data-task-calendar] .grid button.group').first().click()
+    await expect(page.getByRole('heading', { name: 'Crear tarea' })).toBeVisible()
+    await page.getByPlaceholder('¿Qué hay que lograr?').fill('Tarea creada desde calendario')
+    await page.getByRole('dialog').getByRole('button', { name: 'Crear', exact: true }).click()
+    await expect.poll(() => mock.createWrites.length).toBe(1)
+    expect(mock.createWrites[0].list_id).toBeTruthy()
+    expect(mock.createWrites[0].is_all_day).toBe(true)
+    expect(mock.createWrites[0].operation_id).toBeTruthy()
+  })
+
   test('supports keyboard pickup and exact Escape cancellation for a list', async ({ page }) => {
     const mock = await installWorkspaceMock(page)
     await page.setViewportSize({ width: 1398, height: 504 })

@@ -59,6 +59,8 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Mueve o elimina las tareas antes de archivar", "code": "task_container_not_empty"})
 	case errors.Is(err, repository.ErrTaskParentArchived):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Restaura primero la tarea padre", "code": "task_parent_archived"})
+	case errors.Is(err, repository.ErrTaskBulkMoveInvalid):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La selección contiene tareas que no se pueden mover juntas", "code": "invalid_bulk_move"})
 	case errors.Is(err, repository.ErrDefaultTaskList):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La Bandeja general debe permanecer como lista raíz predeterminada", "code": "default_list_invariant"})
 	case errors.Is(err, repository.ErrTaskTrashConfirmation):
@@ -519,6 +521,82 @@ func (s *Server) handleMoveTask(c *fiber.Ctx) error {
 		"task":         full,
 		"order":        order,
 	})
+}
+
+func (s *Server) handleBulkMoveTasks(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	var req struct {
+		Items []struct {
+			ID      string `json:"id"`
+			Version int64  `json:"version"`
+		} `json:"items"`
+		DestinationListID         *string `json:"destination_list_id"`
+		DestinationStatusCategory string  `json:"destination_status_category"`
+		OperationID               string  `json:"operation_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud invalida"})
+	}
+	parsedOperationID, err := parseTaskOperationID(req.OperationID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id debe ser un UUID"})
+	}
+	operationID := uuid.New()
+	if parsedOperationID != nil {
+		operationID = *parsedOperationID
+	}
+	items := make([]repository.TaskBulkMoveItem, 0, len(req.Items))
+	wasDone := make(map[uuid.UUID]bool, len(req.Items))
+	for _, raw := range req.Items {
+		id, parseErr := uuid.Parse(strings.TrimSpace(raw.ID))
+		if parseErr != nil || raw.Version < 1 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Cada tarea requiere id y version validos"})
+		}
+		existing, getErr := s.services.Task.GetByID(c.Context(), id, accountID)
+		if getErr != nil || existing.DeletedAt != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Una tarea seleccionada ya no esta disponible"})
+		}
+		if existing.ProgramID != nil {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Las tareas de Programas no se pueden mover en grupo", "code": "program_task_bulk_move_not_supported"})
+		}
+		wasDone[id] = existing.Status == domain.TaskStatusCompleted || (existing.StatusDetail != nil && existing.StatusDetail.Category == domain.TaskStatusCategoryDone)
+		items = append(items, repository.TaskBulkMoveItem{ID: id, Version: raw.Version})
+	}
+	var destinationListID *uuid.UUID
+	if req.DestinationListID != nil && strings.TrimSpace(*req.DestinationListID) != "" {
+		id, parseErr := uuid.Parse(strings.TrimSpace(*req.DestinationListID))
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Lista de destino invalida"})
+		}
+		destinationListID = &id
+	}
+	result, err := s.repos.TaskWork.BulkMoveTasks(c.Context(), accountID, userID, items, destinationListID, strings.TrimSpace(req.DestinationStatusCategory), operationID.String())
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	canonical := make([]*domain.Task, 0, len(result.TaskIDs))
+	for _, id := range result.TaskIDs {
+		full, getErr := s.services.Task.GetByID(c.Context(), id, accountID)
+		if getErr != nil {
+			return taskWorkError(c, getErr)
+		}
+		full.MutationOperationID = &operationID
+		isDone := full.Status == domain.TaskStatusCompleted || (full.StatusDetail != nil && full.StatusDetail.Category == domain.TaskStatusCategoryDone)
+		if isDone {
+			_ = s.repos.Task.DeleteRemindersByTask(c.Context(), id)
+			if !wasDone[id] {
+				s.services.Task.EnsureNextOccurrence(c.Context(), full)
+			}
+		} else {
+			s.services.Task.RebuildReminder(c.Context(), full)
+		}
+		canonical = append(canonical, full)
+	}
+	s.invalidateTasksCache(accountID)
+	payload := fiber.Map{"operation_id": operationID.String(), "tasks": canonical, "orders": result.Orders}
+	s.broadcastTaskWork(accountID, "bulk_moved", payload)
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID.String(), "tasks": canonical, "orders": result.Orders})
 }
 
 func (s *Server) handleGetTaskHierarchy(c *fiber.Ctx) error {

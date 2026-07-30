@@ -65,12 +65,14 @@ func taskCreatedEventPayload(task *domain.Task, operationID *uuid.UUID) map[stri
 }
 
 func (s *TaskService) Update(ctx context.Context, task *domain.Task) error {
+	operationID := task.MutationOperationID
 	previous, _ := s.GetByID(ctx, task.ID, task.AccountID)
 	if err := s.repos.Task.Update(ctx, task); err != nil {
 		return err
 	}
 	canonical := task
 	if loaded, err := s.GetByID(ctx, task.ID, task.AccountID); err == nil {
+		loaded.MutationOperationID = operationID
 		canonical = loaded
 		*task = *loaded
 	}
@@ -81,16 +83,24 @@ func (s *TaskService) Update(ctx context.Context, task *domain.Task) error {
 
 	if s.hub != nil {
 		structureChanged := previous != nil && (!taskNullableUUIDEqual(previous.ListID, canonical.ListID) || !taskNullableUUIDEqual(previous.ParentTaskID, canonical.ParentTaskID))
-		s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
+		payload := map[string]interface{}{
 			"action":            "updated",
 			"task":              canonical,
 			"structure_changed": structureChanged,
-		})
+		}
+		if canonical.MutationOperationID != nil {
+			payload["operation_id"] = canonical.MutationOperationID.String()
+		}
+		s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, payload)
 		if previous != nil && previous.ParentTaskID == nil && !taskNullableUUIDEqual(previous.ListID, canonical.ListID) {
-			s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
+			subtaskPayload := map[string]interface{}{
 				"action":  "subtasks_updated",
 				"task_id": canonical.ID.String(),
-			})
+			}
+			if canonical.MutationOperationID != nil {
+				subtaskPayload["operation_id"] = canonical.MutationOperationID.String()
+			}
+			s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, subtaskPayload)
 		}
 	}
 	if canonical.ParentTaskID != nil {

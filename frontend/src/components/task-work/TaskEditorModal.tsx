@@ -37,6 +37,8 @@ interface Props {
   defaultTitle?: string
   defaultPriority?: TaskPriority
   defaultDueAt?: string
+  defaultStartAt?: string
+  defaultAllDay?: boolean
   parentTaskId?: string
   parentTaskTitle?: string
   lists: TaskList[]
@@ -57,7 +59,7 @@ function localDateTime(value?: string) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
 }
 
-export default function TaskEditorModal({ open, task, defaultListId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, parentTaskId, parentTaskTitle, lists, folders, workflows, users, onClose, onSaved, onOperation }: Props) {
+export default function TaskEditorModal({ open, task, defaultListId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, defaultStartAt, defaultAllDay, parentTaskId, parentTaskTitle, lists, folders, workflows, users, onClose, onSaved, onOperation }: Props) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<TaskType>('reminder')
@@ -104,9 +106,9 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
     setStatusId(task?.status_id || defaultStatusId || '')
     setOwnerId(task?.assigned_to || defaultOwnerId || '')
     setCollaboratorIds(task?.collaborators?.map(item => item.user_id) || [])
-    setStartAt(localDateTime(task?.start_at))
+    setStartAt(localDateTime(task?.start_at || defaultStartAt))
     setDueAt(localDateTime(task?.due_at || defaultDueAt))
-    setAllDay(Boolean(task?.is_all_day))
+    setAllDay(task ? Boolean(task.is_all_day) : Boolean(defaultAllDay))
     setProgress(task?.progress || 0)
     setMilestone(Boolean(task?.is_milestone))
     setRecurrence(task?.recurrence_rule || '')

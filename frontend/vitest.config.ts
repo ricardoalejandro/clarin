@@ -10,6 +10,8 @@ export default defineConfig({
       'src/lib/useDebouncedValue.test.tsx',
       'src/lib/useKanbanPan.test.tsx',
       'src/components/task-work/taskWorkspaceState.test.ts',
+      'src/components/task-work/taskBoardSelection.test.ts',
+      'src/components/task-work/taskCalendarState.test.ts',
     ],
     restoreMocks: true,
   },

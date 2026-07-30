@@ -73,6 +73,7 @@ async function installTaskBoardMock(page: Page) {
   let tasks = initialTasks()
   let moveMode: MoveMode = 'success'
   const moveRequests: Array<{ taskId: string; body: Record<string, unknown> }> = []
+  const bulkRequests: Array<Record<string, unknown>> = []
 
   await page.routeWebSocket('**/ws**', socket => {
     socket.onMessage(() => undefined)
@@ -131,6 +132,16 @@ async function installTaskBoardMock(page: Page) {
       const offset = Number(url.searchParams.get('offset') || 0)
       const limit = Number(url.searchParams.get('limit') || 200)
       await json(route, { tasks: tasks.slice(offset, offset + limit), total: tasks.length })
+      return
+    }
+
+    if (path === '/api/tasks/bulk-move' && request.method() === 'POST') {
+      bulkRequests.push(body)
+      const itemIDs = new Set((body.items as Array<{ id: string }>).map(item => item.id))
+      const category = String(body.destination_status_category || '')
+      const destinationStatus = statuses.find(item => item.category === category)
+      tasks = tasks.map(item => itemIDs.has(item.id) && destinationStatus ? { ...item, status_id: destinationStatus.id, status_detail: destinationStatus, status: destinationStatus.category === 'done' ? 'completed' : destinationStatus.category === 'cancelled' ? 'cancelled' : 'pending', progress: destinationStatus.category === 'done' ? 100 : 0, version: item.version + 1 } : item)
+      await json(route, { success: true, operation_id: body.operation_id, tasks: tasks.filter(item => itemIDs.has(item.id)), orders: { 'list-kanban': tasks.map(item => item.id) } })
       return
     }
 
@@ -194,6 +205,7 @@ async function installTaskBoardMock(page: Page) {
 
   return {
     moveRequests,
+    bulkRequests,
     setMoveMode(mode: MoveMode) { moveMode = mode },
   }
 }
@@ -264,6 +276,24 @@ test.describe('Clarin Work Kanban drag stability', () => {
     expect(mock.moveRequests[0].body.before_task_id ?? null).toBe(activeOrder[movedIndex + 1] ?? null)
     expect(errors.filter(message => /maximum update depth|react error #185|application error/i.test(message))).toEqual([])
     await expect(page.getByText('Application error: a client-side exception has occurred')).toHaveCount(0)
+  })
+
+  test('gathers a Shift range into one visual stack and performs one atomic bulk move', async ({ page }) => {
+    const mock = await installTaskBoardMock(page)
+    await openBoard(page)
+    await card(page, 'todo-1').getByRole('checkbox').click()
+    await card(page, 'todo-3').getByRole('checkbox').click({ modifiers: ['Shift'] })
+    await expect(page.locator('[data-task-bulk-actions]')).toContainText('3')
+
+    await startMouseDrag(page, card(page, 'todo-1'), card(page, 'active-2'))
+    await expect(page.getByText('3 tareas', { exact: true })).toBeVisible()
+    expect(await page.locator('[data-task-gather-ghost]').count()).toBeLessThanOrEqual(8)
+    await page.mouse.up()
+
+    await expect.poll(() => mock.bulkRequests.length).toBe(1)
+    expect(mock.moveRequests).toHaveLength(0)
+    expect((mock.bulkRequests[0].items as unknown[])).toHaveLength(3)
+    expect(mock.bulkRequests[0].destination_status_category).toBe('active')
   })
 
   test('reorders once inside a column and restores a keyboard cancellation', async ({ page }) => {

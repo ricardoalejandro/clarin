@@ -34,6 +34,7 @@ import {
   TaskAttachment,
   TaskComment,
   TaskDependency,
+  TaskFolder,
   TaskList,
   TaskWorkflow,
 } from '@/types/task'
@@ -43,12 +44,14 @@ import { TaskPriorityPicker, TaskStatusPicker } from './TaskPropertyPicker'
 import TaskUserCombobox from './TaskUserCombobox'
 import useTaskDetailWindow, { type TaskDetailResizeEdge } from './useTaskDetailWindow'
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
+import { TaskListPicker } from './TaskSelectPicker'
 
 interface Props {
   taskId: string | null
   allTasks: Task[]
   users: TaskAccountUser[]
   lists: TaskList[]
+  folders: TaskFolder[]
   workflows: TaskWorkflow[]
   onClose: () => void
   onEdit: (task: Task) => void
@@ -107,7 +110,7 @@ function initials(name: string) {
   return name.trim().slice(0, 2).toUpperCase() || 'CL'
 }
 
-export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workflows, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
+export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folders, workflows, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
   const [task, setTask] = useState<Task | null>(null)
   const [children, setChildren] = useState<Task[]>([])
   const [comments, setComments] = useState<TaskComment[]>([])
@@ -532,7 +535,8 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
     const execute = async () => {
       const current = taskRef.current
       if (!current || current.id !== requestedTaskId || taskIdRef.current !== requestedTaskId) return false
-      const result = await apiPut<{ task: Task }>(`/api/tasks/${requestedTaskId}`, { ...body, version: current.version })
+      const operationID = crypto.randomUUID()
+      const result = await apiPut<{ task: Task; operation_id?: string }>(`/api/tasks/${requestedTaskId}`, { ...body, version: current.version, operation_id: operationID })
       if (taskIdRef.current !== requestedTaskId) return false
       if (!result.success || !result.data?.task) {
         if (result.status === 409) await refreshTask()
@@ -906,7 +910,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
         <div className="text-xs font-semibold text-slate-500">Estado<div className="mt-1.5"><TaskStatusPicker value={task.status_id || ''} statuses={statuses} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div></div>
         <div className="text-xs font-semibold text-slate-500">Responsable<div className="mt-1.5"><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={isPending('owner')} /></div></div>
         <div className="text-xs font-semibold text-slate-500">Prioridad<div className="mt-1.5"><TaskPriorityPicker value={task.priority} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></div></div>
-        <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5 flex min-h-11 items-center rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-medium text-slate-600">{task.list_name || list?.name || 'Bandeja general'}</div></div>
+        <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5"><TaskListPicker value={task.list_id || ''} lists={lists} folders={folders} disabled={Boolean(task.parent_task_id) || isPending('list')} onChange={listID => { void updateTask('list', { list_id: listID }) }} /></div>{task.parent_task_id && <p className="mt-1.5 text-[10px] font-normal leading-4 text-slate-400">Las subtareas heredan la lista de su tarea principal y se trasladan junto con ella.</p>}</div>
         <label className="text-xs font-semibold text-slate-500"><span className="flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Inicio</span><input type="datetime-local" value={startDraft} disabled={isPending('dates')} onFocus={() => { editingDatesRef.current = true }} onChange={event => setStartDraft(event.target.value)} onBlur={() => { void saveDates() }} className={`${inputClass} mt-1.5`} /></label>
         <label className="text-xs font-semibold text-slate-500"><span className="flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Entrega</span><input type="datetime-local" value={dueDraft} disabled={isPending('dates')} onFocus={() => { editingDatesRef.current = true }} onChange={event => setDueDraft(event.target.value)} onBlur={() => { void saveDates() }} className={`${inputClass} mt-1.5`} /></label>
         <label className="text-xs font-semibold text-slate-500 sm:col-span-2"><span className="flex items-center justify-between"><span>Progreso</span><span className="text-emerald-700">{progressDraft}%</span></span><input type="range" min="0" max="100" step="5" value={progressDraft} disabled={isPending('progress') || task.status_detail?.category === 'done'} onFocus={() => { editingProgressRef.current = true }} onChange={event => setProgressDraft(Number(event.target.value))} onPointerUp={() => { void saveProgress() }} onKeyUp={() => { void saveProgress() }} className="mt-2 w-full accent-emerald-600 disabled:opacity-50" /></label>

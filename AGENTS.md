@@ -108,6 +108,8 @@ If a task touches multiple areas, read all matching skills before editing.
 
 ## Verification Baseline
 
+- Every functional modification must include or update a unit test in the nearest stable layer. Extract pure reducers/helpers when UI behavior otherwise depends on timing, geometry, drag state, reconciliation or payload construction. TypeScript, builds and browser tests complement this rule but do not replace it.
+
 - Backend changes: run `GOCACHE=/tmp/go-build go test ./...` from `backend`. Add `go build` or Docker build when the change affects startup, compile-time wiring, generated assets, or deployment behavior.
 - Frontend changes: run `npx tsc --noEmit` from `frontend`; run `npm run build` when routes, components, API contracts, or production rendering can be affected.
 - Database/storage/MCP/security changes need focused manual reasoning in addition to automated checks.

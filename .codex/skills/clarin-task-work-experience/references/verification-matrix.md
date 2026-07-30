@@ -1,5 +1,13 @@
 # Clarin Work Verification Matrix
 
+## Bulk movement and calendar creation
+
+- Unit: checkbox toggle, Shift range, dragging selected/unselected cards, maximum stack/ghost counts, reduced motion state, unique payload items, relative order and destination resolution.
+- Backend: same-account top-level tasks only, optimistic versions, deterministic locks, parent/child workflow mapping, archived/incompatible/duplicate rejection and all-or-nothing rollback.
+- Integration: one request per gesture to column/list/folder, one matching `operation_id` in HTTP/WebSocket, no duplicate cards, no React #185, Escape/error rollback and folder list choice.
+- Calendar: month all-day and week/day one-hour slots, direct creation, scope/remembered list selection, keyboard Enter/Escape and draft preservation into the full editor.
+- Accessibility/layout: `aria-live` group counts and destination announcements, keyboard status/list pickers, reduced motion, sidebar expansion/restoration and widths 375, 917, 979, 1249 and 1284 px.
+
 ## Database And API
 
 - Run the task migration twice; confirm the second run preserves manual order.

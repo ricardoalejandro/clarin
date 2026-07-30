@@ -569,11 +569,17 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		RecurrenceRule  *string   `json:"recurrence_rule"`
 		ReminderMinutes *int      `json:"reminder_minutes"`
 		Notes           *string   `json:"notes"`
+		OperationID     string    `json:"operation_id"`
 	}
 
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	operationID, operationErr := parseTaskOperationID(req.OperationID)
+	if operationErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
+	}
+	existing.MutationOperationID = operationID
 	if req.Version != nil && *req.Version != existing.Version {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La tarea cambió en otra sesión", "code": "version_conflict", "current_version": existing.Version})
 	}
@@ -901,19 +907,31 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	if err := s.services.Task.Update(c.Context(), existing); err != nil {
 		return taskWorkError(c, err)
 	}
-	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, existing.ID, &userID, "updated", fiber.Map{"version": existing.Version})
+	activityMetadata := fiber.Map{"version": existing.Version}
+	if operationID != nil {
+		activityMetadata["operation_id"] = operationID.String()
+	}
+	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, existing.ID, &userID, "updated", activityMetadata)
 
 	full, err := s.services.Task.GetByID(c.Context(), existing.ID, accountID)
 	if err != nil {
 		s.invalidateTasksCache(accountID)
-		return c.JSON(fiber.Map{"success": true, "task": existing})
+		response := fiber.Map{"success": true, "task": existing}
+		if operationID != nil {
+			response["operation_id"] = operationID.String()
+		}
+		return c.JSON(response)
 	}
 	if !wasDone && full.StatusDetail != nil && full.StatusDetail.Category == domain.TaskStatusCategoryDone {
 		s.services.Task.EnsureNextOccurrence(c.Context(), full)
 	}
 
 	s.invalidateTasksCache(accountID)
-	return c.JSON(fiber.Map{"success": true, "task": full})
+	response := fiber.Map{"success": true, "task": full}
+	if operationID != nil {
+		response["operation_id"] = operationID.String()
+	}
+	return c.JSON(response)
 }
 
 func taskRequestUUIDPointersEqual(left, right *uuid.UUID) bool {

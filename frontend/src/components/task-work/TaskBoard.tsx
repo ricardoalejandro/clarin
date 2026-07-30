@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
+import { createPortal } from 'react-dom'
 import {
   DndContext,
   DragOverlay,
@@ -18,6 +19,7 @@ import {
   type CollisionDetection,
   type DragCancelEvent,
   type DragEndEvent,
+  type DragMoveEvent,
   type DragOverEvent,
   type DragStartEvent,
 } from '@dnd-kit/core'
@@ -52,6 +54,7 @@ import { useKanbanPan } from '@/lib/useKanbanPan'
 import {
   TASK_PRIORITY_CONFIG,
   Task,
+  TaskFolder,
   TaskList,
   TaskMoveResponse,
   TaskPriority,
@@ -59,6 +62,8 @@ import {
 } from '@/types/task'
 import TaskUserCombobox from './TaskUserCombobox'
 import type { TaskAccountUser } from './TaskEditorModal'
+import { TaskListPicker } from './TaskSelectPicker'
+import { selectionAfterToggle, selectionForDrag, taskStackLayers, uniqueBulkItems } from './taskBoardSelection'
 
 export interface TaskInlineDraft {
   title: string
@@ -67,6 +72,9 @@ export interface TaskInlineDraft {
   ownerId: string
   dueDate: string
   priority: TaskPriority
+  startAt?: string
+  dueAt?: string
+  isAllDay?: boolean
 }
 
 interface Props {
@@ -74,6 +82,8 @@ interface Props {
   statuses: TaskWorkflowStatus[]
   allStatuses: TaskWorkflowStatus[]
   lists: TaskList[]
+  allLists?: TaskList[]
+  folders?: TaskFolder[]
   users: TaskAccountUser[]
   currentUserId: string
   defaultListId?: string
@@ -153,7 +163,10 @@ function sameOrder(left: string[] | undefined, right: string[] | undefined) {
 }
 
 function isBelowTarget(event: DragOverEvent | DragEndEvent) {
-  if (event.activatorEvent.type === 'keydown') return event.delta.y > 0 || (event.delta.y === 0 && event.delta.x > 0)
+  // The sortable keyboard coordinate getter already advances `over` to the
+  // intended insertion anchor. Treating a positive keyboard delta as "below"
+  // applies that movement a second time and skips one card per key press.
+  if (event.activatorEvent.type === 'keydown') return false
   return Boolean(event.active.rect.current.translated && event.active.rect.current.translated.top > event.over!.rect.top + event.over!.rect.height / 2)
 }
 
@@ -275,6 +288,8 @@ function TaskBoardCard({
   onStar,
   onComplete,
   highlighted,
+  selected,
+  onSelect,
 }: {
   task: Task
   columnId: string
@@ -286,6 +301,8 @@ function TaskBoardCard({
   onStar: () => void
   onComplete?: () => void
   highlighted?: boolean
+  selected?: boolean
+  onSelect: (shift: boolean) => void
 }) {
   const sortableData = useMemo(() => ({ type: 'task', columnId, listId: task.list_id }), [columnId, task.list_id])
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -305,10 +322,11 @@ function TaskBoardCard({
     {...attributes}
     {...listeners}
     onClick={() => { if (!suppressOpen()) onOpen() }}
-    className={`group relative cursor-grab touch-manipulation select-none overflow-hidden rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
+    className={`group relative cursor-grab touch-manipulation select-none overflow-hidden rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${selected ? 'border-emerald-400 bg-emerald-50/40 ring-2 ring-emerald-100' : highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
   >
     <span className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: task.status_detail?.color || '#64748b' }} />
     <div className="flex items-start gap-2">
+      <button type="button" role="checkbox" aria-checked={selected} aria-label={`${selected ? 'Quitar' : 'Seleccionar'} ${task.title}`} onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onSelect(event.shiftKey) }} className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition ${selected ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-300 bg-white text-transparent hover:border-emerald-500'}`}><Check className="h-3 w-3" /></button>
       <button
         type="button"
         disabled={!onComplete}
@@ -323,9 +341,9 @@ function TaskBoardCard({
       <GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-slate-200 transition group-hover:text-slate-400" />
     </div>
 
-    {showListName && <p className="ml-7 mt-1 truncate text-[10px] font-medium text-slate-400">{task.list_name || 'Bandeja general'}</p>}
+    {showListName && <p className="ml-14 mt-1 truncate text-[10px] font-medium text-slate-400">{task.list_name || 'Bandeja general'}</p>}
 
-    <div className="ml-7 mt-2.5 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px]">
+    <div className="ml-14 mt-2.5 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px]">
       {(task.priority === 'high' || task.priority === 'urgent') && <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-1 font-semibold ${priority.bg} ${priority.color}`}><Flag className="h-3 w-3" />{priority.label}</span>}
       {task.due_at && <span className={`inline-flex items-center gap-1 rounded-md bg-slate-50 px-1.5 py-1 font-medium ${overdue ? 'bg-rose-50 text-rose-600' : 'text-slate-500'}`}><CalendarDays className="h-3 w-3" />{dueFormatter.format(new Date(task.due_at))}</span>}
       {Boolean(task.subtask_count) && <span className={`inline-flex items-center gap-1 rounded-md bg-slate-50 px-1.5 py-1 ${task.subtask_done === task.subtask_count ? 'text-emerald-600' : 'text-slate-400'}`}><ListChecks className="h-3 w-3" />{task.subtask_done}/{task.subtask_count}</span>}
@@ -462,6 +480,8 @@ function BoardColumn({
   onComplete,
   onOperation,
   recentlyCreatedTaskId,
+  selectedTaskIds,
+  onSelectTask,
 }: {
   status: TaskWorkflowStatus
   taskIds: string[]
@@ -487,6 +507,8 @@ function BoardColumn({
   onComplete: (task: Task, status: TaskWorkflowStatus) => void
   onOperation: (operationId: string, active: boolean) => void
   recentlyCreatedTaskId?: string
+  selectedTaskIds: Set<string>
+  onSelectTask: (taskID: string, shift: boolean, orderedIDs: string[]) => void
 }) {
   const expanded = !collapsed || temporarilyExpanded
   const defaultList = lists.find(item => item.id === defaultListId)
@@ -527,7 +549,7 @@ function BoardColumn({
             const task = tasksById.get(taskId)
             if (!task) return null
             const toggleStatus = allStatuses.find(item => item.workflow_id === task.status_detail?.workflow_id && item.category === (task.status_detail?.category === 'done' ? 'not_started' : 'done'))
-            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={toggleStatus ? () => onComplete(task, toggleStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} />
+            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={toggleStatus ? () => onComplete(task, toggleStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} selected={selectedTaskIds.has(task.id)} onSelect={shift => onSelectTask(task.id, shift, taskIds)} />
           })}
           {!taskIds.length && isOver && <div className="flex h-12 items-center justify-center rounded-xl border border-dashed border-emerald-400 bg-white text-xs font-semibold text-emerald-700">Suelta aquí</div>}
         </div>
@@ -539,10 +561,13 @@ function BoardColumn({
   </section>
 }
 
-function OverlayCard({ task }: { task: Task }) {
-  return <div className="w-[284px] rotate-1 rounded-xl border border-emerald-300 bg-white p-3 shadow-2xl shadow-slate-900/20">
-    <div className="flex items-start gap-2"><GripVertical className="mt-0.5 h-4 w-4 text-emerald-500" /><p className="line-clamp-2 text-sm font-semibold text-slate-800">{task.title}</p></div>
-    <p className="ml-6 mt-2 truncate text-[10px] text-slate-400">{task.assigned_to_name || 'Sin responsable'}{task.list_name ? ` · ${task.list_name}` : ''}</p>
+function OverlayCard({ task, count, destination }: { task: Task; count: number; destination?: string }) {
+  const layers = taskStackLayers(count)
+  return <div className="relative h-[92px] w-[284px] motion-reduce:transition-none" aria-label={`${count} ${count === 1 ? 'tarea' : 'tareas'} seleccionadas`}>
+    {layers.map(layer => <div key={layer.index} className="absolute inset-0 rounded-xl border border-emerald-300 bg-white p-3 shadow-2xl shadow-slate-900/20 transition-[transform,background-color] duration-150 motion-reduce:transform-none" style={{ transform: `translate(${layer.x}px, ${layer.y}px) rotate(${layer.rotation}deg)`, opacity: layer.opacity, zIndex: 10 - layer.index }}>
+      {layer.index === 0 && <><div className="flex items-start gap-2"><GripVertical className="mt-0.5 h-4 w-4 text-emerald-500" /><p className="line-clamp-2 text-sm font-semibold text-slate-800">{task.title}</p></div><p className="ml-6 mt-2 truncate text-[10px] text-slate-400">{destination ? `Mover a ${destination}` : task.assigned_to_name || 'Sin responsable'}</p></>}
+    </div>)}
+    {count > 1 && <span className="absolute -right-3 -top-3 z-20 rounded-full bg-slate-900 px-2.5 py-1 text-xs font-black text-white shadow-lg">{count} tareas</span>}
   </div>
 }
 
@@ -551,6 +576,8 @@ export default function TaskBoard({
   statuses,
   allStatuses,
   lists,
+  allLists = lists,
+  folders = [],
   users,
   currentUserId,
   defaultListId,
@@ -578,17 +605,26 @@ export default function TaskBoard({
   const [orders, setOrders] = useState<ColumnOrders>(() => initialOrders(tasks, statuses, lists, groupByList))
   const ordersRef = useRef<ColumnOrders>(initialOrders(tasks, statuses, lists, groupByList))
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
+  const [selectionAnchorID, setSelectionAnchorID] = useState('')
+  const [dragTaskIds, setDragTaskIds] = useState<string[]>([])
   const [overColumnId, setOverColumnId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<{ message: string; retry: () => void } | null>(null)
+  const [announcement, setAnnouncement] = useState('')
+  const [externalDropTarget, setExternalDropTarget] = useState<{ type: 'list' | 'folder'; id: string; label: string } | null>(null)
+  const [pendingFolderDrop, setPendingFolderDrop] = useState<{ folder: TaskFolder; taskIDs: string[] } | null>(null)
+  const [gatherGhosts, setGatherGhosts] = useState<Array<{ id: string; title: string; left: number; top: number; width: number; height: number; dx: number; dy: number }>>([])
   const snapshotRef = useRef<{ tasks: Task[]; orders: ColumnOrders } | null>(null)
   const boardViewportRef = useRef<HTMLDivElement | null>(null)
   const lastOverIdRef = useRef<string | null>(null)
   const validDestinationColumnIdsRef = useRef<Set<string>>(new Set(statuses.map(status => status.id)))
   const recentlyMovedToNewColumnRef = useRef(false)
   const recentlyMovedFrameRef = useRef<number | null>(null)
+  const gatherTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastDragEndRef = useRef(0)
   const tasksById = useMemo(() => new Map(localTasks.map(task => [task.id, task])), [localTasks])
   const activeTask = activeId ? tasksById.get(activeId) : undefined
+  const selectedTaskIDSet = useMemo(() => new Set(selectedTaskIds), [selectedTaskIds])
   useKanbanPan(boardViewportRef)
 
   const sensors = useSensors(
@@ -612,6 +648,7 @@ export default function TaskBoard({
 
   useEffect(() => () => {
     if (recentlyMovedFrameRef.current !== null) cancelAnimationFrame(recentlyMovedFrameRef.current)
+    if (gatherTimerRef.current) clearTimeout(gatherTimerRef.current)
   }, [])
 
   const markRecentlyMovedToNewColumn = useCallback(() => {
@@ -683,6 +720,10 @@ export default function TaskBoard({
 
   const suppressOpen = useCallback(() => Date.now() - lastDragEndRef.current < 160, [])
   const toggleCollapsed = (statusId: string) => onCollapsedStatusIdsChange(collapsedStatusIds.includes(statusId) ? collapsedStatusIds.filter(id => id !== statusId) : [...collapsedStatusIds, statusId])
+  const selectTask = useCallback((taskID: string, shift: boolean, orderedIDs: string[]) => {
+    setSelectedTaskIds(current => selectionAfterToggle(current, taskID, orderedIDs, shift, selectionAnchorID))
+    setSelectionAnchorID(taskID)
+  }, [selectionAnchorID])
 
   const resetDrag = () => {
     if (recentlyMovedFrameRef.current !== null) {
@@ -693,7 +734,10 @@ export default function TaskBoard({
     lastOverIdRef.current = null
     validDestinationColumnIdsRef.current = new Set(statuses.map(status => status.id))
     setActiveId(null)
+    setDragTaskIds([])
     setOverColumnId(null)
+    document.querySelectorAll('[data-task-drop-active]').forEach(element => element.removeAttribute('data-task-drop-active'))
+    setExternalDropTarget(null)
     snapshotRef.current = null
     lastDragEndRef.current = Date.now()
     onDragStateChange(false)
@@ -705,6 +749,39 @@ export default function TaskBoard({
     ordersRef.current = snapshot.orders
     onTasksChange(snapshot.tasks)
   }
+
+  const bulkMove = useCallback(async (taskIDs: string[], destinationListID?: string, destinationCategory?: string) => {
+    const movingTasks = taskIDs.map(id => tasksById.get(id)).filter((task): task is Task => Boolean(task && !task.parent_task_id))
+    const items = uniqueBulkItems(movingTasks.map(task => ({ id: task.id, version: task.version || 1 })))
+    if (!items.length) return
+    const operationID = crypto.randomUUID()
+    onOperation(operationID, true)
+    setAnnouncement(`Moviendo ${items.length} ${items.length === 1 ? 'tarea' : 'tareas'}`)
+    try {
+      const result = await apiPost<{ tasks: Task[]; operation_id: string }>(`/api/tasks/bulk-move`, {
+        items,
+        destination_list_id: destinationListID,
+        destination_status_category: destinationCategory,
+        operation_id: operationID,
+      })
+      if (!result.success || !result.data?.tasks) {
+        const message = result.status === 409 ? 'Una tarea cambió en otra sesión. No se movió ninguna tarea.' : result.error || 'No se pudo mover la selección.'
+        setMoveError({ message, retry: () => { setMoveError(null); void bulkMove(taskIDs, destinationListID, destinationCategory) } })
+        onError(message)
+        setAnnouncement(`Movimiento cancelado. ${message}`)
+        await onRefresh()
+        return
+      }
+      result.data.tasks.forEach(task => onCanonicalTask(task, 'bulk_moved'))
+      setSelectedTaskIds([])
+      setSelectionAnchorID('')
+      setMoveError(null)
+      setAnnouncement(`${items.length} ${items.length === 1 ? 'tarea movida' : 'tareas movidas'} correctamente`)
+      await onRefresh()
+    } finally {
+      onOperation(operationID, false)
+    }
+  }, [onCanonicalTask, onError, onOperation, onRefresh, tasksById])
 
   const move = useCallback(async (taskId: string, destinationColumnId: string, nextOrders: ColumnOrders, snapshot: { tasks: Task[]; orders: ColumnOrders }) => {
     const task = snapshot.tasks.find(item => item.id === taskId) || localTasks.find(item => item.id === taskId)
@@ -772,6 +849,22 @@ export default function TaskBoard({
   const handleDragStart = (event: DragStartEvent) => {
     const id = String(event.active.id)
     const task = tasksById.get(id)
+    const group = selectionForDrag(selectedTaskIds, id)
+    if (!selectedTaskIds.includes(id)) setSelectedTaskIds([])
+    setSelectionAnchorID(id)
+    setDragTaskIds(group)
+    const activeRect = document.querySelector<HTMLElement>(`[data-task-id="${id}"]`)?.getBoundingClientRect()
+    if (activeRect && group.length > 1) {
+      const ghosts = group.filter(taskID => taskID !== id).slice(0, 8).flatMap(taskID => {
+        const rect = document.querySelector<HTMLElement>(`[data-task-id="${taskID}"]`)?.getBoundingClientRect()
+        const selectedTask = tasksById.get(taskID)
+        return rect && selectedTask ? [{ id: taskID, title: selectedTask.title, left: rect.left, top: rect.top, width: rect.width, height: Math.min(rect.height, 88), dx: activeRect.left - rect.left, dy: activeRect.top - rect.top }] : []
+      })
+      setGatherGhosts(ghosts)
+      if (gatherTimerRef.current) clearTimeout(gatherTimerRef.current)
+      gatherTimerRef.current = setTimeout(() => { setGatherGhosts([]); gatherTimerRef.current = null }, 180)
+    }
+    setAnnouncement(`${group.length} ${group.length === 1 ? 'tarea seleccionada' : 'tareas seleccionadas'}. Elige un destino.`)
     validDestinationColumnIdsRef.current = new Set(statuses.filter(status => !task || Boolean(resolvedStatus(task, status, allStatuses))).map(status => status.id))
     lastOverIdRef.current = null
     recentlyMovedToNewColumnRef.current = false
@@ -779,6 +872,22 @@ export default function TaskBoard({
     setActiveId(id)
     setMoveError(null)
     onDragStateChange(true)
+  }
+
+  const handleDragMove = (event: DragMoveEvent) => {
+    const rect = event.active.rect.current.translated
+    if (!rect) return
+    const element = document.elementFromPoint(rect.left + Math.min(28, rect.width / 2), rect.top + Math.min(28, rect.height / 2)) as HTMLElement | null
+    const target = element?.closest<HTMLElement>('[data-task-drop-list],[data-task-drop-folder]')
+    document.querySelectorAll('[data-task-drop-active]').forEach(candidate => candidate.removeAttribute('data-task-drop-active'))
+    if (!target) {
+      setExternalDropTarget(null)
+      return
+    }
+    target.setAttribute('data-task-drop-active', 'true')
+    const listID = target.dataset.taskDropList
+    const folderID = target.dataset.taskDropFolder
+    setExternalDropTarget(listID ? { type: 'list', id: listID, label: target.dataset.taskDropLabel || 'lista' } : folderID ? { type: 'folder', id: folderID, label: target.dataset.taskDropLabel || 'carpeta' } : null)
   }
 
   const destinationFromEvent = (event: DragOverEvent | DragEndEvent) => {
@@ -813,9 +922,29 @@ export default function TaskBoard({
     const taskId = String(event.active.id)
     const destination = destinationFromEvent(event)
     const snapshot = snapshotRef.current
+    if (externalDropTarget && snapshot) {
+      const movingIDs = dragTaskIds.length ? [...dragTaskIds] : [taskId]
+      rollback(snapshot)
+      const target = externalDropTarget
+      resetDrag()
+      if (target.type === 'list') {
+        void bulkMove(movingIDs, target.id)
+      } else {
+        const folder = folders.find(item => item.id === target.id)
+        if (folder) setPendingFolderDrop({ folder, taskIDs: movingIDs })
+      }
+      return
+    }
     if (!event.over || !destination || !snapshot) {
       if (snapshot) rollback(snapshot)
       resetDrag()
+      return
+    }
+    if (dragTaskIds.length > 1) {
+      const boardStatus = statuses.find(status => status.id === destination)
+      rollback(snapshot)
+      resetDrag()
+      if (boardStatus && dragTaskIds.some(id => tasksById.get(id)?.status_detail?.category !== boardStatus.category)) void bulkMove(dragTaskIds, undefined, boardStatus.category)
       return
     }
     const overId = String(event.over.id)
@@ -842,6 +971,7 @@ export default function TaskBoard({
   const handleDragCancel = (_event: DragCancelEvent) => {
     if (snapshotRef.current) rollback(snapshotRef.current)
     resetDrag()
+    setAnnouncement('Movimiento cancelado. La selección volvió a su posición original.')
   }
 
   const quickComplete = async (task: Task, status: TaskWorkflowStatus) => {
@@ -863,13 +993,16 @@ export default function TaskBoard({
   }
 
   return <div className="relative flex h-full min-h-[430px] flex-col">
+    <div className="sr-only" aria-live="polite">{announcement}</div>
     {moveError && <div className="mb-2 flex shrink-0 items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700"><span className="min-w-0 flex-1">{moveError.message}</span><button type="button" onClick={moveError.retry} className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-white px-2.5 py-1.5 font-bold shadow-sm"><RotateCcw className="h-3 w-3" />Reintentar</button><button type="button" onClick={() => setMoveError(null)} aria-label="Cerrar" className="rounded p-1 hover:bg-white"><X className="h-3.5 w-3.5" /></button></div>}
+    {selectedTaskIds.length > 0 && !activeId && <div data-task-bulk-actions className="mx-3 mb-2 flex shrink-0 flex-wrap items-center gap-2 rounded-2xl border border-emerald-200 bg-white px-3 py-2 shadow-lg shadow-emerald-950/5 sm:mx-4"><span className="rounded-full bg-emerald-600 px-2.5 py-1 text-[11px] font-black text-white">{selectedTaskIds.length}</span><span className="text-xs font-semibold text-slate-700">{selectedTaskIds.length === 1 ? 'tarea seleccionada' : 'tareas seleccionadas'}</span><div className="ml-auto min-w-[220px]"><TaskListPicker value="" lists={allLists} folders={folders} onChange={listID => { void bulkMove(selectedTaskIds, listID) }} className="!min-h-9 !py-1" /></div><button type="button" onClick={() => { setSelectedTaskIds([]); setSelectionAnchorID('') }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Limpiar selección"><X className="h-4 w-4" /></button></div>}
     <DndContext
       sensors={sensors}
       collisionDetection={collisionDetectionStrategy}
       measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
       autoScroll
       onDragStart={handleDragStart}
+      onDragMove={handleDragMove}
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
       onDragCancel={handleDragCancel}
@@ -896,6 +1029,8 @@ export default function TaskBoard({
           onTaskCreated={onTaskCreated}
           onOperation={onOperation}
           recentlyCreatedTaskId={recentlyCreatedTaskId}
+          selectedTaskIds={selectedTaskIDSet}
+          onSelectTask={selectTask}
           onCreateFull={onCreateFull}
           onOpen={onOpen}
           onEdit={onEdit}
@@ -904,7 +1039,9 @@ export default function TaskBoard({
           onComplete={(task, doneStatus) => void quickComplete(task, doneStatus)}
         />)}
       </div>
-      <DragOverlay dropAnimation={{ duration: 180, easing: 'ease-out' }}>{activeTask ? <OverlayCard task={activeTask} /> : null}</DragOverlay>
+      <DragOverlay dropAnimation={{ duration: 180, easing: 'ease-out' }}>{activeTask ? <OverlayCard task={activeTask} count={Math.max(1, dragTaskIds.length)} destination={externalDropTarget?.label || statuses.find(status => status.id === overColumnId)?.name} /> : null}</DragOverlay>
     </DndContext>
+    {gatherGhosts.length > 0 && typeof document !== 'undefined' && createPortal(<div className="pointer-events-none fixed inset-0 z-[160] motion-reduce:hidden" aria-hidden="true">{gatherGhosts.map(ghost => <div key={ghost.id} data-task-gather-ghost className="fixed overflow-hidden rounded-xl border border-emerald-300 bg-white px-3 py-2 shadow-xl" style={{ left: ghost.left, top: ghost.top, width: ghost.width, height: ghost.height, '--task-gather-x': `${ghost.dx}px`, '--task-gather-y': `${ghost.dy}px` } as React.CSSProperties}><span className="line-clamp-2 text-sm font-semibold text-slate-700">{ghost.title}</span></div>)}</div>, document.body)}
+    {pendingFolderDrop && <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-sm" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPendingFolderDrop(null) }}><div role="dialog" aria-modal="true" aria-labelledby="task-folder-drop-title" className="w-full max-w-md rounded-3xl bg-white p-5 shadow-2xl"><div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Elegir destino</p><h2 id="task-folder-drop-title" className="mt-1 text-lg font-black text-slate-900">{pendingFolderDrop.folder.name}</h2><p className="mt-1 text-sm text-slate-500">Las tareas siempre pertenecen a una lista. Selecciona la lista concreta dentro de esta carpeta.</p></div><button type="button" onClick={() => setPendingFolderDrop(null)} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></div><div className="mt-4 space-y-2">{pendingFolderDrop.folder.lists.map(list => <button key={list.id} type="button" onClick={() => { const ids = pendingFolderDrop.taskIDs; setPendingFolderDrop(null); void bulkMove(ids, list.id) }} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:border-emerald-300 hover:bg-emerald-50"><span className="h-3 w-3 rounded-full" style={{ backgroundColor: list.color }} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-bold text-slate-700">{list.name}</span><span className="text-[10px] text-slate-400">{pendingFolderDrop.folder.name} / {list.name}</span></span></button>)}{!pendingFolderDrop.folder.lists.length && <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">Esta carpeta no tiene listas disponibles.</div>}</div></div></div>}
   </div>
 }

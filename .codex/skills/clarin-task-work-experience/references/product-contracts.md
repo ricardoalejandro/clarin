@@ -1,5 +1,18 @@
 # Clarin Work Product Contracts
 
+## Group movement and list transfer
+
+- A task list transfer is one account-scoped transaction: lock the parent task, its one-level children, source/destination lists, workflows, statuses and durable destination order; map every status by category or reject everything.
+- Bulk movement accepts unique top-level task IDs and optimistic versions only. Sort locks by stable UUID, preserve request-relative order, carry subtasks with parents and emit one `bulk_moved` event with one `operation_id`.
+- A selected group is represented by one lightweight `DragOverlay`; never mount duplicate sortable cards in the overlay. Render at most three stack layers and eight convergence ghosts, while the badge reports the true total.
+- Dropping on a folder never assigns its first list implicitly. A concrete list choice is required. Column drops map each real workflow by category; list drops preserve each task's current category.
+- Escape, incompatible workflow, `409`, network failure and invalid targets restore the captured task/order/selection state without partial backend writes.
+
+## Calendar creation
+
+- Month cells and Week/Day hour slots may open a compact task composer. A concrete list, responsible user, compatible initial status and explicit start/due interval are required before creation.
+- “More options” must preserve title, list, owner, all-day mode and exact dates/times in the full editor.
+
 Read the sections relevant to the requested task change before editing.
 
 ## Hierarchy And Workflow
