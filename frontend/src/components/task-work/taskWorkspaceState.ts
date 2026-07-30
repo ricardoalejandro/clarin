@@ -34,3 +34,8 @@ export function ensureExpandedFolder(current: Set<string>, folderID?: string) {
   if (!folderID || current.has(folderID)) return current
   return new Set(Array.from(current).concat(folderID))
 }
+
+export function folderAutoExpandedForScope(scope: { type: string; id?: string }, lists: Array<{ id: string; folder_id?: string | null }>) {
+  if (scope.type !== 'list' || !scope.id) return undefined
+  return lists.find(list => list.id === scope.id)?.folder_id || undefined
+}

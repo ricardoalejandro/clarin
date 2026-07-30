@@ -34,6 +34,14 @@ export function selectionForDrag(current: string[], activeID: string) {
   return current.includes(activeID) ? current : [activeID]
 }
 
+export function cardClickSelectsTask(modifiers: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean }) {
+  return Boolean(modifiers.ctrlKey || modifiers.metaKey || modifiers.shiftKey)
+}
+
+export function touchHoldSelectsTask(selected: boolean, movement: number, tolerance = 8) {
+  return !selected && movement <= tolerance
+}
+
 export function convergenceLimit(selectedIDs: string[], activeID: string) {
   return [activeID, ...selectedIDs.filter(id => id !== activeID)].slice(0, 8)
 }

@@ -63,7 +63,16 @@ import {
 import TaskUserCombobox from './TaskUserCombobox'
 import type { TaskAccountUser } from './TaskEditorModal'
 import { TaskListPicker } from './TaskSelectPicker'
-import { selectionAfterToggle, selectionForDrag, taskStackLayers, uniqueBulkItems } from './taskBoardSelection'
+import { cardClickSelectsTask, selectionAfterToggle, selectionForDrag, taskStackLayers, touchHoldSelectsTask, uniqueBulkItems } from './taskBoardSelection'
+import {
+  resolveTaskDropTarget,
+  sameTaskDropTarget,
+  taskDropAutoScrollDelta,
+  type MeasuredTaskDropTarget,
+  type TaskDropPoint,
+  type TaskExternalDropTarget,
+} from './taskDropTargets'
+import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 
 export interface TaskInlineDraft {
   title: string
@@ -96,6 +105,7 @@ interface Props {
   onTaskCreated: (task: Task, operationId: string) => void
   recentlyCreatedTaskId?: string
   onDragStateChange: (active: boolean) => void
+  onExternalDropTargetChange?: (target: TaskExternalDropTarget | null) => void
   onOpen: (task: Task) => void
   onEdit: (task: Task) => void
   onCreateSubtask: (task: Task) => void
@@ -277,6 +287,31 @@ function stopControlStart(event: React.SyntheticEvent) {
   event.stopPropagation()
 }
 
+function pointerFromActivator(event: Event): TaskDropPoint | null {
+  const pointer = event as MouseEvent
+  if (Number.isFinite(pointer.clientX) && Number.isFinite(pointer.clientY)) return { x: pointer.clientX, y: pointer.clientY }
+  const touch = (event as TouchEvent).touches?.[0] || (event as TouchEvent).changedTouches?.[0]
+  return touch ? { x: touch.clientX, y: touch.clientY } : null
+}
+
+function measuredNavigationTargets(): MeasuredTaskDropTarget[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('[data-task-drop-list],[data-task-drop-folder]')).flatMap(element => {
+    const listID = element.dataset.taskDropList
+    const folderID = element.dataset.taskDropFolder
+    const id = listID || folderID
+    if (!id) return []
+    const rect = element.getBoundingClientRect()
+    if (!rect.width || !rect.height) return []
+    return [{
+      type: listID ? 'list' as const : 'folder' as const,
+      id,
+      label: element.dataset.taskDropLabel || (listID ? 'lista' : 'carpeta'),
+      color: element.dataset.taskDropColor,
+      rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+    }]
+  })
+}
+
 function TaskBoardCard({
   task,
   columnId,
@@ -289,6 +324,7 @@ function TaskBoardCard({
   onComplete,
   highlighted,
   selected,
+  selectionMode,
   onSelect,
 }: {
   task: Task
@@ -302,8 +338,12 @@ function TaskBoardCard({
   onComplete?: () => void
   highlighted?: boolean
   selected?: boolean
+  selectionMode: boolean
   onSelect: (shift: boolean) => void
 }) {
+  const touchHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const touchOriginRef = useRef<TaskDropPoint | null>(null)
+  const touchSelectedRef = useRef(false)
   const sortableData = useMemo(() => ({ type: 'task', columnId, listId: task.list_id }), [columnId, task.list_id])
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
@@ -313,6 +353,12 @@ function TaskBoardCard({
   const overdue = Boolean(task.due_at && new Date(task.due_at) < new Date() && !['done', 'cancelled'].includes(task.status_detail?.category || ''))
   const done = task.status_detail?.category === 'done'
   const priority = TASK_PRIORITY_CONFIG[task.priority]
+  const cancelTouchHold = () => {
+    if (touchHoldTimerRef.current) clearTimeout(touchHoldTimerRef.current)
+    touchHoldTimerRef.current = null
+    touchOriginRef.current = null
+  }
+  useEffect(() => cancelTouchHold, [])
 
   return <article
     ref={setNodeRef}
@@ -321,12 +367,41 @@ function TaskBoardCard({
     style={{ transform: CSS.Transform.toString(transform), transition }}
     {...attributes}
     {...listeners}
-    onClick={() => { if (!suppressOpen()) onOpen() }}
+    onTouchStartCapture={event => {
+      const touch = event.touches[0]
+      if (!touch || selected) return
+      touchOriginRef.current = { x: touch.clientX, y: touch.clientY }
+      touchHoldTimerRef.current = setTimeout(() => {
+        if (!touchHoldSelectsTask(Boolean(selected), 0)) return
+        touchSelectedRef.current = true
+        onSelect(false)
+        touchHoldTimerRef.current = null
+      }, 320)
+    }}
+    onTouchMoveCapture={event => {
+      const touch = event.touches[0]
+      const origin = touchOriginRef.current
+      if (touch && origin && Math.hypot(touch.clientX - origin.x, touch.clientY - origin.y) > 8) cancelTouchHold()
+    }}
+    onTouchEndCapture={cancelTouchHold}
+    onTouchCancelCapture={cancelTouchHold}
+    onClick={event => {
+      if (touchSelectedRef.current) {
+        touchSelectedRef.current = false
+        event.preventDefault()
+        return
+      }
+      if (cardClickSelectsTask(event)) {
+        event.preventDefault()
+        onSelect(event.shiftKey)
+        return
+      }
+      if (!suppressOpen()) onOpen()
+    }}
     className={`group relative cursor-grab touch-manipulation select-none overflow-hidden rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${selected ? 'border-emerald-400 bg-emerald-50/40 ring-2 ring-emerald-100' : highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
   >
     <span className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: task.status_detail?.color || '#64748b' }} />
     <div className="flex items-start gap-2">
-      <button type="button" role="checkbox" aria-checked={selected} aria-label={`${selected ? 'Quitar' : 'Seleccionar'} ${task.title}`} onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onSelect(event.shiftKey) }} className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition ${selected ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-300 bg-white text-transparent hover:border-emerald-500'}`}><Check className="h-3 w-3" /></button>
       <button
         type="button"
         disabled={!onComplete}
@@ -341,9 +416,9 @@ function TaskBoardCard({
       <GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-slate-200 transition group-hover:text-slate-400" />
     </div>
 
-    {showListName && <p className="ml-14 mt-1 truncate text-[10px] font-medium text-slate-400">{task.list_name || 'Bandeja general'}</p>}
+    {showListName && <p className="ml-7 mt-1 truncate text-[10px] font-medium text-slate-400">{task.list_name || 'Bandeja general'}</p>}
 
-    <div className="ml-14 mt-2.5 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px]">
+    <div className="ml-7 mt-2.5 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px]">
       {(task.priority === 'high' || task.priority === 'urgent') && <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-1 font-semibold ${priority.bg} ${priority.color}`}><Flag className="h-3 w-3" />{priority.label}</span>}
       {task.due_at && <span className={`inline-flex items-center gap-1 rounded-md bg-slate-50 px-1.5 py-1 font-medium ${overdue ? 'bg-rose-50 text-rose-600' : 'text-slate-500'}`}><CalendarDays className="h-3 w-3" />{dueFormatter.format(new Date(task.due_at))}</span>}
       {Boolean(task.subtask_count) && <span className={`inline-flex items-center gap-1 rounded-md bg-slate-50 px-1.5 py-1 ${task.subtask_done === task.subtask_count ? 'text-emerald-600' : 'text-slate-400'}`}><ListChecks className="h-3 w-3" />{task.subtask_done}/{task.subtask_count}</span>}
@@ -352,10 +427,13 @@ function TaskBoardCard({
       <span className="ml-auto flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-100 px-1.5 font-bold text-slate-500" title={task.assigned_to_name || 'Sin responsable'}>{(task.assigned_to_name || '?').slice(0, 2).toUpperCase()}</span>
     </div>
 
-    <div className="pointer-events-none absolute right-2 top-2 flex translate-y-[-3px] items-center gap-0.5 rounded-lg border border-slate-200 bg-white p-0.5 opacity-0 shadow-lg transition group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 [@media(pointer:coarse)]:pointer-events-auto [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100">
+    <div className={`absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white p-0.5 shadow-lg transition ${selectionMode ? 'pointer-events-auto translate-y-0 opacity-100' : 'pointer-events-none -translate-y-1 opacity-0 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 [@media(pointer:coarse)]:pointer-events-auto [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100'}`}>
+      <button type="button" role="checkbox" aria-checked={selected} aria-label={`${selected ? 'Quitar' : 'Seleccionar'} ${task.title}`} onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onSelect(event.shiftKey) }} title={selected ? 'Quitar de la selección' : 'Seleccionar tarea'} className={`rounded-md p-1.5 transition ${selected ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:bg-emerald-50 hover:text-emerald-700'}`}><Check className="h-3.5 w-3.5" /></button>
+      {!selectionMode && <>
       <button type="button" onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onCreateSubtask() }} title="Crear subtarea" className="rounded-md p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"><Plus className="h-3.5 w-3.5" /></button>
       <button type="button" onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onEdit() }} title="Editar tarea" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil className="h-3.5 w-3.5" /></button>
       <button type="button" onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onStar() }} title={task.starred ? 'Quitar de favoritas' : 'Añadir a favoritas'} className={`rounded-md p-1.5 hover:bg-amber-50 ${task.starred ? 'text-amber-500' : 'text-slate-400 hover:text-amber-500'}`}><Star className={`h-3.5 w-3.5 ${task.starred ? 'fill-current' : ''}`} /></button>
+      </>}
     </div>
   </article>
 }
@@ -549,7 +627,7 @@ function BoardColumn({
             const task = tasksById.get(taskId)
             if (!task) return null
             const toggleStatus = allStatuses.find(item => item.workflow_id === task.status_detail?.workflow_id && item.category === (task.status_detail?.category === 'done' ? 'not_started' : 'done'))
-            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={toggleStatus ? () => onComplete(task, toggleStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} selected={selectedTaskIds.has(task.id)} onSelect={shift => onSelectTask(task.id, shift, taskIds)} />
+            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={toggleStatus ? () => onComplete(task, toggleStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} selected={selectedTaskIds.has(task.id)} selectionMode={selectedTaskIds.size > 0} onSelect={shift => onSelectTask(task.id, shift, taskIds)} />
           })}
           {!taskIds.length && isOver && <div className="flex h-12 items-center justify-center rounded-xl border border-dashed border-emerald-400 bg-white text-xs font-semibold text-emerald-700">Suelta aquí</div>}
         </div>
@@ -561,10 +639,10 @@ function BoardColumn({
   </section>
 }
 
-function OverlayCard({ task, count, destination }: { task: Task; count: number; destination?: string }) {
+function OverlayCard({ task, count, destination, destinationColor }: { task: Task; count: number; destination?: string; destinationColor?: string }) {
   const layers = taskStackLayers(count)
   return <div className="relative h-[92px] w-[284px] motion-reduce:transition-none" aria-label={`${count} ${count === 1 ? 'tarea' : 'tareas'} seleccionadas`}>
-    {layers.map(layer => <div key={layer.index} className="absolute inset-0 rounded-xl border border-emerald-300 bg-white p-3 shadow-2xl shadow-slate-900/20 transition-[transform,background-color] duration-150 motion-reduce:transform-none" style={{ transform: `translate(${layer.x}px, ${layer.y}px) rotate(${layer.rotation}deg)`, opacity: layer.opacity, zIndex: 10 - layer.index }}>
+    {layers.map(layer => <div key={layer.index} className="absolute inset-0 rounded-xl border bg-white p-3 shadow-2xl shadow-slate-900/20 transition-[transform,background-color,border-color] duration-150 motion-reduce:transform-none" style={{ transform: `translate(${layer.x}px, ${layer.y}px) rotate(${layer.rotation}deg)`, opacity: layer.opacity, zIndex: 10 - layer.index, borderColor: destinationColor || '#6ee7b7', backgroundColor: destinationColor ? `${destinationColor}12` : '#ffffff' }}>
       {layer.index === 0 && <><div className="flex items-start gap-2"><GripVertical className="mt-0.5 h-4 w-4 text-emerald-500" /><p className="line-clamp-2 text-sm font-semibold text-slate-800">{task.title}</p></div><p className="ml-6 mt-2 truncate text-[10px] text-slate-400">{destination ? `Mover a ${destination}` : task.assigned_to_name || 'Sin responsable'}</p></>}
     </div>)}
     {count > 1 && <span className="absolute -right-3 -top-3 z-20 rounded-full bg-slate-900 px-2.5 py-1 text-xs font-black text-white shadow-lg">{count} tareas</span>}
@@ -590,6 +668,7 @@ export default function TaskBoard({
   onTaskCreated,
   recentlyCreatedTaskId,
   onDragStateChange,
+  onExternalDropTargetChange,
   onOpen,
   onEdit,
   onCreateSubtask,
@@ -611,7 +690,7 @@ export default function TaskBoard({
   const [overColumnId, setOverColumnId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<{ message: string; retry: () => void } | null>(null)
   const [announcement, setAnnouncement] = useState('')
-  const [externalDropTarget, setExternalDropTarget] = useState<{ type: 'list' | 'folder'; id: string; label: string } | null>(null)
+  const [externalDropTarget, setExternalDropTarget] = useState<TaskExternalDropTarget | null>(null)
   const [pendingFolderDrop, setPendingFolderDrop] = useState<{ folder: TaskFolder; taskIDs: string[] } | null>(null)
   const [gatherGhosts, setGatherGhosts] = useState<Array<{ id: string; title: string; left: number; top: number; width: number; height: number; dx: number; dy: number }>>([])
   const snapshotRef = useRef<{ tasks: Task[]; orders: ColumnOrders } | null>(null)
@@ -621,6 +700,7 @@ export default function TaskBoard({
   const recentlyMovedToNewColumnRef = useRef(false)
   const recentlyMovedFrameRef = useRef<number | null>(null)
   const gatherTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const dragPointerOriginRef = useRef<TaskDropPoint | null>(null)
   const lastDragEndRef = useRef(0)
   const tasksById = useMemo(() => new Map(localTasks.map(task => [task.id, task])), [localTasks])
   const activeTask = activeId ? tasksById.get(activeId) : undefined
@@ -629,7 +709,7 @@ export default function TaskBoard({
 
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 240, tolerance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 520, tolerance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   )
 
@@ -650,6 +730,20 @@ export default function TaskBoard({
     if (recentlyMovedFrameRef.current !== null) cancelAnimationFrame(recentlyMovedFrameRef.current)
     if (gatherTimerRef.current) clearTimeout(gatherTimerRef.current)
   }, [])
+
+  useEffect(() => { onExternalDropTargetChange?.(externalDropTarget) }, [externalDropTarget, onExternalDropTargetChange])
+
+  useEffect(() => {
+    if (!selectedTaskIds.length || activeId) return
+    const clearSelection = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setSelectedTaskIds([])
+      setSelectionAnchorID('')
+      setAnnouncement('Selección cancelada')
+    }
+    window.addEventListener('keydown', clearSelection)
+    return () => window.removeEventListener('keydown', clearSelection)
+  }, [activeId, selectedTaskIds.length])
 
   const markRecentlyMovedToNewColumn = useCallback(() => {
     recentlyMovedToNewColumnRef.current = true
@@ -736,8 +830,8 @@ export default function TaskBoard({
     setActiveId(null)
     setDragTaskIds([])
     setOverColumnId(null)
-    document.querySelectorAll('[data-task-drop-active]').forEach(element => element.removeAttribute('data-task-drop-active'))
     setExternalDropTarget(null)
+    dragPointerOriginRef.current = null
     snapshotRef.current = null
     lastDragEndRef.current = Date.now()
     onDragStateChange(false)
@@ -850,6 +944,7 @@ export default function TaskBoard({
     const id = String(event.active.id)
     const task = tasksById.get(id)
     const group = selectionForDrag(selectedTaskIds, id)
+    dragPointerOriginRef.current = pointerFromActivator(event.activatorEvent)
     if (!selectedTaskIds.includes(id)) setSelectedTaskIds([])
     setSelectionAnchorID(id)
     setDragTaskIds(group)
@@ -875,19 +970,20 @@ export default function TaskBoard({
   }
 
   const handleDragMove = (event: DragMoveEvent) => {
-    const rect = event.active.rect.current.translated
-    if (!rect) return
-    const element = document.elementFromPoint(rect.left + Math.min(28, rect.width / 2), rect.top + Math.min(28, rect.height / 2)) as HTMLElement | null
-    const target = element?.closest<HTMLElement>('[data-task-drop-list],[data-task-drop-folder]')
-    document.querySelectorAll('[data-task-drop-active]').forEach(candidate => candidate.removeAttribute('data-task-drop-active'))
-    if (!target) {
-      setExternalDropTarget(null)
-      return
+    const origin = dragPointerOriginRef.current
+    if (!origin) return
+    const point = { x: origin.x + event.delta.x, y: origin.y + event.delta.y }
+    const targets = measuredNavigationTargets()
+    const next = resolveTaskDropTarget(point, targets, externalDropTarget)
+    setExternalDropTarget(current => sameTaskDropTarget(current, next) ? current : next)
+    const navigation = document.querySelector<HTMLElement>('[data-task-navigation-scroll]')
+    if (navigation) {
+      const rect = navigation.getBoundingClientRect()
+      if (point.x >= rect.left && point.x <= rect.right) {
+        const delta = taskDropAutoScrollDelta(point.y, rect)
+        if (delta) navigation.scrollBy({ top: delta, behavior: 'auto' })
+      }
     }
-    target.setAttribute('data-task-drop-active', 'true')
-    const listID = target.dataset.taskDropList
-    const folderID = target.dataset.taskDropFolder
-    setExternalDropTarget(listID ? { type: 'list', id: listID, label: target.dataset.taskDropLabel || 'lista' } : folderID ? { type: 'folder', id: folderID, label: target.dataset.taskDropLabel || 'carpeta' } : null)
   }
 
   const destinationFromEvent = (event: DragOverEvent | DragEndEvent) => {
@@ -1039,7 +1135,7 @@ export default function TaskBoard({
           onComplete={(task, doneStatus) => void quickComplete(task, doneStatus)}
         />)}
       </div>
-      <DragOverlay dropAnimation={{ duration: 180, easing: 'ease-out' }}>{activeTask ? <OverlayCard task={activeTask} count={Math.max(1, dragTaskIds.length)} destination={externalDropTarget?.label || statuses.find(status => status.id === overColumnId)?.name} /> : null}</DragOverlay>
+      <DragOverlay dropAnimation={{ duration: 180, easing: 'ease-out' }} style={{ zIndex: TASK_OVERLAY_LAYERS.dragOverlay }}>{activeTask ? <OverlayCard task={activeTask} count={Math.max(1, dragTaskIds.length)} destination={externalDropTarget?.label || statuses.find(status => status.id === overColumnId)?.name} destinationColor={externalDropTarget?.color} /> : null}</DragOverlay>
     </DndContext>
     {gatherGhosts.length > 0 && typeof document !== 'undefined' && createPortal(<div className="pointer-events-none fixed inset-0 z-[160] motion-reduce:hidden" aria-hidden="true">{gatherGhosts.map(ghost => <div key={ghost.id} data-task-gather-ghost className="fixed overflow-hidden rounded-xl border border-emerald-300 bg-white px-3 py-2 shadow-xl" style={{ left: ghost.left, top: ghost.top, width: ghost.width, height: ghost.height, '--task-gather-x': `${ghost.dx}px`, '--task-gather-y': `${ghost.dy}px` } as React.CSSProperties}><span className="line-clamp-2 text-sm font-semibold text-slate-700">{ghost.title}</span></div>)}</div>, document.body)}
     {pendingFolderDrop && <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-sm" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPendingFolderDrop(null) }}><div role="dialog" aria-modal="true" aria-labelledby="task-folder-drop-title" className="w-full max-w-md rounded-3xl bg-white p-5 shadow-2xl"><div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Elegir destino</p><h2 id="task-folder-drop-title" className="mt-1 text-lg font-black text-slate-900">{pendingFolderDrop.folder.name}</h2><p className="mt-1 text-sm text-slate-500">Las tareas siempre pertenecen a una lista. Selecciona la lista concreta dentro de esta carpeta.</p></div><button type="button" onClick={() => setPendingFolderDrop(null)} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></div><div className="mt-4 space-y-2">{pendingFolderDrop.folder.lists.map(list => <button key={list.id} type="button" onClick={() => { const ids = pendingFolderDrop.taskIDs; setPendingFolderDrop(null); void bulkMove(ids, list.id) }} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:border-emerald-300 hover:bg-emerald-50"><span className="h-3 w-3 rounded-full" style={{ backgroundColor: list.color }} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-bold text-slate-700">{list.name}</span><span className="text-[10px] text-slate-400">{pendingFolderDrop.folder.name} / {list.name}</span></span></button>)}{!pendingFolderDrop.folder.lists.length && <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">Esta carpeta no tiene listas disponibles.</div>}</div></div></div>}

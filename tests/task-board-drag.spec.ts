@@ -281,7 +281,9 @@ test.describe('Clarin Work Kanban drag stability', () => {
   test('gathers a Shift range into one visual stack and performs one atomic bulk move', async ({ page }) => {
     const mock = await installTaskBoardMock(page)
     await openBoard(page)
+    await card(page, 'todo-1').hover()
     await card(page, 'todo-1').getByRole('checkbox').click()
+    await card(page, 'todo-3').hover()
     await card(page, 'todo-3').getByRole('checkbox').click({ modifiers: ['Shift'] })
     await expect(page.locator('[data-task-bulk-actions]')).toContainText('3')
 

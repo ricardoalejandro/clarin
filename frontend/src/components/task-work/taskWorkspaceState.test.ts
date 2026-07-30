@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Task } from '@/types/task'
 import {
   ensureExpandedFolder,
+  folderAutoExpandedForScope,
   hasActiveTaskQuery,
   normalizeExpandedFolders,
   toggleExpandedFolder,
@@ -40,5 +41,11 @@ describe('folder accordion state', () => {
     const changed = toggleExpandedFolder(snapshot, 'b')
     expect(Array.from(snapshot)).toEqual(['a'])
     expect(Array.from(changed)).toEqual(['a', 'b'])
+  })
+
+  it('abre automáticamente solo el padre de una lista, no una carpeta activa contraída', () => {
+    const lists = [{ id: 'list', folder_id: 'folder' }]
+    expect(folderAutoExpandedForScope({ type: 'list', id: 'list' }, lists)).toBe('folder')
+    expect(folderAutoExpandedForScope({ type: 'folder', id: 'folder' }, lists)).toBeUndefined()
   })
 })

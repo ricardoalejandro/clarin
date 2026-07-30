@@ -24,6 +24,8 @@ import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 import { TaskContainerIcon } from './TaskContainerAppearance'
 import { TaskStatusPicker } from './TaskPropertyPicker'
 import { hasActiveTaskQuery, upsertCanonicalTask } from './taskWorkspaceState'
+import type { TaskExternalDropTarget } from './taskDropTargets'
+import { taskListDensity } from './taskListDensity'
 
 type Scope = { type: 'all' } | { type: 'folder'; id: string } | { type: 'list'; id: string } | { type: 'trash' }
 type CalendarMode = 'month' | 'week' | 'day'
@@ -115,18 +117,28 @@ function TaskCard({ task, compact = false, onOpen, onStar }: { task: Task; compa
 
 function ListView({ tasks, statuses, allStatuses, onOpen, onStatus, onStar }: { tasks: Task[]; statuses: TaskWorkflowStatus[]; allStatuses: TaskWorkflowStatus[]; onOpen: (task: Task) => void; onStatus: (task: Task, statusId: string) => void; onStar: (task: Task) => void }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [containerWidth, setContainerWidth] = useState(0)
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const observer = new ResizeObserver(entries => setContainerWidth(Math.round(entries[0]?.contentRect.width || 0)))
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [])
+  const density = taskListDensity(containerWidth)
   if (!tasks.length) return <EmptyState />
   const sections = statuses.map(status => ({ status, tasks: tasks.filter(task => task.status_id === status.id) })).filter(section => section.tasks.length)
   const orphaned = tasks.filter(task => !statuses.some(status => status.id === task.status_id))
   if (orphaned.length) sections.push({ status: { id: 'other', name: 'Otros', color: '#94a3b8', category: 'not_started', sort_order: 999 } as TaskWorkflowStatus, tasks: orphaned })
-  return <div className="space-y-3 pb-8">{sections.map(section => <section key={section.status.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+  return <div ref={containerRef} data-task-list-density={density} className="space-y-3 pb-8">{sections.map(section => <section key={section.status.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
     <button onClick={() => setCollapsed(current => ({ ...current, [section.status.id]: !current[section.status.id] }))} className="flex w-full items-center gap-2 border-b border-slate-100 px-4 py-3 text-left"><ChevronDown className={`h-4 w-4 text-slate-400 transition ${collapsed[section.status.id] ? '-rotate-90' : ''}`} /><i className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: section.status.color }} /><span className="text-xs font-bold uppercase tracking-wider text-slate-600">{section.status.name}</span><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-400">{section.tasks.length}</span></button>
-    {!collapsed[section.status.id] && <div className="divide-y divide-slate-100">{section.tasks.map(task => { const allowed = allStatuses.filter(status => status.workflow_id === task.status_detail?.workflow_id).sort((left, right) => left.sort_order - right.sort_order); return <div key={task.id} onClick={() => onOpen(task)} className="group grid cursor-pointer grid-cols-[minmax(180px,1fr)_110px] items-center gap-3 px-4 py-3 hover:bg-slate-50 sm:grid-cols-[minmax(220px,1fr)_150px_120px_110px_44px]">
-      <div className="flex min-w-0 items-center gap-3"><button onClick={event => { event.stopPropagation(); const next = allowed.find(status => status.category === (task.status_detail?.category === 'done' ? 'not_started' : 'done')); if (next) onStatus(task, next.id) }} className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${task.status_detail?.category === 'done' ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white'}`}>{task.status_detail?.category === 'done' && <Check className="h-3 w-3" />}</button><div className="min-w-0"><p className={`truncate text-sm font-medium ${task.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{task.title}</p><p className="mt-0.5 truncate text-[10px] text-slate-400">{task.list_name || 'Bandeja general'}{task.subtask_count ? ` · ${task.subtask_done}/${task.subtask_count} subtareas` : ''}</p></div></div>
-      <div onClick={event => event.stopPropagation()}><TaskStatusPicker value={task.status_id || ''} statuses={allowed} onChange={statusID => onStatus(task, statusID)} /></div>
-      <div className="hidden items-center gap-2 sm:flex"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-[9px] font-bold text-slate-500">{(task.assigned_to_name || '?').slice(0,2).toUpperCase()}</span><span className="truncate text-xs text-slate-500">{task.assigned_to_name || 'Sin nombre'}</span></div>
-      <span className={`hidden text-xs sm:block ${taskIsOverdue(task) ? 'font-semibold text-rose-600' : 'text-slate-400'}`}>{task.due_at ? dateShort.format(new Date(task.due_at)) : 'Sin fecha'}</span>
-      <button onClick={event => { event.stopPropagation(); onStar(task) }} className={`hidden rounded-lg p-2 sm:block ${task.starred ? 'text-amber-400' : 'text-slate-300 opacity-0 group-hover:opacity-100'}`}><Star className={`h-4 w-4 ${task.starred ? 'fill-current' : ''}`} /></button>
+    {!collapsed[section.status.id] && <div className="divide-y divide-slate-100">{section.tasks.map(task => { const allowed = allStatuses.filter(status => status.workflow_id === task.status_detail?.workflow_id).sort((left, right) => left.sort_order - right.sort_order); return <div key={task.id} onClick={() => onOpen(task)} className={`group grid cursor-pointer items-center gap-3 px-4 py-3 hover:bg-slate-50 ${density === 'comfortable' ? 'grid-cols-[minmax(260px,1fr)_minmax(200px,220px)_minmax(150px,180px)_100px_40px]' : density === 'compact' ? 'grid-cols-[minmax(220px,1fr)_minmax(176px,190px)_minmax(120px,150px)_90px_36px]' : 'grid-cols-1'}`}>
+      <div className="flex min-w-0 items-center gap-3"><button onClick={event => { event.stopPropagation(); const next = allowed.find(status => status.category === (task.status_detail?.category === 'done' ? 'not_started' : 'done')); if (next) onStatus(task, next.id) }} className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${task.status_detail?.category === 'done' ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white'}`}>{task.status_detail?.category === 'done' && <Check className="h-3 w-3" />}</button><div className="min-w-0"><p className={`truncate text-sm font-medium ${task.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{task.title}</p><p className="mt-0.5 truncate text-[10px] text-slate-400">{task.list_name || 'Bandeja general'}{task.subtask_count ? ` · ${task.subtask_done}/${task.subtask_count} subtareas` : ''}{density === 'stacked' ? ` · ${task.assigned_to_name || 'Sin responsable'} · ${task.due_at ? dateShort.format(new Date(task.due_at)) : 'Sin fecha'}` : ''}</p></div></div>
+      <div onClick={event => event.stopPropagation()}><TaskStatusPicker value={task.status_id || ''} statuses={allowed} compact={density === 'compact'} onChange={statusID => onStatus(task, statusID)} /></div>
+      <div className={`items-center gap-2 ${density === 'stacked' ? 'hidden' : 'flex'}`}><span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-[9px] font-bold text-slate-500">{(task.assigned_to_name || '?').slice(0,2).toUpperCase()}</span><span className="truncate text-xs text-slate-500">{task.assigned_to_name || 'Sin nombre'}</span></div>
+      <span className={`${density === 'stacked' ? 'hidden' : 'block'} text-xs ${taskIsOverdue(task) ? 'font-semibold text-rose-600' : 'text-slate-400'}`}>{task.due_at ? dateShort.format(new Date(task.due_at)) : 'Sin fecha'}</span>
+      <button onClick={event => { event.stopPropagation(); onStar(task) }} className={`${density === 'stacked' ? 'hidden' : 'block'} rounded-lg p-2 ${task.starred ? 'text-amber-400' : 'text-slate-300 opacity-0 group-hover:opacity-100'}`}><Star className={`h-4 w-4 ${task.starred ? 'fill-current' : ''}`} /></button>
     </div> })}</div>}
   </section>)}</div>
 }
@@ -285,6 +297,8 @@ export default function TaskWorkspace() {
   const [recentlyCreatedTaskId, setRecentlyCreatedTaskId] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [taskDragActiveState, setTaskDragActiveState] = useState(false)
+  const [taskDropTarget, setTaskDropTarget] = useState<TaskExternalDropTarget | null>(null)
   const boardSidebarWasCollapsedRef = useRef(false)
   const [navOverflow, setNavOverflow] = useState({ top: false, bottom: false })
   const [editorOpen, setEditorOpen] = useState(false)
@@ -445,11 +459,13 @@ export default function TaskWorkspace() {
 
   const handleBoardDragState = useCallback((active: boolean) => {
     boardDragActive.current = active
+    setTaskDragActiveState(active)
     if (active) {
       boardSidebarWasCollapsedRef.current = sidebarCollapsed
       if (sidebarCollapsed) setSidebarCollapsed(false)
       return
     }
+    setTaskDropTarget(null)
     if (boardSidebarWasCollapsedRef.current) setSidebarCollapsed(true)
     boardSidebarWasCollapsedRef.current = false
     reconcileQueuedRealtime()
@@ -705,10 +721,10 @@ export default function TaskWorkspace() {
     {sidebarOpen && <button aria-label="Cerrar navegación" onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-40 bg-slate-950/30 lg:hidden" />}
     <aside className={`absolute inset-y-0 left-0 z-50 flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all lg:relative lg:z-10 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} ${sidebarCollapsed ? 'w-[72px]' : 'w-[268px]'}`}>
       <div className="flex h-16 items-center border-b border-slate-100 px-4"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white"><Check className="h-4 w-4" /></div>{!sidebarCollapsed && <div className="ml-3 min-w-0"><p className="truncate text-sm font-black text-slate-900">Clarin Work</p><p className="text-[10px] font-semibold uppercase tracking-[.16em] text-emerald-600">Tareas y proyectos</p></div>}<button onClick={() => setSidebarCollapsed(value => !value)} className="ml-auto hidden rounded-lg p-2 text-slate-400 hover:bg-slate-100 lg:block">{sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}</button><button onClick={() => setSidebarOpen(false)} className="ml-auto rounded-lg p-2 text-slate-400 lg:hidden"><X className="h-4 w-4" /></button></div>
-      <div className="relative min-h-0 flex-1"><nav ref={navRef} className="task-navigation-scroll h-full overflow-y-auto px-2 py-3">
+      <div className="relative min-h-0 flex-1"><nav ref={navRef} data-task-navigation-scroll className="task-navigation-scroll h-full overflow-y-auto px-2 py-3">
         <button title="Todo el trabajo" onClick={() => selectScope({ type: 'all' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold ${scope.type === 'all' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'}`}><Inbox className="h-4 w-4 shrink-0" />{!sidebarCollapsed && <><span className="flex-1 text-left">Todo el trabajo</span><span className="text-[10px] text-slate-400">{globalTaskCount}</span></>}</button>
         {!sidebarCollapsed && <div className="mb-2 mt-5 flex items-center justify-between px-2"><span className="text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Carpetas y listas</span><button onClick={() => setStructureOpen(true)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-emerald-600"><Plus className="h-3.5 w-3.5" /></button></div>}
-        <TaskHierarchyTree folders={folders} rootLists={rootLists} scope={scope} collapsed={sidebarCollapsed} onSelect={selectScope} onChanged={async () => { await loadStructure(); await loadTasks(false) }} onError={setError} onOperation={handleBoardOperation} />
+        <TaskHierarchyTree folders={folders} rootLists={rootLists} scope={scope} collapsed={sidebarCollapsed} taskDragActive={taskDragActiveState} taskDropTarget={taskDropTarget} onSelect={selectScope} onChanged={async () => { await loadStructure(); await loadTasks(false) }} onError={setError} onOperation={handleBoardOperation} />
       </nav>{navOverflow.top && <div className="pointer-events-none absolute inset-x-0 top-0 h-5 bg-gradient-to-b from-white to-transparent" />}{navOverflow.bottom && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-white to-transparent" />}</div>
       <div className="border-t border-slate-100 p-2"><button onClick={() => selectScope({ type: 'trash' })} title="Papelera" className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold ${scope.type === 'trash' ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50'}`}><Trash2 className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Papelera'}</button><button onClick={() => setStructureOpen(true)} title="Configurar" className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-800"><Settings2 className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Configurar espacio'}</button></div>
     </aside>
@@ -738,7 +754,7 @@ export default function TaskWorkspace() {
         {loading ? <div className="space-y-3">{Array.from({length:5}).map((_,index) => <div key={index} className="h-16 animate-pulse rounded-2xl bg-slate-200/60" />)}</div> : <div className="h-full min-h-[420px]">
           {scope.type === 'trash' && <TrashView tasks={tasks} onChanged={async () => { await Promise.all([loadTasks(false), loadStructure()]) }} onError={setError} />}
           {scope.type !== 'trash' && view === 'list' && <ListView tasks={tasks} statuses={statuses} allStatuses={allStatuses} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} />}
-          {scope.type !== 'trash' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} allLists={lists} folders={folders} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setTasks} onCanonicalTask={acceptCanonicalTask} onOperation={handleBoardOperation} onTaskCreated={revealCreatedTask} recentlyCreatedTaskId={recentlyCreatedTaskId} onDragStateChange={handleBoardDragState} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => setStructureOpen(true)} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={() => loadTasks(false)} onError={setError} />}
+          {scope.type !== 'trash' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} allLists={lists} folders={folders} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setTasks} onCanonicalTask={acceptCanonicalTask} onOperation={handleBoardOperation} onTaskCreated={revealCreatedTask} recentlyCreatedTaskId={recentlyCreatedTaskId} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => setStructureOpen(true)} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={() => loadTasks(false)} onError={setError} />}
           {scope.type !== 'trash' && view === 'calendar' && <TaskCalendarView tasks={tasks} lists={editorLists} folders={folders} statuses={allStatuses} users={users} currentUserID={currentUserId} scopeListID={scope.type === 'list' ? scope.id : undefined} onOpen={task => setSelectedTaskId(task.id)} onCreated={revealCreatedTask} onOperation={handleBoardOperation} onMore={openCreate} />}
           {scope.type !== 'trash' && view === 'gantt' && <TaskGanttView data={gantt} onOpen={task => setSelectedTaskId(task.id)} onMove={moveGantt} />}
           {scope.type !== 'trash' && view === 'summary' && <SummaryView tasks={tasks} summary={visibleSummary} users={users} />}

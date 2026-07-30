@@ -7,6 +7,7 @@
 - Integration: one request per gesture to column/list/folder, one matching `operation_id` in HTTP/WebSocket, no duplicate cards, no React #185, Escape/error rollback and folder list choice.
 - Calendar: month all-day and week/day one-hour slots, direct creation, scope/remembered list selection, keyboard Enter/Escape and draft preservation into the full editor.
 - Accessibility/layout: `aria-live` group counts and destination announcements, keyboard status/list pickers, reduced motion, sidebar expansion/restoration and widths 375, 917, 979, 1249 and 1284 px.
+- Unit: main-row versus chevron accordion transitions, adaptive pointer/keyboard/touch selection, list-first lateral-target resolution, hysteresis, edge autoscroll, overlay ordering and measured Lista density.
 
 ## Database And API
 
@@ -55,6 +56,7 @@
 - In Trash, verify Tareas and Listas y carpetas tabs, original location, archived date, countdown/“Nunca”, restore constraints, admin-only policy/purge controls, exact-name irreversible dialog, loading, retry, Escape, and WebSocket reconciliation.
 - Confirm navigation renders the pinned default list first, then “Listas independientes” with its explanation, then folders in canonical order. Drag folders and lists with mouse, touch long-press, and keyboard; verify overlay/insertion target, one request per gesture, exact Escape/outside/`409`/`500` rollback, and workflow confirmation before a populated list changes workflow.
 - Expand several folders independently by mouse and keyboard, reload persisted state, auto-open the active parent, autoexpand a collapsed drag target after an intentional pause, and restore expansion exactly on Escape/error. With enough folders, verify the themed scrollbar and top/bottom overflow shadows.
+- Select a folder by its main row, collapse it while active, and confirm no scope effect reopens it; selecting one of its child lists must open it again. During task drag, verify the real pointer—not the translated card—selects the highlighted list/folder through navigation scroll and a folder drop opens the concrete-list chooser above the board.
 - Rename a default list, root list, nested list, and folder; choose every supported color/icon by pointer and keyboard, then reload and prove the canonical values return. Reject an icon outside the catalog.
 - At 1398×504, 1024, 768, and 375 px—and with Eros open—verify full-bleed canvas, stable two-row header, primary view tabs, search expansion without height/layout shift, `/` focus, Escape retention, and clear/collapse behavior.
 
@@ -62,6 +64,7 @@
 
 - Verify docked, floating, resized, maximized, mobile, Escape, focus restoration, and board interaction behind non-modal modes.
 - Apply the same matrix to creation. Verify double-click maximize, geometry persistence/clamping, clean Escape, dirty-draft confirmation, cancelled discard preservation, searchable grouped list selection, and portaled controls at every viewport edge.
+- Open list, responsible, status and priority pickers from calendar/detail/list at narrow and wide widths; assert each menu is above its owner, at least 280 px when possible, keyboard-safe, unclipped, and restores focus. Floating dimming remains non-blocking while maximized/mobile modes remain modal.
 - Edit every supported inline property and recover from version conflict without losing drafts.
 - Operate the status and priority pickers with pointer and keyboard. Add collaborators through search, remove any chip, and remove the final collaborator while asserting `user_ids: []` and an explicitly empty canonical response.
 - Create/open/complete a subtask and navigate parent-child without losing context.

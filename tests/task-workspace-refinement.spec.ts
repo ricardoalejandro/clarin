@@ -49,6 +49,7 @@ async function installWorkspaceMock(page: Page) {
   const collaboratorWrites: Array<Record<string, unknown>> = []
   const taskWrites: Array<Record<string, unknown>> = []
   const createWrites: Array<Record<string, unknown>> = []
+  const bulkMoves: Array<Record<string, unknown>> = []
   const taskQueries: Array<{ search: string; at: number }> = []
   const trashWrites: Array<{ path: string; method: string; body: Record<string, unknown> }> = []
 
@@ -162,6 +163,14 @@ async function installWorkspaceMock(page: Page) {
       setTimeout(() => workspaceSocket?.send(JSON.stringify({ event: 'task_update', data: { action: 'created', task: created, operation_id: body.operation_id } })), 20)
       return
     }
+    if (path === '/api/tasks/bulk-move' && request.method() === 'POST') {
+      bulkMoves.push(body)
+      const destinationListID = String(body.destination_list_id || task.list_id)
+      const destination = [...hierarchy.root_lists, ...hierarchy.folders.flatMap(folder => folder.lists)].find(item => item.id === destinationListID)
+      task = { ...task, list_id: destinationListID, list_name: destination?.name || task.list_name, version: task.version + 1 }
+      await json(route, { success: true, operation_id: body.operation_id, tasks: [task], orders: { [destinationListID]: [task.id] } })
+      return
+    }
     if (path === `/api/tasks/${task.id}`) { await json(route, { task }); return }
     if (path === `/api/tasks/${task.id}/children`) { await json(route, { tasks: [] }); return }
     if (path === `/api/tasks/${task.id}/comments`) { await json(route, { comments: [], total: 0, limit: 100, offset: 0 }); return }
@@ -181,7 +190,7 @@ async function installWorkspaceMock(page: Page) {
     localStorage.setItem('tasks:detail-mode', 'maximized')
   })
 
-  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, trashWrites, taskQueries }
+  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, bulkMoves, trashWrites, taskQueries }
 }
 
 async function drag(page: Page, source: Locator, target: Locator) {
@@ -213,6 +222,20 @@ async function dragSortable(page: Page, source: Locator, target: Locator) {
   await page.mouse.up()
 }
 
+async function dragTaskToNavigation(page: Page, source: Locator, target: Locator) {
+  const sourceBox = await source.boundingBox()
+  const targetBox = await target.boundingBox()
+  expect(sourceBox).not.toBeNull()
+  expect(targetBox).not.toBeNull()
+  const start = { x: sourceBox!.x + sourceBox!.width * 0.55, y: sourceBox!.y + Math.min(34, sourceBox!.height / 2) }
+  const end = { x: targetBox!.x + targetBox!.width / 2, y: targetBox!.y + targetBox!.height / 2 }
+  await page.mouse.move(start.x, start.y)
+  await page.mouse.down()
+  await page.mouse.move(start.x + 10, start.y + 7, { steps: 4 })
+  await page.mouse.move(end.x, end.y, { steps: 18 })
+  await page.waitForTimeout(120)
+}
+
 test.describe('Clarin Work workspace refinement', () => {
   test.describe.configure({ timeout: 60_000 })
 
@@ -236,13 +259,26 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.getByRole('button', { name: 'Calendario' }).click()
     await expect(page.locator('[data-task-calendar]')).toBeVisible()
     await page.locator('[data-task-calendar] .grid button.group').first().click()
-    await expect(page.getByRole('heading', { name: 'Crear tarea' })).toBeVisible()
+    const composer = page.getByRole('dialog', { name: 'Crear tarea' })
+    await expect(composer).toBeVisible()
+    const pickerTriggers = composer.locator('button[aria-haspopup="listbox"]')
+    await pickerTriggers.nth(0).click()
+    const listPortal = page.locator('[data-task-select-picker-portal]')
+    await expect(listPortal).toBeVisible()
+    expect(await listPortal.evaluate(element => Number(getComputedStyle(element).zIndex))).toBeGreaterThan(145)
+    await page.getByRole('option', { name: /Lista de carpeta/ }).click()
+    await pickerTriggers.nth(1).click()
+    const ownerPortal = page.locator('[data-task-user-combobox-portal]')
+    await expect(ownerPortal).toBeVisible()
+    expect(await ownerPortal.evaluate(element => Number(getComputedStyle(element).zIndex))).toBeGreaterThan(145)
+    await page.getByRole('option', { name: /Ana Analista/ }).click()
     await page.getByPlaceholder('¿Qué hay que lograr?').fill('Tarea creada desde calendario')
-    await page.getByRole('dialog').getByRole('button', { name: 'Crear', exact: true }).click()
+    await composer.getByRole('button', { name: 'Crear', exact: true }).click()
     await expect.poll(() => mock.createWrites.length).toBe(1)
     expect(mock.createWrites[0].list_id).toBeTruthy()
     expect(mock.createWrites[0].is_all_day).toBe(true)
     expect(mock.createWrites[0].operation_id).toBeTruthy()
+    expect(mock.createWrites[0]).toMatchObject({ list_id: 'list-folder', assigned_to: 'user-analyst' })
   })
 
   test('supports keyboard pickup and exact Escape cancellation for a list', async ({ page }) => {
@@ -379,6 +415,45 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(page.getByRole('button', { name: 'Expandir Cliente Alfa' })).toHaveAttribute('aria-expanded', 'false')
     await page.getByRole('button', { name: 'Expandir Cliente Alfa' }).click()
     await expect(page.locator('[data-task-hierarchy-list="list-folder"]')).toBeVisible()
+  })
+
+  test('lets the active folder stay collapsed when its main row is clicked', async ({ page }) => {
+    await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 620 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const row = page.getByRole('button', { name: 'Cliente Alfa 0', exact: true })
+    await row.click()
+    await expect(page.getByRole('button', { name: 'Expandir Cliente Alfa' })).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('[data-task-hierarchy-list="list-folder"]')).not.toBeVisible()
+    await row.click()
+    await expect(page.getByRole('button', { name: 'Contraer Cliente Alfa' })).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.locator('[data-task-hierarchy-list="list-folder"]')).toBeVisible()
+  })
+
+  test('moves a task to a navigation list and opens the folder chooser above the board', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 720 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByRole('button', { name: 'Tablero' }).click()
+    const taskCard = page.locator('[data-task-id="task-refinement"]')
+    const listTarget = page.locator('[data-task-drop-list="list-folder"]').first()
+    await dragTaskToNavigation(page, taskCard, listTarget)
+    await expect(listTarget.locator('[data-task-drop-highlight]')).toHaveCount(1)
+    await expect(page.getByText('Soltar en Lista de carpeta', { exact: true })).toBeVisible()
+    await page.mouse.up()
+    await expect.poll(() => mock.bulkMoves.length).toBe(1)
+    expect(mock.bulkMoves[0]).toMatchObject({ destination_list_id: 'list-folder' })
+
+    const folderTarget = page.getByRole('button', { name: 'Cliente Alfa 0', exact: true })
+    await dragTaskToNavigation(page, taskCard, folderTarget)
+    await page.mouse.up()
+    const chooser = page.getByRole('dialog', { name: 'Cliente Alfa' })
+    await expect(chooser).toBeVisible()
+    const chooserBox = await chooser.boundingBox()
+    expect(chooserBox).not.toBeNull()
+    await chooser.getByRole('button', { name: /Lista de carpeta/ }).click()
+    await expect.poll(() => mock.bulkMoves.length).toBe(2)
+    expect(mock.bulkMoves[1]).toMatchObject({ destination_list_id: 'list-folder' })
   })
 
   test('keeps the workspace full-bleed and contained across responsive widths', async ({ page }) => {

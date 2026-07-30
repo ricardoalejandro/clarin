@@ -5,6 +5,7 @@ import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown, Search, UserRound, X } from 'lucide-react'
 import type { TaskAccountUser } from './TaskEditorModal'
+import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 
 interface Props {
   users: TaskAccountUser[]
@@ -74,8 +75,8 @@ export default function TaskUserCombobox({ users, value, onChange, placeholder =
       <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition ${open ? 'rotate-180' : ''}`} />
     </button>
     {open && typeof document !== 'undefined' && createPortal(<>
-      <button type="button" aria-label="Cerrar selector" className="fixed inset-0 z-[109] cursor-default" onMouseDown={() => close(false)} />
-      <div data-task-user-combobox-portal style={style} onKeyDown={event => {
+      <button type="button" aria-label="Cerrar selector" data-task-picker-backdrop className="fixed inset-0 cursor-default" style={{ zIndex: TASK_OVERLAY_LAYERS.pickerBackdrop }} onMouseDown={() => close(false)} />
+      <div data-task-user-combobox-portal style={{ ...style, zIndex: TASK_OVERLAY_LAYERS.picker }} onKeyDown={event => {
         if (event.key !== 'Tab') return
         const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled]),[tabindex]:not([tabindex="-1"])'))
         if (!focusable.length) return
@@ -83,7 +84,7 @@ export default function TaskUserCombobox({ users, value, onChange, placeholder =
         const last = focusable[focusable.length - 1]
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
-      }} className="fixed z-[110] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15">
+      }} className="fixed overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15">
         <div className="relative border-b border-slate-100 p-2.5"><Search className="absolute left-5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input ref={inputRef} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {
           if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close() }
           if (event.key === 'ArrowDown') { event.preventDefault(); setHighlighted(index => Math.min(filtered.length - 1, index + 1)) }

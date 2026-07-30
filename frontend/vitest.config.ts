@@ -2,6 +2,7 @@ import path from 'node:path'
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  esbuild: { jsx: 'automatic', jsxImportSource: 'react' },
   resolve: { alias: { '@': path.resolve(__dirname, 'src') } },
   test: {
     environment: 'jsdom',
@@ -9,9 +10,7 @@ export default defineConfig({
     include: [
       'src/lib/useDebouncedValue.test.tsx',
       'src/lib/useKanbanPan.test.tsx',
-      'src/components/task-work/taskWorkspaceState.test.ts',
-      'src/components/task-work/taskBoardSelection.test.ts',
-      'src/components/task-work/taskCalendarState.test.ts',
+      'src/components/task-work/**/*.test.{ts,tsx}',
     ],
     restoreMocks: true,
   },

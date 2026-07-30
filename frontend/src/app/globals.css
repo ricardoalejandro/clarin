@@ -552,14 +552,6 @@ textarea::placeholder {
   100% { box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
 }
 
-[data-task-drop-active="true"] {
-  position: relative;
-  z-index: 2;
-  background: rgb(236 253 245) !important;
-  box-shadow: inset 0 0 0 2px rgb(52 211 153), 0 8px 22px rgb(16 185 129 / 0.14);
-  border-radius: 0.75rem;
-}
-
 [data-task-gather-ghost] {
   animation: task-gather-card 170ms cubic-bezier(.2,.75,.25,1) both;
 }

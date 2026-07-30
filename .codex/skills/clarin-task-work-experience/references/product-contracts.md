@@ -7,6 +7,8 @@
 - A selected group is represented by one lightweight `DragOverlay`; never mount duplicate sortable cards in the overlay. Render at most three stack layers and eight convergence ghosts, while the badge reports the true total.
 - Dropping on a folder never assigns its first list implicitly. A concrete list choice is required. Column drops map each real workflow by category; list drops preserve each task's current category.
 - Escape, incompatible workflow, `409`, network failure and invalid targets restore the captured task/order/selection state without partial backend writes.
+- Resolve navigation targets from the real pointer coordinates and current measured list/folder rectangles, never from the translated card rectangle. Prefer a concrete list over its containing folder, use hysteresis at narrow boundaries, highlight destinations declaratively, and keep one write per completed gesture.
+- Ordinary cards expose only completion persistently. Selection is adaptive through hover/focus actions, Ctrl/Cmd click, Shift range, stationary touch hold, or an already-active selection; Escape clears selection without mutating tasks.
 
 ## Calendar creation
 
@@ -27,6 +29,7 @@ Read the sections relevant to the requested task change before editing.
 - Lists may move between folders, reorder inside one folder, or return to the explicit root container. Folders may reorder only among folders. Capture the complete hierarchy at drag start, preview locally, and emit at most one account-scoped structural write with the destination plus optional `before_list_id`/`before_folder_id`; Escape, an invalid drop, an incompatible workflow, `409`, or transport failure restores that exact snapshot.
 - A structural list move must lock the source and destination folders, every active list in both ordering scopes, and the destination anchor before writing. The anchor must be active, same-account, and already inside the final folder/root scope. Workflow inheritance, task-status remapping, location, and normalized destination order commit or roll back together.
 - The default account list is fixed at the root with `sort_order=0` and cannot be dragged, reparented, reordered, or archived. It may still be renamed and use a validated catalog color/icon; its safe default icon is `inbox`.
+- Clicking a folder's main row selects its aggregate scope and toggles that accordion. Its chevron changes expansion only. An active folder may remain collapsed; navigation to a concrete child list is the only scope change that forces its parent open.
 - Folder/list icons are stable catalog identifiers rather than arbitrary components, paths, or markup. Validate the same allowlist in the API and database, return icons in every hierarchy response, and render a safe fallback for legacy data.
 - Archiving a list or folder is allowed only when it contains no active tasks. Restoring a child task requires an active parent and an active list/folder chain.
 - Create, restore, move, archive, and workflow-remap paths must lock and revalidate their parent/list/folder/status dependencies after waiting; a pre-lock read is never sufficient proof under concurrency.
@@ -80,6 +83,7 @@ Read the sections relevant to the requested task change before editing.
 - Full task creation uses the same window behavior as detail: floating and docked desktop modes leave the workspace interactive, maximized and mobile modes are modal, and the remembered geometry is clamped to the measured viewport. Support header drag, edge/corner resize, right docking, maximize/restore, and double-click maximize.
 - Escape closes an untouched creation form immediately. Once the user changes any field, Escape/close must offer “continue editing” or explicit discard and preserve the complete draft when discard is cancelled.
 - List, folder, workflow, recurrence, reminder, category, color, and icon choices use accessible viewport-aware portaled pickers. The task-list picker is searchable and grouped by default list, independent lists, and folders with a real breadcrumb.
+- Task dialogs, confirmations, picker backdrops, picker menus, drag overlays and notifications use one monotonic layer contract. A child picker must always render above its owning dialog, restore focus, reposition on scroll/resize and stay within the viewport.
 
 ## Filters And Saved Views
 
@@ -109,6 +113,7 @@ Read the sections relevant to the requested task change before editing.
 - Keep title/actions and views/tools in two compact header rows. Lista, Tablero, Calendario, Gantt, and Resumen remain primary navigation and do not move when search expands.
 - Board, calendar, and Gantt use the complete measured canvas. Reading views may retain only an 8–12 px breathing margin. Empty states fill the available surface instead of rendering as an inset card.
 - Base responsive decisions on the measured workspace container after dashboard navigation and Eros chrome, not on browser width alone.
+- In Lista, size the status control from the measured view width: show full semantics when comfortable, a compact trigger at medium width, and a separate property row when narrow. The portaled menu remains at least 280 px when the viewport permits it; tooltips appear only for actually truncated text.
 - The hierarchy navigation is independently scrollable with a quiet theme-aware scrollbar and edge shadows only when overflow exists. Folder accordions allow multiple open folders and remember expansion locally while always auto-opening the active list's parent.
 
 ## Activity, Comments, And Realtime

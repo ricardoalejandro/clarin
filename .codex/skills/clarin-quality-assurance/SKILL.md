@@ -37,6 +37,7 @@ npm run build
 - A build, TypeScript pass, manual click-through, or Playwright scenario never substitutes for the nearest-layer unit test.
 - Verify success, empty, conflict/error and rollback behavior when the change can mutate persisted state. Multi-item operations must also prove atomicity, deduplication and one-write semantics.
 - Keep focused browser tests for integration, animation, accessibility, drag sensors and real layout; do not duplicate every pure permutation there.
+- Geometry- or layer-driven UI must expose deterministic helpers/constants for unit coverage, then add a focused browser assertion for real pointer coordinates, clipping, focus restoration and overlay order.
 
 General:
 
