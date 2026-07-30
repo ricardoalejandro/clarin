@@ -191,6 +191,7 @@ export interface TaskList {
   name: string
   description?: string
   color: string
+  icon: string
   sort_order: number
   created_by: string
   created_at: string
@@ -205,6 +206,7 @@ export interface TaskFolder {
   name: string
   description?: string
   color: string
+  icon: string
   sort_order: number
   created_by: string
   archived_at?: string

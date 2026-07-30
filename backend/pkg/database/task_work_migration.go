@@ -87,6 +87,18 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS icon TEXT NOT NULL DEFAULT 'list'`,
+		`UPDATE task_lists SET icon=CASE WHEN is_default THEN 'inbox' ELSE 'list' END
+		 WHERE icon IS NULL OR BTRIM(icon)='' OR icon NOT IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square')`,
+		`ALTER TABLE task_folders ADD COLUMN IF NOT EXISTS icon TEXT NOT NULL DEFAULT 'folder'`,
+		`UPDATE task_folders SET icon='folder'
+		 WHERE icon IS NULL OR BTRIM(icon)='' OR icon NOT IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square')`,
+		`DO $$ BEGIN ALTER TABLE task_lists ADD CONSTRAINT task_lists_icon_check
+			CHECK (icon IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square'));
+			EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE task_folders ADD CONSTRAINT task_folders_icon_check
+			CHECK (icon IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square'));
+			EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_lists_account_id ON task_lists(account_id, id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_lists_default ON task_lists(account_id) WHERE is_default AND archived_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_task_lists_folder_order ON task_lists(account_id, folder_id, archived_at, sort_order)`,
@@ -302,8 +314,8 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		END $$`,
 		`CREATE OR REPLACE FUNCTION ensure_account_task_default_list() RETURNS TRIGGER AS $$
 		BEGIN
-			INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,sort_order,created_by,is_default)
-			SELECT NEW.account_id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981',0,NEW.user_id,TRUE
+			INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,icon,sort_order,created_by,is_default)
+			SELECT NEW.account_id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981','inbox',0,NEW.user_id,TRUE
 			FROM task_workflows w
 			WHERE w.account_id=NEW.account_id AND w.is_default
 			ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING;
@@ -393,8 +405,8 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("task work default list adoption failed: %w", err)
 	}
 	if _, err := db.Exec(ctx, `
-		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,sort_order,created_by,is_default)
-		SELECT a.id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981',0,owner.user_id,TRUE
+		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,icon,sort_order,created_by,is_default)
+		SELECT a.id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981','inbox',0,owner.user_id,TRUE
 		FROM accounts a
 		JOIN task_workflows w ON w.account_id=a.id AND w.is_default
 		JOIN LATERAL (
@@ -410,6 +422,26 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING
 	`); err != nil {
 		return fmt.Errorf("task work default list creation failed: %w", err)
+	}
+	if _, err := db.Exec(ctx, `
+		UPDATE task_lists SET folder_id=NULL,sort_order=0,icon='inbox',updated_at=NOW()
+		WHERE is_default AND archived_at IS NULL
+	`); err != nil {
+		return fmt.Errorf("task work default list root repair failed: %w", err)
+	}
+	if _, err := db.Exec(ctx, `
+		WITH ranked AS (
+			SELECT id,account_id,folder_id,
+				ROW_NUMBER() OVER(PARTITION BY account_id,folder_id ORDER BY sort_order,created_at,id) AS position
+			FROM task_lists WHERE NOT is_default AND archived_at IS NULL
+		), normalized AS (
+			SELECT id,CASE WHEN folder_id IS NULL THEN (position+1)*1024 ELSE position*1024 END AS repaired_order
+			FROM ranked
+		)
+		UPDATE task_lists list SET sort_order=normalized.repaired_order,updated_at=NOW()
+		FROM normalized WHERE list.id=normalized.id AND list.sort_order IS DISTINCT FROM normalized.repaired_order
+	`); err != nil {
+		return fmt.Errorf("task work list hierarchy order repair failed: %w", err)
 	}
 	if _, err := db.Exec(ctx, `
 		UPDATE tasks task SET list_id=list.id,updated_at=NOW()

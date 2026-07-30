@@ -24,6 +24,7 @@ var (
 	ErrTaskVersionConflict          = errors.New("task was updated concurrently")
 	ErrTaskOrderInvalid             = errors.New("task order does not represent one complete scope")
 	ErrTaskListOrderInvalid         = errors.New("task list order anchor is invalid")
+	ErrTaskFolderOrderInvalid       = errors.New("task folder order anchor is invalid")
 	ErrTaskSavedViewNameConflict    = errors.New("task saved view name already exists")
 	ErrTaskSavedViewDefaultConflict = errors.New("task saved view default changed concurrently")
 	ErrTaskCollaboratorInvalid      = errors.New("task collaborator does not belong to account")
@@ -76,8 +77,8 @@ func (r *TaskWorkRepository) TaskBelongsToAccount(ctx context.Context, accountID
 
 func (r *TaskWorkRepository) EnsureDefaultList(ctx context.Context, accountID, userID uuid.UUID) (*uuid.UUID, error) {
 	if _, err := r.db.Exec(ctx, `
-		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,is_default,name,description,color,sort_order,created_by)
-		SELECT $1,w.id,TRUE,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981',0,$2
+		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,is_default,name,description,color,icon,sort_order,created_by)
+		SELECT $1,w.id,TRUE,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981','inbox',0,$2
 		FROM task_workflows w
 		WHERE w.account_id=$1 AND w.is_default
 		ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING
@@ -93,7 +94,7 @@ func (r *TaskWorkRepository) EnsureDefaultList(ctx context.Context, accountID, u
 
 func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUID) ([]*domain.TaskFolder, []*domain.TaskList, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT f.id,f.account_id,f.workflow_id,f.name,f.description,f.color,f.sort_order,f.created_by,
+		SELECT f.id,f.account_id,f.workflow_id,f.name,f.description,f.color,f.icon,f.sort_order,f.created_by,
 			f.archived_at,f.created_at,f.updated_at,
 			COUNT(t.id) FILTER (WHERE t.deleted_at IS NULL)
 		FROM task_folders f
@@ -112,7 +113,7 @@ func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUI
 	for rows.Next() {
 		folder := &domain.TaskFolder{}
 		if err := rows.Scan(&folder.ID, &folder.AccountID, &folder.WorkflowID, &folder.Name, &folder.Description,
-			&folder.Color, &folder.SortOrder, &folder.CreatedBy, &folder.ArchivedAt, &folder.CreatedAt,
+			&folder.Color, &folder.Icon, &folder.SortOrder, &folder.CreatedBy, &folder.ArchivedAt, &folder.CreatedAt,
 			&folder.UpdatedAt, &folder.TaskCount); err != nil {
 			return nil, nil, err
 		}
@@ -163,16 +164,19 @@ func (r *TaskWorkRepository) CreateFolder(ctx context.Context, folder *domain.Ta
 	if folder.Color == "" {
 		folder.Color = "#10b981"
 	}
+	if folder.Icon == "" {
+		folder.Icon = "folder"
+	}
 	return r.db.QueryRow(ctx, `
-		INSERT INTO task_folders(id,account_id,workflow_id,name,description,color,sort_order,created_by,created_at,updated_at)
-		SELECT $1,$2,$3,$4,$5,$6,COALESCE(MAX(sort_order)+1,0),$7,$8,$8
+		INSERT INTO task_folders(id,account_id,workflow_id,name,description,color,icon,sort_order,created_by,created_at,updated_at)
+		SELECT $1,$2,$3,$4,$5,$6,$7,COALESCE(MAX(sort_order)+1024,1024),$8,$9,$9
 		FROM task_folders WHERE account_id=$2
 		RETURNING sort_order
-	`, folder.ID, folder.AccountID, folder.WorkflowID, folder.Name, folder.Description, folder.Color,
+	`, folder.ID, folder.AccountID, folder.WorkflowID, folder.Name, folder.Description, folder.Color, folder.Icon,
 		folder.CreatedBy, folder.CreatedAt).Scan(&folder.SortOrder)
 }
 
-func (r *TaskWorkRepository) UpdateFolder(ctx context.Context, accountID, folderID uuid.UUID, name, description, color *string, workflowID *uuid.UUID, workflowProvided bool) error {
+func (r *TaskWorkRepository) UpdateFolder(ctx context.Context, accountID, folderID uuid.UUID, name, description, color, icon *string, workflowID *uuid.UUID, workflowProvided bool) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -198,9 +202,10 @@ func (r *TaskWorkRepository) UpdateFolder(ctx context.Context, accountID, folder
 	command, err := tx.Exec(ctx, `
 		UPDATE task_folders SET
 			name=COALESCE($3::text,name), description=COALESCE($4::text,description),
-			color=COALESCE($5::text,color), workflow_id=CASE WHEN $7::boolean THEN $6::uuid ELSE workflow_id END, updated_at=NOW()
+			color=COALESCE($5::text,color), icon=COALESCE($6::text,icon),
+			workflow_id=CASE WHEN $8::boolean THEN $7::uuid ELSE workflow_id END, updated_at=NOW()
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL
-	`, accountID, folderID, name, description, color, resolvedWorkflowID, workflowProvided)
+	`, accountID, folderID, name, description, color, icon, resolvedWorkflowID, workflowProvided)
 	if err != nil {
 		return err
 	}
@@ -368,7 +373,7 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, folde
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, listID uuid.UUID, folderID *uuid.UUID, folderProvided bool, beforeListID *uuid.UUID, orderProvided bool, workflowID *uuid.UUID, inherited *bool, description, name, color *string) error {
+func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, listID uuid.UUID, folderID *uuid.UUID, folderProvided bool, beforeListID *uuid.UUID, orderProvided bool, workflowID *uuid.UUID, inherited *bool, description, name, color, icon *string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -490,7 +495,7 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		}
 		validAnchor := false
 		for _, candidate := range lockedLists {
-			if candidate.ID == *beforeListID && taskUUIDPointersEqual(candidate.FolderID, finalFolderID) {
+			if candidate.ID == *beforeListID && !candidate.IsDefault && taskUUIDPointersEqual(candidate.FolderID, finalFolderID) {
 				validAnchor = true
 				break
 			}
@@ -528,8 +533,8 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 	}
 	if _, err := tx.Exec(ctx, `UPDATE task_lists SET folder_id=$3,workflow_id=$4,
 		workflow_inherited=$5,description=COALESCE($6::text,description),
-		name=COALESCE($7::text,name),color=COALESCE($8::text,color),updated_at=NOW()
-		WHERE account_id=$1 AND id=$2`, accountID, listID, finalFolderID, finalWorkflowID, finalInherited, description, name, color); err != nil {
+		name=COALESCE($7::text,name),color=COALESCE($8::text,color),icon=COALESCE($9::text,icon),updated_at=NOW()
+		WHERE account_id=$1 AND id=$2`, accountID, listID, finalFolderID, finalWorkflowID, finalInherited, description, name, color, icon); err != nil {
 		return err
 	}
 	if finalWorkflowID != currentWorkflowID {
@@ -540,7 +545,7 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 	if orderProvided {
 		destination := make([]lockedTaskList, 0)
 		for _, candidate := range lockedLists {
-			if candidate.ID != listID && taskUUIDPointersEqual(candidate.FolderID, finalFolderID) {
+			if candidate.ID != listID && !candidate.IsDefault && taskUUIDPointersEqual(candidate.FolderID, finalFolderID) {
 				destination = append(destination, candidate)
 			}
 		}
@@ -566,14 +571,92 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 			orderedIDs = append(orderedIDs, listID)
 		}
 		if _, err := tx.Exec(ctx, `WITH ordered AS (
-			SELECT item.id,(item.ordinality::int * 1024) AS position
+			SELECT item.id,((item.ordinality::int + CASE WHEN $3::boolean THEN 0 ELSE 1 END) * 1024) AS position
 			FROM unnest($2::uuid[]) WITH ORDINALITY AS item(id, ordinality)
 		)
 		UPDATE task_lists list SET sort_order=ordered.position,updated_at=NOW()
 		FROM ordered WHERE list.account_id=$1 AND list.id=ordered.id
-			AND list.archived_at IS NULL`, accountID, orderedIDs); err != nil {
+			AND list.archived_at IS NULL`, accountID, orderedIDs, finalFolderID != nil); err != nil {
 			return err
 		}
+		if finalFolderID == nil {
+			if _, err := tx.Exec(ctx, `UPDATE task_lists SET sort_order=0,updated_at=NOW()
+				WHERE account_id=$1 AND is_default AND archived_at IS NULL`, accountID); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *TaskWorkRepository) ReorderFolder(ctx context.Context, accountID, folderID uuid.UUID, beforeFolderID *uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	type orderedFolder struct {
+		ID        uuid.UUID
+		SortOrder int
+		CreatedAt time.Time
+	}
+	rows, err := tx.Query(ctx, `SELECT id,sort_order,created_at FROM task_folders
+		WHERE account_id=$1 AND archived_at IS NULL ORDER BY id FOR UPDATE`, accountID)
+	if err != nil {
+		return err
+	}
+	folders := make([]orderedFolder, 0)
+	foundMoving, foundAnchor := false, beforeFolderID == nil
+	for rows.Next() {
+		item := orderedFolder{}
+		if err := rows.Scan(&item.ID, &item.SortOrder, &item.CreatedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		folders = append(folders, item)
+		foundMoving = foundMoving || item.ID == folderID
+		foundAnchor = foundAnchor || (beforeFolderID != nil && item.ID == *beforeFolderID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !foundMoving {
+		return ErrTaskWorkNotFound
+	}
+	if !foundAnchor || (beforeFolderID != nil && *beforeFolderID == folderID) {
+		return ErrTaskFolderOrderInvalid
+	}
+	sort.SliceStable(folders, func(left, right int) bool {
+		if folders[left].SortOrder != folders[right].SortOrder {
+			return folders[left].SortOrder < folders[right].SortOrder
+		}
+		if !folders[left].CreatedAt.Equal(folders[right].CreatedAt) {
+			return folders[left].CreatedAt.Before(folders[right].CreatedAt)
+		}
+		return folders[left].ID.String() < folders[right].ID.String()
+	})
+	orderedIDs := make([]uuid.UUID, 0, len(folders))
+	inserted := false
+	for _, folder := range folders {
+		if folder.ID == folderID {
+			continue
+		}
+		if beforeFolderID != nil && folder.ID == *beforeFolderID {
+			orderedIDs = append(orderedIDs, folderID)
+			inserted = true
+		}
+		orderedIDs = append(orderedIDs, folder.ID)
+	}
+	if !inserted {
+		orderedIDs = append(orderedIDs, folderID)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE task_folders folder SET
+		sort_order=(ordered.position::int * 1024),updated_at=NOW()
+		FROM unnest($2::uuid[]) WITH ORDINALITY AS ordered(id,position)
+		WHERE folder.account_id=$1 AND folder.id=ordered.id AND folder.archived_at IS NULL`, accountID, orderedIDs); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

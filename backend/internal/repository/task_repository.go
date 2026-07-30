@@ -1101,7 +1101,7 @@ func (r *TaskRepository) GetSubtasksByTask(ctx context.Context, taskID uuid.UUID
 
 func (r *TaskRepository) GetListsByAccount(ctx context.Context, accountID uuid.UUID) ([]*domain.TaskList, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT tl.id, tl.account_id, tl.folder_id, tl.workflow_id, COALESCE(tl.workflow_inherited,TRUE), COALESCE(tl.is_default,FALSE), tl.name, COALESCE(tl.description,''), tl.color,
+		SELECT tl.id, tl.account_id, tl.folder_id, tl.workflow_id, COALESCE(tl.workflow_inherited,TRUE), COALESCE(tl.is_default,FALSE), tl.name, COALESCE(tl.description,''), tl.color, COALESCE(tl.icon,CASE WHEN tl.is_default THEN 'inbox' ELSE 'list' END),
 			tl.sort_order, tl.created_by, tl.archived_at, tl.created_at, tl.updated_at,
 			COALESCE((SELECT COUNT(*) FROM tasks t WHERE t.account_id=tl.account_id AND t.list_id=tl.id AND t.parent_task_id IS NULL AND t.deleted_at IS NULL), 0) AS task_count
 		FROM task_lists tl
@@ -1116,7 +1116,7 @@ func (r *TaskRepository) GetListsByAccount(ctx context.Context, accountID uuid.U
 	var lists []*domain.TaskList
 	for rows.Next() {
 		l := &domain.TaskList{}
-		if err := rows.Scan(&l.ID, &l.AccountID, &l.FolderID, &l.WorkflowID, &l.WorkflowInherited, &l.IsDefault, &l.Name, &l.Description, &l.Color,
+		if err := rows.Scan(&l.ID, &l.AccountID, &l.FolderID, &l.WorkflowID, &l.WorkflowInherited, &l.IsDefault, &l.Name, &l.Description, &l.Color, &l.Icon,
 			&l.SortOrder, &l.CreatedBy, &l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt, &l.TaskCount); err != nil {
 			return nil, err
 		}
@@ -1132,6 +1132,9 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 	l.UpdatedAt = now
 	if strings.TrimSpace(l.Color) == "" {
 		l.Color = "#10b981"
+	}
+	if strings.TrimSpace(l.Icon) == "" {
+		l.Icon = "list"
 	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -1181,15 +1184,15 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 	}
 	l.SortOrder = maxOrder + 1
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO task_lists (id, account_id, folder_id, workflow_id, workflow_inherited, is_default, name, description, color, sort_order, created_by, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-	`, l.ID, l.AccountID, l.FolderID, l.WorkflowID, l.WorkflowInherited, l.IsDefault, l.Name, l.Description, l.Color, l.SortOrder, l.CreatedBy, l.CreatedAt, l.UpdatedAt); err != nil {
+		INSERT INTO task_lists (id, account_id, folder_id, workflow_id, workflow_inherited, is_default, name, description, color, icon, sort_order, created_by, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+	`, l.ID, l.AccountID, l.FolderID, l.WorkflowID, l.WorkflowInherited, l.IsDefault, l.Name, l.Description, l.Color, l.Icon, l.SortOrder, l.CreatedBy, l.CreatedAt, l.UpdatedAt); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-func (r *TaskRepository) UpdateList(ctx context.Context, id, accountID uuid.UUID, name, color *string, sortOrder *int) error {
+func (r *TaskRepository) UpdateList(ctx context.Context, id, accountID uuid.UUID, name, color, icon *string, sortOrder *int) error {
 	sets := []string{"updated_at=NOW()"}
 	args := []interface{}{}
 	idx := 1
@@ -1202,6 +1205,11 @@ func (r *TaskRepository) UpdateList(ctx context.Context, id, accountID uuid.UUID
 	if color != nil {
 		sets = append(sets, fmt.Sprintf("color=$%d", idx))
 		args = append(args, *color)
+		idx++
+	}
+	if icon != nil {
+		sets = append(sets, fmt.Sprintf("icon=$%d", idx))
+		args = append(args, *icon)
 		idx++
 	}
 	if sortOrder != nil {

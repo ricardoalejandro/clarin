@@ -65,6 +65,7 @@ If a task touches multiple areas, read all matching skills before editing.
 - Aggregate boards group heterogeneous workflows by category and map a drop to the task's real equivalent status. Disable destinations without a valid equivalent.
 - Keep one responsible owner plus optional collaborators unless a deliberate full-stack migration introduces multi-owner semantics.
 - Treat list hierarchy drag as one structural transaction: validate same-account folder/anchor, remap inherited workflows completely, persist destination order once, and roll back the whole operation on any incompatibility. The default task list remains fixed at the root.
+- Present the root hierarchy as pinned default list, independent lists, then ordered folders. Folders and lists use validated catalog icon identifiers; structural drag of either kind produces at most one backend write and exact rollback.
 - An explicit empty collaborator collection is canonical. Frontend reconciliation must not preserve stale collaborators when the last participant is removed.
 - Real subtasks are one-level child tasks in the parent's list and compatible workflow. Do not expose the legacy checklist table as a second editable source.
 - Archive task lists/folders only when they contain no active tasks. Child restore requires an active parent; concurrent structure/task mutations must lock and revalidate their dependencies inside one transaction.
@@ -73,6 +74,7 @@ If a task touches multiple areas, read all matching skills before editing.
 - Page older task comments explicitly and preserve chronological order and scroll; never hide history behind a fixed unannounced limit.
 - Patch task/order WebSocket events by stable ID/version/operation ID. Do not replace a populated board with skeletons or reload hierarchy for ordinary task/comment events.
 - Base task detail layout on measured available surface width. Docked/floating modes leave the workspace interactive; maximized/mobile modes may block it.
+- Apply the same measured window contract to full task creation. Preserve dirty drafts behind an explicit discard confirmation, and use viewport-aware portaled pickers for hierarchy/workflow choices.
 - Keep task labels separate from Contact tags. Never reuse Contact identity metadata as task metadata without an explicit task model.
 - Ship only task controls that work end to end across success, loading, empty, conflict, permission and failure states.
 

@@ -152,25 +152,24 @@ const (
 
 // Permission module constants
 const (
-	PermChats         = "chats"
-	PermContacts      = "contacts"
-	PermPrograms      = "programs"
-	PermDevices       = "devices"
-	PermLeads         = "leads"
-	PermEvents        = "events"
-	PermBroadcasts    = "broadcasts"
-	PermTags          = "tags"
-	PermSettings      = "settings"
-	PermIntegrations  = "integrations"
-	PermAutomations   = "automations"
-	PermBots          = "bots"
-	PermSurveys       = "surveys"
-	PermDynamics      = "dynamics"
-	PermTasks         = "tasks"
-	PermDocuments     = "documents"
-	PermSharedBrowser = "shared_browser"
-	PermReports       = "reports"
-	PermAll           = "*"
+	PermChats        = "chats"
+	PermContacts     = "contacts"
+	PermPrograms     = "programs"
+	PermDevices      = "devices"
+	PermLeads        = "leads"
+	PermEvents       = "events"
+	PermBroadcasts   = "broadcasts"
+	PermTags         = "tags"
+	PermSettings     = "settings"
+	PermIntegrations = "integrations"
+	PermAutomations  = "automations"
+	PermBots         = "bots"
+	PermSurveys      = "surveys"
+	PermDynamics     = "dynamics"
+	PermTasks        = "tasks"
+	PermDocuments    = "documents"
+	PermReports      = "reports"
+	PermAll          = "*"
 )
 
 // AllPermissions contains all available permission modules in display order
@@ -178,7 +177,7 @@ var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
 	PermAutomations, PermBots, PermDevices, PermEvents,
 	PermBroadcasts, PermSurveys, PermTasks, PermDynamics,
-	PermDocuments, PermSharedBrowser, PermReports, PermTags, PermSettings, PermIntegrations,
+	PermDocuments, PermReports, PermTags, PermSettings, PermIntegrations,
 }
 
 // Role represents a named set of module permissions
@@ -1314,6 +1313,7 @@ type TaskList struct {
 	Name              string     `json:"name"`
 	Description       string     `json:"description,omitempty"`
 	Color             string     `json:"color,omitempty"`
+	Icon              string     `json:"icon"`
 	SortOrder         int        `json:"sort_order"`
 	CreatedBy         uuid.UUID  `json:"created_by"`
 	ArchivedAt        *time.Time `json:"archived_at,omitempty"`
@@ -1355,6 +1355,7 @@ type TaskFolder struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description,omitempty"`
 	Color       string      `json:"color"`
+	Icon        string      `json:"icon"`
 	SortOrder   int         `json:"sort_order"`
 	CreatedBy   uuid.UUID   `json:"created_by"`
 	ArchivedAt  *time.Time  `json:"archived_at,omitempty"`

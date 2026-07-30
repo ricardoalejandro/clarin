@@ -306,7 +306,6 @@ const ALL_MODULES = [
   { key: 'dynamics', label: 'Dinámicas', color: 'rose' },
   { key: 'tasks', label: 'Tareas', color: 'lime' },
   { key: 'documents', label: 'Plantillas', color: 'purple' },
-  { key: 'shared_browser', label: 'Navegador', color: 'cyan' },
   { key: 'reports', label: 'Reportería', color: 'emerald' },
 ]
 

@@ -873,7 +873,6 @@ func Migrate(db *pgxpool.Pool) error {
 		 ON CONFLICT (name) DO NOTHING`,
 		// Ensure existing 'Administrador' role gets the new 'integrations' permission
 		`UPDATE roles SET permissions = array_append(permissions, 'integrations') WHERE name = 'Administrador' AND NOT ('integrations' = ANY(permissions))`,
-		`UPDATE roles SET permissions = array_append(permissions, 'shared_browser') WHERE name = 'Administrador' AND NOT ('shared_browser' = ANY(permissions))`,
 		`UPDATE roles SET permissions = array_append(permissions, 'reports') WHERE name = 'Administrador' AND NOT ('reports' = ANY(permissions))`,
 		`INSERT INTO roles (name, description, is_system, permissions) VALUES
 			('Supervisor', 'Acceso a chats, leads, contactos y eventos', TRUE, ARRAY['chats','contacts','leads','events','tags'])
@@ -1235,43 +1234,11 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_interactions_account_contact_manual ON interactions(account_id, contact_id, type) WHERE contact_id IS NOT NULL AND type IN ('note','call')`,
 		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_account_chat_direction_time ON messages(account_id, chat_id, is_from_me, timestamp DESC) WHERE NOT COALESCE(is_revoked,false)`,
 		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_leads_account_created_id ON leads(account_id, created_at DESC, id DESC)`,
-		`CREATE TABLE IF NOT EXISTS shared_browser_allowed_domains (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			domain TEXT NOT NULL,
-			is_active BOOLEAN NOT NULL DEFAULT TRUE,
-			created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			UNIQUE (account_id, domain)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_shared_browser_domains_account ON shared_browser_allowed_domains (account_id, is_active, domain)`,
-		`CREATE TABLE IF NOT EXISTS shared_browser_sessions (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE UNIQUE,
-			status TEXT NOT NULL DEFAULT 'idle',
-			current_url TEXT NOT NULL DEFAULT '',
-			current_domain TEXT NOT NULL DEFAULT '',
-			controller_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-			control_expires_at TIMESTAMPTZ,
-			gateway_session_id TEXT NOT NULL DEFAULT '',
-			last_error TEXT NOT NULL DEFAULT '',
-			last_activity_at TIMESTAMPTZ,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_shared_browser_sessions_account ON shared_browser_sessions (account_id, updated_at DESC)`,
-		`CREATE TABLE IF NOT EXISTS shared_browser_audit_events (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-			user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-			event_type TEXT NOT NULL,
-			url TEXT NOT NULL DEFAULT '',
-			domain TEXT NOT NULL DEFAULT '',
-			metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_shared_browser_audit_account_created ON shared_browser_audit_events (account_id, created_at DESC)`,
+		// Shared browser was retired after its production data was backed up.
+		`UPDATE roles SET permissions=array_remove(permissions,'shared_browser') WHERE 'shared_browser'=ANY(permissions)`,
+		`DROP TABLE IF EXISTS shared_browser_audit_events`,
+		`DROP TABLE IF EXISTS shared_browser_sessions`,
+		`DROP TABLE IF EXISTS shared_browser_allowed_domains`,
 		`CREATE TABLE IF NOT EXISTS eros_settings (
 			id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
 			enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -1359,7 +1326,6 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Add surveys permission to Administrador role
 		`UPDATE roles SET permissions = array_append(permissions, 'surveys') WHERE name = 'Administrador' AND NOT ('surveys' = ANY(permissions))`,
-		`UPDATE roles SET permissions = array_append(permissions, 'shared_browser') WHERE name = 'Administrador' AND NOT ('shared_browser' = ANY(permissions))`,
 
 		// Add is_template column to surveys
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS is_template BOOLEAN NOT NULL DEFAULT FALSE`,

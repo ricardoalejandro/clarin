@@ -56,9 +56,6 @@ type Config struct {
 	ErosMCPBaseURL       string
 	ErosMCPAccessToken   string
 	ErosBridgeTimeout    time.Duration
-	// Shared Browser
-	SharedBrowserGatewayURL string
-	SharedBrowserTimeout    time.Duration
 	// Google Contacts OAuth
 	GoogleClientID     string
 	GoogleClientSecret string
@@ -128,8 +125,6 @@ func Load() *Config {
 		ErosMCPBaseURL:                  strings.TrimRight(getEnv("EROS_MCP_BASE_URL", ""), "/"),
 		ErosMCPAccessToken:              getEnv("EROS_MCP_ACCESS_TOKEN", ""),
 		ErosBridgeTimeout:               getEnvDuration("EROS_CODEX_BRIDGE_TIMEOUT", 195*time.Second),
-		SharedBrowserGatewayURL:         strings.TrimRight(getEnv("SHARED_BROWSER_GATEWAY_URL", "http://clarin-shared-browser:8791"), "/"),
-		SharedBrowserTimeout:            getEnvDuration("SHARED_BROWSER_TIMEOUT", 30*time.Second),
 		GoogleClientID:                  getEnv("GOOGLE_CLIENT_ID", ""),
 		GoogleClientSecret:              getEnv("GOOGLE_CLIENT_SECRET", ""),
 		GoogleRedirectURI:               getEnv("GOOGLE_REDIRECT_URI", ""),

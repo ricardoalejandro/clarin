@@ -10,9 +10,11 @@ Read the sections relevant to the requested task change before editing.
 - In aggregate views, group heterogeneous workflows by category and map a drop to the equivalent real status for each task. Disable a destination when no equivalent exists.
 - Renaming or changing a status affects every list sharing that workflow; explain that scope before saving.
 - Changing a list or folder workflow must be one transaction: lock the affected containers and destination statuses, prove a category-equivalent mapping for every active task, remap every task, and only then persist the new workflow.
-- Lists may move between folders, reorder inside one folder, or return to the explicit root container. Capture the complete hierarchy at drag start, preview locally, and emit at most one account-scoped structural write with the destination plus optional `before_list_id`; Escape, an invalid drop, an incompatible workflow, `409`, or transport failure restores that exact snapshot.
+- The root hierarchy is presented in this order: the pinned default list, “Listas independientes” (lists without a folder), then ordered folders and their ordered child lists. During a list drag, the independent-list heading becomes the explicit root drop zone; never use the ambiguous label “Sin carpeta” as a navigation action.
+- Lists may move between folders, reorder inside one folder, or return to the explicit root container. Folders may reorder only among folders. Capture the complete hierarchy at drag start, preview locally, and emit at most one account-scoped structural write with the destination plus optional `before_list_id`/`before_folder_id`; Escape, an invalid drop, an incompatible workflow, `409`, or transport failure restores that exact snapshot.
 - A structural list move must lock the source and destination folders, every active list in both ordering scopes, and the destination anchor before writing. The anchor must be active, same-account, and already inside the final folder/root scope. Workflow inheritance, task-status remapping, location, and normalized destination order commit or roll back together.
-- The default account list is fixed at the root and cannot be dragged, reparented, or reordered. Explain that constraint at its disabled drag affordance.
+- The default account list is fixed at the root with `sort_order=0` and cannot be dragged, reparented, reordered, or archived. It may still be renamed and use a validated catalog color/icon; its safe default icon is `inbox`.
+- Folder/list icons are stable catalog identifiers rather than arbitrary components, paths, or markup. Validate the same allowlist in the API and database, return icons in every hierarchy response, and render a safe fallback for legacy data.
 - Archiving a list or folder is allowed only when it contains no active tasks. Restoring a child task requires an active parent and an active list/folder chain.
 - Create, restore, move, archive, and workflow-remap paths must lock and revalidate their parent/list/folder/status dependencies after waiting; a pre-lock read is never sufficient proof under concurrency.
 
@@ -47,6 +49,9 @@ Read the sections relevant to the requested task change before editing.
 - Inline creation inherits an unambiguous list and real status. If the scope contains multiple possible lists, require a list selection.
 - Enter saves a valid title; Escape cancels; More options preserves the draft in the full editor.
 - Insert inline-created tasks at a deterministic server position and patch them without losing board scroll.
+- Full task creation uses the same window behavior as detail: floating and docked desktop modes leave the workspace interactive, maximized and mobile modes are modal, and the remembered geometry is clamped to the measured viewport. Support header drag, edge/corner resize, right docking, maximize/restore, and double-click maximize.
+- Escape closes an untouched creation form immediately. Once the user changes any field, Escape/close must offer “continue editing” or explicit discard and preserve the complete draft when discard is cancelled.
+- List, folder, workflow, recurrence, reminder, category, color, and icon choices use accessible viewport-aware portaled pickers. The task-list picker is searchable and grouped by default list, independent lists, and folders with a real breadcrumb.
 
 ## Filters And Saved Views
 

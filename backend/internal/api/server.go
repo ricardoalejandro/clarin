@@ -705,6 +705,7 @@ func (s *Server) setupRoutes() {
 	tasks.Get("/hierarchy", s.handleGetTaskHierarchy)
 	tasks.Post("/folders", s.handleCreateTaskFolder)
 	tasks.Put("/folders/:folderId", s.handleUpdateTaskFolder)
+	tasks.Put("/folders/:folderId/structure", s.handleReorderTaskFolder)
 	tasks.Delete("/folders/:folderId", s.handleArchiveTaskFolder)
 	tasks.Get("/workflows", s.handleGetTaskWorkflows)
 	tasks.Post("/workflows", s.handleCreateTaskWorkflow)
@@ -906,24 +907,6 @@ func (s *Server) setupRoutes() {
 	dynamics.Get("/:id/links/:linkId/registrations", s.handleListLinkRegistrations)
 	dynamics.Get("/:id/links/:linkId/registrations/export", s.handleExportLinkRegistrations)
 	dynamics.Delete("/:id/links/:linkId/registrations/:regId", s.handleDeleteLinkRegistration)
-
-	// Shared browser: one controlled internal Chromium session per cuenta.
-	sharedBrowser := protected.Group("/shared-browser", s.requirePermission(domain.PermSharedBrowser))
-	sharedBrowser.Get("/status", s.handleSharedBrowserStatus)
-	sharedBrowser.Get("/allowed-domains", s.handleSharedBrowserAllowedDomains)
-	sharedBrowser.Post("/allowed-domains", s.handleSharedBrowserAddAllowedDomain)
-	sharedBrowser.Post("/open", s.handleSharedBrowserOpen)
-	sharedBrowser.Post("/request-control", s.handleSharedBrowserRequestControl)
-	sharedBrowser.Post("/release-control", s.handleSharedBrowserReleaseControl)
-	sharedBrowser.Post("/reload", s.handleSharedBrowserReload)
-	sharedBrowser.Post("/restart", s.handleSharedBrowserRestart)
-	sharedBrowser.Use("/vnc", s.wsUpgrade)
-	sharedBrowser.Get("/vnc", websocket.New(s.handleSharedBrowserVNC))
-	sharedBrowser.Get("/stream", s.handleSharedBrowserStream)
-	sharedBrowser.Get("/screenshot", s.handleSharedBrowserScreenshot)
-	sharedBrowser.Post("/click", s.handleSharedBrowserClick)
-	sharedBrowser.Post("/key", s.handleSharedBrowserKey)
-	sharedBrowser.Post("/scroll", s.handleSharedBrowserScroll)
 
 	// WebSocket route
 	s.app.Use("/ws", s.wsUpgrade)

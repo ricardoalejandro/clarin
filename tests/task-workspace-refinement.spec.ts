@@ -9,7 +9,7 @@ const doneStatus = { id: 'status-done', account_id: 'account-work', workflow_id:
 const statuses = [todoStatus, activeStatus, doneStatus]
 
 function list(id: string, name: string, folderId = '', order = 1024, taskCount = 0, isDefault = false) {
-  return { id, account_id: 'account-work', folder_id: folderId || undefined, workflow_id: 'workflow-main', workflow_inherited: Boolean(folderId), is_default: isDefault, name, description: '', color: isDefault ? '#10b981' : '#3b82f6', sort_order: order, created_by: 'user-owner', created_at: now, updated_at: now, task_count: taskCount }
+  return { id, account_id: 'account-work', folder_id: folderId || undefined, workflow_id: 'workflow-main', workflow_inherited: Boolean(folderId), is_default: isDefault, name, description: '', color: isDefault ? '#10b981' : '#3b82f6', icon: isDefault ? 'inbox' : 'list', sort_order: order, created_by: 'user-owner', created_at: now, updated_at: now, task_count: taskCount }
 }
 
 function makeTask() {
@@ -31,13 +31,19 @@ async function installWorkspaceMock(page: Page) {
   let hierarchy = {
     folders: [{
       id: 'folder-client', account_id: 'account-work', workflow_id: 'workflow-main', name: 'Cliente Alfa', description: '', color: '#8b5cf6', sort_order: 1024,
-      created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, lists: [list('list-folder', 'Lista de carpeta', 'folder-client', 1024)],
+      icon: 'folder', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, lists: [list('list-folder', 'Lista de carpeta', 'folder-client', 1024)],
+    }, {
+      id: 'folder-beta', account_id: 'account-work', workflow_id: 'workflow-main', name: 'Cliente Beta', description: '', color: '#f59e0b', sort_order: 2048,
+      icon: 'briefcase', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, lists: [],
     }],
-    root_lists: [list('list-default', 'Bandeja general', '', 1024, 0, true), list('list-work', 'Trabajo principal', '', 2048, 1)],
+    root_lists: [list('list-default', 'Bandeja general', '', 0, 0, true), list('list-work', 'Trabajo principal', '', 2048, 1)],
   }
   const structureWrites: Array<Record<string, unknown>> = []
+  const folderStructureWrites: Array<{ folderId: string; body: Record<string, unknown> }> = []
+  const appearanceWrites: Array<{ path: string; body: Record<string, unknown> }> = []
   const collaboratorWrites: Array<Record<string, unknown>> = []
   const taskWrites: Array<Record<string, unknown>> = []
+  const createWrites: Array<Record<string, unknown>> = []
 
   await page.routeWebSocket('**/ws**', socket => { socket.onMessage(() => undefined) })
   await page.route('**/api/**', async route => {
@@ -67,12 +73,40 @@ async function installWorkspaceMock(page: Page) {
 
     const structureMatch = path.match(/^\/api\/tasks\/lists\/([^/]+)\/structure$/)
     if (structureMatch && request.method() === 'PUT') {
-      structureWrites.push(body)
-      const moving = hierarchy.root_lists.find(item => item.id === structureMatch[1])!
-      hierarchy = {
-        folders: hierarchy.folders.map(folder => folder.id === body.folder_id ? { ...folder, lists: [...folder.lists, { ...moving, folder_id: folder.id, workflow_inherited: true, sort_order: 2048 }] } : folder),
-        root_lists: hierarchy.root_lists.filter(item => item.id !== moving.id),
+      if (!Object.prototype.hasOwnProperty.call(body, 'folder_id') && !Object.prototype.hasOwnProperty.call(body, 'before_list_id')) {
+        appearanceWrites.push({ path, body })
+        const update = (item: ReturnType<typeof list>) => item.id === structureMatch[1] ? { ...item, ...body } : item
+        hierarchy = { folders: hierarchy.folders.map(folder => ({ ...folder, lists: folder.lists.map(update) })), root_lists: hierarchy.root_lists.map(update) }
+        await json(route, { success: true, hierarchy })
+        return
       }
+      structureWrites.push(body)
+      const moving = [...hierarchy.root_lists, ...hierarchy.folders.flatMap(folder => folder.lists)].find(item => item.id === structureMatch[1])!
+      const targetFolderID = typeof body.folder_id === 'string' ? body.folder_id : ''
+      hierarchy = {
+        folders: hierarchy.folders.map(folder => ({ ...folder, lists: [...folder.lists.filter(item => item.id !== moving.id), ...(folder.id === targetFolderID ? [{ ...moving, folder_id: folder.id, workflow_inherited: true, sort_order: 2048 }] : [])] })),
+        root_lists: [...hierarchy.root_lists.filter(item => item.id !== moving.id), ...(!targetFolderID ? [{ ...moving, folder_id: undefined, workflow_inherited: true, sort_order: 2048 }] : [])],
+      }
+      await json(route, { success: true, hierarchy, operation_id: body.operation_id })
+      return
+    }
+
+    const folderStructureMatch = path.match(/^\/api\/tasks\/folders\/([^/]+)\/structure$/)
+    if (folderStructureMatch && request.method() === 'PUT') {
+      folderStructureWrites.push({ folderId: folderStructureMatch[1], body })
+      const moving = hierarchy.folders.find(folder => folder.id === folderStructureMatch[1])!
+      const rest = hierarchy.folders.filter(folder => folder.id !== moving.id)
+      const anchor = typeof body.before_folder_id === 'string' ? rest.findIndex(folder => folder.id === body.before_folder_id) : -1
+      const index = anchor >= 0 ? anchor : rest.length
+      hierarchy = { ...hierarchy, folders: [...rest.slice(0, index), moving, ...rest.slice(index)].map((folder, position) => ({ ...folder, sort_order: (position + 1) * 1024 })) }
+      await json(route, { success: true, hierarchy, operation_id: body.operation_id })
+      return
+    }
+
+    const folderUpdateMatch = path.match(/^\/api\/tasks\/folders\/([^/]+)$/)
+    if (folderUpdateMatch && request.method() === 'PUT') {
+      appearanceWrites.push({ path, body })
+      hierarchy = { ...hierarchy, folders: hierarchy.folders.map(folder => folder.id === folderUpdateMatch[1] ? { ...folder, ...body } : folder) }
       await json(route, { success: true })
       return
     }
@@ -98,6 +132,11 @@ async function installWorkspaceMock(page: Page) {
       await json(route, { task })
       return
     }
+    if (path === '/api/tasks' && request.method() === 'POST') {
+      createWrites.push(body)
+      await json(route, { task: { ...makeTask(), ...body, id: 'task-created', title: String(body.title || ''), collaborators: [] } }, 201)
+      return
+    }
     if (path === `/api/tasks/${task.id}`) { await json(route, { task }); return }
     if (path === `/api/tasks/${task.id}/children`) { await json(route, { tasks: [] }); return }
     if (path === `/api/tasks/${task.id}/comments`) { await json(route, { comments: [], total: 0, limit: 100, offset: 0 }); return }
@@ -117,7 +156,7 @@ async function installWorkspaceMock(page: Page) {
     localStorage.setItem('tasks:detail-mode', 'maximized')
   })
 
-  return { structureWrites, collaboratorWrites, taskWrites }
+  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites }
 }
 
 async function drag(page: Page, source: Locator, target: Locator) {
@@ -131,7 +170,21 @@ async function drag(page: Page, source: Locator, target: Locator) {
   await expect(page.locator('[data-task-hierarchy-overlay]')).toBeVisible()
   await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height / 2, { steps: 12 })
   await page.waitForTimeout(180)
-  await expect(page.locator('[data-task-hierarchy-container="folder:folder-client"] [data-task-hierarchy-placeholder]')).toBeVisible()
+  await expect(page.locator('[data-task-hierarchy-container="container:folder-client"] [data-task-hierarchy-placeholder]')).toBeVisible()
+  await page.mouse.up()
+}
+
+async function dragSortable(page: Page, source: Locator, target: Locator) {
+  const sourceBox = await source.boundingBox()
+  const targetBox = await target.boundingBox()
+  expect(sourceBox).not.toBeNull()
+  expect(targetBox).not.toBeNull()
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(sourceBox!.x + 12, sourceBox!.y + 6, { steps: 3 })
+  await expect(page.locator('[data-task-hierarchy-overlay]')).toBeVisible()
+  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + 3, { steps: 12 })
+  await page.waitForTimeout(180)
   await page.mouse.up()
 }
 
@@ -143,13 +196,13 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.setViewportSize({ width: 1398, height: 504 })
     await page.goto(`${baseURL}/dashboard/tasks`)
     await expect(page.getByText('Trabajo principal', { exact: true }).first()).toBeVisible()
-    await expect(page.getByTitle('La Bandeja general permanece en la raíz')).toBeVisible()
+    await expect(page.getByTitle('La Bandeja general permanece fija en la raíz')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Mover Bandeja general' })).toHaveCount(0)
 
     await drag(page, page.getByRole('button', { name: 'Mover Trabajo principal' }), page.getByRole('button', { name: 'Cliente Alfa 0' }))
     await expect.poll(() => mock.structureWrites.length).toBe(1)
-    expect(mock.structureWrites[0]).toMatchObject({ folder_id: 'folder-client', before_list_id: '', workflow_inherited: true })
-    await expect(page.locator('[data-task-hierarchy-container="folder:folder-client"] [data-task-hierarchy-list="list-work"]')).toBeVisible()
+    expect(mock.structureWrites[0]).toMatchObject({ folder_id: 'folder-client', before_list_id: null, workflow_inherited: true })
+    await expect(page.locator('[data-task-hierarchy-container="container:folder-client"] [data-task-hierarchy-list="list-work"]')).toBeVisible()
   })
 
   test('supports keyboard pickup and exact Escape cancellation for a list', async ({ page }) => {
@@ -165,6 +218,41 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(page.locator('[data-task-hierarchy-overlay]')).toHaveCount(0)
     expect(mock.structureWrites).toHaveLength(0)
     await expect(page.locator('[data-task-hierarchy-container="root"] [data-task-hierarchy-list="list-work"]')).toBeVisible()
+  })
+
+  test('keeps the root hierarchy understandable and reorders folders with one write', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const defaultRow = page.locator('[data-task-default-list]')
+    const independent = page.getByText('Listas independientes', { exact: true })
+    const folders = page.getByText('Carpetas', { exact: true })
+    await expect(defaultRow).toContainText('Bandeja general')
+    await expect(independent).toHaveAttribute('title', 'Listas que no pertenecen a una carpeta')
+    const positions = await Promise.all([defaultRow, independent, folders].map(async locator => (await locator.boundingBox())!.y))
+    expect(positions[0]).toBeLessThan(positions[1])
+    expect(positions[1]).toBeLessThan(positions[2])
+
+    await dragSortable(page, page.getByRole('button', { name: 'Mover carpeta Cliente Beta' }), page.getByRole('button', { name: 'Mover carpeta Cliente Alfa' }))
+    await expect.poll(() => mock.folderStructureWrites.length).toBe(1)
+    expect(mock.folderStructureWrites[0]).toMatchObject({ folderId: 'folder-beta', body: { before_folder_id: 'folder-client' } })
+  })
+
+  test('personalizes a list from the controlled icon and color catalog', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const row = page.locator('[data-task-hierarchy-list="list-work"]')
+    await row.hover()
+    await page.getByRole('button', { name: 'Personalizar Trabajo principal' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Personalizar lista' })
+    await dialog.getByRole('textbox', { name: 'Nombre' }).fill('Seguimiento comercial')
+    await dialog.getByRole('button', { name: 'Color #f97316' }).click()
+    await dialog.getByRole('button', { name: 'Objetivo' }).click()
+    await dialog.getByRole('button', { name: 'Guardar cambios' }).click()
+    await expect.poll(() => mock.appearanceWrites.length).toBe(1)
+    expect(mock.appearanceWrites[0].body).toMatchObject({ name: 'Seguimiento comercial', color: '#f97316', icon: 'target' })
+    await expect(page.getByText('Seguimiento comercial', { exact: true })).toBeVisible()
   })
 
   test('expands search without changing the header height and preserves its query on Escape', async ({ page }) => {
@@ -228,5 +316,72 @@ test.describe('Clarin Work workspace refinement', () => {
     expect(mock.collaboratorWrites[0].user_ids).toEqual([])
     await expect(detail.getByRole('button', { name: 'Quitar a Administrador' })).toHaveCount(0)
     await expect(detail.getByRole('button', { name: 'Añadir colaborador' })).toBeVisible()
+  })
+
+  test('creates in a movable, resizable and dockable window and protects its draft', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 900 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+
+    await page.getByRole('button', { name: 'Nueva tarea' }).click()
+    let dialog = page.getByRole('dialog', { name: 'Crear una tarea' })
+    await expect(dialog).toHaveAttribute('data-window-mode', 'floating')
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Nueva tarea' }).click()
+    dialog = page.getByRole('dialog', { name: 'Crear una tarea' })
+    const beforeMove = await dialog.boundingBox()
+    const header = dialog.getByRole('heading', { name: 'Crear una tarea' }).locator('..').locator('..')
+    const headerBox = await header.boundingBox()
+    await page.mouse.move(headerBox!.x + 350, headerBox!.y + 28)
+    await page.mouse.down()
+    await page.mouse.move(headerBox!.x + 410, headerBox!.y + 62, { steps: 8 })
+    await page.mouse.up()
+    const afterMove = await dialog.boundingBox()
+    expect(afterMove!.x).toBeGreaterThan(beforeMove!.x + 30)
+
+    const resize = dialog.locator('[data-task-window-resize="se"]')
+    const resizeBox = await resize.boundingBox()
+    const beforeResize = await dialog.boundingBox()
+    await page.mouse.move(resizeBox!.x + 2, resizeBox!.y + 2)
+    await page.mouse.down()
+    await page.mouse.move(resizeBox!.x + 42, resizeBox!.y + 32, { steps: 6 })
+    await page.mouse.up()
+    const afterResize = await dialog.boundingBox()
+    expect(afterResize!.width).toBeGreaterThan(beforeResize!.width + 20)
+
+    await dialog.getByRole('button', { name: 'Maximizar' }).click()
+    await expect(dialog).toHaveAttribute('data-window-mode', 'maximized')
+    await dialog.getByRole('button', { name: 'Restaurar' }).click()
+    await expect(dialog).toHaveAttribute('data-window-mode', 'floating')
+    await dialog.getByRole('button', { name: 'Acoplar a la derecha' }).click()
+    await expect(dialog).toHaveAttribute('data-window-mode', 'docked')
+    await dialog.getByRole('button', { name: 'Ventana flotante' }).click()
+
+    await dialog.getByRole('button', { name: /Bandeja general/ }).click()
+    const listSearch = page.getByRole('listbox', { name: 'Seleccionar lista' }).getByPlaceholder('Buscar…')
+    await listSearch.fill('carpeta')
+    await page.getByRole('option', { name: /Lista de carpeta/ }).click()
+    await expect(dialog.getByRole('button', { name: /Lista de carpeta/ })).toBeVisible()
+
+    const title = dialog.getByPlaceholder('¿Qué hay que lograr?')
+    await title.fill('Tarea creada desde ventana profesional')
+    await page.keyboard.press('Escape')
+    const confirm = page.getByRole('alertdialog')
+    await expect(confirm).toContainText('¿Descartar el borrador?')
+    await confirm.getByRole('button', { name: 'Continuar editando' }).click()
+    await expect(title).toHaveValue('Tarea creada desde ventana profesional')
+    await dialog.getByRole('button', { name: 'Crear tarea' }).click()
+    await expect.poll(() => mock.createWrites.length).toBe(1)
+    expect(mock.createWrites[0]).toMatchObject({ title: 'Tarea creada desde ventana profesional', list_id: 'list-folder' })
+  })
+
+  test('removes the shared browser product without hiding web push settings', async ({ page }) => {
+    await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await expect(page.getByRole('link', { name: 'Navegador', exact: true })).toHaveCount(0)
+    await expect(page.locator('a[href="/dashboard/browser"]')).toHaveCount(0)
   })
 })

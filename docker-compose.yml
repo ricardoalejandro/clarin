@@ -32,31 +32,6 @@ services:
     networks:
       - clarin-internal
 
-  shared-browser:
-    build:
-      context: ./shared-browser-gateway
-      dockerfile: ../deploy/Dockerfile.shared-browser-gateway
-    container_name: clarin-shared-browser
-    restart: unless-stopped
-    environment:
-      PORT: 8791
-      PROFILE_ROOT: /data/profiles
-      BROWSER_VIEWPORT_WIDTH: ${SHARED_BROWSER_VIEWPORT_WIDTH:-1365}
-      BROWSER_VIEWPORT_HEIGHT: ${SHARED_BROWSER_VIEWPORT_HEIGHT:-768}
-    volumes:
-      - shared_browser_profiles:/data/profiles
-    shm_size: "1gb"
-    mem_limit: 1536m
-    cpus: 1.5
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8791/health >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 45s
-    networks:
-      - clarin-internal
-
   minio:
     image: minio/minio:latest
     container_name: clarin-minio
@@ -171,8 +146,6 @@ services:
       EROS_MCP_BASE_URL: ${EROS_MCP_BASE_URL:-http://clarin-backend:8081/mcp}
       EROS_MCP_ACCESS_TOKEN: ${EROS_MCP_ACCESS_TOKEN:-}
       EROS_CODEX_BRIDGE_TIMEOUT: ${EROS_CODEX_BRIDGE_TIMEOUT:-195s}
-      SHARED_BROWSER_GATEWAY_URL: ${SHARED_BROWSER_GATEWAY_URL:-http://clarin-shared-browser:8791}
-      SHARED_BROWSER_TIMEOUT: ${SHARED_BROWSER_TIMEOUT:-30s}
       # Google Contacts sync
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -192,8 +165,6 @@ services:
       minio:
         condition: service_healthy
       codex-bridge:
-        condition: service_started
-      shared-browser:
         condition: service_started
     volumes:
       - whatsapp_sessions:/app/sessions
@@ -299,7 +270,6 @@ volumes:
   whatsapp_sessions:
   minio_data:
   codex_bridge_home:
-  shared_browser_profiles:
 networks:
   clarin-internal:
     driver: bridge

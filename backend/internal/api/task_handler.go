@@ -1277,6 +1277,7 @@ func (s *Server) handleCreateTaskList(c *fiber.Ctx) error {
 	var req struct {
 		Name        string  `json:"name"`
 		Color       string  `json:"color"`
+		Icon        string  `json:"icon"`
 		Description string  `json:"description"`
 		FolderID    *string `json:"folder_id"`
 		WorkflowID  *string `json:"workflow_id"`
@@ -1284,8 +1285,16 @@ func (s *Server) handleCreateTaskList(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	req.Icon = strings.TrimSpace(req.Icon)
+	if req.Icon == "" {
+		req.Icon = "list"
+	}
+	if !validTaskContainerIcon(req.Icon) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Icono inválido"})
 	}
 
 	list := &domain.TaskList{
@@ -1293,6 +1302,7 @@ func (s *Server) handleCreateTaskList(c *fiber.Ctx) error {
 		Name:        strings.TrimSpace(req.Name),
 		Description: strings.TrimSpace(req.Description),
 		Color:       req.Color,
+		Icon:        req.Icon,
 		CreatedBy:   userID,
 	}
 	if req.FolderID != nil && *req.FolderID != "" {
@@ -1335,13 +1345,21 @@ func (s *Server) handleUpdateTaskList(c *fiber.Ctx) error {
 	var req struct {
 		Name      *string `json:"name"`
 		Color     *string `json:"color"`
+		Icon      *string `json:"icon"`
 		SortOrder *int    `json:"sort_order"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if req.Icon != nil {
+		trimmed := strings.TrimSpace(*req.Icon)
+		req.Icon = &trimmed
+	}
+	if req.Icon != nil && !validTaskContainerIcon(*req.Icon) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Icono inválido"})
+	}
 
-	if err := s.repos.Task.UpdateList(c.Context(), listID, accountID, req.Name, req.Color, req.SortOrder); err != nil {
+	if err := s.repos.Task.UpdateList(c.Context(), listID, accountID, req.Name, req.Color, req.Icon, req.SortOrder); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to update task list"})
 	}
 	s.invalidateTasksCache(accountID)
