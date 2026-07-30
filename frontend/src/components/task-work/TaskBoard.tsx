@@ -45,10 +45,10 @@ import {
   Plus,
   RotateCcw,
   Star,
-  UserRound,
   X,
 } from 'lucide-react'
 import { apiPost } from '@/lib/api'
+import { useKanbanPan } from '@/lib/useKanbanPan'
 import {
   TASK_PRIORITY_CONFIG,
   Task,
@@ -83,6 +83,8 @@ interface Props {
   onTasksChange: Dispatch<SetStateAction<Task[]>>
   onCanonicalTask: (task: Task, action?: string) => boolean
   onOperation: (operationId: string, active: boolean) => void
+  onTaskCreated: (task: Task, operationId: string) => void
+  recentlyCreatedTaskId?: string
   onDragStateChange: (active: boolean) => void
   onOpen: (task: Task) => void
   onEdit: (task: Task) => void
@@ -118,12 +120,6 @@ function resolvedStatus(task: Task, boardStatus: TaskWorkflowStatus, allStatuses
     return allStatuses.find(status => status.id === task.status_id) || task.status_detail
   }
   return allStatuses.find(status => status.workflow_id === task.status_detail?.workflow_id && status.category === boardStatus.category)
-}
-
-function upsertTask(tasks: Task[], incoming: Task) {
-  const index = tasks.findIndex(task => task.id === incoming.id)
-  if (index < 0) return [incoming, ...tasks]
-  return tasks.map(task => task.id === incoming.id ? incoming : task)
 }
 
 function resolvedCreateStatus(boardStatus: TaskWorkflowStatus, list: TaskList | undefined, allStatuses: TaskWorkflowStatus[]) {
@@ -278,6 +274,7 @@ function TaskBoardCard({
   onCreateSubtask,
   onStar,
   onComplete,
+  highlighted,
 }: {
   task: Task
   columnId: string
@@ -288,6 +285,7 @@ function TaskBoardCard({
   onCreateSubtask: () => void
   onStar: () => void
   onComplete?: () => void
+  highlighted?: boolean
 }) {
   const sortableData = useMemo(() => ({ type: 'task', columnId, listId: task.list_id }), [columnId, task.list_id])
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -307,7 +305,7 @@ function TaskBoardCard({
     {...attributes}
     {...listeners}
     onClick={() => { if (!suppressOpen()) onOpen() }}
-    className={`group relative cursor-grab touch-manipulation select-none overflow-hidden rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${overdue ? 'border-rose-200' : 'border-slate-200'}`}
+    className={`group relative cursor-grab touch-manipulation select-none overflow-hidden rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
   >
     <span className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: task.status_detail?.color || '#64748b' }} />
     <div className="flex items-start gap-2">
@@ -352,6 +350,7 @@ function InlineCreate({
   users,
   currentUserId,
   onCreated,
+  onOperation,
   onMore,
 }: {
   status: TaskWorkflowStatus
@@ -360,7 +359,8 @@ function InlineCreate({
   defaultListId?: string
   users: TaskAccountUser[]
   currentUserId: string
-  onCreated: (task: Task) => void
+  onCreated: (task: Task, operationId: string) => void
+  onOperation: (operationId: string, active: boolean) => void
   onMore: (statusId?: string, draft?: TaskInlineDraft) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -391,7 +391,9 @@ function InlineCreate({
     if (!title.trim() || !ownerId || !list || !targetStatus || saving) return
     setSaving(true)
     setError('')
-    const result = await apiPost<{ task: Task }>('/api/tasks', {
+    const operationId = crypto.randomUUID()
+    onOperation(operationId, true)
+    const result = await apiPost<{ task: Task; operation_id?: string }>('/api/tasks', {
       title: title.trim(),
       description: '',
       type: 'reminder',
@@ -403,14 +405,17 @@ function InlineCreate({
       recurrence_rule: '',
       reminder_minutes: 0,
       placement: 'top',
+      operation_id: operationId,
     })
     if (!result.success || !result.data?.task) {
       setError(result.error || 'No se pudo crear la tarea')
       setSaving(false)
+      onOperation(operationId, false)
       return
     }
-    onCreated(result.data.task)
+    onCreated(result.data.task, result.data.operation_id || operationId)
     setSaving(false)
+    onOperation(operationId, false)
     close()
   }
 
@@ -455,6 +460,8 @@ function BoardColumn({
   onCreateSubtask,
   onStar,
   onComplete,
+  onOperation,
+  recentlyCreatedTaskId,
 }: {
   status: TaskWorkflowStatus
   taskIds: string[]
@@ -471,13 +478,15 @@ function BoardColumn({
   suppressOpen: () => boolean
   onCollapse: () => void
   onConfigureStatuses: () => void
-  onTaskCreated: (task: Task) => void
+  onTaskCreated: (task: Task, operationId: string) => void
   onCreateFull: (statusId?: string, draft?: TaskInlineDraft) => void
   onOpen: (task: Task) => void
   onEdit: (task: Task) => void
   onCreateSubtask: (task: Task) => void
   onStar: (task: Task) => void
   onComplete: (task: Task, status: TaskWorkflowStatus) => void
+  onOperation: (operationId: string, active: boolean) => void
+  recentlyCreatedTaskId?: string
 }) {
   const expanded = !collapsed || temporarilyExpanded
   const defaultList = lists.find(item => item.id === defaultListId)
@@ -495,7 +504,8 @@ function BoardColumn({
     </button>
   </section>
 
-  return <section ref={setNodeRef} data-task-column-id={status.id} data-task-column-collapsed="false" className={`flex h-full min-h-[360px] w-[300px] shrink-0 flex-col overflow-hidden rounded-2xl border shadow-sm transition ${isOver && canReceive ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'}`} style={{ background: `color-mix(in srgb, ${statusColor} 6%, #f8fafc)` }}>
+  return <section ref={setNodeRef} data-task-column-id={status.id} data-task-column-collapsed="false" className={`flex h-full min-h-[360px] w-[300px] shrink-0 items-start rounded-2xl transition ${isOver && canReceive ? 'bg-emerald-50/50 ring-2 ring-inset ring-emerald-300' : ''}`}>
+    <div data-task-column-surface className={`flex max-h-full w-full flex-col overflow-hidden rounded-2xl border shadow-sm transition ${isOver && canReceive ? 'border-emerald-400 shadow-emerald-100' : 'border-slate-200'}`} style={{ background: `color-mix(in srgb, ${statusColor} 6%, #f8fafc)` }}>
     <header className="relative flex shrink-0 items-center gap-2 border-b border-white/80 bg-white/85 px-3 py-2.5 backdrop-blur">
       <span className="h-2.5 w-2.5 shrink-0 rounded-full ring-4 ring-slate-100" style={{ backgroundColor: statusColor }} />
       <h3 className="min-w-0 truncate text-xs font-black uppercase tracking-[.08em] text-slate-700">{status.name}</h3>
@@ -510,19 +520,21 @@ function BoardColumn({
       </div></>}
     </header>
 
-    <div className="shrink-0 px-2 pt-2"><InlineCreate status={status} allStatuses={allStatuses} lists={lists} defaultListId={defaultListId} users={users} currentUserId={currentUserId} onCreated={onTaskCreated} onMore={onCreateFull} /></div>
-    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2 [scrollbar-width:thin]">
+    <div className="kanban-col-scroll min-h-0 overflow-y-auto overscroll-contain p-2">
       <SortableContext items={taskIds} strategy={verticalListSortingStrategy} id={`sortable:${status.id}`}>
-        <div className="min-h-[96px] space-y-2">
+        <div className="space-y-2">
           {taskIds.map(taskId => {
             const task = tasksById.get(taskId)
             if (!task) return null
             const toggleStatus = allStatuses.find(item => item.workflow_id === task.status_detail?.workflow_id && item.category === (task.status_detail?.category === 'done' ? 'not_started' : 'done'))
-            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={toggleStatus ? () => onComplete(task, toggleStatus) : undefined} />
+            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={toggleStatus ? () => onComplete(task, toggleStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} />
           })}
-          {!taskIds.length && <div className={`flex min-h-[110px] flex-col items-center justify-center rounded-xl border border-dashed px-4 text-center transition ${isOver ? 'border-emerald-400 bg-white text-emerald-700' : 'border-slate-300/80 text-slate-400'}`}><UserRound className="h-5 w-5 opacity-50" /><p className="mt-2 text-xs font-semibold">{isOver ? 'Suelta aquí' : 'Sin tareas en este estado'}</p></div>}
+          {!taskIds.length && isOver && <div className="flex h-12 items-center justify-center rounded-xl border border-dashed border-emerald-400 bg-white text-xs font-semibold text-emerald-700">Suelta aquí</div>}
         </div>
       </SortableContext>
+      <div className={taskIds.length ? 'mt-2' : ''}><InlineCreate status={status} allStatuses={allStatuses} lists={lists} defaultListId={defaultListId} users={users} currentUserId={currentUserId} onCreated={onTaskCreated} onOperation={onOperation} onMore={onCreateFull} /></div>
+      {!taskIds.length && !isOver && <p className="px-2 pb-1 text-[10px] font-medium text-slate-400">Sin tareas en este estado</p>}
+    </div>
     </div>
   </section>
 }
@@ -548,6 +560,8 @@ export default function TaskBoard({
   onTasksChange,
   onCanonicalTask,
   onOperation,
+  onTaskCreated,
+  recentlyCreatedTaskId,
   onDragStateChange,
   onOpen,
   onEdit,
@@ -575,6 +589,7 @@ export default function TaskBoard({
   const lastDragEndRef = useRef(0)
   const tasksById = useMemo(() => new Map(localTasks.map(task => [task.id, task])), [localTasks])
   const activeTask = activeId ? tasksById.get(activeId) : undefined
+  useKanbanPan(boardViewportRef)
 
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
@@ -589,6 +604,11 @@ export default function TaskBoard({
     setOrders(nextOrders)
     ordersRef.current = nextOrders
   }, [activeId, groupByList, lists, statuses, tasks])
+
+  useEffect(() => {
+    if (!recentlyCreatedTaskId) return
+    requestAnimationFrame(() => boardViewportRef.current?.querySelector<HTMLElement>(`[data-task-id="${recentlyCreatedTaskId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' }))
+  }, [recentlyCreatedTaskId])
 
   useEffect(() => () => {
     if (recentlyMovedFrameRef.current !== null) cancelAnimationFrame(recentlyMovedFrameRef.current)
@@ -855,7 +875,7 @@ export default function TaskBoard({
       onDragCancel={handleDragCancel}
       accessibility={{ screenReaderInstructions: { draggable: 'Presiona espacio para tomar una tarea, usa las flechas para moverla, espacio para soltarla o Escape para cancelar.' } }}
     >
-      <div ref={boardViewportRef} data-testid="task-board-viewport" className="flex min-h-0 flex-1 items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-2 [scrollbar-width:thin]">
+      <div ref={boardViewportRef} data-testid="task-board-viewport" className="kanban-scroll flex min-h-0 flex-1 items-stretch gap-3 overflow-x-auto overscroll-x-contain px-3 pb-2 sm:px-4">
         {statuses.map(status => <BoardColumn
           key={status.id}
           status={status}
@@ -873,18 +893,9 @@ export default function TaskBoard({
           suppressOpen={suppressOpen}
           onCollapse={() => toggleCollapsed(status.id)}
           onConfigureStatuses={onConfigureStatuses}
-          onTaskCreated={task => {
-            if (!onCanonicalTask(task, 'created')) {
-              void onRefresh()
-              return
-            }
-            const next = upsertTask(localTasks, task)
-            const nextOrders = initialOrders(next, statuses, lists, groupByList)
-            setLocalTasks(next)
-            setOrders(nextOrders)
-            ordersRef.current = nextOrders
-            onTasksChange(current => upsertTask(current, task))
-          }}
+          onTaskCreated={onTaskCreated}
+          onOperation={onOperation}
+          recentlyCreatedTaskId={recentlyCreatedTaskId}
           onCreateFull={onCreateFull}
           onOpen={onOpen}
           onEdit={onEdit}

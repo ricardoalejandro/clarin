@@ -28,6 +28,8 @@ async function json(route: Route, body: unknown, status = 200) {
 
 async function installWorkspaceMock(page: Page) {
   let task = makeTask()
+  let createdTasks: ReturnType<typeof makeTask>[] = []
+  let workspaceSocket: { send(message: string): void } | undefined
   let trashTasks = [{ ...makeTask(), id: 'task-trash', title: 'Tarea eliminada explícitamente', deleted_at: '2026-06-20T12:00:00.000Z', version: 4 }]
   let trashRetentionDays: number | null = 30
   let trashContainers = [{ id: 'list-trash', type: 'list' as const, name: 'Lista archivada', color: '#3b82f6', icon: 'list', archived_at: '2026-06-20T12:00:00.000Z', original_folder_name: 'Cliente Alfa', list_count: 0, task_count: 0, next_eligible_at: '2026-07-20T12:00:00.000Z', can_purge: true, restore_blocked: false }]
@@ -47,9 +49,10 @@ async function installWorkspaceMock(page: Page) {
   const collaboratorWrites: Array<Record<string, unknown>> = []
   const taskWrites: Array<Record<string, unknown>> = []
   const createWrites: Array<Record<string, unknown>> = []
+  const taskQueries: Array<{ search: string; at: number }> = []
   const trashWrites: Array<{ path: string; method: string; body: Record<string, unknown> }> = []
 
-  await page.routeWebSocket('**/ws**', socket => { socket.onMessage(() => undefined) })
+  await page.routeWebSocket('**/ws**', socket => { workspaceSocket = socket; socket.onMessage(() => undefined) })
   await page.route('**/api/**', async route => {
     const request = route.request()
     const url = new URL(request.url())
@@ -76,7 +79,13 @@ async function installWorkspaceMock(page: Page) {
     }
     if (path === '/api/tasks/saved-views') { await json(route, { views: [] }); return }
     if (path === '/api/tasks/stats') { await json(route, { pending: 1, completed: 0, overdue: 0, cancelled: 0, today: 0 }); return }
-    if (path === '/api/tasks' && request.method() === 'GET') { const items = url.searchParams.get('deleted') === 'true' ? trashTasks : [task]; await json(route, { tasks: items, total: items.length }); return }
+    if (path === '/api/tasks' && request.method() === 'GET') {
+      const search = (url.searchParams.get('search') || '').toLocaleLowerCase()
+      taskQueries.push({ search, at: Date.now() })
+      const activeItems = [task, ...createdTasks].filter(item => !search || `${item.title} ${item.description}`.toLocaleLowerCase().includes(search))
+      const items = url.searchParams.get('deleted') === 'true' ? trashTasks : activeItems
+      await json(route, { tasks: items, total: items.length }); return
+    }
 
     if (path === `/api/tasks/${task.id}` && request.method() === 'DELETE') { trashWrites.push({ path, method: request.method(), body }); await json(route, { success: true, task: { ...task, deleted_at: now, version: task.version + 1 }, version: task.version + 1 }); return }
     if (path === '/api/tasks/task-trash/restore' && request.method() === 'POST') { trashWrites.push({ path, method: request.method(), body }); trashTasks = []; await json(route, { success: true, task: { ...makeTask(), id: 'task-trash' } }); return }
@@ -147,7 +156,10 @@ async function installWorkspaceMock(page: Page) {
     }
     if (path === '/api/tasks' && request.method() === 'POST') {
       createWrites.push(body)
-      await json(route, { task: { ...makeTask(), ...body, id: 'task-created', title: String(body.title || ''), collaborators: [] } }, 201)
+      const created = { ...makeTask(), ...body, id: `task-created-${createdTasks.length + 1}`, title: String(body.title || ''), version: 1, collaborators: [] }
+      createdTasks = [created, ...createdTasks]
+      await json(route, { task: created, operation_id: body.operation_id }, 201)
+      setTimeout(() => workspaceSocket?.send(JSON.stringify({ event: 'task_update', data: { action: 'created', task: created, operation_id: body.operation_id } })), 20)
       return
     }
     if (path === `/api/tasks/${task.id}`) { await json(route, { task }); return }
@@ -169,7 +181,7 @@ async function installWorkspaceMock(page: Page) {
     localStorage.setItem('tasks:detail-mode', 'maximized')
   })
 
-  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, trashWrites }
+  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, trashWrites, taskQueries }
 }
 
 async function drag(page: Page, source: Locator, target: Locator) {
@@ -287,6 +299,71 @@ test.describe('Clarin Work workspace refinement', () => {
     expect(Math.abs((after?.height || 0) - (before?.height || 0))).toBeLessThanOrEqual(1)
     await page.getByRole('button', { name: 'Limpiar búsqueda' }).click()
     await expect(search).toHaveValue('')
+  })
+
+  test('waits 500 ms, cancels intermediate searches and performs one final query', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 620 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await expect(page.getByText('Preparar propuesta profesional', { exact: true })).toBeVisible()
+    mock.taskQueries.length = 0
+    await page.keyboard.press('/')
+    const search = page.locator('#task-search')
+    await search.fill('f')
+    await search.fill('fi')
+    await search.fill('finaz')
+    await expect(page.locator('[data-task-search-pending]')).toBeVisible()
+    await page.waitForTimeout(450)
+    expect(mock.taskQueries.filter(query => query.search).length).toBe(0)
+    await expect.poll(() => mock.taskQueries.filter(query => query.search === 'finaz').length).toBe(1)
+    expect(mock.taskQueries.filter(query => query.search && query.search !== 'finaz')).toHaveLength(0)
+  })
+
+  test('keeps an inline-created task visible by clearing active query state and deduplicating its WebSocket echo', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 700 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByRole('button', { name: 'Tablero' }).click()
+    await page.keyboard.press('/')
+    await page.locator('#task-search').fill('finaz')
+    await expect.poll(() => mock.taskQueries.filter(query => query.search === 'finaz').length).toBe(1)
+    await expect(page.locator('[data-task-id]')).toHaveCount(0)
+
+    const todo = page.locator('section[data-task-column-id="status-todo"]')
+    await todo.getByRole('button', { name: 'Agregar tarea' }).click()
+    await todo.getByPlaceholder('Nombre de la tarea…').fill('Nueva tarea que debe permanecer')
+    await todo.getByRole('button', { name: 'Crear', exact: true }).click()
+
+    await expect.poll(() => mock.createWrites.length).toBe(1)
+    expect(mock.createWrites[0].operation_id).toMatch(/^[0-9a-f-]{36}$/)
+    await expect(page.getByRole('status').filter({ hasText: 'Limpiamos la búsqueda y los filtros para mostrar la tarea creada.' })).toBeVisible()
+    await expect(page.locator('#task-search')).toHaveValue('')
+    await expect(page.getByText('Nueva tarea que debe permanecer', { exact: true })).toHaveCount(1)
+    await page.waitForTimeout(250)
+    await expect(page.locator('[data-task-id^="task-created-"]')).toHaveCount(1)
+
+    await page.reload()
+    await page.getByRole('button', { name: 'Tablero' }).click()
+    await expect(page.getByText('Nueva tarea que debe permanecer', { exact: true })).toHaveCount(1)
+  })
+
+  test('supports multiple persisted folder accordions and independent keyboard toggles', async ({ page }) => {
+    await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 620 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const alpha = page.getByRole('button', { name: 'Contraer Cliente Alfa' })
+    const beta = page.getByRole('button', { name: 'Contraer Cliente Beta' })
+    await expect(alpha).toBeVisible()
+    await expect(beta).toBeVisible()
+    await alpha.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('button', { name: 'Expandir Cliente Alfa' })).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('[data-task-hierarchy-list="list-folder"]')).not.toBeVisible()
+    await expect(beta).toHaveAttribute('aria-expanded', 'true')
+    await page.reload()
+    await expect(page.getByRole('button', { name: 'Expandir Cliente Alfa' })).toHaveAttribute('aria-expanded', 'false')
+    await page.getByRole('button', { name: 'Expandir Cliente Alfa' }).click()
+    await expect(page.locator('[data-task-hierarchy-list="list-folder"]')).toBeVisible()
   })
 
   test('keeps the workspace full-bleed and contained across responsive widths', async ({ page }) => {

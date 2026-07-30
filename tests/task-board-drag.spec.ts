@@ -348,4 +348,47 @@ test.describe('Clarin Work Kanban drag stability', () => {
     await expect(column(page, 'status-paused').locator('[data-task-id="todo-1"]')).toHaveCount(1)
     await expect(card(page, 'todo-1')).toHaveCount(1)
   })
+
+  test('pans horizontally with Ctrl or the middle button without opening or moving cards', async ({ page }) => {
+    const mock = await installTaskBoardMock(page)
+    await page.setViewportSize({ width: 1100, height: 720 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const viewport = page.getByTestId('task-board-viewport')
+    await expect(viewport).toBeVisible()
+    await viewport.evaluate(element => { element.scrollLeft = 180 })
+    const box = await viewport.boundingBox()
+    expect(box).not.toBeNull()
+
+    await page.keyboard.down('Control')
+    await page.mouse.move(box!.x + 300, box!.y + 80)
+    await page.mouse.down()
+    await page.mouse.move(box!.x + 220, box!.y + 80, { steps: 6 })
+    await page.mouse.up()
+    await page.keyboard.up('Control')
+    const afterCtrl = await viewport.evaluate(element => element.scrollLeft)
+    expect(afterCtrl).toBeGreaterThan(240)
+
+    await page.mouse.move(box!.x + 300, box!.y + 120)
+    await page.mouse.down({ button: 'middle' })
+    await page.mouse.move(box!.x + 240, box!.y + 120, { steps: 6 })
+    await page.mouse.up({ button: 'middle' })
+    const afterMiddle = await viewport.evaluate(element => element.scrollLeft)
+    expect(afterMiddle).toBeGreaterThan(afterCtrl)
+    expect(mock.moveRequests).toHaveLength(0)
+    await expect(page.getByRole('dialog', { name: 'Detalle de tarea' })).toHaveCount(0)
+  })
+
+  test('keeps full-height drop targets but limits tint to real column content with edge breathing room', async ({ page }) => {
+    await installTaskBoardMock(page)
+    await openBoard(page)
+    const viewport = page.getByTestId('task-board-viewport')
+    const firstColumn = column(page, 'status-todo')
+    const emptyColumn = column(page, 'status-paused')
+    const [viewportBox, firstBox, emptyBox, emptySurfaceBox] = await Promise.all([
+      viewport.boundingBox(), firstColumn.boundingBox(), emptyColumn.boundingBox(), emptyColumn.locator('[data-task-column-surface]').boundingBox(),
+    ])
+    expect(firstBox!.x - viewportBox!.x).toBeGreaterThanOrEqual(12)
+    expect(emptySurfaceBox!.height).toBeLessThan(emptyBox!.height / 2)
+    await expect(emptyColumn.getByRole('button', { name: 'Agregar tarea' })).toBeVisible()
+  })
 })

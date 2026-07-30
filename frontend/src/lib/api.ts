@@ -310,7 +310,7 @@ export async function api<T>(
 }
 
 // Convenience methods
-export const apiGet = <T>(endpoint: string) => api<T>(endpoint, { method: 'GET' })
+export const apiGet = <T>(endpoint: string, options: { signal?: AbortSignal } = {}) => api<T>(endpoint, { method: 'GET', signal: options.signal })
 
 export const apiPost = <T>(endpoint: string, body: unknown) =>
   api<T>(endpoint, {

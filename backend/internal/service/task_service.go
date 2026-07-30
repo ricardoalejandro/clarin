@@ -22,6 +22,7 @@ func NewTaskService(repos *repository.Repositories, hub *ws.Hub) *TaskService {
 }
 
 func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
+	operationID := task.MutationOperationID
 	if err := s.repos.Task.Create(ctx, task); err != nil {
 		return err
 	}
@@ -35,12 +36,15 @@ func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
 
 	// Broadcast
 	if s.hub != nil {
-		payload := map[string]interface{}{"action": "created", "task": canonical}
+		payload := taskCreatedEventPayload(canonical, operationID)
 		if canonical.ParentTaskID != nil {
 			payload = map[string]interface{}{
 				"action":  "subtask_created",
 				"task_id": canonical.ParentTaskID.String(),
 				"subtask": canonical,
+			}
+			if operationID != nil {
+				payload["operation_id"] = operationID.String()
 			}
 		}
 		s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, payload)
@@ -50,6 +54,14 @@ func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
 	}
 
 	return nil
+}
+
+func taskCreatedEventPayload(task *domain.Task, operationID *uuid.UUID) map[string]interface{} {
+	payload := map[string]interface{}{"action": "created", "task": task}
+	if operationID != nil {
+		payload["operation_id"] = operationID.String()
+	}
+	return payload
 }
 
 func (s *TaskService) Update(ctx context.Context, task *domain.Task) error {

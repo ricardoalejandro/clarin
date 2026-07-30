@@ -146,6 +146,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		ReminderMinutes *int     `json:"reminder_minutes"`
 		Notes           string   `json:"notes"`
 		Placement       string   `json:"placement"`
+		OperationID     string   `json:"operation_id"`
 	}
 
 	if err := c.BodyParser(&req); err != nil {
@@ -154,6 +155,10 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	req.Title = strings.TrimSpace(req.Title)
 	if req.Title == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Title is required"})
+	}
+	operationID, operationErr := parseTaskOperationID(req.OperationID)
+	if operationErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
 	}
 
 	var dueAt *time.Time
@@ -375,6 +380,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	task.CollaboratorsSet = true
 	task.CollaboratorsActor = &userID
 	task.MutationActor = &userID
+	task.MutationOperationID = operationID
 	if err := s.services.Task.Create(c.Context(), task); err != nil {
 		return taskWorkError(c, err)
 	}
@@ -434,10 +440,30 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	// Re-read to get joined names
 	full, err := s.services.Task.GetByID(c.Context(), task.ID, accountID)
 	if err != nil {
-		return c.JSON(fiber.Map{"success": true, "task": task})
+		return c.JSON(taskCreateResponse(task, operationID))
 	}
 	s.invalidateTasksCache(accountID)
-	return c.JSON(fiber.Map{"success": true, "task": full})
+	return c.JSON(taskCreateResponse(full, operationID))
+}
+
+func taskCreateResponse(task *domain.Task, operationID *uuid.UUID) fiber.Map {
+	response := fiber.Map{"success": true, "task": task}
+	if operationID != nil {
+		response["operation_id"] = operationID.String()
+	}
+	return response
+}
+
+func parseTaskOperationID(raw string) (*uuid.UUID, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
 // handleGetTasks lists tasks with filters

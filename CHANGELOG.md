@@ -2,6 +2,13 @@
 
 ## 2026-07-30
 
+### Build 5 — Tablero estable, búsquedas confiables y navegación cómoda
+- 🐛 Crear una tarea con búsqueda o filtros activos ya no permite que una recarga WebSocket la haga desaparecer: HTTP y tiempo real comparten un identificador y se reconcilian una sola vez.
+- ⚡ La búsqueda espera 500 ms, cancela solicitudes anteriores y muestra su estado pendiente sin renderizar respuestas obsoletas.
+- ✨ Las carpetas funcionan como acordeones múltiples persistentes y siguen aceptando listas durante un arrastre; la navegación incorpora scroll temático e indicadores de desbordamiento.
+- 💄 El tablero admite desplazamiento con Ctrl o botón central, respira en ambos bordes y limita el color de cada columna al contenido real.
+- ✅ Vitest, React Testing Library, pruebas backend y escenarios Playwright cubren creación, deduplicación, acordeones, paneo, columnas y la regresión completa del Kanban.
+
 ### Build 4 — Papelera segura con retención configurable
 - ✨ Papelera separa tareas de listas y carpetas, conserva su ubicación original y permite restaurarlas con reglas estructurales claras.
 - 🔒 Mover listas o carpetas a Papelera exige escribir su nombre exacto; la eliminación permanente es manual, irreversible, posterior al plazo y exclusiva de administradores.

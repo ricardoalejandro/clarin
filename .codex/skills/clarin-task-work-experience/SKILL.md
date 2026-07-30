@@ -36,6 +36,8 @@ Implement Clarin Work as one complete collaboration surface. Keep hierarchy, sta
 ### 3. Build A Complete Interaction
 
 - Make drag work with mouse, long-press touch, keyboard, empty columns, auto-scroll, cancellation, optimistic preview, rollback, retry, and exact post-reload persistence.
+- Keep folder expansion independent from selection: several folders may remain open, the active list's parent opens automatically, collapsed folders stay valid drag targets, and drag cancellation restores the expansion snapshot.
+- Offer Ctrl+drag and middle-button horizontal panning on wide boards without allowing that gesture to open or move a task.
 - Separate click from drag. Interactive card controls must not begin a drag or open the task accidentally after dropping.
 - Expose only actions with real success, loading, empty, permission, conflict, and failure behavior.
 - Keep one responsible owner and optional collaborators unless the product contract is intentionally migrated end to end.
@@ -47,6 +49,7 @@ Implement Clarin Work as one complete collaboration surface. Keep hierarchy, sta
 - Include stable task IDs, versions, actions, and operation IDs in account-scoped events.
 - Patch canonical task payloads and ordering without replacing a populated board with skeletons or resetting scroll, focus, filters, drafts, or selection.
 - Recognize the initiating client's echo and queue conflicting remote events while a drag is active.
+- Abort obsolete filtered/search requests. A local create carries one operation ID through HTTP and WebSocket; when current filters would hide it, clear that query before inserting the canonical task, then highlight and scroll to exactly one card.
 - Reload task hierarchy only for structural events; comments and task moves must not refetch folders or workflows.
 - Guard every async task switch so a late response cannot replace the newly selected task.
 

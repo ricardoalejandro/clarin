@@ -19,6 +19,8 @@ jobs:
       run: npm --prefix frontend ci
     - name: Install Playwright Browsers
       run: npx playwright install --with-deps
+    - name: Run frontend unit tests
+      run: npm --prefix frontend run test:unit
     - name: Build frontend
       run: npm --prefix frontend run build
     - name: Run Playwright tests

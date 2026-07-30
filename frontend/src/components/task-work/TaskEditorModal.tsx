@@ -44,7 +44,8 @@ interface Props {
   workflows: TaskWorkflow[]
   users: TaskAccountUser[]
   onClose: () => void
-  onSaved: (task: Task) => void
+  onSaved: (task: Task, operationId?: string) => void
+  onOperation?: (operationId: string, active: boolean) => void
 }
 
 const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100'
@@ -56,7 +57,7 @@ function localDateTime(value?: string) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
 }
 
-export default function TaskEditorModal({ open, task, defaultListId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, parentTaskId, parentTaskTitle, lists, folders, workflows, users, onClose, onSaved }: Props) {
+export default function TaskEditorModal({ open, task, defaultListId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, parentTaskId, parentTaskTitle, lists, folders, workflows, users, onClose, onSaved, onOperation }: Props) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<TaskType>('reminder')
@@ -186,6 +187,8 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
     if (!canSave || saving) return
     setSaving(true)
     setError('')
+    const operationId = !task ? crypto.randomUUID() : undefined
+    if (operationId) onOperation?.(operationId, true)
     const body = {
       title: title.trim(), description, type, priority,
       assigned_to: ownerId, collaborator_ids: collaboratorIds,
@@ -196,6 +199,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
       recurrence_rule: recurrence, reminder_minutes: reminder || 0,
       ...(parentTaskId && !task ? { parent_task_id: parentTaskId } : {}),
       ...(task ? { version: editVersion } : {}),
+      ...(operationId ? { operation_id: operationId } : {}),
     }
     const result = task
       ? await apiPut<{ task: Task }>(`/api/tasks/${task.id}`, body)
@@ -207,10 +211,12 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
         setError('La tarea cambió en otra sesión. Conservamos todos tus campos; revisa y vuelve a guardar sobre la versión más reciente.')
       } else setError(result.error || 'No se pudo guardar la tarea')
       setSaving(false)
+      if (operationId) onOperation?.(operationId, false)
       return
     }
-    onSaved(result.data.task)
+    onSaved(result.data.task, operationId)
     setSaving(false)
+    if (operationId) onOperation?.(operationId, false)
     onClose()
   }
 

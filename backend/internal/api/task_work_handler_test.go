@@ -34,6 +34,32 @@ func TestComputeCriticalPathUsesLongestDependencyChain(t *testing.T) {
 	}
 }
 
+func TestParseTaskOperationID(t *testing.T) {
+	if value, err := parseTaskOperationID(""); err != nil || value != nil {
+		t.Fatalf("empty operation id must remain optional: %v, %#v", err, value)
+	}
+	want := uuid.New()
+	got, err := parseTaskOperationID("  " + want.String() + "  ")
+	if err != nil || got == nil || *got != want {
+		t.Fatalf("valid operation id changed: %v, %#v", err, got)
+	}
+	if _, err := parseTaskOperationID("not-a-uuid"); err == nil {
+		t.Fatal("malformed operation id was accepted")
+	}
+}
+
+func TestTaskCreateResponseCarriesOptionalOperationID(t *testing.T) {
+	task := &domain.Task{ID: uuid.New(), AccountID: uuid.New(), Version: 1}
+	operationID := uuid.New()
+	response := taskCreateResponse(task, &operationID)
+	if response["task"] != task || response["operation_id"] != operationID.String() {
+		t.Fatalf("create response lost its canonical identity: %#v", response)
+	}
+	if _, exists := taskCreateResponse(task, nil)["operation_id"]; exists {
+		t.Fatal("response fabricated an omitted operation id")
+	}
+}
+
 func TestGanttRequiresExplicitSchedule(t *testing.T) {
 	start := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
 	due := start.Add(2 * time.Hour)

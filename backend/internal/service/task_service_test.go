@@ -88,3 +88,16 @@ func TestTaskSubtasksUpdatedPayloadCarriesCanonicalParent(t *testing.T) {
 		t.Fatalf("canonical parent is missing from realtime payload: %#v", payload)
 	}
 }
+
+func TestTaskCreatedEventPayloadCarriesOperationID(t *testing.T) {
+	task := &domain.Task{ID: uuid.New(), AccountID: uuid.New(), Version: 1}
+	operationID := uuid.New()
+	payload := taskCreatedEventPayload(task, &operationID)
+	if payload["action"] != "created" || payload["task"] != task || payload["operation_id"] != operationID.String() {
+		t.Fatalf("HTTP/WebSocket creation identity was not preserved: %#v", payload)
+	}
+	withoutOperation := taskCreatedEventPayload(task, nil)
+	if _, exists := withoutOperation["operation_id"]; exists {
+		t.Fatalf("optional operation id was fabricated: %#v", withoutOperation)
+	}
+}

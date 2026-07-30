@@ -4,9 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArchiveRestore, BarChart3, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight,
   Clock3, Columns3, FolderOpen, GanttChartSquare, Inbox, LayoutList, ListTodo, Menu,
-  PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Search, Settings2, ShieldCheck, Sparkles, Star, Trash2, X,
+  Loader2, PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Search, Settings2, ShieldCheck, Sparkles, Star, Trash2, X,
 } from 'lucide-react'
 import { apiDelete, apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
   TASK_PRIORITY_CONFIG, Task, TaskFilters, TaskFolder, TaskGanttData, TaskList, TaskSavedView,
   TaskTrashContainer, TaskTrashPolicy, TaskViewMode, TaskWorkflow, TaskWorkflowStatus, TaskWorkSummary,
@@ -20,6 +21,7 @@ import TaskHierarchyTree from './TaskHierarchyTree'
 import TaskStructureModal from './TaskStructureModal'
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 import { TaskContainerIcon } from './TaskContainerAppearance'
+import { hasActiveTaskQuery, upsertCanonicalTask } from './taskWorkspaceState'
 
 type Scope = { type: 'all' } | { type: 'folder'; id: string } | { type: 'list'; id: string } | { type: 'trash' }
 type CalendarMode = 'month' | 'week' | 'day'
@@ -76,11 +78,11 @@ function appendTaskFilters(params: URLSearchParams, filters: TaskFilters) {
   if (filters.starred !== undefined) params.set('starred', String(filters.starred))
 }
 
-async function fetchTaskPages(params: URLSearchParams) {
+async function fetchTaskPages(params: URLSearchParams, signal?: AbortSignal) {
   const firstParams = new URLSearchParams(params)
   firstParams.set('limit', '200')
   firstParams.set('offset', '0')
-  const first = await apiGet<{ tasks: Task[]; total: number }>(`/api/tasks?${firstParams}`)
+  const first = await apiGet<{ tasks: Task[]; total: number }>(`/api/tasks?${firstParams}`, { signal })
   if (!first.success) return first
   const total = first.data?.total || 0
   const pages: Task[] = [...(first.data?.tasks || [])]
@@ -90,7 +92,7 @@ async function fetchTaskPages(params: URLSearchParams) {
       const pageParams = new URLSearchParams(params)
       pageParams.set('limit', '200')
       pageParams.set('offset', String(offset))
-      return apiGet<{ tasks: Task[]; total: number }>(`/api/tasks?${pageParams}`)
+      return apiGet<{ tasks: Task[]; total: number }>(`/api/tasks?${pageParams}`, { signal })
     }))
     const failed = batch.find(page => !page.success)
     if (failed) return { success: false, error: failed.error || 'No se pudo cargar una página de tareas' }
@@ -272,13 +274,16 @@ export default function TaskWorkspace() {
   const [search, setSearch] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [workspaceWidth, setWorkspaceWidth] = useState(0)
-  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search.trim(), 500)
   const [filters, setFilters] = useState<TaskFilters>(EMPTY_TASK_FILTERS)
   const [collapsedStatusIds, setCollapsedStatusIds] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [recentlyCreatedTaskId, setRecentlyCreatedTaskId] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [navOverflow, setNavOverflow] = useState({ top: false, bottom: false })
   const [editorOpen, setEditorOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
   const [subtaskParent, setSubtaskParent] = useState<Task | null>(null)
@@ -290,6 +295,8 @@ export default function TaskWorkspace() {
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const structureSequence = useRef(0)
   const loadSequence = useRef(0)
+  const taskLoadAbortRef = useRef<AbortController | null>(null)
+  const creationHighlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedOnce = useRef(false)
   const defaultViewLoadHandled = useRef(false)
   const tasksRef = useRef<Task[]>([])
@@ -303,6 +310,7 @@ export default function TaskWorkspace() {
   const reconciliationTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const workspaceRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const navRef = useRef<HTMLElement>(null)
 
   const lists = useMemo(() => [...rootLists, ...folders.flatMap(folder => folder.lists)], [rootLists, folders])
   const globalTaskCount = useMemo(() => lists.reduce((total, list) => total + (list.task_count || 0), 0), [lists])
@@ -349,6 +357,9 @@ export default function TaskWorkspace() {
   }, [])
 
   const loadTasks = useCallback(async (showLoader = false) => {
+    taskLoadAbortRef.current?.abort()
+    const controller = new AbortController()
+    taskLoadAbortRef.current = controller
     const sequence = ++loadSequence.current
     const versionsAtRequestStart = new Map(taskVersions.current)
     if (showLoader && !loadedOnce.current) setLoading(true)
@@ -358,8 +369,9 @@ export default function TaskWorkspace() {
     const ganttParams = scopeQuery(scope)
     if (debouncedSearch) ganttParams.set('search', debouncedSearch)
     appendTaskFilters(ganttParams, filters)
-    const taskRes = await fetchTaskPages(params)
-    if (sequence !== loadSequence.current) return
+    const queryActive = hasActiveTaskQuery(debouncedSearch, taskFilterCount(filters))
+    const taskRes = await fetchTaskPages(params, controller.signal)
+    if (sequence !== loadSequence.current || controller.signal.aborted) return
     if (taskRes.success) {
       const loadedTasks = taskRes.data?.tasks || []
       setTasks(current => {
@@ -378,7 +390,7 @@ export default function TaskWorkspace() {
           return [task]
         })
         const loadedIDs = new Set(loadedTasks.map(task => task.id))
-        for (const task of current) {
+        for (const task of queryActive ? [] : current) {
           if (!loadedIDs.has(task.id)
             && (task.version || 0) > (versionsAtRequestStart.get(task.id) || 0)
             && taskTombstones.current.get(task.id) === undefined) reconciled.push(task)
@@ -386,12 +398,12 @@ export default function TaskWorkspace() {
         return reconciled
       })
     }
-    else setError(taskRes.error || 'No se pudieron cargar las tareas')
+    else if (!controller.signal.aborted) setError(taskRes.error || 'No se pudieron cargar las tareas')
     if (view === 'gantt') {
-      const ganttRes = await apiGet<TaskGanttData>(`/api/tasks/gantt?${ganttParams}`)
-      if (sequence !== loadSequence.current) return
+      const ganttRes = await apiGet<TaskGanttData>(`/api/tasks/gantt?${ganttParams}`, { signal: controller.signal })
+      if (sequence !== loadSequence.current || controller.signal.aborted) return
       if (ganttRes.success && ganttRes.data) setGantt({ tasks: ganttRes.data.tasks || [], dependencies: ganttRes.data.dependencies || [], critical_task_ids: ganttRes.data.critical_task_ids || [], slack_minutes: ganttRes.data.slack_minutes || {}, unscheduled_count: ganttRes.data.unscheduled_count || 0 })
-      else if (!ganttRes.success) setError(ganttRes.error || 'No se pudo cargar el diagrama Gantt')
+      else if (!ganttRes.success && !controller.signal.aborted) setError(ganttRes.error || 'No se pudo cargar el diagrama Gantt')
     }
     loadedOnce.current = true
     setLoading(false)
@@ -433,23 +445,59 @@ export default function TaskWorkspace() {
     if (!active) reconcileQueuedRealtime()
   }, [reconcileQueuedRealtime])
 
+  const revealCreatedTask = useCallback((saved: Task) => {
+    if (!acceptCanonicalTask(saved, 'created')) return
+    const clearedQuery = hasActiveTaskQuery(search, taskFilterCount(filters))
+    if (refreshTimer.current) {
+      clearTimeout(refreshTimer.current)
+      refreshTimer.current = null
+    }
+    taskLoadAbortRef.current?.abort()
+    setSearch('')
+    setDebouncedSearch('')
+    setFilters(EMPTY_TASK_FILTERS)
+    setTasks(current => upsertCanonicalTask(current, saved))
+    setRecentlyCreatedTaskId(saved.id)
+    setNotice(clearedQuery ? 'Limpiamos la búsqueda y los filtros para mostrar la tarea creada.' : 'Tarea creada y lista para trabajar.')
+    if (creationHighlightTimer.current) clearTimeout(creationHighlightTimer.current)
+    creationHighlightTimer.current = setTimeout(() => {
+      setRecentlyCreatedTaskId('')
+      setNotice('')
+    }, 4200)
+    void loadStructure()
+  }, [acceptCanonicalTask, filters, loadStructure, search])
+
   useEffect(() => { void loadStructure() }, [loadStructure])
   useEffect(() => {
     if (!structureReady) return
     if (scope.type === 'list' && !lists.some(list => list.id === scope.id)) setScope({ type: 'all' })
     if (scope.type === 'folder' && !folders.some(folder => folder.id === scope.id)) setScope({ type: 'all' })
   }, [scope, lists, folders, structureReady])
-  useEffect(() => { const timer = setTimeout(() => setDebouncedSearch(search.trim()), 250); return () => clearTimeout(timer) }, [search])
   useEffect(() => { void loadTasks(!loadedOnce.current) }, [loadTasks])
   useEffect(() => {
     tasksRef.current = tasks
     for (const task of tasks) taskVersions.current.set(task.id, Math.max(taskVersions.current.get(task.id) || 0, task.version || 0))
   }, [tasks])
   useEffect(() => () => {
+    taskLoadAbortRef.current?.abort()
     if (reconciliationTimer.current) clearTimeout(reconciliationTimer.current)
+    if (refreshTimer.current) clearTimeout(refreshTimer.current)
+    if (creationHighlightTimer.current) clearTimeout(creationHighlightTimer.current)
     pendingOperationTimers.current.forEach(timer => clearTimeout(timer))
     pendingOperationTimers.current.clear()
   }, [])
+  useEffect(() => {
+    const nav = navRef.current
+    if (!nav) return
+    const update = () => setNavOverflow({ top: nav.scrollTop > 2, bottom: nav.scrollTop + nav.clientHeight < nav.scrollHeight - 2 })
+    update()
+    nav.addEventListener('scroll', update, { passive: true })
+    const observer = new ResizeObserver(update)
+    observer.observe(nav)
+    const mutation = new MutationObserver(update)
+    mutation.observe(nav, { childList: true, subtree: true })
+    return () => { nav.removeEventListener('scroll', update); observer.disconnect(); mutation.disconnect() }
+  }, [sidebarCollapsed, folders, rootLists])
   useEffect(() => { localStorage.setItem('tasks:view', view) }, [view])
   useEffect(() => {
     const element = workspaceRef.current
@@ -497,6 +545,12 @@ export default function TaskWorkspace() {
         return
       }
       const incoming = payload.task
+      if (hasActiveTaskQuery(search, taskFilterCount(filters))) {
+        if (refreshTimer.current) clearTimeout(refreshTimer.current)
+        refreshTimer.current = setTimeout(() => void loadTasks(false), 180)
+        if (action === 'created' || action === 'restored' || payload.structure_changed) void loadStructure()
+        return
+      }
       if (!acceptCanonicalTask(incoming, action)) return
       const previous = tasksRef.current.find(task => task.id === incoming.id)
       setTasks(current => {
@@ -538,7 +592,7 @@ export default function TaskWorkspace() {
     }
     if (refreshTimer.current) clearTimeout(refreshTimer.current)
     refreshTimer.current = setTimeout(() => void loadTasks(false), 180)
-  }), [acceptCanonicalTask, debouncedSearch, filters, folders, loadTasks, loadStructure, markTaskDeleted, scope, view])
+  }), [acceptCanonicalTask, debouncedSearch, filters, folders, loadTasks, loadStructure, markTaskDeleted, scope, search, view])
   useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.target as HTMLElement)?.matches('input,textarea,select,[contenteditable="true"]')) return; if (event.key.toLowerCase() === 'n') { event.preventDefault(); if (scope.type === 'trash') setError('Sal de la papelera para crear una tarea.'); else if (scope.type === 'folder' && !activeFolder?.lists.length) { setError('Esta carpeta todavía no tiene listas. Crea una lista antes de añadir tareas.'); setStructureOpen(true) } else { setSubtaskParent(null); setEditingTask(null); setEditorOpen(true) } } if (event.key === '/') { event.preventDefault(); setSearchOpen(true); requestAnimationFrame(() => searchInputRef.current?.focus()) } }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener) }, [activeFolder, scope.type])
 
   const defaultWorkflow = workflows.find(item => item.is_default) || workflows[0]
@@ -635,16 +689,17 @@ export default function TaskWorkspace() {
   }
 
   const immersiveView = scope.type !== 'trash' && ['board', 'calendar', 'gantt'].includes(view)
+  const searchPending = search.trim() !== debouncedSearch
 
   return <div ref={workspaceRef} data-task-workspace-width={workspaceWidth} className="relative flex h-full min-h-0 w-full overflow-hidden bg-slate-50">
     {sidebarOpen && <button aria-label="Cerrar navegación" onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-40 bg-slate-950/30 lg:hidden" />}
     <aside className={`absolute inset-y-0 left-0 z-50 flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all lg:relative lg:z-10 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} ${sidebarCollapsed ? 'w-[72px]' : 'w-[268px]'}`}>
       <div className="flex h-16 items-center border-b border-slate-100 px-4"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white"><Check className="h-4 w-4" /></div>{!sidebarCollapsed && <div className="ml-3 min-w-0"><p className="truncate text-sm font-black text-slate-900">Clarin Work</p><p className="text-[10px] font-semibold uppercase tracking-[.16em] text-emerald-600">Tareas y proyectos</p></div>}<button onClick={() => setSidebarCollapsed(value => !value)} className="ml-auto hidden rounded-lg p-2 text-slate-400 hover:bg-slate-100 lg:block">{sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}</button><button onClick={() => setSidebarOpen(false)} className="ml-auto rounded-lg p-2 text-slate-400 lg:hidden"><X className="h-4 w-4" /></button></div>
-      <nav className="flex-1 overflow-y-auto px-2 py-3">
+      <div className="relative min-h-0 flex-1"><nav ref={navRef} className="task-navigation-scroll h-full overflow-y-auto px-2 py-3">
         <button title="Todo el trabajo" onClick={() => selectScope({ type: 'all' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold ${scope.type === 'all' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'}`}><Inbox className="h-4 w-4 shrink-0" />{!sidebarCollapsed && <><span className="flex-1 text-left">Todo el trabajo</span><span className="text-[10px] text-slate-400">{globalTaskCount}</span></>}</button>
         {!sidebarCollapsed && <div className="mb-2 mt-5 flex items-center justify-between px-2"><span className="text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Carpetas y listas</span><button onClick={() => setStructureOpen(true)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-emerald-600"><Plus className="h-3.5 w-3.5" /></button></div>}
         <TaskHierarchyTree folders={folders} rootLists={rootLists} scope={scope} collapsed={sidebarCollapsed} onSelect={selectScope} onChanged={async () => { await loadStructure(); await loadTasks(false) }} onError={setError} onOperation={handleBoardOperation} />
-      </nav>
+      </nav>{navOverflow.top && <div className="pointer-events-none absolute inset-x-0 top-0 h-5 bg-gradient-to-b from-white to-transparent" />}{navOverflow.bottom && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-white to-transparent" />}</div>
       <div className="border-t border-slate-100 p-2"><button onClick={() => selectScope({ type: 'trash' })} title="Papelera" className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold ${scope.type === 'trash' ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50'}`}><Trash2 className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Papelera'}</button><button onClick={() => setStructureOpen(true)} title="Configurar" className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-800"><Settings2 className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Configurar espacio'}</button></div>
     </aside>
 
@@ -657,7 +712,8 @@ export default function TaskWorkspace() {
             <div className={`relative flex h-9 items-center overflow-hidden rounded-xl border transition-all duration-200 ${searchOpen ? `${workspaceWidth < 850 ? 'w-44' : 'w-64'} border-emerald-300 bg-white shadow-sm` : `w-9 ${search ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}`}>
               <button type="button" aria-label="Buscar tareas" onClick={() => { setSearchOpen(true); requestAnimationFrame(() => searchInputRef.current?.focus()) }} className="flex h-9 w-9 shrink-0 items-center justify-center text-slate-500"><Search className="h-4 w-4" /></button>
               <input ref={searchInputRef} id="task-search" value={search} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setSearchOpen(false); event.currentTarget.blur() } }} placeholder="Buscar tareas…" className="h-full min-w-0 flex-1 bg-transparent pr-1 text-sm text-slate-700 outline-none placeholder:text-slate-400" />
-              {search && <button type="button" aria-label="Limpiar búsqueda" onClick={() => { setSearch(''); setDebouncedSearch(''); setSearchOpen(false) }} className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-3.5 w-3.5" /></button>}
+              {searchPending && <Loader2 data-task-search-pending className="h-3.5 w-3.5 shrink-0 animate-spin text-emerald-500" aria-label="Esperando para buscar" />}
+              {search && <button type="button" aria-label="Limpiar búsqueda" onClick={() => { taskLoadAbortRef.current?.abort(); setSearch(''); setDebouncedSearch(''); setSearchOpen(false) }} className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-3.5 w-3.5" /></button>}
               {!searchOpen && search && <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-emerald-500" />}
             </div>
             {scope.type !== 'trash' && structureReady && <TaskFilterToolbar filters={filters} statuses={allStatuses} users={users} scope={scope.type === 'all' ? { type: 'all' } : { type: scope.type, id: scope.id }} view={view} collapsedStatusIds={collapsedStatusIds} onChange={setFilters} onApplyView={applySavedView} applyDefaultOnLoad={!defaultViewLoadHandled.current} onDefaultLoadHandled={() => { defaultViewLoadHandled.current = true }} onError={setError} showChips={false} />}
@@ -667,11 +723,12 @@ export default function TaskWorkspace() {
       </header>
 
       <div data-task-workspace-canvas className={`min-h-0 flex-1 ${immersiveView ? 'overflow-hidden p-0' : 'overflow-auto p-2 sm:p-3'}`}>
+        {notice && <div role="status" className="m-2 mb-3 flex items-center justify-between rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700"><span>{notice}</span><button aria-label="Cerrar aviso" onClick={() => setNotice('')}><X className="h-4 w-4" /></button></div>}
         {error && <div className="m-2 mb-3 flex items-center justify-between rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"><span>{error}</span><button onClick={() => setError('')}><X className="h-4 w-4" /></button></div>}
         {loading ? <div className="space-y-3">{Array.from({length:5}).map((_,index) => <div key={index} className="h-16 animate-pulse rounded-2xl bg-slate-200/60" />)}</div> : <div className="h-full min-h-[420px]">
           {scope.type === 'trash' && <TrashView tasks={tasks} onChanged={async () => { await Promise.all([loadTasks(false), loadStructure()]) }} onError={setError} />}
           {scope.type !== 'trash' && view === 'list' && <ListView tasks={tasks} statuses={statuses} allStatuses={allStatuses} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} />}
-          {scope.type !== 'trash' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setTasks} onCanonicalTask={acceptCanonicalTask} onOperation={handleBoardOperation} onDragStateChange={handleBoardDragState} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => setStructureOpen(true)} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={() => loadTasks(false)} onError={setError} />}
+          {scope.type !== 'trash' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setTasks} onCanonicalTask={acceptCanonicalTask} onOperation={handleBoardOperation} onTaskCreated={revealCreatedTask} recentlyCreatedTaskId={recentlyCreatedTaskId} onDragStateChange={handleBoardDragState} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => setStructureOpen(true)} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={() => loadTasks(false)} onError={setError} />}
           {scope.type !== 'trash' && view === 'calendar' && <CalendarView tasks={tasks} onOpen={task => setSelectedTaskId(task.id)} />}
           {scope.type !== 'trash' && view === 'gantt' && <TaskGanttView data={gantt} onOpen={task => setSelectedTaskId(task.id)} onMove={moveGantt} />}
           {scope.type !== 'trash' && view === 'summary' && <SummaryView tasks={tasks} summary={visibleSummary} users={users} />}
@@ -679,17 +736,20 @@ export default function TaskWorkspace() {
       </div>
     </main>
 
-    <TaskEditorModal open={editorOpen} task={editingTask?.id ? editingTask : null} parentTaskId={subtaskParent?.id} parentTaskTitle={subtaskParent?.title} defaultListId={subtaskParent?.list_id || createDraft?.listId || activeList?.id || activeFolder?.lists[0]?.id || lists.find(list => list.is_default)?.id || lists[0]?.id} defaultStatusId={createStatusId} defaultOwnerId={subtaskParent?.assigned_to || createDraft?.ownerId || currentUserId} defaultTitle={createDraft?.title} defaultPriority={createDraft?.priority} defaultDueAt={createDraft?.dueDate ? new Date(`${createDraft.dueDate}T17:00:00`).toISOString() : undefined} lists={editorLists} folders={folders} workflows={workflows} users={users} onClose={() => { setEditorOpen(false); setEditingTask(null); setSubtaskParent(null); setCreateStatusId(''); setCreateDraft(null) }} onSaved={saved => {
+    <TaskEditorModal open={editorOpen} task={editingTask?.id ? editingTask : null} parentTaskId={subtaskParent?.id} parentTaskTitle={subtaskParent?.title} defaultListId={subtaskParent?.list_id || createDraft?.listId || activeList?.id || activeFolder?.lists[0]?.id || lists.find(list => list.is_default)?.id || lists[0]?.id} defaultStatusId={createStatusId} defaultOwnerId={subtaskParent?.assigned_to || createDraft?.ownerId || currentUserId} defaultTitle={createDraft?.title} defaultPriority={createDraft?.priority} defaultDueAt={createDraft?.dueDate ? new Date(`${createDraft.dueDate}T17:00:00`).toISOString() : undefined} lists={editorLists} folders={folders} workflows={workflows} users={users} onOperation={handleBoardOperation} onClose={() => { setEditorOpen(false); setEditingTask(null); setSubtaskParent(null); setCreateStatusId(''); setCreateDraft(null) }} onSaved={saved => {
       if (saved.parent_task_id) {
         if (subtaskParent) setSelectedTaskId(subtaskParent.id)
         void loadTasks(false)
         return
       }
-      if (!acceptCanonicalTask(saved, editingTask ? 'updated' : 'created')) return
-      setTasks(current => { const exists = current.some(item => item.id === saved.id); return exists ? current.map(item => item.id === saved.id ? saved : item) : [saved, ...current] })
+      if (!editingTask) {
+        revealCreatedTask(saved)
+        return
+      }
+      if (!acceptCanonicalTask(saved, 'updated')) return
+      setTasks(current => upsertCanonicalTask(current, saved))
       if (!editingTask || editingTask.list_id !== saved.list_id || editingTask.parent_task_id !== saved.parent_task_id) void loadStructure()
-      if (!editingTask && saved.list_id) { setSearch(''); setDebouncedSearch(''); setFilters(EMPTY_TASK_FILTERS); setScope({ type: 'list', id: saved.list_id }) }
-      else void loadTasks(false)
+      void loadTasks(false)
     }} />
     <TaskDetailDrawer taskId={selectedTaskId} allTasks={tasks} users={users} lists={lists} workflows={workflows} onClose={closeTaskDetail} onEdit={task => { setSubtaskParent(null); setCreateDraft(null); setEditingTask(task); setEditorOpen(true) }} onOpenTask={setSelectedTaskId} onCreateSubtask={task => { setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onChanged={changed => { if (changed && acceptCanonicalTask(changed)) setTasks(current => current.map(item => item.id === changed.id ? changed : item)); void loadTasks(false) }} onDeleted={(id, version) => { const accepted = markTaskDeleted(id, version); if (accepted) { setTasks(current => current.filter(item => item.id !== id)); void loadStructure() }; return accepted }} />
     <TaskStructureModal open={structureOpen} folders={folders} lists={lists} workflows={workflows} onClose={() => setStructureOpen(false)} onChanged={async () => { await loadStructure(); await loadTasks(false) }} onOperation={handleBoardOperation} />

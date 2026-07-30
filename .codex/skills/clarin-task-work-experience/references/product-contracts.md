@@ -52,6 +52,8 @@ Read the sections relevant to the requested task change before editing.
 - Use the entire card as a discoverable drag surface while keeping an accessible handle and excluding buttons, inputs, links, menus, and selects.
 - A short click opens the detail. Completing, starring, editing, archiving, and adding a subtask never initiate drag.
 - Keep status columns compact, colored from the real status, collapsible, and droppable. Collapsed columns must remain understandable and expand on intentional drag hover.
+- Ctrl+drag and middle-button drag pan the wide board horizontally with open/closed-hand cursor feedback. These gestures suppress card click and task drag while preserving normal wheel, touch, keyboard, and sortable behavior.
+- The full-height column remains a drop target, but its tinted visual surface grows only with real content up to the available height. Empty columns stay compact, and “Agregar tarea” follows the last card rather than floating above it.
 
 ## Task Cards And Creation
 
@@ -60,6 +62,8 @@ Read the sections relevant to the requested task change before editing.
 - Inline creation inherits an unambiguous list and real status. If the scope contains multiple possible lists, require a list selection.
 - Enter saves a valid title; Escape cancels; More options preserves the draft in the full editor.
 - Insert inline-created tasks at a deterministic server position and patch them without losing board scroll.
+- Every create may carry one optional UUID `operation_id`; the response and `task_update/created` event return the same value. The initiating client deduplicates the HTTP result and WebSocket echo by ID, version, and operation ID.
+- If search or filters would hide a task just created by the current user, clear both while preserving the current folder/list scope, insert the canonical task once, scroll to it, highlight it temporarily, and explain why the query was cleared.
 - Full task creation uses the same window behavior as detail: floating and docked desktop modes leave the workspace interactive, maximized and mobile modes are modal, and the remembered geometry is clamped to the measured viewport. Support header drag, edge/corner resize, right docking, maximize/restore, and double-click maximize.
 - Escape closes an untouched creation form immediately. Once the user changes any field, Escape/close must offer “continue editing” or explicit discard and preserve the complete draft when discard is cancelled.
 - List, folder, workflow, recurrence, reminder, category, color, and icon choices use accessible viewport-aware portaled pickers. The task-list picker is searchable and grouped by default list, independent lists, and folders with a real breadcrumb.
@@ -68,6 +72,7 @@ Read the sections relevant to the requested task change before editing.
 
 - Combine different fields with AND and multiple choices inside one field with OR.
 - Keep search directly accessible without displacing the primary view tabs. A compact search may expand in place on click or `/`; Escape collapses without deleting the query, while its clear action deletes and collapses. Show active filters as removable chips only while filters exist.
+- Debounce task search for exactly 500 ms and expose the pending state quietly. Abort prior task/Gantt requests whenever query, filters, scope, or view changes; cancellation is not an error and an older response can never replace the latest result.
 - Validate every saved-view JSON field server-side; keep views private to the current account/user unless shared views are explicitly designed.
 - Apply a user's default saved view only during the workspace bootstrap. Remounting the toolbar after visiting Trash or changing scope must not overwrite the user's current navigation.
 - A filtered reorder must use server anchors and must never submit a replacement order composed only of filtered cards.
@@ -91,6 +96,7 @@ Read the sections relevant to the requested task change before editing.
 - Keep title/actions and views/tools in two compact header rows. Lista, Tablero, Calendario, Gantt, and Resumen remain primary navigation and do not move when search expands.
 - Board, calendar, and Gantt use the complete measured canvas. Reading views may retain only an 8–12 px breathing margin. Empty states fill the available surface instead of rendering as an inset card.
 - Base responsive decisions on the measured workspace container after dashboard navigation and Eros chrome, not on browser width alone.
+- The hierarchy navigation is independently scrollable with a quiet theme-aware scrollbar and edge shadows only when overflow exists. Folder accordions allow multiple open folders and remember expansion locally while always auto-opening the active list's parent.
 
 ## Activity, Comments, And Realtime
 
@@ -99,6 +105,7 @@ Read the sections relevant to the requested task change before editing.
 - Preserve mentions, attachments, author permissions, composer draft, edit draft, scroll proximity, and keyboard shortcuts during realtime updates.
 - Page boundaries remain correct when comments are created or deleted. A canonical remote edit must update an already-loaded older comment by ID without replacing the recipient's locally-authorized edit/delete permissions.
 - Events include account scope, stable task ID, action, canonical version, and operation ID when initiated optimistically.
+- Under an active search or filter, remote create/update events never flash an unverified task into the UI; reconcile against the latest abortable canonical server response instead.
 - Keep a maximum accepted version and versioned delete tombstone per task in the workspace. Reject older task/order/HTTP payloads, and clear a tombstone only with a strictly compatible canonical restore, so out-of-order update/delete/restore delivery cannot resurrect or hide work.
 - Patch task moves and ordinary updates. Reload folders/lists/workflows only for structural events.
 - A late response from a previous task must never replace the currently selected task.

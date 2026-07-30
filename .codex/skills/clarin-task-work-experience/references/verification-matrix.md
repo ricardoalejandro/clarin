@@ -32,16 +32,21 @@
 - Use two sessions; confirm no duplicate card, skeleton flash, scroll reset, or stale status/order.
 - Deliver move/update/delete/restore events and their HTTP responses deliberately out of order; verify max-version/tombstone guards reject every older task and order payload.
 - Verify aggregate scopes with same and different workflows.
+- Pan a horizontally overflowing board with Ctrl+left-drag and middle-button drag; verify cursor feedback, no card click, no task move, and unchanged wheel/touch/keyboard behavior.
+- Compare empty, short, and long columns: the droppable fills the canvas, the tint follows content, “Agregar tarea” follows the cards, long content scrolls vertically, and both board edges retain 12–16 px breathing room.
 
 ## Creation, Filters, And Views
 
 - Create inline with title only and with responsible, due date, priority, and More options.
+- Search for a non-matching term, create inline, and deliver HTTP plus the matching WebSocket echo in both orders. Assert one write, one card, cleared search/filters, unchanged scope, explanatory notice, highlight/scroll, and persistence after reload.
+- Type several search values rapidly with fake timers and browser requests: no query before 500 ms, one final query, prior tasks/Gantt requests aborted, cancellation silent, and no stale response rendered.
 - Verify ambiguous folder/all scopes require a list and created tasks appear in the selected hierarchy.
 - Combine multi-value filters, remove individual chips, clear all, and preserve visible data while loading.
 - Create, apply, update, default, and delete a saved view from another session/device; deny another user/account.
 - Visit Trash and return after initial default-view bootstrap; confirm the default does not reapply over the user's current scope.
 - In Trash, verify Tareas and Listas y carpetas tabs, original location, archived date, countdown/“Nunca”, restore constraints, admin-only policy/purge controls, exact-name irreversible dialog, loading, retry, Escape, and WebSocket reconciliation.
 - Confirm navigation renders the pinned default list first, then “Listas independientes” with its explanation, then folders in canonical order. Drag folders and lists with mouse, touch long-press, and keyboard; verify overlay/insertion target, one request per gesture, exact Escape/outside/`409`/`500` rollback, and workflow confirmation before a populated list changes workflow.
+- Expand several folders independently by mouse and keyboard, reload persisted state, auto-open the active parent, autoexpand a collapsed drag target after an intentional pause, and restore expansion exactly on Escape/error. With enough folders, verify the themed scrollbar and top/bottom overflow shadows.
 - Rename a default list, root list, nested list, and folder; choose every supported color/icon by pointer and keyboard, then reload and prove the canonical values return. Reject an icon outside the catalog.
 - At 1398×504, 1024, 768, and 375 px—and with Eros open—verify full-bleed canvas, stable two-row header, primary view tabs, search expansion without height/layout shift, `/` focus, Escape retention, and clear/collapse behavior.
 
@@ -61,7 +66,7 @@
 ## Baseline And Production
 
 - Run `GOCACHE=/tmp/go-build go test ./...` from `backend`.
-- Run `npx tsc --noEmit` and `npm run build` from `frontend`.
+- Run `npm run test:unit`, `npx tsc --noEmit`, and `npm run build` from `frontend`.
 - Run `git diff --check` and inspect the complete diff for secrets or unrelated changes.
 - After `make deploy`, verify Clarin containers, backend `/health`, `/api/version`, backend/frontend logs, live task schema/indexes, saved views, and absence of duplicate active order positions.
 - When retiring a stateful module, create and verify a restricted off-repository database/volume backup before the first migration-capable restart. After deployment, verify the removed routes, permission, tables, service, volume, image and dependency are absent while similarly named unrelated features remain.
