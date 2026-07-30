@@ -2,6 +2,15 @@
 
 ## 2026-07-30
 
+### Build 6 — Movimientos profesionales, mazos y creación desde calendario
+- ✨ El detalle permite trasladar tareas entre listas con un selector buscable; padre y subtareas cambian juntos y conservan la categoría equivalente del flujo.
+- ✨ El tablero incorpora selección por checkbox y rango con Shift, barra de acciones masivas y un mazo animado de hasta tres cartas que representa todo el grupo.
+- 🔒 Los movimientos masivos de estado o lista son account-scoped, atómicos, conservan el orden relativo y producen una única escritura y un único evento en tiempo real.
+- ✨ Las listas y carpetas del panel izquierdo aceptan tareas como destinos; una carpeta siempre solicita elegir su lista concreta.
+- ✨ Calendario permite crear directamente en días o franjas horarias mediante un composer compacto, y “Más opciones” conserva fechas, lista, responsable y borrador.
+- 💄 El control de lista del detalle, el estado en vista Lista, la navegación contraída y el botón primario usan el lenguaje visual accesible de Clarin Work.
+- ✅ Las pruebas unitarias cubren selección, rango, mazo, deduplicación masiva, destinos y fechas del composer; pasan a ser obligatorias para todo cambio funcional estable.
+
 ### Build 5 — Tablero estable, búsquedas confiables y navegación cómoda
 - 🐛 Crear una tarea con búsqueda o filtros activos ya no permite que una recarga WebSocket la haga desaparecer: HTTP y tiempo real comparten un identificador y se reconcilian una sola vez.
 - ⚡ La búsqueda espera 500 ms, cancela solicitudes anteriores y muestra su estado pendiente sin renderizar respuestas obsoletas.
