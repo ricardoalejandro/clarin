@@ -13,6 +13,10 @@ import (
 // the richer UI is rolled out.
 func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 	statements := []string{
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS task_trash_retention_days SMALLINT DEFAULT 30`,
+		`DO $$ BEGIN ALTER TABLE accounts ADD CONSTRAINT accounts_task_trash_retention_days_check
+			CHECK (task_trash_retention_days IS NULL OR task_trash_retention_days BETWEEN 7 AND 365);
+			EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`CREATE TABLE IF NOT EXISTS task_lists (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -85,6 +89,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS workflow_id UUID REFERENCES task_workflows(id) ON DELETE RESTRICT`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS workflow_inherited BOOLEAN NOT NULL DEFAULT TRUE`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`,
+		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS archived_with_folder BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE`,
 		`ALTER TABLE task_lists ADD COLUMN IF NOT EXISTS icon TEXT NOT NULL DEFAULT 'list'`,
@@ -185,6 +190,23 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			UNIQUE(task_id, media_asset_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(account_id, task_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS task_media_gc_jobs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			media_asset_id UUID NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE,
+			object_key TEXT NOT NULL,
+			status VARCHAR(20) NOT NULL DEFAULT 'pending',
+			attempts INT NOT NULL DEFAULT 0,
+			available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			claim_token UUID,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT task_media_gc_jobs_status_check CHECK (status IN ('pending','processing')),
+			UNIQUE(account_id,media_asset_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_media_gc_jobs_due
+			ON task_media_gc_jobs(available_at,id) WHERE status='pending'`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_comments_account_task_id ON task_comments(account_id,task_id,id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_attachments_account_task_id ON task_attachments(account_id,task_id,id)`,
 		`CREATE TABLE IF NOT EXISTS task_comment_mentions (

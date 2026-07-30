@@ -42,6 +42,7 @@ import TaskCollaboratorPicker from './TaskCollaboratorPicker'
 import { TaskPriorityPicker, TaskStatusPicker } from './TaskPropertyPicker'
 import TaskUserCombobox from './TaskUserCombobox'
 import useTaskDetailWindow, { type TaskDetailResizeEdge } from './useTaskDetailWindow'
+import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 
 interface Props {
   taskId: string | null
@@ -120,6 +121,8 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
   const [loading, setLoading] = useState(false)
   const [pending, setPending] = useState<PendingOperations>({})
   const [failure, setFailure] = useState<Failure | null>(null)
+  const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false)
+  const [archiveError, setArchiveError] = useState('')
   const [panelWidth, setPanelWidth] = useState(0)
 
   const [titleDraft, setTitleDraft] = useState('')
@@ -463,7 +466,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
   useEffect(() => {
     if (!taskOpen) return
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || document.querySelector('[data-task-editor-modal],[data-task-structure-modal],[data-task-property-picker-portal]')) return
+      if (event.key !== 'Escape' || document.querySelector('[data-task-editor-modal],[data-task-structure-modal],[data-task-property-picker-portal],[data-task-destructive-dialog]')) return
       event.preventDefault()
       onCloseRef.current()
     }
@@ -795,14 +798,16 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
 
   const removeTask = async () => {
     const currentTask = taskRef.current
-    if (!currentTask || !window.confirm('¿Archivar esta tarea y sus subtareas? Podrás restaurarla desde la Papelera.')) return
+    if (!currentTask) return
+    setArchiveError('')
     beginPending('archive')
-    const result = await apiDelete<{ task: Task; version: number }>(`/api/tasks/${currentTask.id}`)
+    const result = await apiDelete<{ task: Task; version: number }>(`/api/tasks/${currentTask.id}`, { version: currentTask.version, operation_id: crypto.randomUUID() })
     if (result.success) {
       const archivedVersion = result.data?.task?.version || result.data?.version
+      setArchiveConfirmOpen(false)
       if (onDeleted(currentTask.id, archivedVersion)) onClose()
       else await refreshTask()
-    } else showFailure(result.error || 'No se pudo archivar la tarea', () => { void removeTask() })
+    } else setArchiveError(result.error || 'No se pudo mover la tarea a Papelera. Reintenta.')
     endPending('archive')
   }
 
@@ -952,7 +957,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
                 {!detailWindow.isMobile && <><button title="Acoplar a la derecha" onClick={() => detailWindow.setMode('docked')} className={`flex h-9 w-9 items-center justify-center rounded-xl hover:bg-slate-100 ${detailWindow.effectiveMode === 'docked' ? 'text-emerald-600' : 'text-slate-400'}`}><PanelRight className="h-4 w-4" /></button><button title="Ventana flotante" onClick={() => detailWindow.setMode('floating')} className={`flex h-9 w-9 items-center justify-center rounded-xl hover:bg-slate-100 ${detailWindow.effectiveMode === 'floating' ? 'text-emerald-600' : 'text-slate-400'}`}><Move className="h-4 w-4" /></button></>}
                 {!detailWindow.isMobile && <button title={detailWindow.effectiveMode === 'maximized' ? 'Restaurar ventana' : 'Maximizar'} onClick={detailWindow.toggleMaximized} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700">{detailWindow.effectiveMode === 'maximized' ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>}
                 <button title="Editar todas las propiedades" onClick={() => onEdit(task)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil className="h-4 w-4" /></button>
-                <button title="Archivar" disabled={isPending('archive')} onClick={() => { void removeTask() }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>
+                <button title="Mover a Papelera" disabled={isPending('archive')} onClick={() => { setArchiveError(''); setArchiveConfirmOpen(true) }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>
                 <button title="Cerrar" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
               </div>
             </div>
@@ -964,6 +969,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
           {isWide ? <div className="flex min-h-0 flex-1"><main className="min-w-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6 lg:px-8">{detailsPane}</main><section className="flex w-[390px] min-h-0 shrink-0 flex-col border-l border-slate-200">{activityPane}</section></div> : tab === 'details' ? <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6">{detailsPane}</main> : activityPane}
         </> : <div className="flex flex-1 flex-col items-center justify-center px-6 text-center"><AlertCircle className="h-8 w-8 text-rose-300" /><p className="mt-3 text-sm font-semibold text-slate-700">No pudimos abrir esta tarea.</p><button onClick={() => { void load() }} className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Reintentar</button></div>}
       </aside>
+      <TaskDestructiveConfirmDialog open={archiveConfirmOpen} title="Mover tarea a Papelera" description={`${task?.subtask_count ? `También se moverán ${task.subtask_count} subtarea${task.subtask_count === 1 ? '' : 's'}. ` : ''}La tarea podrá restaurarse durante el plazo configurado. Completar una tarea nunca la envía aquí.`} actionLabel="Mover a Papelera" busy={isPending('archive')} error={archiveError} onClose={() => { if (!isPending('archive')) { setArchiveConfirmOpen(false); setArchiveError('') } }} onConfirm={() => { void removeTask() }} />
     </div>,
     document.body,
   )

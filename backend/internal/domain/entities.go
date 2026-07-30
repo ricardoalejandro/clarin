@@ -1304,22 +1304,63 @@ const (
 
 // TaskList represents a named grouping for tasks
 type TaskList struct {
-	ID                uuid.UUID  `json:"id"`
-	AccountID         uuid.UUID  `json:"account_id"`
-	FolderID          *uuid.UUID `json:"folder_id,omitempty"`
-	WorkflowID        *uuid.UUID `json:"workflow_id,omitempty"`
-	WorkflowInherited bool       `json:"workflow_inherited"`
-	IsDefault         bool       `json:"is_default"`
-	Name              string     `json:"name"`
-	Description       string     `json:"description,omitempty"`
-	Color             string     `json:"color,omitempty"`
-	Icon              string     `json:"icon"`
-	SortOrder         int        `json:"sort_order"`
-	CreatedBy         uuid.UUID  `json:"created_by"`
-	ArchivedAt        *time.Time `json:"archived_at,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	TaskCount         int        `json:"task_count"`
+	ID                 uuid.UUID  `json:"id"`
+	AccountID          uuid.UUID  `json:"account_id"`
+	FolderID           *uuid.UUID `json:"folder_id,omitempty"`
+	WorkflowID         *uuid.UUID `json:"workflow_id,omitempty"`
+	WorkflowInherited  bool       `json:"workflow_inherited"`
+	IsDefault          bool       `json:"is_default"`
+	Name               string     `json:"name"`
+	Description        string     `json:"description,omitempty"`
+	Color              string     `json:"color,omitempty"`
+	Icon               string     `json:"icon"`
+	SortOrder          int        `json:"sort_order"`
+	CreatedBy          uuid.UUID  `json:"created_by"`
+	ArchivedAt         *time.Time `json:"archived_at,omitempty"`
+	ArchivedWithFolder bool       `json:"archived_with_folder"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	TaskCount          int        `json:"task_count"`
+}
+
+// TaskTrashPolicy is the account-wide manual trash policy. A nil retention
+// disables permanent deletion without changing what is already archived.
+type TaskTrashPolicy struct {
+	RetentionDays *int `json:"retention_days"`
+	CanManage     bool `json:"can_manage"`
+}
+
+// TaskTrashContainer is an archived list or folder rendered by Clarin Work.
+// Eligibility is derived only from archive timestamps and the account policy.
+type TaskTrashContainer struct {
+	ID                 uuid.UUID  `json:"id"`
+	Type               string     `json:"type"`
+	Name               string     `json:"name"`
+	Color              string     `json:"color"`
+	Icon               string     `json:"icon"`
+	ArchivedAt         time.Time  `json:"archived_at"`
+	OriginalFolderID   *uuid.UUID `json:"original_folder_id,omitempty"`
+	OriginalFolderName string     `json:"original_folder_name,omitempty"`
+	ArchivedWithFolder bool       `json:"archived_with_folder"`
+	ListCount          int        `json:"list_count"`
+	TaskCount          int        `json:"task_count"`
+	NextEligibleAt     *time.Time `json:"next_eligible_at,omitempty"`
+	CanPurge           bool       `json:"can_purge"`
+	RestoreBlocked     bool       `json:"restore_blocked"`
+}
+
+type TaskTrashPurgeResult struct {
+	Tasks   int `json:"tasks"`
+	Lists   int `json:"lists"`
+	Folders int `json:"folders"`
+}
+
+type TaskMediaGCJob struct {
+	ID           uuid.UUID
+	AccountID    uuid.UUID
+	MediaAssetID uuid.UUID
+	ObjectKey    string
+	ClaimToken   uuid.UUID
 }
 
 // TaskWorkflow owns an ordered set of task statuses. Lists inherit their

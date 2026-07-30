@@ -324,8 +324,11 @@ export const apiPut = <T>(endpoint: string, body: unknown) =>
     body: JSON.stringify(body),
   })
 
-export const apiDelete = <T>(endpoint: string) =>
-  api<T>(endpoint, { method: 'DELETE' })
+export const apiDelete = <T>(endpoint: string, body?: unknown) =>
+	api<T>(endpoint, {
+		method: 'DELETE',
+		...(body === undefined ? {} : { body: JSON.stringify(body) }),
+	})
 
 export async function apiUpload<T = any>(endpoint: string, formData: FormData, options: { signal?: AbortSignal } = {}): Promise<{ success: boolean; data?: T; error?: string }> {
   if (isAuthIdleExpired()) {

@@ -1248,7 +1248,7 @@ func (r *TaskRepository) DeleteList(ctx context.Context, id, accountID uuid.UUID
 	if activeTasks > 0 {
 		return ErrTaskContainerNotEmpty
 	}
-	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),updated_at=NOW() WHERE id=$1 AND account_id=$2`, id, accountID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),archived_with_folder=FALSE,updated_at=NOW() WHERE id=$1 AND account_id=$2`, id, accountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

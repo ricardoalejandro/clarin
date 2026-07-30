@@ -2,14 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  BarChart3, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight,
-  Columns3, GanttChartSquare, Inbox, LayoutList, Menu,
-  PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Search, Settings2, Sparkles, Star, Trash2, X,
+  ArchiveRestore, BarChart3, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight,
+  Clock3, Columns3, FolderOpen, GanttChartSquare, Inbox, LayoutList, ListTodo, Menu,
+  PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Search, Settings2, ShieldCheck, Sparkles, Star, Trash2, X,
 } from 'lucide-react'
-import { apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
+import { apiDelete, apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
 import {
   TASK_PRIORITY_CONFIG, Task, TaskFilters, TaskFolder, TaskGanttData, TaskList, TaskSavedView,
-  TaskViewMode, TaskWorkflow, TaskWorkflowStatus, TaskWorkSummary,
+  TaskTrashContainer, TaskTrashPolicy, TaskViewMode, TaskWorkflow, TaskWorkflowStatus, TaskWorkSummary,
 } from '@/types/task'
 import TaskBoard, { TaskInlineDraft } from './TaskBoard'
 import TaskDetailDrawer from './TaskDetailDrawer'
@@ -18,6 +18,8 @@ import TaskFilterToolbar, { EMPTY_TASK_FILTERS, TaskFilterChips, taskFilterCount
 import TaskGanttView from './TaskGanttView'
 import TaskHierarchyTree from './TaskHierarchyTree'
 import TaskStructureModal from './TaskStructureModal'
+import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
+import { TaskContainerIcon } from './TaskContainerAppearance'
 
 type Scope = { type: 'all' } | { type: 'folder'; id: string } | { type: 'list'; id: string } | { type: 'trash' }
 type CalendarMode = 'month' | 'week' | 'day'
@@ -169,8 +171,92 @@ function EmptyState() {
   return <div className="flex h-full min-h-[300px] flex-col items-center justify-center bg-white p-6 text-center"><div className="rounded-2xl bg-emerald-50 p-4"><Sparkles className="h-7 w-7 text-emerald-600" /></div><h3 className="mt-4 text-base font-bold text-slate-800">Todo listo para empezar</h3><p className="mt-1 max-w-xs text-sm leading-6 text-slate-400">Crea la primera tarea o cambia los filtros para ver el trabajo existente.</p></div>
 }
 
-function TrashView({ tasks, onRestore }: { tasks: Task[]; onRestore: (task: Task) => void }) {
-  return <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-5 py-4"><h3 className="text-sm font-bold text-slate-800">Tareas archivadas</h3><p className="mt-1 text-xs text-slate-400">Restaurar una tarea principal también recupera sus subtareas archivadas.</p></div><div className="divide-y divide-slate-100">{tasks.map(task => <div key={task.id} className={`flex items-center gap-3 px-5 py-3 ${task.parent_task_id ? 'pl-9' : ''}`}><div className="rounded-xl bg-slate-100 p-2"><Trash2 className="h-4 w-4 text-slate-400" /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-slate-700">{task.title}</p><p className="text-[10px] text-slate-400">{task.parent_task_id ? 'Subtarea' : task.list_name || 'Bandeja general'} · archivada {task.deleted_at ? dateShort.format(new Date(task.deleted_at)) : ''}</p></div><button onClick={() => onRestore(task)} className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"><RotateCcw className="h-3.5 w-3.5" /> Restaurar</button></div>)}{!tasks.length && <div className="py-16 text-center text-sm text-slate-400">La papelera está vacía.</div>}</div></div>
+type TrashTarget = { kind: 'task' | 'list' | 'folder'; id: string; name: string }
+
+function TrashView({ tasks, onChanged, onError }: { tasks: Task[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
+  const [tab, setTab] = useState<'tasks' | 'containers'>('tasks')
+  const [policy, setPolicy] = useState<TaskTrashPolicy>({ retention_days: 30, can_manage: false })
+  const [containers, setContainers] = useState<TaskTrashContainer[]>([])
+  const [loadingMeta, setLoadingMeta] = useState(true)
+  const [pending, setPending] = useState('')
+  const [purgeTarget, setPurgeTarget] = useState<TrashTarget | null>(null)
+  const [purgeError, setPurgeError] = useState('')
+  const [customDays, setCustomDays] = useState('30')
+
+  const loadMeta = useCallback(async () => {
+    setLoadingMeta(true)
+    const [policyResult, containerResult] = await Promise.all([
+      apiGet<TaskTrashPolicy>('/api/tasks/trash-policy'),
+      apiGet<{ containers: TaskTrashContainer[] }>('/api/tasks/trash/containers'),
+    ])
+    if (policyResult.success && policyResult.data) {
+      setPolicy(policyResult.data)
+      if (policyResult.data.retention_days !== null) setCustomDays(String(policyResult.data.retention_days))
+    } else onError(policyResult.error || 'No se pudo cargar la política de Papelera.')
+    if (containerResult.success) setContainers(containerResult.data?.containers || [])
+    else onError(containerResult.error || 'No se pudieron cargar las listas y carpetas archivadas.')
+    setLoadingMeta(false)
+  }, [onError])
+  useEffect(() => { void loadMeta() }, [loadMeta])
+  useEffect(() => subscribeWebSocket(raw => {
+    const message = raw as { event?: string; data?: { action?: string } }
+    if (message.event !== 'task_update') return
+    if (['trash_policy_updated', 'folder_archived', 'folder_restored', 'folder_purged', 'list_deleted', 'list_restored', 'list_purged', 'deleted', 'restored', 'task_purged'].includes(message.data?.action || '')) void loadMeta()
+  }), [loadMeta])
+
+  const nextForTask = (task: Task) => {
+    if (!task.deleted_at || policy.retention_days === null) return null
+    return new Date(new Date(task.deleted_at).getTime() + policy.retention_days * 86_400_000)
+  }
+  const taskCanPurge = (task: Task) => {
+    const next = nextForTask(task)
+    return Boolean(next && next.getTime() <= Date.now())
+  }
+  const timing = (next?: Date | string | null) => {
+    if (policy.retention_days === null) return 'Conservación permanente'
+    if (!next) return `Retención de ${policy.retention_days} días`
+    const date = typeof next === 'string' ? new Date(next) : next
+    const remaining = Math.ceil((date.getTime() - Date.now()) / 86_400_000)
+    return remaining <= 0 ? 'Elegible para eliminación permanente' : `${remaining} día${remaining === 1 ? '' : 's'} restante${remaining === 1 ? '' : 's'}`
+  }
+  const restoreTask = async (task: Task) => {
+    const key = `restore-task:${task.id}`; if (pending) return; setPending(key)
+    const result = await apiPost(`/api/tasks/${task.id}/restore`, { operation_id: crypto.randomUUID() })
+    if (result.success) await Promise.all([onChanged(), loadMeta()]); else onError(result.error || 'No se pudo restaurar la tarea.')
+    setPending('')
+  }
+  const restoreContainer = async (item: TaskTrashContainer) => {
+    const key = `restore-${item.type}:${item.id}`; if (pending) return; setPending(key)
+    const result = await apiPost(`/api/tasks/${item.type === 'folder' ? 'folders' : 'lists'}/${item.id}/restore`, { operation_id: crypto.randomUUID() })
+    if (result.success) await Promise.all([onChanged(), loadMeta()]); else onError(result.error || `No se pudo restaurar ${item.type === 'folder' ? 'la carpeta' : 'la lista'}.`)
+    setPending('')
+  }
+  const savePolicy = async (value: number | null) => {
+    if (!policy.can_manage || pending || (value !== null && (value < 7 || value > 365))) return
+    setPending('policy')
+    const result = await apiPut<TaskTrashPolicy>('/api/tasks/trash-policy', { retention_days: value })
+    if (result.success && result.data) { setPolicy(result.data); if (value !== null) setCustomDays(String(value)); await loadMeta() }
+    else onError(result.error || 'No se pudo actualizar la retención.')
+    setPending('')
+  }
+  const purge = async () => {
+    if (!purgeTarget || pending) return
+    const key = `purge-${purgeTarget.kind}:${purgeTarget.id}`; setPending(key); setPurgeError('')
+    const endpoint = purgeTarget.kind === 'task' ? `/api/tasks/${purgeTarget.id}/purge` : `/api/tasks/${purgeTarget.kind === 'folder' ? 'folders' : 'lists'}/${purgeTarget.id}/purge`
+    const result = await apiDelete(endpoint, { confirmation_name: purgeTarget.name, operation_id: crypto.randomUUID() })
+    if (result.success) { setPurgeTarget(null); await Promise.all([onChanged(), loadMeta()]) }
+    else setPurgeError(result.error || 'No se pudo eliminar permanentemente. Reintenta.')
+    setPending('')
+  }
+
+  return <div className="min-h-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+    <div className="border-b border-slate-100 px-4 py-4 sm:px-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-black text-slate-900">Papelera de Clarin Work</h3><p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">Solo una acción explícita de “Mover a Papelera” inicia la retención. Las tareas completadas permanecen en sus listas sin plazo de eliminación.</p></div><div className="flex items-center gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-700"><ShieldCheck className="h-4 w-4" />{policy.retention_days === null ? 'Nunca eliminar' : `${policy.retention_days} días de retención`}</div></div>
+      {policy.can_manage && <div className="mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-2.5"><span className="mr-1 text-[10px] font-black uppercase tracking-[.12em] text-slate-400">Política de la cuenta</span>{[7, 30, 90, 180, 365].map(value => <button key={value} disabled={pending === 'policy'} onClick={() => void savePolicy(value)} className={`rounded-xl px-3 py-2 text-xs font-bold transition ${policy.retention_days === value ? 'bg-slate-900 text-white shadow-sm' : 'bg-white text-slate-500 hover:text-slate-800'}`}>{value} días</button>)}<button disabled={pending === 'policy'} onClick={() => void savePolicy(null)} className={`rounded-xl px-3 py-2 text-xs font-bold transition ${policy.retention_days === null ? 'bg-slate-900 text-white shadow-sm' : 'bg-white text-slate-500 hover:text-slate-800'}`}>Nunca</button><div className="ml-auto flex items-center gap-1.5"><input aria-label="Días de retención personalizados" type="number" min={7} max={365} value={customDays} onChange={event => setCustomDays(event.target.value)} className="h-9 w-20 rounded-xl border border-slate-200 bg-white px-2 text-center text-xs font-bold text-slate-700 outline-none focus:border-emerald-400" /><button disabled={pending === 'policy' || Number(customDays) < 7 || Number(customDays) > 365} onClick={() => void savePolicy(Number(customDays))} className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 hover:border-emerald-200 hover:text-emerald-700 disabled:opacity-30">Aplicar</button></div></div>}
+    </div>
+    <div className="flex border-b border-slate-100 bg-slate-50/60 px-4 pt-2 sm:px-5"><button onClick={() => setTab('tasks')} className={`flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-bold ${tab === 'tasks' ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400'}`}><ListTodo className="h-4 w-4" />Tareas <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-500">{tasks.length}</span></button><button onClick={() => setTab('containers')} className={`flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-bold ${tab === 'containers' ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400'}`}><FolderOpen className="h-4 w-4" />Listas y carpetas <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-500">{containers.length}</span></button></div>
+    {tab === 'tasks' ? <div className="divide-y divide-slate-100">{tasks.map(task => { const next = nextForTask(task); const canPurge = taskCanPurge(task); return <div key={task.id} className={`flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5 ${task.parent_task_id ? 'pl-8 sm:pl-10' : ''}`}><div className="rounded-xl bg-slate-100 p-2"><Trash2 className="h-4 w-4 text-slate-400" /></div><div className="min-w-[180px] flex-1"><p className="truncate text-sm font-semibold text-slate-700">{task.title}</p><p className="mt-0.5 text-[10px] text-slate-400">{task.parent_task_id ? 'Subtarea' : task.list_name || 'Bandeja general'} · movida {task.deleted_at ? dateShort.format(new Date(task.deleted_at)) : ''}</p></div><div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold ${canPurge ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />{timing(next)}</div><button disabled={Boolean(pending)} onClick={() => void restoreTask(task)} className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40"><RotateCcw className="h-3.5 w-3.5" /> Restaurar</button>{policy.can_manage && canPurge && <button disabled={Boolean(pending)} onClick={() => { setPurgeError(''); setPurgeTarget({ kind: 'task', id: task.id, name: task.title }) }} className="rounded-xl px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40">Eliminar permanentemente</button>}</div>})}{!tasks.length && <div className="py-16 text-center"><ArchiveRestore className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay tareas en Papelera.</p></div>}</div> : <div className="divide-y divide-slate-100">{containers.map(item => <div key={`${item.type}:${item.id}`} className="flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5"><div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ color: item.color, backgroundColor: `${item.color}18` }}><TaskContainerIcon value={item.icon} className="h-4 w-4" /></div><div className="min-w-[180px] flex-1"><p className="truncate text-sm font-semibold text-slate-700">{item.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{item.type === 'folder' ? `Carpeta · ${item.list_count} lista${item.list_count === 1 ? '' : 's'}` : `Lista${item.original_folder_name ? ` · ${item.original_folder_name}` : ' · nivel principal'}`} · {item.task_count} tarea{item.task_count === 1 ? '' : 's'}</p></div><div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold ${item.can_purge ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />{timing(item.next_eligible_at)}</div><button disabled={Boolean(pending) || item.restore_blocked} title={item.restore_blocked ? 'Restaura primero la carpeta original' : 'Restaurar'} onClick={() => void restoreContainer(item)} className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-35"><RotateCcw className="h-3.5 w-3.5" /> Restaurar</button>{policy.can_manage && item.can_purge && <button disabled={Boolean(pending)} onClick={() => { setPurgeError(''); setPurgeTarget({ kind: item.type, id: item.id, name: item.name }) }} className="rounded-xl px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40">Eliminar permanentemente</button>}</div>)}{!containers.length && !loadingMeta && <div className="py-16 text-center"><FolderOpen className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay listas ni carpetas en Papelera.</p></div>}</div>}
+    <TaskDestructiveConfirmDialog open={Boolean(purgeTarget)} permanent title={`Eliminar ${purgeTarget?.kind === 'folder' ? 'carpeta' : purgeTarget?.kind === 'list' ? 'lista' : 'tarea'} permanentemente`} description="Esta acción es irreversible. Se eliminará el elemento archivado y, cuando corresponda, todo su árbol. La operación se bloqueará si algún descendiente aún no cumple la retención." actionLabel="Eliminar permanentemente" confirmationName={purgeTarget?.name} busy={pending.startsWith('purge-')} error={purgeError} onClose={() => { if (!pending.startsWith('purge-')) { setPurgeTarget(null); setPurgeError('') } }} onConfirm={() => void purge()} />
+  </div>
 }
 
 export default function TaskWorkspace() {
@@ -381,7 +467,7 @@ export default function TaskWorkspace() {
     if (message.event !== 'task_update' && message.event !== 'task_overdue') return
     const payload = message.data || {}
     const action = payload.action || ''
-    const structureActions = new Set(['folder_created', 'folder_updated', 'folder_archived', 'list_created', 'list_updated', 'list_archived', 'list_deleted', 'workflow_created', 'workflow_updated', 'status_created', 'status_updated', 'status_deleted'])
+    const structureActions = new Set(['folder_created', 'folder_updated', 'folder_archived', 'folder_restored', 'folder_purged', 'list_created', 'list_updated', 'list_archived', 'list_deleted', 'list_restored', 'list_purged', 'workflow_created', 'workflow_updated', 'status_created', 'status_updated', 'status_deleted'])
     if (payload.operation_id && pendingOperations.current.has(payload.operation_id)) return
     if (boardDragActive.current || pendingOperations.current.size > 0) {
       queuedRealtimeRefresh.current = true
@@ -510,7 +596,6 @@ export default function TaskWorkspace() {
     }
     setError(result.error || 'No se pudo actualizar la tarea favorita. Inténtalo de nuevo.')
   }
-  const restoreTask = async (task: Task) => { const result = await apiPost(`/api/tasks/${task.id}/restore`, {}); if (result.success) await Promise.all([loadTasks(false), loadStructure()]); else setError(result.error || 'No se pudo restaurar la tarea') }
   const selectScope = (next: Scope) => { setScope(next); setSidebarOpen(false) }
   const openCreate = (statusId?: string, draft?: TaskInlineDraft) => {
     if (scope.type === 'trash') {
@@ -584,7 +669,7 @@ export default function TaskWorkspace() {
       <div data-task-workspace-canvas className={`min-h-0 flex-1 ${immersiveView ? 'overflow-hidden p-0' : 'overflow-auto p-2 sm:p-3'}`}>
         {error && <div className="m-2 mb-3 flex items-center justify-between rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"><span>{error}</span><button onClick={() => setError('')}><X className="h-4 w-4" /></button></div>}
         {loading ? <div className="space-y-3">{Array.from({length:5}).map((_,index) => <div key={index} className="h-16 animate-pulse rounded-2xl bg-slate-200/60" />)}</div> : <div className="h-full min-h-[420px]">
-          {scope.type === 'trash' && <TrashView tasks={tasks} onRestore={task => void restoreTask(task)} />}
+          {scope.type === 'trash' && <TrashView tasks={tasks} onChanged={async () => { await Promise.all([loadTasks(false), loadStructure()]) }} onError={setError} />}
           {scope.type !== 'trash' && view === 'list' && <ListView tasks={tasks} statuses={statuses} allStatuses={allStatuses} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} />}
           {scope.type !== 'trash' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setTasks} onCanonicalTask={acceptCanonicalTask} onOperation={handleBoardOperation} onDragStateChange={handleBoardDragState} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => setStructureOpen(true)} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={() => loadTasks(false)} onError={setError} />}
           {scope.type !== 'trash' && view === 'calendar' && <CalendarView tasks={tasks} onOpen={task => setSelectedTaskId(task.id)} />}

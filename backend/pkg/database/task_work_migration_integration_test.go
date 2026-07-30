@@ -123,6 +123,19 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if err := migrateTaskWork(ctx, db); err != nil {
 		t.Fatalf("idempotent migrate: %v", err)
 	}
+	var retentionDays *int
+	if err := db.QueryRow(ctx, `SELECT task_trash_retention_days FROM accounts WHERE id=$1`, accountA).Scan(&retentionDays); err != nil || retentionDays == nil || *retentionDays != 30 {
+		t.Fatalf("task trash retention default=%v err=%v, want 30", retentionDays, err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE accounts SET task_trash_retention_days=6 WHERE id=$1`, accountA); err == nil {
+		t.Fatal("task trash retention accepted value below 7")
+	}
+	if _, err := db.Exec(ctx, `UPDATE accounts SET task_trash_retention_days=NULL WHERE id=$1`, accountA); err != nil {
+		t.Fatalf("task trash retention rejected Never: %v", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE accounts SET task_trash_retention_days=30 WHERE id=$1`, accountA); err != nil {
+		t.Fatalf("restore task trash retention: %v", err)
+	}
 	var invalidDefaultWorkflows int
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM (
 		SELECT workflow.id

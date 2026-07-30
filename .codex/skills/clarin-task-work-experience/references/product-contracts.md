@@ -18,6 +18,17 @@ Read the sections relevant to the requested task change before editing.
 - Archiving a list or folder is allowed only when it contains no active tasks. Restoring a child task requires an active parent and an active list/folder chain.
 - Create, restore, move, archive, and workflow-remap paths must lock and revalidate their parent/list/folder/status dependencies after waiting; a pre-lock read is never sufficient proof under concurrency.
 
+## Trash, Completion And Retention
+
+- Completion and trash are independent lifecycles. A task in `done`, its `completed_at`, progress, due date, or appearance in a report never starts retention and never hides or archives it.
+- Retention starts only after an explicit “Mover a Papelera” mutation writes `tasks.deleted_at`, `task_lists.archived_at`, or `task_folders.archived_at`. The account policy is 7–365 days or `NULL` for “Nunca”; policy changes recalculate eligibility and never schedule or execute automatic purge.
+- Users with task access may archive and restore. Only account administrators may configure retention or permanently purge, and every irreversible action requires the exact canonical title/name under the same transaction lock used for eligibility.
+- The default list cannot be archived or purged. Lists and folders may enter Trash only without active tasks; completed-but-active tasks still count as active because they have no `deleted_at`.
+- Folder archive marks only the child lists archived by that folder operation. Folder restore restores those lists together but preserves lists that were archived individually; an individual list whose original folder is archived must wait for the folder restore.
+- List/folder purge locks the account policy, target, descendants, and anchors, and commits only when every descendant is archived/deleted and every relevant timestamp has reached the cutoff. One ineligible or active descendant rolls back the entire tree.
+- Attachment candidates are enqueued transactionally and deleted from object storage only by durable cleanup after rechecking every live media reference and the account-scoped object key.
+- Archive, restore, purge, and policy WebSocket events remain account-scoped and carry an operation ID so the initiating client can ignore its own echo.
+
 ## Ordering And Concurrency
 
 - `sort_order` is the durable manual order of top-level tasks inside a list and of child tasks inside one parent.

@@ -14,6 +14,11 @@
 - Archive only empty lists/folders; restore children only under an active parent and active container chain.
 - Move and reorder lists in root and folders, and reorder folders among folders; reject cross-account/wrong-container/archived/self anchors and every structural move of the default list. Verify one transaction performs workflow inheritance, complete category remapping, location and destination order, or leaves every row unchanged.
 - Verify the default list is repaired to root order `0`, non-default root order starts after it, and folder/list icons accept only the shared catalog while round-tripping through hierarchy APIs.
+- Complete and reopen a task and prove `deleted_at` remains null and no retention appears. Then explicitly archive that completed task and prove eligibility is based on `deleted_at`, never `completed_at`.
+- Test account policies at exact 7, 30, and 365-day boundaries plus `NULL`/“Nunca”; changing policy recalculates displays without deleting rows or enqueueing purge work.
+- Verify task users can archive/restore while only account administrators can update policy or purge. Reject incorrect exact names, stale versions, active/default containers, cross-account IDs, and too-young descendants under lock.
+- Archive and restore folders with mixed child provenance: restore lists archived by the folder operation, preserve individually archived lists, and block an individual list restore while its original folder remains archived.
+- Purge eligible task/list/folder trees atomically; one active or ineligible descendant must leave every row unchanged. Recheck shared media references before physical deletion and retain shared/protected objects.
 
 ## Board
 
@@ -35,6 +40,7 @@
 - Combine multi-value filters, remove individual chips, clear all, and preserve visible data while loading.
 - Create, apply, update, default, and delete a saved view from another session/device; deny another user/account.
 - Visit Trash and return after initial default-view bootstrap; confirm the default does not reapply over the user's current scope.
+- In Trash, verify Tareas and Listas y carpetas tabs, original location, archived date, countdown/“Nunca”, restore constraints, admin-only policy/purge controls, exact-name irreversible dialog, loading, retry, Escape, and WebSocket reconciliation.
 - Confirm navigation renders the pinned default list first, then “Listas independientes” with its explanation, then folders in canonical order. Drag folders and lists with mouse, touch long-press, and keyboard; verify overlay/insertion target, one request per gesture, exact Escape/outside/`409`/`500` rollback, and workflow confirmation before a populated list changes workflow.
 - Rename a default list, root list, nested list, and folder; choose every supported color/icon by pointer and keyboard, then reload and prove the canonical values return. Reject an icon outside the catalog.
 - At 1398×504, 1024, 768, and 375 px—and with Eros open—verify full-bleed canvas, stable two-row header, primary view tabs, search expansion without height/layout shift, `/` focus, Escape retention, and clear/collapse behavior.

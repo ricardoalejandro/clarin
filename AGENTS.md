@@ -69,6 +69,7 @@ If a task touches multiple areas, read all matching skills before editing.
 - An explicit empty collaborator collection is canonical. Frontend reconciliation must not preserve stale collaborators when the last participant is removed.
 - Real subtasks are one-level child tasks in the parent's list and compatible workflow. Do not expose the legacy checklist table as a second editable source.
 - Archive task lists/folders only when they contain no active tasks. Child restore requires an active parent; concurrent structure/task mutations must lock and revalidate their dependencies inside one transaction.
+- Completing a task is never deletion. Trash retention starts only from an explicit task `deleted_at`, list `archived_at`, or folder `archived_at`; never derive retention from done status, `completed_at`, progress, due dates, or reports. Permanent purge is manual, admin-only, retention-gated, exact-name confirmed, and atomic across an archived container tree.
 - Aggregate Kanban anchors are same-list and same workflow category, not necessarily the same concrete status. Workflow changes must remap every affected task by category atomically or reject without partial changes.
 - Treat task comments, mentions, attachments, activity and dependencies as task-scoped account data. Keep comment drafts, scroll and edits stable during realtime reconciliation.
 - Page older task comments explicitly and preserve chronological order and scroll; never hide history behind a fixed unannounced limit.

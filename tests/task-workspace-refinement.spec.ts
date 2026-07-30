@@ -28,6 +28,9 @@ async function json(route: Route, body: unknown, status = 200) {
 
 async function installWorkspaceMock(page: Page) {
   let task = makeTask()
+  let trashTasks = [{ ...makeTask(), id: 'task-trash', title: 'Tarea eliminada explícitamente', deleted_at: '2026-06-20T12:00:00.000Z', version: 4 }]
+  let trashRetentionDays: number | null = 30
+  let trashContainers = [{ id: 'list-trash', type: 'list' as const, name: 'Lista archivada', color: '#3b82f6', icon: 'list', archived_at: '2026-06-20T12:00:00.000Z', original_folder_name: 'Cliente Alfa', list_count: 0, task_count: 0, next_eligible_at: '2026-07-20T12:00:00.000Z', can_purge: true, restore_blocked: false }]
   let hierarchy = {
     folders: [{
       id: 'folder-client', account_id: 'account-work', workflow_id: 'workflow-main', name: 'Cliente Alfa', description: '', color: '#8b5cf6', sort_order: 1024,
@@ -44,6 +47,7 @@ async function installWorkspaceMock(page: Page) {
   const collaboratorWrites: Array<Record<string, unknown>> = []
   const taskWrites: Array<Record<string, unknown>> = []
   const createWrites: Array<Record<string, unknown>> = []
+  const trashWrites: Array<{ path: string; method: string; body: Record<string, unknown> }> = []
 
   await page.routeWebSocket('**/ws**', socket => { socket.onMessage(() => undefined) })
   await page.route('**/api/**', async route => {
@@ -58,6 +62,9 @@ async function installWorkspaceMock(page: Page) {
       return
     }
     if (path === '/api/tasks/hierarchy') { await json(route, hierarchy); return }
+    if (path === '/api/tasks/trash-policy' && request.method() === 'GET') { await json(route, { success: true, retention_days: trashRetentionDays, can_manage: true }); return }
+    if (path === '/api/tasks/trash-policy' && request.method() === 'PUT') { trashWrites.push({ path, method: request.method(), body }); trashRetentionDays = body.retention_days === null ? null : Number(body.retention_days); await json(route, { success: true, retention_days: trashRetentionDays, can_manage: true }); return }
+    if (path === '/api/tasks/trash/containers') { await json(route, { success: true, containers: trashContainers }); return }
     if (path === '/api/tasks/workflows') { await json(route, { workflows: [{ id: 'workflow-main', account_id: 'account-work', name: 'Flujo principal', is_default: true, created_by: 'user-owner', created_at: now, updated_at: now, statuses }] }); return }
     if (path === '/api/account/users') {
       await json(route, { users: [
@@ -69,7 +76,13 @@ async function installWorkspaceMock(page: Page) {
     }
     if (path === '/api/tasks/saved-views') { await json(route, { views: [] }); return }
     if (path === '/api/tasks/stats') { await json(route, { pending: 1, completed: 0, overdue: 0, cancelled: 0, today: 0 }); return }
-    if (path === '/api/tasks' && request.method() === 'GET') { await json(route, { tasks: [task], total: 1 }); return }
+    if (path === '/api/tasks' && request.method() === 'GET') { const items = url.searchParams.get('deleted') === 'true' ? trashTasks : [task]; await json(route, { tasks: items, total: items.length }); return }
+
+    if (path === `/api/tasks/${task.id}` && request.method() === 'DELETE') { trashWrites.push({ path, method: request.method(), body }); await json(route, { success: true, task: { ...task, deleted_at: now, version: task.version + 1 }, version: task.version + 1 }); return }
+    if (path === '/api/tasks/task-trash/restore' && request.method() === 'POST') { trashWrites.push({ path, method: request.method(), body }); trashTasks = []; await json(route, { success: true, task: { ...makeTask(), id: 'task-trash' } }); return }
+    if (path === '/api/tasks/task-trash/purge' && request.method() === 'DELETE') { trashWrites.push({ path, method: request.method(), body }); trashTasks = []; await json(route, { success: true, purged: { tasks: 1, lists: 0, folders: 0 } }); return }
+    if (path === '/api/tasks/lists/list-trash/restore' && request.method() === 'POST') { trashWrites.push({ path, method: request.method(), body }); trashContainers = []; await json(route, { success: true }); return }
+    if (path === '/api/tasks/lists/list-trash/purge' && request.method() === 'DELETE') { trashWrites.push({ path, method: request.method(), body }); trashContainers = []; await json(route, { success: true, purged: { tasks: 0, lists: 1, folders: 0 } }); return }
 
     const structureMatch = path.match(/^\/api\/tasks\/lists\/([^/]+)\/structure$/)
     if (structureMatch && request.method() === 'PUT') {
@@ -156,7 +169,7 @@ async function installWorkspaceMock(page: Page) {
     localStorage.setItem('tasks:detail-mode', 'maximized')
   })
 
-  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites }
+  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, trashWrites }
 }
 
 async function drag(page: Page, source: Locator, target: Locator) {
@@ -383,5 +396,42 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.goto(`${baseURL}/dashboard/tasks`)
     await expect(page.getByRole('link', { name: 'Navegador', exact: true })).toHaveCount(0)
     await expect(page.locator('a[href="/dashboard/browser"]')).toHaveCount(0)
+  })
+
+  test('uses a professional archive confirmation and starts retention only from explicit deletion', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByText('Preparar propuesta profesional', { exact: true }).click()
+    await page.getByTitle('Mover a Papelera').click()
+    const dialog = page.getByRole('alertdialog', { name: 'Mover tarea a Papelera' })
+    await expect(dialog).toContainText('Completar una tarea nunca la envía aquí')
+    await dialog.getByRole('button', { name: 'Mover a Papelera' }).click()
+    await expect.poll(() => mock.trashWrites.filter(write => write.path === '/api/tasks/task-refinement').length).toBe(1)
+    expect(mock.trashWrites.find(write => write.path === '/api/tasks/task-refinement')?.body).toMatchObject({ version: 1 })
+    expect(mock.trashWrites.find(write => write.path === '/api/tasks/task-refinement')?.body).not.toHaveProperty('completed_at')
+  })
+
+  test('manages safe retention, restoration and exact-name permanent deletion', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByTitle('Papelera').click()
+    await expect(page.getByText('Solo una acción explícita de “Mover a Papelera” inicia la retención.')).toBeVisible()
+    await expect(page.getByText('30 días de retención')).toBeVisible()
+    await page.getByRole('button', { name: 'Nunca' }).click()
+    await expect.poll(() => mock.trashWrites.some(write => write.path === '/api/tasks/trash-policy' && write.body.retention_days === null)).toBeTruthy()
+    await page.getByRole('button', { name: '30 días' }).click()
+
+    await page.getByRole('button', { name: /Listas y carpetas/ }).click()
+    await expect(page.getByText('Lista archivada', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Eliminar permanentemente' }).click()
+    const dialog = page.getByRole('alertdialog', { name: 'Eliminar lista permanentemente' })
+    const input = dialog.getByRole('textbox')
+    await input.fill('Lista equivocada')
+    await expect(dialog.getByRole('button', { name: 'Eliminar permanentemente' })).toBeDisabled()
+    await input.fill('Lista archivada')
+    await dialog.getByRole('button', { name: 'Eliminar permanentemente' }).click()
+    await expect.poll(() => mock.trashWrites.some(write => write.path === '/api/tasks/lists/list-trash/purge' && write.body.confirmation_name === 'Lista archivada')).toBeTruthy()
   })
 })

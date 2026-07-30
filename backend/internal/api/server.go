@@ -181,6 +181,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 
 	server.setupRoutes()
 	server.startSurveyUploadCleanupWorker()
+	server.startTaskMediaGCWorker()
 	// Retention is an invariant of persisted status data, not a publishing
 	// capability. Keep cleanup running even if publication is disabled after a
 	// real-device trial, otherwise old rows and media would outlive 24 hours.
@@ -703,9 +704,14 @@ func (s *Server) setupRoutes() {
 	// Task routes
 	tasks := protected.Group("/tasks", s.requirePermission(domain.PermTasks))
 	tasks.Get("/hierarchy", s.handleGetTaskHierarchy)
+	tasks.Get("/trash-policy", s.handleGetTaskTrashPolicy)
+	tasks.Put("/trash-policy", s.handlePutTaskTrashPolicy)
+	tasks.Get("/trash/containers", s.handleGetTaskTrashContainers)
 	tasks.Post("/folders", s.handleCreateTaskFolder)
 	tasks.Put("/folders/:folderId", s.handleUpdateTaskFolder)
 	tasks.Put("/folders/:folderId/structure", s.handleReorderTaskFolder)
+	tasks.Post("/folders/:folderId/restore", s.handleRestoreTaskFolder)
+	tasks.Delete("/folders/:folderId/purge", s.handlePurgeTaskFolder)
 	tasks.Delete("/folders/:folderId", s.handleArchiveTaskFolder)
 	tasks.Get("/workflows", s.handleGetTaskWorkflows)
 	tasks.Post("/workflows", s.handleCreateTaskWorkflow)
@@ -718,6 +724,8 @@ func (s *Server) setupRoutes() {
 	tasks.Post("/lists/reorder", s.handleReorderLists)
 	tasks.Put("/lists/:listId/structure", s.handleUpdateTaskListStructure)
 	tasks.Put("/lists/:listId", s.handleUpdateTaskList)
+	tasks.Post("/lists/:listId/restore", s.handleRestoreTaskList)
+	tasks.Delete("/lists/:listId/purge", s.handlePurgeTaskList)
 	tasks.Delete("/lists/:listId", s.handleDeleteTaskList)
 	tasks.Get("/calendar", s.handleGetTasksCalendar)
 	tasks.Get("/stats", s.handleGetTaskStats)
@@ -733,6 +741,7 @@ func (s *Server) setupRoutes() {
 	tasks.Get("/:id", s.handleGetTask)
 	tasks.Put("/:id", s.handleUpdateTask)
 	tasks.Post("/:id/move", s.handleMoveTask)
+	tasks.Delete("/:id/purge", s.handlePurgeTask)
 	tasks.Delete("/:id", s.handleDeleteTask)
 	tasks.Post("/:id/complete", s.handleCompleteTask)
 	tasks.Post("/:id/star", s.handleToggleStar)

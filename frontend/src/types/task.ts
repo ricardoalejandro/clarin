@@ -194,9 +194,33 @@ export interface TaskList {
   icon: string
   sort_order: number
   created_by: string
+  archived_at?: string
+  archived_with_folder?: boolean
   created_at: string
   updated_at: string
   task_count: number
+}
+
+export interface TaskTrashPolicy {
+  retention_days: number | null
+  can_manage: boolean
+}
+
+export interface TaskTrashContainer {
+  id: string
+  type: 'list' | 'folder'
+  name: string
+  color: string
+  icon: string
+  archived_at: string
+  original_folder_id?: string
+  original_folder_name?: string
+  archived_with_folder?: boolean
+  list_count: number
+  task_count: number
+  next_eligible_at?: string
+  can_purge: boolean
+  restore_blocked: boolean
 }
 
 export interface TaskFolder {

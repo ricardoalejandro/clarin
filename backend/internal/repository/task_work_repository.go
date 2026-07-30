@@ -367,7 +367,7 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, folde
 	if _, err := tx.Exec(ctx, `UPDATE task_lists SET folder_id=NULL,workflow_inherited=TRUE,updated_at=NOW() WHERE account_id=$1 AND folder_id=$2 AND is_default AND archived_at IS NULL`, accountID, folderID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND folder_id=$2 AND NOT is_default AND archived_at IS NULL`, accountID, folderID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),archived_with_folder=TRUE,updated_at=NOW() WHERE account_id=$1 AND folder_id=$2 AND NOT is_default AND archived_at IS NULL`, accountID, folderID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -2005,18 +2005,26 @@ func (r *TaskWorkRepository) DeleteDependency(ctx context.Context, accountID, ta
 }
 
 func (r *TaskWorkRepository) SoftDeleteTask(ctx context.Context, accountID, taskID, userID uuid.UUID) error {
+	return r.SoftDeleteTaskVersioned(ctx, accountID, taskID, userID, nil)
+}
+
+func (r *TaskWorkRepository) SoftDeleteTaskVersioned(ctx context.Context, accountID, taskID, userID uuid.UUID, expectedVersion *int64) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	var observedListID, observedParentID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT list_id,parent_task_id FROM tasks
-		WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, taskID).Scan(&observedListID, &observedParentID); err != nil {
+	var observedVersion int64
+	if err := tx.QueryRow(ctx, `SELECT list_id,parent_task_id,version FROM tasks
+		WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, taskID).Scan(&observedListID, &observedParentID, &observedVersion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
 		return err
+	}
+	if expectedVersion != nil && observedVersion != *expectedVersion {
+		return ErrTaskVersionConflict
 	}
 	if observedListID != nil {
 		if err := tx.QueryRow(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, *observedListID).Scan(new(uuid.UUID)); err != nil {
@@ -2026,14 +2034,15 @@ func (r *TaskWorkRepository) SoftDeleteTask(ctx context.Context, accountID, task
 		return err
 	}
 	var lockedListID, lockedParentID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT list_id,parent_task_id FROM tasks
-		WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, taskID).Scan(&lockedListID, &lockedParentID); err != nil {
+	var lockedVersion int64
+	if err := tx.QueryRow(ctx, `SELECT list_id,parent_task_id,version FROM tasks
+		WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, taskID).Scan(&lockedListID, &lockedParentID, &lockedVersion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
 		return err
 	}
-	if !taskUUIDPointersEqual(observedListID, lockedListID) || !taskUUIDPointersEqual(observedParentID, lockedParentID) {
+	if !taskUUIDPointersEqual(observedListID, lockedListID) || !taskUUIDPointersEqual(observedParentID, lockedParentID) || lockedVersion != observedVersion {
 		return ErrTaskVersionConflict
 	}
 	command, err := tx.Exec(ctx, `UPDATE tasks SET deleted_at=NOW(),deleted_by=$3,updated_at=NOW(),version=version+1

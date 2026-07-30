@@ -913,10 +913,14 @@ func (s *Server) handleDeleteTask(c *fiber.Ctx) error {
 			return guardErr
 		}
 	}
+	request, operationID, parseErr := parseTaskTrashMutation(c)
+	if parseErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
 
 	userID := c.Locals("user_id").(uuid.UUID)
-	if err := s.repos.TaskWork.SoftDeleteTask(c.Context(), accountID, taskID, userID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to delete task"})
+	if err := s.repos.TaskWork.SoftDeleteTaskVersioned(c.Context(), accountID, taskID, userID, request.Version); err != nil {
+		return taskWorkError(c, err)
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "archived", fiber.Map{})
 
@@ -925,12 +929,12 @@ func (s *Server) handleDeleteTask(c *fiber.Ctx) error {
 	if loadErr != nil {
 		archivedTask = taskDeleteTombstone(existing, userID)
 	}
-	deletePayload := fiber.Map{"task_id": taskID, "task": archivedTask, "version": archivedTask.Version}
+	deletePayload := fiber.Map{"task_id": taskID, "task": archivedTask, "version": archivedTask.Version, "operation_id": operationID}
 	s.broadcastTaskWork(accountID, "deleted", deletePayload)
 	if existing.ParentTaskID != nil {
 		s.services.Task.NotifySubtasksUpdated(c.Context(), accountID, *existing.ParentTaskID)
 	}
-	return c.JSON(fiber.Map{"success": true, "task": archivedTask, "version": archivedTask.Version})
+	return c.JSON(fiber.Map{"success": true, "task": archivedTask, "version": archivedTask.Version, "operation_id": operationID})
 }
 
 func taskDeleteTombstone(task *domain.Task, deletedBy uuid.UUID) *domain.Task {
@@ -1380,7 +1384,11 @@ func (s *Server) handleDeleteTaskList(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid list ID"})
 	}
 
-	if err := s.repos.Task.DeleteList(c.Context(), listID, accountID); err != nil {
+	request, operationID, parseErr := parseTaskTrashMutation(c)
+	if parseErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	if err := s.repos.TaskWork.ArchiveListConfirmed(c.Context(), accountID, listID, request.ConfirmationName); err != nil {
 		if errors.Is(err, repository.ErrDefaultTaskList) {
 			return c.Status(409).JSON(fiber.Map{"success": false, "error": "La Bandeja general es la lista predeterminada y no se puede archivar"})
 		}
@@ -1392,11 +1400,11 @@ func (s *Server) handleDeleteTaskList(c *fiber.Ctx) error {
 
 	if s.hub != nil {
 		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
-			"action": "list_deleted",
+			"action": "list_deleted", "operation_id": operationID,
 		})
 	}
 
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
 }
 
 // handleToggleStar toggles the starred status of a task

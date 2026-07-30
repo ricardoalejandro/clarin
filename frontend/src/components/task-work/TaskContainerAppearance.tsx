@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { apiDelete, apiPut } from '@/lib/api'
 import type { TaskFolder, TaskList } from '@/types/task'
+import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 
 export const TASK_CONTAINER_COLORS = ['#10b981', '#14b8a6', '#3b82f6', '#6366f1', '#8b5cf6', '#d946ef', '#f59e0b', '#f97316', '#ef4444', '#64748b']
 
@@ -53,8 +54,10 @@ export function TaskAppearanceDialog({ item, type, onClose, onSaved, onError, on
   const isDefault = 'is_default' in item && Boolean(item.is_default)
   const [icon, setIcon] = useState(item.icon || (type === 'folder' ? 'folder' : isDefault ? 'inbox' : 'list'))
   const [saving, setSaving] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const [archiveError, setArchiveError] = useState('')
   useEffect(() => {
-    const close = (event: KeyboardEvent) => event.key === 'Escape' && !saving && onClose()
+    const close = (event: KeyboardEvent) => event.key === 'Escape' && !saving && !document.querySelector('[data-task-destructive-dialog]') && onClose()
     window.addEventListener('keydown', close)
     return () => window.removeEventListener('keydown', close)
   }, [onClose, saving])
@@ -82,14 +85,15 @@ export function TaskAppearanceDialog({ item, type, onClose, onSaved, onError, on
   }
   const archive = async () => {
     if (isDefault || item.task_count > 0 || saving) return
-    if (!window.confirm(`¿Archivar ${type === 'folder' ? 'la carpeta' : 'la lista'} vacía “${item.name}”?`)) return
+    setArchiveError('')
     setSaving(true)
     try {
       const path = type === 'folder' ? `/api/tasks/folders/${item.id}` : `/api/tasks/lists/${item.id}`
-      const result = await apiDelete(path)
-      if (!result.success) { onError(result.error || 'No se pudo archivar.'); return }
-      await onSaved(); onClose()
-    } catch { onError('No se pudo archivar.') } finally { setSaving(false) }
+      const operationID = crypto.randomUUID()
+      const result = await apiDelete(path, { confirmation_name: item.name, operation_id: operationID })
+      if (!result.success) { setArchiveError(result.error || 'No se pudo mover a Papelera.'); return }
+      setArchiveOpen(false); await onSaved(); onClose()
+    } catch { setArchiveError('No se pudo mover a Papelera. Reintenta.') } finally { setSaving(false) }
   }
   return createPortal(<div className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" role="presentation" onMouseDown={event => event.target === event.currentTarget && !saving && onClose()}>
     <section role="dialog" aria-modal="true" aria-labelledby="task-appearance-title" className="w-full max-w-lg overflow-hidden rounded-3xl border border-white/70 bg-white shadow-2xl">
@@ -99,7 +103,8 @@ export function TaskAppearanceDialog({ item, type, onClose, onSaved, onError, on
         <fieldset><legend className="text-xs font-bold text-slate-600">Color</legend><div className="mt-2 flex flex-wrap gap-2">{TASK_CONTAINER_COLORS.map(value => <button key={value} type="button" aria-label={`Color ${value}`} aria-pressed={color === value} onClick={() => setColor(value)} className={`h-9 w-9 rounded-xl border-4 transition ${color === value ? 'scale-110 border-slate-900 shadow-lg' : 'border-white shadow-sm ring-1 ring-slate-200 hover:scale-105'}`} style={{ backgroundColor: value }} />)}</div></fieldset>
         <fieldset><legend className="text-xs font-bold text-slate-600">Icono</legend><div className="mt-2 grid grid-cols-6 gap-2 sm:grid-cols-9">{TASK_CONTAINER_ICONS.map(option => <button key={option.value} type="button" title={option.label} aria-label={option.label} aria-pressed={icon === option.value} onClick={() => setIcon(option.value)} className={`flex h-10 items-center justify-center rounded-xl border transition ${icon === option.value ? 'border-emerald-400 bg-emerald-50 text-emerald-700 ring-2 ring-emerald-100' : 'border-slate-200 text-slate-500 hover:border-slate-300 hover:bg-slate-50'}`}><option.icon className="h-4 w-4" /></button>)}</div></fieldset>
       </div>
-      <footer className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">{!isDefault && <button type="button" disabled={saving || item.task_count > 0} title={item.task_count > 0 ? 'Mueve o archiva primero las tareas activas' : 'Archivar contenedor vacío'} onClick={() => void archive()} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30">Archivar</button>}<button type="button" disabled={saving} onClick={onClose} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-white">Cancelar</button><button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg disabled:opacity-40">{saving ? 'Guardando…' : 'Guardar cambios'}</button></footer>
+      <footer className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">{!isDefault && <button type="button" disabled={saving || item.task_count > 0} title={item.task_count > 0 ? 'Mueve o envía primero las tareas activas a Papelera' : 'Mover a Papelera'} onClick={() => { setArchiveError(''); setArchiveOpen(true) }} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30">Mover a Papelera</button>}<button type="button" disabled={saving} onClick={onClose} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-white">Cancelar</button><button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg disabled:opacity-40">{saving ? 'Guardando…' : 'Guardar cambios'}</button></footer>
     </section>
+    <TaskDestructiveConfirmDialog open={archiveOpen} title={`Mover ${type === 'folder' ? 'carpeta' : 'lista'} a Papelera`} description={type === 'folder' ? 'La carpeta y sus listas activas se archivarán juntas. Podrás restaurarlas desde Papelera.' : 'La lista conservará su ubicación original y podrá restaurarse desde Papelera.'} actionLabel="Mover a Papelera" confirmationName={item.name} busy={saving} error={archiveError} onClose={() => { if (!saving) { setArchiveOpen(false); setArchiveError('') } }} onConfirm={() => { void archive() }} />
   </div>, document.body)
 }

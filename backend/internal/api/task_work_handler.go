@@ -61,6 +61,17 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Restaura primero la tarea padre", "code": "task_parent_archived"})
 	case errors.Is(err, repository.ErrDefaultTaskList):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La Bandeja general debe permanecer como lista raíz predeterminada", "code": "default_list_invariant"})
+	case errors.Is(err, repository.ErrTaskTrashConfirmation):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "El nombre escrito no coincide exactamente", "code": "trash_confirmation_mismatch"})
+	case errors.Is(err, repository.ErrTaskTrashDisabled):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La eliminación permanente está desactivada para esta cuenta", "code": "trash_purge_disabled"})
+	case errors.Is(err, repository.ErrTaskTrashNotEligible):
+		payload := fiber.Map{"success": false, "error": "El elemento todavía no cumplió el plazo de retención", "code": "trash_not_eligible"}
+		var eligibility *repository.TaskTrashEligibilityError
+		if errors.As(err, &eligibility) && eligibility.NextEligibleAt != nil {
+			payload["next_eligible_at"] = eligibility.NextEligibleAt
+		}
+		return c.Status(fiber.StatusConflict).JSON(payload)
 	default:
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo completar la operación"})
 	}
@@ -646,11 +657,16 @@ func (s *Server) handleArchiveTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Carpeta inválida"})
 	}
-	if err := s.repos.TaskWork.ArchiveFolder(c.Context(), accountID, folderID); err != nil {
+	request, operationID, err := parseTaskTrashMutation(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	if err := s.repos.TaskWork.ArchiveFolderConfirmed(c.Context(), accountID, folderID, request.ConfirmationName); err != nil {
 		return taskWorkError(c, err)
 	}
-	s.broadcastTaskWork(accountID, "folder_archived", fiber.Map{"folder_id": folderID})
-	return c.JSON(fiber.Map{"success": true})
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(accountID, "folder_archived", fiber.Map{"folder_id": folderID, "operation_id": operationID})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
 }
 
 func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
@@ -1427,6 +1443,10 @@ func (s *Server) handleRestoreTask(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
+	_, operationID, err := parseTaskTrashMutation(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
 	if err := s.repos.TaskWork.RestoreTask(c.Context(), accountID, taskID); err != nil {
 		return taskWorkError(c, err)
 	}
@@ -1442,13 +1462,13 @@ func (s *Server) handleRestoreTask(c *fiber.Ctx) error {
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "restored", fiber.Map{})
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "restored", fiber.Map{"task_id": taskID, "task": full})
+	s.broadcastTaskWork(accountID, "restored", fiber.Map{"task_id": taskID, "task": full, "operation_id": operationID})
 	parentID := taskID
 	if full.ParentTaskID != nil {
 		parentID = *full.ParentTaskID
 	}
 	s.services.Task.NotifySubtasksUpdated(c.Context(), accountID, parentID)
-	return c.JSON(fiber.Map{"success": true, "task": full})
+	return c.JSON(fiber.Map{"success": true, "task": full, "operation_id": operationID})
 }
 
 func parseTaskScope(c *fiber.Ctx) (*uuid.UUID, *uuid.UUID, error) {

@@ -2,6 +2,13 @@
 
 ## 2026-07-30
 
+### Build 4 — Papelera segura con retención configurable
+- ✨ Papelera separa tareas de listas y carpetas, conserva su ubicación original y permite restaurarlas con reglas estructurales claras.
+- 🔒 Mover listas o carpetas a Papelera exige escribir su nombre exacto; la eliminación permanente es manual, irreversible, posterior al plazo y exclusiva de administradores.
+- ⚙️ Cada cuenta puede conservar elementos entre 7 y 365 días o elegir “Nunca”; cambiar la política solo recalcula elegibilidad y jamás purga automáticamente.
+- 🐛 Completar o reabrir una tarea no inicia retención: únicamente `deleted_at` o `archived_at` creados por “Mover a Papelera” cuentan para el plazo.
+- 🗄️ La purga de árboles es atómica y los adjuntos sin referencias pasan por una cola durable con revalidación antes de eliminarse del almacenamiento.
+
 ### Build 3 — Jerarquía visual, creación profesional y retirada segura de Navegador
 - ✨ Bandeja general queda fija arriba; las listas independientes y carpetas muestran una jerarquía clara, reordenable con mouse, touch o teclado y recuperable ante conflictos.
 - 💄 Carpetas y listas se personalizan con nombre, paleta de contraste e iconos de catálogo, visibles también en selectores agrupados y breadcrumbs.
