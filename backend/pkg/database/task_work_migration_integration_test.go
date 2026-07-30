@@ -263,7 +263,7 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		t.Fatalf("insert target workflow statuses: %v", err)
 	}
 	notInherited := false
-	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, nil, false, &targetWorkflowID, &notInherited, nil, nil, nil); !errors.Is(err, repository.ErrTaskStatusMappingInvalid) {
+	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, nil, false, nil, false, &targetWorkflowID, &notInherited, nil, nil, nil); !errors.Is(err, repository.ErrTaskStatusMappingInvalid) {
 		t.Fatalf("list accepted a workflow without equivalent active status: %v", err)
 	}
 	folder := &domain.TaskFolder{AccountID: accountA, WorkflowID: &targetWorkflowID, Name: "General contract", CreatedBy: userA}
@@ -276,6 +276,68 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	var folderWorkflowID uuid.UUID
 	if err := db.QueryRow(ctx, `SELECT workflow_id FROM task_folders WHERE account_id=$1 AND id=$2`, accountA, folder.ID).Scan(&folderWorkflowID); err != nil || folderWorkflowID != workflowA {
 		t.Fatalf("folder did not resolve explicit null to default workflow: workflow=%s err=%v", folderWorkflowID, err)
+	}
+	firstMovableList, secondMovableList := uuid.New(), uuid.New()
+	if _, err := db.Exec(ctx, `INSERT INTO task_lists(id,account_id,workflow_id,workflow_inherited,name,color,sort_order,created_by) VALUES
+		($1,$3,$4,FALSE,'Primera movible','#0ea5e9',2048,$5),
+		($2,$3,$4,FALSE,'Segunda movible','#8b5cf6',3072,$5)`, firstMovableList, secondMovableList, accountA, workflowA, userA); err != nil {
+		t.Fatalf("insert movable task lists: %v", err)
+	}
+	inherited := true
+	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, secondMovableList, &folder.ID, true, nil, true, nil, &inherited, nil, nil, nil); err != nil {
+		t.Fatalf("append list into folder: %v", err)
+	}
+	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, firstMovableList, &folder.ID, true, &secondMovableList, true, nil, &inherited, nil, nil, nil); err != nil {
+		t.Fatalf("insert list before folder anchor: %v", err)
+	}
+	var firstFolderID, secondFolderID uuid.UUID
+	var firstListOrder, secondListOrder int
+	if err := db.QueryRow(ctx, `SELECT folder_id,sort_order FROM task_lists WHERE account_id=$1 AND id=$2`, accountA, firstMovableList).Scan(&firstFolderID, &firstListOrder); err != nil {
+		t.Fatalf("load first moved list: %v", err)
+	}
+	if err := db.QueryRow(ctx, `SELECT folder_id,sort_order FROM task_lists WHERE account_id=$1 AND id=$2`, accountA, secondMovableList).Scan(&secondFolderID, &secondListOrder); err != nil {
+		t.Fatalf("load second moved list: %v", err)
+	}
+	if firstFolderID != folder.ID || secondFolderID != folder.ID || firstListOrder >= secondListOrder || firstListOrder%1024 != 0 || secondListOrder%1024 != 0 {
+		t.Fatalf("folder list order was not persisted: folders=%s,%s order=%d,%d", firstFolderID, secondFolderID, firstListOrder, secondListOrder)
+	}
+	var defaultListB uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND is_default AND archived_at IS NULL`, accountB).Scan(&defaultListB); err != nil {
+		t.Fatalf("load other account default list: %v", err)
+	}
+	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, firstMovableList, &folder.ID, true, &defaultListB, true, nil, &inherited, nil, nil, nil); !errors.Is(err, repository.ErrTaskListOrderInvalid) {
+		t.Fatalf("cross-account list anchor was accepted: %v", err)
+	}
+	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, &folder.ID, true, nil, true, nil, &inherited, nil, nil, nil); !errors.Is(err, repository.ErrDefaultTaskList) {
+		t.Fatalf("default list moved into folder: %v", err)
+	}
+	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, nil, true, &firstMovableList, true, nil, &notInherited, nil, nil, nil); !errors.Is(err, repository.ErrDefaultTaskList) {
+		t.Fatalf("default list reordered in root: %v", err)
+	}
+	limitedFolder := &domain.TaskFolder{AccountID: accountA, WorkflowID: &targetWorkflowID, Name: "Limited folder", CreatedBy: userA}
+	if err := repos.TaskWork.CreateFolder(ctx, limitedFolder); err != nil {
+		t.Fatalf("create limited folder: %v", err)
+	}
+	workflowRollbackList, workflowRollbackTask := uuid.New(), uuid.New()
+	if _, err := db.Exec(ctx, `INSERT INTO task_lists(id,account_id,workflow_id,workflow_inherited,name,color,sort_order,created_by) VALUES($1,$2,$3,FALSE,'Rollback workflow','#f97316',4096,$4)`, workflowRollbackList, accountA, workflowA, userA); err != nil {
+		t.Fatalf("insert workflow rollback list: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO tasks(id,account_id,created_by,assigned_to,title,type,priority,status,status_id,list_id,sort_order) VALUES($1,$2,$3,$3,'Keep active state','reminder','medium','in_progress',$4,$5,1024)`, workflowRollbackTask, accountA, userA, activeStatusID, workflowRollbackList); err != nil {
+		t.Fatalf("insert workflow rollback task: %v", err)
+	}
+	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, workflowRollbackList, &limitedFolder.ID, true, nil, true, nil, &inherited, nil, nil, nil); !errors.Is(err, repository.ErrTaskStatusMappingInvalid) {
+		t.Fatalf("list moved into incompatible workflow: %v", err)
+	}
+	var rollbackFolderID *uuid.UUID
+	var rollbackWorkflowID, rollbackStatusID uuid.UUID
+	if err := db.QueryRow(ctx, `SELECT folder_id,workflow_id FROM task_lists WHERE account_id=$1 AND id=$2`, accountA, workflowRollbackList).Scan(&rollbackFolderID, &rollbackWorkflowID); err != nil {
+		t.Fatalf("load workflow rollback list: %v", err)
+	}
+	if err := db.QueryRow(ctx, `SELECT status_id FROM tasks WHERE account_id=$1 AND id=$2`, accountA, workflowRollbackTask).Scan(&rollbackStatusID); err != nil {
+		t.Fatalf("load workflow rollback task: %v", err)
+	}
+	if rollbackFolderID != nil || rollbackWorkflowID != workflowA || rollbackStatusID != activeStatusID {
+		t.Fatalf("incompatible workflow move was not rolled back: folder=%v workflow=%s status=%s", rollbackFolderID, rollbackWorkflowID, rollbackStatusID)
 	}
 	if err := repos.Task.DeleteList(ctx, listID, accountA); !errors.Is(err, repository.ErrTaskContainerNotEmpty) {
 		t.Fatalf("list with active tasks was archived: %v", err)

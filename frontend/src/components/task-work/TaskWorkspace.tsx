@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BarChart3, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight,
-  CircleDot, Columns3, Folder, FolderOpen, GanttChartSquare, Inbox, LayoutList, Menu,
+  Columns3, GanttChartSquare, Inbox, LayoutList, Menu,
   PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Search, Settings2, Sparkles, Star, Trash2, X,
 } from 'lucide-react'
 import { apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
@@ -14,8 +14,9 @@ import {
 import TaskBoard, { TaskInlineDraft } from './TaskBoard'
 import TaskDetailDrawer from './TaskDetailDrawer'
 import TaskEditorModal, { TaskAccountUser } from './TaskEditorModal'
-import TaskFilterToolbar, { EMPTY_TASK_FILTERS, taskFilterCount } from './TaskFilters'
+import TaskFilterToolbar, { EMPTY_TASK_FILTERS, TaskFilterChips, taskFilterCount } from './TaskFilters'
 import TaskGanttView from './TaskGanttView'
+import TaskHierarchyTree from './TaskHierarchyTree'
 import TaskStructureModal from './TaskStructureModal'
 
 type Scope = { type: 'all' } | { type: 'folder'; id: string } | { type: 'list'; id: string } | { type: 'trash' }
@@ -108,6 +109,7 @@ function TaskCard({ task, compact = false, onOpen, onStar }: { task: Task; compa
 
 function ListView({ tasks, statuses, allStatuses, onOpen, onStatus, onStar }: { tasks: Task[]; statuses: TaskWorkflowStatus[]; allStatuses: TaskWorkflowStatus[]; onOpen: (task: Task) => void; onStatus: (task: Task, statusId: string) => void; onStar: (task: Task) => void }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  if (!tasks.length) return <EmptyState />
   const sections = statuses.map(status => ({ status, tasks: tasks.filter(task => task.status_id === status.id) })).filter(section => section.tasks.length)
   const orphaned = tasks.filter(task => !statuses.some(status => status.id === task.status_id))
   if (orphaned.length) sections.push({ status: { id: 'other', name: 'Otros', color: '#94a3b8', category: 'not_started', sort_order: 999 } as TaskWorkflowStatus, tasks: orphaned })
@@ -120,7 +122,7 @@ function ListView({ tasks, statuses, allStatuses, onOpen, onStatus, onStar }: { 
       <span className={`hidden text-xs sm:block ${taskIsOverdue(task) ? 'font-semibold text-rose-600' : 'text-slate-400'}`}>{task.due_at ? dateShort.format(new Date(task.due_at)) : 'Sin fecha'}</span>
       <button onClick={event => { event.stopPropagation(); onStar(task) }} className={`hidden rounded-lg p-2 sm:block ${task.starred ? 'text-amber-400' : 'text-slate-300 opacity-0 group-hover:opacity-100'}`}><Star className={`h-4 w-4 ${task.starred ? 'fill-current' : ''}`} /></button>
     </div> })}</div>}
-  </section>)}{!tasks.length && <EmptyState />}</div>
+  </section>)}</div>
 }
 
 function CalendarView({ tasks, onOpen }: { tasks: Task[]; onOpen: (task: Task) => void }) {
@@ -164,7 +166,7 @@ function SummaryView({ tasks, summary, users }: { tasks: Task[]; summary: TaskWo
 }
 
 function EmptyState() {
-  return <div className="flex min-h-[340px] flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center"><div className="rounded-2xl bg-emerald-50 p-4"><Sparkles className="h-7 w-7 text-emerald-600" /></div><h3 className="mt-4 text-base font-bold text-slate-800">Todo listo para empezar</h3><p className="mt-1 max-w-xs text-sm leading-6 text-slate-400">Crea la primera tarea o cambia los filtros para ver el trabajo existente.</p></div>
+  return <div className="flex h-full min-h-[300px] flex-col items-center justify-center bg-white p-6 text-center"><div className="rounded-2xl bg-emerald-50 p-4"><Sparkles className="h-7 w-7 text-emerald-600" /></div><h3 className="mt-4 text-base font-bold text-slate-800">Todo listo para empezar</h3><p className="mt-1 max-w-xs text-sm leading-6 text-slate-400">Crea la primera tarea o cambia los filtros para ver el trabajo existente.</p></div>
 }
 
 function TrashView({ tasks, onRestore }: { tasks: Task[]; onRestore: (task: Task) => void }) {
@@ -182,6 +184,8 @@ export default function TaskWorkspace() {
   const [scope, setScope] = useState<Scope>({ type: 'all' })
   const [view, setView] = useState<TaskViewMode>(() => typeof window === 'undefined' ? 'list' : (localStorage.getItem('tasks:view') as TaskViewMode) || 'list')
   const [search, setSearch] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [workspaceWidth, setWorkspaceWidth] = useState(0)
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [filters, setFilters] = useState<TaskFilters>(EMPTY_TASK_FILTERS)
   const [collapsedStatusIds, setCollapsedStatusIds] = useState<string[]>([])
@@ -211,6 +215,8 @@ export default function TaskWorkspace() {
   const queuedRealtimeRefresh = useRef(false)
   const queuedStructureRefresh = useRef(false)
   const reconciliationTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const workspaceRef = useRef<HTMLDivElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const lists = useMemo(() => [...rootLists, ...folders.flatMap(folder => folder.lists)], [rootLists, folders])
   const globalTaskCount = useMemo(() => lists.reduce((total, list) => total + (list.task_count || 0), 0), [lists])
@@ -360,6 +366,13 @@ export default function TaskWorkspace() {
   }, [])
   useEffect(() => { localStorage.setItem('tasks:view', view) }, [view])
   useEffect(() => {
+    const element = workspaceRef.current
+    if (!element) return
+    const observer = new ResizeObserver(entries => setWorkspaceWidth(Math.round(entries[0]?.contentRect.width || 0)))
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+  useEffect(() => {
     const taskFromURL = new URLSearchParams(window.location.search).get('task')
     if (taskFromURL) setSelectedTaskId(taskFromURL)
   }, [])
@@ -440,7 +453,7 @@ export default function TaskWorkspace() {
     if (refreshTimer.current) clearTimeout(refreshTimer.current)
     refreshTimer.current = setTimeout(() => void loadTasks(false), 180)
   }), [acceptCanonicalTask, debouncedSearch, filters, folders, loadTasks, loadStructure, markTaskDeleted, scope, view])
-  useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.target as HTMLElement)?.matches('input,textarea,select,[contenteditable="true"]')) return; if (event.key.toLowerCase() === 'n') { event.preventDefault(); if (scope.type === 'trash') setError('Sal de la papelera para crear una tarea.'); else if (scope.type === 'folder' && !activeFolder?.lists.length) { setError('Esta carpeta todavía no tiene listas. Crea una lista antes de añadir tareas.'); setStructureOpen(true) } else { setSubtaskParent(null); setEditingTask(null); setEditorOpen(true) } } if (event.key === '/') { event.preventDefault(); document.getElementById('task-search')?.focus() } }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener) }, [activeFolder, scope.type])
+  useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.target as HTMLElement)?.matches('input,textarea,select,[contenteditable="true"]')) return; if (event.key.toLowerCase() === 'n') { event.preventDefault(); if (scope.type === 'trash') setError('Sal de la papelera para crear una tarea.'); else if (scope.type === 'folder' && !activeFolder?.lists.length) { setError('Esta carpeta todavía no tiene listas. Crea una lista antes de añadir tareas.'); setStructureOpen(true) } else { setSubtaskParent(null); setEditingTask(null); setEditorOpen(true) } } if (event.key === '/') { event.preventDefault(); setSearchOpen(true); requestAnimationFrame(() => searchInputRef.current?.focus()) } }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener) }, [activeFolder, scope.type])
 
   const defaultWorkflow = workflows.find(item => item.is_default) || workflows[0]
   const scopedLists = useMemo(() => scope.type === 'list'
@@ -536,28 +549,40 @@ export default function TaskWorkspace() {
     else if (saved.scope_id) setScope({ type: saved.scope_type, id: saved.scope_id })
   }
 
-  return <div className="relative flex h-[calc(100vh-64px)] min-h-[620px] overflow-hidden bg-slate-50">
+  const immersiveView = scope.type !== 'trash' && ['board', 'calendar', 'gantt'].includes(view)
+
+  return <div ref={workspaceRef} data-task-workspace-width={workspaceWidth} className="relative flex h-full min-h-0 w-full overflow-hidden bg-slate-50">
     {sidebarOpen && <button aria-label="Cerrar navegación" onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-40 bg-slate-950/30 lg:hidden" />}
     <aside className={`absolute inset-y-0 left-0 z-50 flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all lg:relative lg:z-10 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} ${sidebarCollapsed ? 'w-[72px]' : 'w-[268px]'}`}>
       <div className="flex h-16 items-center border-b border-slate-100 px-4"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white"><Check className="h-4 w-4" /></div>{!sidebarCollapsed && <div className="ml-3 min-w-0"><p className="truncate text-sm font-black text-slate-900">Clarin Work</p><p className="text-[10px] font-semibold uppercase tracking-[.16em] text-emerald-600">Tareas y proyectos</p></div>}<button onClick={() => setSidebarCollapsed(value => !value)} className="ml-auto hidden rounded-lg p-2 text-slate-400 hover:bg-slate-100 lg:block">{sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}</button><button onClick={() => setSidebarOpen(false)} className="ml-auto rounded-lg p-2 text-slate-400 lg:hidden"><X className="h-4 w-4" /></button></div>
       <nav className="flex-1 overflow-y-auto px-2 py-3">
         <button title="Todo el trabajo" onClick={() => selectScope({ type: 'all' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold ${scope.type === 'all' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'}`}><Inbox className="h-4 w-4 shrink-0" />{!sidebarCollapsed && <><span className="flex-1 text-left">Todo el trabajo</span><span className="text-[10px] text-slate-400">{globalTaskCount}</span></>}</button>
         {!sidebarCollapsed && <div className="mb-2 mt-5 flex items-center justify-between px-2"><span className="text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Carpetas y listas</span><button onClick={() => setStructureOpen(true)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-emerald-600"><Plus className="h-3.5 w-3.5" /></button></div>}
-        {folders.map(folder => <div key={folder.id} className="mb-1"><button title={folder.name} onClick={() => selectScope({ type: 'folder', id: folder.id })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium ${scope.type === 'folder' && scope.id === folder.id ? 'bg-slate-100 text-slate-900' : 'text-slate-600 hover:bg-slate-50'}`}>{scope.type === 'folder' && scope.id === folder.id ? <FolderOpen className="h-4 w-4 shrink-0" style={{ color: folder.color }} /> : <Folder className="h-4 w-4 shrink-0" style={{ color: folder.color }} />}{!sidebarCollapsed && <><span className="min-w-0 flex-1 truncate text-left">{folder.name}</span><span className="text-[10px] text-slate-400">{folder.task_count}</span></>}</button>{!sidebarCollapsed && <div className="ml-5 border-l border-slate-200 pl-2">{folder.lists.map(list => <button key={list.id} onClick={() => selectScope({ type: 'list', id: list.id })} className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs ${scope.type === 'list' && scope.id === list.id ? 'bg-emerald-50 font-semibold text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}><i className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: list.color }} /><span className="min-w-0 flex-1 truncate text-left">{list.name}</span><span className="text-[9px] text-slate-400">{list.task_count}</span></button>)}</div>}</div>)}
-        {rootLists.map(list => <button key={list.id} title={list.name} onClick={() => selectScope({ type: 'list', id: list.id })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-sm ${scope.type === 'list' && scope.id === list.id ? 'bg-emerald-50 font-semibold text-emerald-700' : 'text-slate-600 hover:bg-slate-50'}`}><CircleDot className="h-4 w-4 shrink-0" style={{ color: list.color }} />{!sidebarCollapsed && <><span className="min-w-0 flex-1 truncate text-left">{list.name}</span><span className="text-[10px] text-slate-400">{list.task_count}</span></>}</button>)}
+        <TaskHierarchyTree folders={folders} rootLists={rootLists} scope={scope} collapsed={sidebarCollapsed} onSelect={selectScope} onChanged={async () => { await loadStructure(); await loadTasks(false) }} onError={setError} />
       </nav>
       <div className="border-t border-slate-100 p-2"><button onClick={() => selectScope({ type: 'trash' })} title="Papelera" className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold ${scope.type === 'trash' ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50'}`}><Trash2 className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Papelera'}</button><button onClick={() => setStructureOpen(true)} title="Configurar" className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-800"><Settings2 className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Configurar espacio'}</button></div>
     </aside>
 
     <main className="flex min-w-0 flex-1 flex-col">
-      <header className="border-b border-slate-200 bg-white px-3 py-3 sm:px-5">
-        <div className="flex items-center gap-3"><button onClick={() => setSidebarOpen(true)} className="rounded-xl p-2 text-slate-500 hover:bg-slate-100 lg:hidden"><Menu className="h-5 w-5" /></button><div className="min-w-0"><div className="flex items-center gap-1 text-[10px] text-slate-400"><span>Clarin Work</span>{activeFolder && <><ChevronRight className="h-3 w-3" /><span>{activeFolder.name}</span></>}</div><h1 className="truncate text-lg font-black text-slate-900">{scopeName}</h1></div><div className="ml-auto flex items-center gap-2"><button onClick={() => setStructureOpen(true)} className="hidden rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-slate-50 sm:block"><Settings2 className="h-4 w-4" /></button>{scope.type !== 'trash' && <button onClick={() => openCreate()} className="flex items-center gap-2 rounded-xl bg-slate-900 px-3.5 py-2.5 text-sm font-bold text-white shadow-lg shadow-slate-200 transition hover:bg-emerald-700"><Plus className="h-4 w-4" /><span className="hidden sm:inline">Nueva tarea</span></button>}</div></div>
-        <div className="mt-3 flex flex-wrap items-center gap-2"><div className="relative min-w-[180px] flex-1 sm:max-w-sm"><Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" /><input id="task-search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Buscar tareas…  /" className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm outline-none focus:border-emerald-300 focus:bg-white" /></div>{scope.type !== 'trash' && structureReady && <TaskFilterToolbar filters={filters} statuses={allStatuses} users={users} scope={scope.type === 'all' ? { type: 'all' } : { type: scope.type, id: scope.id }} view={view} collapsedStatusIds={collapsedStatusIds} onChange={setFilters} onApplyView={applySavedView} applyDefaultOnLoad={!defaultViewLoadHandled.current} onDefaultLoadHandled={() => { defaultViewLoadHandled.current = true }} onError={setError} />}</div>
-        {scope.type !== 'trash' && <div className="mt-3 flex overflow-x-auto rounded-xl bg-slate-100 p-1 sm:w-fit">{viewOptions.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setView(option.id)} className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold transition ${view === option.id ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}><Icon className="h-3.5 w-3.5" />{option.label}</button> })}</div>}
+      <header data-task-workspace-header className="shrink-0 border-b border-slate-200 bg-white">
+        <div className="flex items-center gap-3 px-3 pb-2 pt-3 sm:px-5"><button onClick={() => setSidebarOpen(true)} className="rounded-xl p-2 text-slate-500 hover:bg-slate-100 lg:hidden"><Menu className="h-5 w-5" /></button><div className="min-w-0"><div className="flex items-center gap-1 text-[10px] text-slate-400"><span>Clarin Work</span>{activeFolder && <><ChevronRight className="h-3 w-3" /><span>{activeFolder.name}</span></>}</div><h1 className="truncate text-lg font-black text-slate-900">{scopeName}</h1></div><div className="ml-auto flex items-center gap-2"><button onClick={() => setStructureOpen(true)} className="hidden rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-slate-50 sm:block"><Settings2 className="h-4 w-4" /></button>{scope.type !== 'trash' && <button onClick={() => openCreate()} className="flex items-center gap-2 rounded-xl bg-slate-900 px-3.5 py-2.5 text-sm font-bold text-white shadow-lg shadow-slate-200 transition hover:bg-emerald-700"><Plus className="h-4 w-4" /><span className="hidden sm:inline">Nueva tarea</span></button>}</div></div>
+        <div className="flex min-w-0 items-center gap-2 px-3 pb-2 sm:px-5">
+          {scope.type !== 'trash' && <div data-task-view-tabs className="flex min-w-0 flex-1 overflow-x-auto rounded-xl bg-slate-100 p-1">{viewOptions.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setView(option.id)} className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-semibold transition sm:px-3 ${view === option.id ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}><Icon className="h-3.5 w-3.5" />{option.label}</button> })}</div>}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <div className={`relative flex h-9 items-center overflow-hidden rounded-xl border transition-all duration-200 ${searchOpen ? `${workspaceWidth < 850 ? 'w-44' : 'w-64'} border-emerald-300 bg-white shadow-sm` : `w-9 ${search ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}`}>
+              <button type="button" aria-label="Buscar tareas" onClick={() => { setSearchOpen(true); requestAnimationFrame(() => searchInputRef.current?.focus()) }} className="flex h-9 w-9 shrink-0 items-center justify-center text-slate-500"><Search className="h-4 w-4" /></button>
+              <input ref={searchInputRef} id="task-search" value={search} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setSearchOpen(false); event.currentTarget.blur() } }} placeholder="Buscar tareas…" className="h-full min-w-0 flex-1 bg-transparent pr-1 text-sm text-slate-700 outline-none placeholder:text-slate-400" />
+              {search && <button type="button" aria-label="Limpiar búsqueda" onClick={() => { setSearch(''); setDebouncedSearch(''); setSearchOpen(false) }} className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-3.5 w-3.5" /></button>}
+              {!searchOpen && search && <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-emerald-500" />}
+            </div>
+            {scope.type !== 'trash' && structureReady && <TaskFilterToolbar filters={filters} statuses={allStatuses} users={users} scope={scope.type === 'all' ? { type: 'all' } : { type: scope.type, id: scope.id }} view={view} collapsedStatusIds={collapsedStatusIds} onChange={setFilters} onApplyView={applySavedView} applyDefaultOnLoad={!defaultViewLoadHandled.current} onDefaultLoadHandled={() => { defaultViewLoadHandled.current = true }} onError={setError} showChips={false} />}
+          </div>
+        </div>
+        {scope.type !== 'trash' && <TaskFilterChips filters={filters} statuses={allStatuses} users={users} onChange={setFilters} />}
       </header>
 
-      <div className={`min-h-0 flex-1 p-3 sm:p-5 ${view === 'board' && scope.type !== 'trash' ? 'overflow-hidden' : 'overflow-auto'}`}>
-        {error && <div className="mb-3 flex items-center justify-between rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"><span>{error}</span><button onClick={() => setError('')}><X className="h-4 w-4" /></button></div>}
+      <div data-task-workspace-canvas className={`min-h-0 flex-1 ${immersiveView ? 'overflow-hidden p-0' : 'overflow-auto p-2 sm:p-3'}`}>
+        {error && <div className="m-2 mb-3 flex items-center justify-between rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"><span>{error}</span><button onClick={() => setError('')}><X className="h-4 w-4" /></button></div>}
         {loading ? <div className="space-y-3">{Array.from({length:5}).map((_,index) => <div key={index} className="h-16 animate-pulse rounded-2xl bg-slate-200/60" />)}</div> : <div className="h-full min-h-[420px]">
           {scope.type === 'trash' && <TrashView tasks={tasks} onRestore={task => void restoreTask(task)} />}
           {scope.type !== 'trash' && view === 'list' && <ListView tasks={tasks} statuses={statuses} allStatuses={allStatuses} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} />}

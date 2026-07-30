@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { CalendarRange, Check, Flag, Repeat2, Sparkles, X } from 'lucide-react'
+import { CalendarRange, Flag, Repeat2, Sparkles, X } from 'lucide-react'
 import { apiGet, apiPost, apiPut } from '@/lib/api'
 import {
   REMINDER_OPTIONS,
@@ -15,6 +15,8 @@ import {
   TaskWorkflow,
 } from '@/types/task'
 import TaskUserCombobox from './TaskUserCombobox'
+import TaskCollaboratorPicker from './TaskCollaboratorPicker'
+import { TaskStatusPicker } from './TaskPropertyPicker'
 
 export interface TaskAccountUser {
   id: string
@@ -165,9 +167,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
     setStatusId(initial?.id || '')
   }, [listId, statusId, statuses, task?.status_detail?.category, workflows])
 
-  const owner = users.find(user => user.id === ownerId)
   const canSave = title.trim() && ownerId && listId && statusId && (!startAt || !dueAt || new Date(dueAt) >= new Date(startAt))
-  const collaboratorUsers = useMemo(() => users.filter(user => user.id !== ownerId), [users, ownerId])
 
   const save = async () => {
     if (!canSave || saving) return
@@ -223,7 +223,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
             <section className="space-y-4 rounded-2xl border border-slate-200 p-4">
               <div className="grid grid-cols-2 gap-3">
                 <label className="text-xs font-semibold text-slate-500">Lista<select disabled={Boolean(parentTaskId || task?.parent_task_id)} value={listId} onChange={event => setListId(event.target.value)} className={`${inputClass} mt-1.5 disabled:bg-slate-100 disabled:text-slate-500`}>{lists.map(list => <option key={list.id} value={list.id}>{list.name}{list.is_default ? ' · predeterminada' : ''}</option>)}</select></label>
-                <label className="text-xs font-semibold text-slate-500">Estado<select value={statusId} onChange={event => { const nextStatus = statuses.find(status => status.id === event.target.value); setStatusId(event.target.value); if (nextStatus?.category === 'done') setProgress(100); if (event.target.value) setError('') }} className={`${inputClass} mt-1.5`}><option value="" disabled>Selecciona un estado…</option>{statuses.map(status => <option key={status.id} value={status.id}>{status.name}</option>)}</select></label>
+                <div className="text-xs font-semibold text-slate-500">Estado<div className="mt-1.5"><TaskStatusPicker value={statusId} statuses={statuses} onChange={nextID => { const nextStatus = statuses.find(status => status.id === nextID); setStatusId(nextID); if (nextStatus?.category === 'done') setProgress(100); if (nextID) setError('') }} /></div></div>
               </div>
               <div>
                 <div className="mb-2 text-xs font-semibold text-slate-500">Tipo</div>
@@ -234,10 +234,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
                 <div className="grid grid-cols-4 gap-1.5">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(key => <button key={key} onClick={() => setPriority(key)} className={`rounded-xl px-2 py-2 text-xs font-medium transition ${priority === key ? `${TASK_PRIORITY_CONFIG[key].bg} ${TASK_PRIORITY_CONFIG[key].color} ring-1 ring-current` : 'bg-slate-100 text-slate-500'}`}>{TASK_PRIORITY_CONFIG[key].label}</button>)}</div>
               </div>
               <label className="block text-xs font-semibold text-slate-500">Responsable<span className="mt-1.5 block"><TaskUserCombobox users={users} value={ownerId} onChange={setOwnerId} /></span></label>
-              <div>
-                <div className="mb-2 text-xs font-semibold text-slate-500">Colaboradores</div>
-                <div className="flex max-h-32 flex-wrap gap-2 overflow-y-auto">{collaboratorUsers.map(user => { const active = collaboratorIds.includes(user.id); return <button key={user.id} onClick={() => setCollaboratorIds(current => active ? current.filter(id => id !== user.id) : [...current, user.id])} className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs ${active ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600'}`}>{active && <Check className="h-3 w-3" />}{user.display_name || user.username}</button> })}{!collaboratorUsers.length && <span className="text-xs text-slate-400">{owner ? 'No hay más usuarios disponibles' : 'Selecciona primero un responsable'}</span>}</div>
-              </div>
+              <div><div className="mb-1 text-xs font-semibold text-slate-500">Colaboradores</div><p className="mb-2 text-[10px] leading-4 text-slate-400">Participantes adicionales; el responsable continúa siendo el propietario.</p><TaskCollaboratorPicker users={users} value={collaboratorIds} ownerID={ownerId} onChange={setCollaboratorIds} emptyLabel={ownerId ? 'Sin colaboradores adicionales.' : 'Selecciona primero un responsable.'} /></div>
             </section>
 
             <section className="space-y-4 rounded-2xl border border-slate-200 p-4">

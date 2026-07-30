@@ -2,6 +2,13 @@
 
 ## 2026-07-30
 
+### Build 2 — Clarin Work aprovecha el espacio y ordena proyectos visualmente
+- ✨ Las listas se arrastran entre carpetas, se reordenan y regresan a “Sin carpeta” con previsualización, teclado, confirmación de flujo y rollback exacto.
+- 💄 Las vistas principales ocupan una barra estable de dos filas; la búsqueda se expande sin desplazar el lienzo y Tablero, Calendario y Gantt aprovechan toda la superficie.
+- ✨ Estado y prioridad usan selectores accesibles con color y significado, mientras los colaboradores se buscan y administran como participantes adicionales.
+- 🐛 Retirar el último colaborador representa correctamente la colección vacía devuelta por el servidor.
+- 🔒 Ubicación, orden, herencia de flujo y remapeo de estados se resuelven en una única transacción aislada por cuenta.
+
 ### Build 1 — Kanban estable incluso durante arrastres prolongados
 - 🐛 La tarjeta activa deja de participar como destino de su propia colisión, eliminando el parpadeo y el error React #185 al mantenerla entre columnas.
 - ⚡ El tablero transfiere una tarjeta una sola vez al cruzar de columna y confirma su posición final al soltar, conservando la animación fluida sin ciclos de índices.

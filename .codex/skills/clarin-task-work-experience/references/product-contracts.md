@@ -10,6 +10,9 @@ Read the sections relevant to the requested task change before editing.
 - In aggregate views, group heterogeneous workflows by category and map a drop to the equivalent real status for each task. Disable a destination when no equivalent exists.
 - Renaming or changing a status affects every list sharing that workflow; explain that scope before saving.
 - Changing a list or folder workflow must be one transaction: lock the affected containers and destination statuses, prove a category-equivalent mapping for every active task, remap every task, and only then persist the new workflow.
+- Lists may move between folders, reorder inside one folder, or return to the explicit root container. Capture the complete hierarchy at drag start, preview locally, and emit at most one account-scoped structural write with the destination plus optional `before_list_id`; Escape, an invalid drop, an incompatible workflow, `409`, or transport failure restores that exact snapshot.
+- A structural list move must lock the source and destination folders, every active list in both ordering scopes, and the destination anchor before writing. The anchor must be active, same-account, and already inside the final folder/root scope. Workflow inheritance, task-status remapping, location, and normalized destination order commit or roll back together.
+- The default account list is fixed at the root and cannot be dragged, reparented, or reordered. Explain that constraint at its disabled drag affordance.
 - Archiving a list or folder is allowed only when it contains no active tasks. Restoring a child task requires an active parent and an active list/folder chain.
 - Create, restore, move, archive, and workflow-remap paths must lock and revalidate their parent/list/folder/status dependencies after waiting; a pre-lock read is never sufficient proof under concurrency.
 
@@ -48,7 +51,7 @@ Read the sections relevant to the requested task change before editing.
 ## Filters And Saved Views
 
 - Combine different fields with AND and multiple choices inside one field with OR.
-- Keep search visible and show active filters as removable chips with a clear-all action.
+- Keep search directly accessible without displacing the primary view tabs. A compact search may expand in place on click or `/`; Escape collapses without deleting the query, while its clear action deletes and collapses. Show active filters as removable chips only while filters exist.
 - Validate every saved-view JSON field server-side; keep views private to the current account/user unless shared views are explicitly designed.
 - Apply a user's default saved view only during the workspace bootstrap. Remounting the toolbar after visiting Trash or changing scope must not overwrite the user's current navigation.
 - A filtered reorder must use server anchors and must never submit a replacement order composed only of filtered cards.
@@ -57,12 +60,21 @@ Read the sections relevant to the requested task change before editing.
 ## Responsibility, Subtasks, And Detail
 
 - One user is the responsible owner. Collaborators are participants, not co-owners or notification subscribers unless explicitly implemented.
+- Collaborator controls show only selected participants as removable chips and add through bounded search by name, username, or role. Exclude the owner. The canonical collaborator response is authoritative even when it is an explicit empty collection; never retain a stale final chip because an omitted task field was merged locally.
+- Status and priority property controls must use accessible, viewport-aware portaled pickers with real status/category and priority semantics. They support pointer and keyboard operation and expose saving, conflict, rollback, and retry behavior.
 - A real subtask is a child task with the same list as its parent and no further child level.
 - Use one canonical child-task API; do not expose the legacy `subtasks` checklist as a second editable surface.
 - Child create/update/archive/restore must invalidate top-level task caches and publish a canonical parent/subtask reconciliation event so counts and progress cannot remain stale.
 - Wide task surfaces show main work plus an activity/conversation rail. Narrow docked/mobile surfaces may use Details and Activity views.
 - Docked/floating modes must leave the workspace usable; maximized/mobile modes may use modal focus and dimming.
 - Inline property writes use task versions and preserve local drafts across conflict recovery.
+
+## Workspace Density
+
+- `/dashboard/tasks` is a full-bleed workspace. Do not add dashboard padding around the task shell or a hard-coded minimum height that creates dead space.
+- Keep title/actions and views/tools in two compact header rows. Lista, Tablero, Calendario, Gantt, and Resumen remain primary navigation and do not move when search expands.
+- Board, calendar, and Gantt use the complete measured canvas. Reading views may retain only an 8–12 px breathing margin. Empty states fill the available surface instead of rendering as an inset card.
+- Base responsive decisions on the measured workspace container after dashboard navigation and Eros chrome, not on browser width alone.
 
 ## Activity, Comments, And Realtime
 

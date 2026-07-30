@@ -29,17 +29,17 @@ import {
 } from 'lucide-react'
 import { apiDelete, apiGet, apiPost, apiPut, apiUpload, subscribeWebSocket } from '@/lib/api'
 import {
-  TASK_PRIORITY_CONFIG,
   Task,
   TaskActivity,
   TaskAttachment,
   TaskComment,
   TaskDependency,
   TaskList,
-  TaskPriority,
   TaskWorkflow,
 } from '@/types/task'
 import { TaskAccountUser } from './TaskEditorModal'
+import TaskCollaboratorPicker from './TaskCollaboratorPicker'
+import { TaskPriorityPicker, TaskStatusPicker } from './TaskPropertyPicker'
 import TaskUserCombobox from './TaskUserCombobox'
 import useTaskDetailWindow, { type TaskDetailResizeEdge } from './useTaskDetailWindow'
 
@@ -594,22 +594,37 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
       return
     }
     const next = shouldSelect ? [...ids, userId] : ids.filter(id => id !== userId)
+    const participant = users.find(user => user.id === userId)
+    const optimisticCollaborators = shouldSelect
+      ? [...(currentTask.collaborators || []), { user_id: userId, display_name: participant?.display_name || participant?.username || 'Usuario', username: participant?.username || '', created_at: new Date().toISOString() }]
+      : (currentTask.collaborators || []).filter(item => item.user_id !== userId)
     beginPending('collaborators')
+    applyTask({ ...currentTask, collaborators: optimisticCollaborators })
     const result = await apiPut<{ task: Task; collaborators: Task['collaborators']; version: number }>(`/api/tasks/${currentTask.id}/collaborators`, {
       user_ids: next,
       version: currentTask.version,
     })
     if (taskIdRef.current === currentTask.id && result.success && result.data?.task) {
-      applyTask(result.data.task)
-      onChanged(result.data.task)
+      const canonical = { ...result.data.task, collaborators: result.data.collaborators ?? [] }
+      applyTask(canonical)
+      onChanged(canonical)
       clearFailure()
     } else if (result.status === 409) {
       await refreshTask()
       showFailure('La tarea cambió en otra sesión. Ya cargamos la versión reciente; puedes aplicar tu selección nuevamente.', () => { void setCollaborator(userId, shouldSelect) })
     } else if (!result.success) {
+      if (taskIdRef.current === currentTask.id) applyTask(currentTask)
       showFailure(result.error || 'No se pudieron actualizar los colaboradores', () => { void setCollaborator(userId, shouldSelect) })
     }
     endPending('collaborators')
+  }
+
+  const setCollaboratorSelection = (nextIDs: string[]) => {
+    const currentIDs = taskRef.current?.collaborators?.map(item => item.user_id) || []
+    const added = nextIDs.find(id => !currentIDs.includes(id))
+    if (added) { void setCollaborator(added, true); return }
+    const removed = currentIDs.find(id => !nextIDs.includes(id))
+    if (removed) void setCollaborator(removed, false)
   }
 
   const toggleChild = async (child: Task) => {
@@ -883,9 +898,9 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
     <section>
       <div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Propiedades</h3><button onClick={() => onEdit(task)} className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50">Más opciones</button></div>
       <div className="grid gap-x-5 gap-y-4 rounded-2xl border border-slate-200 bg-white p-4 sm:grid-cols-2">
-        <label className="text-xs font-semibold text-slate-500">Estado<div className="relative mt-1.5"><select value={task.status_id || ''} disabled={isPending('status')} onChange={event => { void updateTask('status', { status_id: event.target.value }) }} className={`${inputClass} pr-9`}>{statuses.map(status => <option key={status.id} value={status.id}>{status.name}</option>)}</select>{isPending('status') && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div></label>
+        <div className="text-xs font-semibold text-slate-500">Estado<div className="mt-1.5"><TaskStatusPicker value={task.status_id || ''} statuses={statuses} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div></div>
         <div className="text-xs font-semibold text-slate-500">Responsable<div className="mt-1.5"><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={isPending('owner')} /></div></div>
-        <label className="text-xs font-semibold text-slate-500">Prioridad<div className="relative mt-1.5"><select value={task.priority} disabled={isPending('priority')} onChange={event => { void updateTask('priority', { priority: event.target.value }) }} className={`${inputClass} pr-9`}>{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(key => <option key={key} value={key}>{TASK_PRIORITY_CONFIG[key].label}</option>)}</select>{isPending('priority') && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div></label>
+        <div className="text-xs font-semibold text-slate-500">Prioridad<div className="mt-1.5"><TaskPriorityPicker value={task.priority} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></div></div>
         <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5 flex min-h-11 items-center rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm font-medium text-slate-600">{task.list_name || list?.name || 'Bandeja general'}</div></div>
         <label className="text-xs font-semibold text-slate-500"><span className="flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Inicio</span><input type="datetime-local" value={startDraft} disabled={isPending('dates')} onFocus={() => { editingDatesRef.current = true }} onChange={event => setStartDraft(event.target.value)} onBlur={() => { void saveDates() }} className={`${inputClass} mt-1.5`} /></label>
         <label className="text-xs font-semibold text-slate-500"><span className="flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Entrega</span><input type="datetime-local" value={dueDraft} disabled={isPending('dates')} onFocus={() => { editingDatesRef.current = true }} onChange={event => setDueDraft(event.target.value)} onBlur={() => { void saveDates() }} className={`${inputClass} mt-1.5`} /></label>
@@ -894,8 +909,9 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, workf
     </section>
 
     <section>
-      <div className="mb-3 flex items-center gap-2"><UserRound className="h-4 w-4 text-emerald-600" /><h3 className="text-sm font-bold text-slate-800">Colaboradores</h3>{isPending('collaborators') && <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />}</div>
-      <div className="flex max-h-36 flex-wrap gap-2 overflow-y-auto">{users.filter(user => user.id !== task.assigned_to).map(user => { const selected = task.collaborators?.some(item => item.user_id === user.id); return <button key={user.id} disabled={isPending('collaborators')} onClick={() => { void setCollaborator(user.id) }} className={`flex min-h-9 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition ${selected ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'}`}>{selected && <Check className="h-3 w-3" />}{user.display_name || user.username}</button> })}{users.length <= 1 && <span className="text-xs text-slate-400">No hay otros usuarios disponibles.</span>}</div>
+      <div className="mb-1.5 flex items-center gap-2"><UserRound className="h-4 w-4 text-emerald-600" /><h3 className="text-sm font-bold text-slate-800">Colaboradores</h3>{isPending('collaborators') && <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />}</div>
+      <p className="mb-3 text-xs leading-5 text-slate-400">Participan y reciben contexto de la tarea; el responsable continúa siendo su único propietario.</p>
+      <TaskCollaboratorPicker users={users} value={task.collaborators?.map(item => item.user_id) || []} ownerID={task.assigned_to} pending={isPending('collaborators')} onChange={setCollaboratorSelection} />
     </section>
 
     {!task.parent_task_id && <section>

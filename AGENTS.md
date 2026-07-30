@@ -64,6 +64,8 @@ If a task touches multiple areas, read all matching skills before editing.
 - Move task status and order atomically with optimistic concurrency. Never combine unrelated reorder and status calls or replace the order with only filtered/visible cards.
 - Aggregate boards group heterogeneous workflows by category and map a drop to the task's real equivalent status. Disable destinations without a valid equivalent.
 - Keep one responsible owner plus optional collaborators unless a deliberate full-stack migration introduces multi-owner semantics.
+- Treat list hierarchy drag as one structural transaction: validate same-account folder/anchor, remap inherited workflows completely, persist destination order once, and roll back the whole operation on any incompatibility. The default task list remains fixed at the root.
+- An explicit empty collaborator collection is canonical. Frontend reconciliation must not preserve stale collaborators when the last participant is removed.
 - Real subtasks are one-level child tasks in the parent's list and compatible workflow. Do not expose the legacy checklist table as a second editable source.
 - Archive task lists/folders only when they contain no active tasks. Child restore requires an active parent; concurrent structure/task mutations must lock and revalidate their dependencies inside one transaction.
 - Aggregate Kanban anchors are same-list and same workflow category, not necessarily the same concrete status. Workflow changes must remap every affected task by category atomically or reject without partial changes.

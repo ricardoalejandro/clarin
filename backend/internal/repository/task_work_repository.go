@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ var (
 	ErrTaskWorkflowInvalid          = errors.New("task workflow requires initial and completed statuses")
 	ErrTaskVersionConflict          = errors.New("task was updated concurrently")
 	ErrTaskOrderInvalid             = errors.New("task order does not represent one complete scope")
+	ErrTaskListOrderInvalid         = errors.New("task list order anchor is invalid")
 	ErrTaskSavedViewNameConflict    = errors.New("task saved view name already exists")
 	ErrTaskSavedViewDefaultConflict = errors.New("task saved view default changed concurrently")
 	ErrTaskCollaboratorInvalid      = errors.New("task collaborator does not belong to account")
@@ -366,7 +368,7 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, folde
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, listID uuid.UUID, folderID *uuid.UUID, folderProvided bool, workflowID *uuid.UUID, inherited *bool, description, name, color *string) error {
+func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, listID uuid.UUID, folderID *uuid.UUID, folderProvided bool, beforeListID *uuid.UUID, orderProvided bool, workflowID *uuid.UUID, inherited *bool, description, name, color *string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -431,20 +433,71 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 			return ErrTaskWorkNotFound
 		}
 	}
-	var currentFolderID *uuid.UUID
-	var currentWorkflowID uuid.UUID
-	var currentInherited, isDefault bool
-	if err := tx.QueryRow(ctx, `SELECT folder_id,workflow_id,workflow_inherited,is_default FROM task_lists
-		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, listID).
-		Scan(&currentFolderID, &currentWorkflowID, &currentInherited, &isDefault); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrTaskWorkNotFound
-		}
+	type lockedTaskList struct {
+		ID                uuid.UUID
+		FolderID          *uuid.UUID
+		WorkflowID        uuid.UUID
+		WorkflowInherited bool
+		IsDefault         bool
+		SortOrder         int
+		CreatedAt         time.Time
+	}
+	lockedRows, err := tx.Query(ctx, `SELECT id,folder_id,workflow_id,workflow_inherited,is_default,sort_order,created_at
+		FROM task_lists
+		WHERE account_id=$1 AND archived_at IS NULL AND (
+			id=$2 OR folder_id IS NOT DISTINCT FROM $3::uuid OR folder_id IS NOT DISTINCT FROM $4::uuid
+		)
+		ORDER BY id FOR UPDATE`, accountID, listID, observedFolderID, finalFolderID)
+	if err != nil {
 		return err
 	}
+	lockedLists := make([]lockedTaskList, 0)
+	var current *lockedTaskList
+	for lockedRows.Next() {
+		item := lockedTaskList{}
+		if err := lockedRows.Scan(&item.ID, &item.FolderID, &item.WorkflowID, &item.WorkflowInherited, &item.IsDefault, &item.SortOrder, &item.CreatedAt); err != nil {
+			lockedRows.Close()
+			return err
+		}
+		lockedLists = append(lockedLists, item)
+		if item.ID == listID {
+			copy := item
+			current = &copy
+		}
+	}
+	if err := lockedRows.Err(); err != nil {
+		lockedRows.Close()
+		return err
+	}
+	lockedRows.Close()
+	if current == nil {
+		return ErrTaskWorkNotFound
+	}
+	currentFolderID := current.FolderID
+	currentWorkflowID := current.WorkflowID
+	currentInherited := current.WorkflowInherited
+	isDefault := current.IsDefault
 	if !taskUUIDPointersEqual(observedFolderID, currentFolderID) || observedWorkflowID != currentWorkflowID ||
 		observedInherited != currentInherited || observedDefault != isDefault {
 		return ErrTaskVersionConflict
+	}
+	if isDefault && (finalFolderID != nil || orderProvided) {
+		return ErrDefaultTaskList
+	}
+	if orderProvided && beforeListID != nil {
+		if *beforeListID == listID {
+			return ErrTaskListOrderInvalid
+		}
+		validAnchor := false
+		for _, candidate := range lockedLists {
+			if candidate.ID == *beforeListID && taskUUIDPointersEqual(candidate.FolderID, finalFolderID) {
+				validAnchor = true
+				break
+			}
+		}
+		if !validAnchor {
+			return ErrTaskListOrderInvalid
+		}
 	}
 	var folderWorkflowID *uuid.UUID
 	if finalFolderID != nil {
@@ -481,6 +534,44 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 	}
 	if finalWorkflowID != currentWorkflowID {
 		if err := remapListTaskStatuses(ctx, tx, accountID, []uuid.UUID{listID}, finalWorkflowID); err != nil {
+			return err
+		}
+	}
+	if orderProvided {
+		destination := make([]lockedTaskList, 0)
+		for _, candidate := range lockedLists {
+			if candidate.ID != listID && taskUUIDPointersEqual(candidate.FolderID, finalFolderID) {
+				destination = append(destination, candidate)
+			}
+		}
+		sort.SliceStable(destination, func(left, right int) bool {
+			if destination[left].SortOrder != destination[right].SortOrder {
+				return destination[left].SortOrder < destination[right].SortOrder
+			}
+			if !destination[left].CreatedAt.Equal(destination[right].CreatedAt) {
+				return destination[left].CreatedAt.Before(destination[right].CreatedAt)
+			}
+			return destination[left].ID.String() < destination[right].ID.String()
+		})
+		orderedIDs := make([]uuid.UUID, 0, len(destination)+1)
+		inserted := false
+		for _, candidate := range destination {
+			if beforeListID != nil && candidate.ID == *beforeListID {
+				orderedIDs = append(orderedIDs, listID)
+				inserted = true
+			}
+			orderedIDs = append(orderedIDs, candidate.ID)
+		}
+		if !inserted {
+			orderedIDs = append(orderedIDs, listID)
+		}
+		if _, err := tx.Exec(ctx, `WITH ordered AS (
+			SELECT item.id,(item.ordinality::int * 1024) AS position
+			FROM unnest($2::uuid[]) WITH ORDINALITY AS item(id, ordinality)
+		)
+		UPDATE task_lists list SET sort_order=ordered.position,updated_at=NOW()
+		FROM ordered WHERE list.account_id=$1 AND list.id=ordered.id
+			AND list.archived_at IS NULL`, accountID, orderedIDs); err != nil {
 			return err
 		}
 	}

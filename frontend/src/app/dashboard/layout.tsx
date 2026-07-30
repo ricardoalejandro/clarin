@@ -775,7 +775,7 @@ export default function DashboardLayout({
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
+          pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
         } ${(chatComposerKeyboardOpen || chatComposerAccessoryOpen) && !updateAvailable ? 'pt-[env(safe-area-inset-top)]' : ''}`}>
           {children}
         </main>

@@ -41,6 +41,8 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La tarea cambió en otra sesión; recarga antes de guardar", "code": "version_conflict"})
 	case errors.Is(err, repository.ErrTaskOrderInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "El orden debe contener todas las tareas activas de una sola lista", "code": "invalid_task_order"})
+	case errors.Is(err, repository.ErrTaskListOrderInvalid):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La posición elegida ya no pertenece al destino", "code": "invalid_list_order_anchor"})
 	case errors.Is(err, repository.ErrTaskSavedViewNameConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Ya existe una vista guardada con ese nombre", "code": "saved_view_name_conflict"})
 	case errors.Is(err, repository.ErrTaskSavedViewDefaultConflict):
@@ -563,6 +565,7 @@ func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
 	}
 	var req struct {
 		FolderID          *string `json:"folder_id"`
+		BeforeListID      *string `json:"before_list_id"`
 		WorkflowID        *string `json:"workflow_id"`
 		WorkflowInherited *bool   `json:"workflow_inherited"`
 		Description       *string `json:"description"`
@@ -572,7 +575,7 @@ func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	var folderID, workflowID *uuid.UUID
+	var folderID, beforeListID, workflowID *uuid.UUID
 	if req.FolderID != nil && *req.FolderID != "" {
 		id, e := uuid.Parse(*req.FolderID)
 		if e != nil {
@@ -587,6 +590,13 @@ func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
 		}
 		workflowID = &id
 	}
+	if req.BeforeListID != nil && *req.BeforeListID != "" {
+		id, e := uuid.Parse(*req.BeforeListID)
+		if e != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Posición de lista inválida"})
+		}
+		beforeListID = &id
+	}
 	inherited := req.WorkflowInherited
 	if req.FolderID != nil && inherited == nil {
 		value := folderID != nil
@@ -599,7 +609,7 @@ func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
 		}
 		req.Name = &trimmed
 	}
-	if err := s.repos.TaskWork.UpdateListLocation(c.Context(), accountID, listID, folderID, req.FolderID != nil, workflowID, inherited, req.Description, req.Name, req.Color); err != nil {
+	if err := s.repos.TaskWork.UpdateListLocation(c.Context(), accountID, listID, folderID, req.FolderID != nil, beforeListID, req.BeforeListID != nil, workflowID, inherited, req.Description, req.Name, req.Color); err != nil {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
@@ -837,6 +847,9 @@ func (s *Server) handleSetTaskCollaborators(c *fiber.Ctx) error {
 	full, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
 	if err != nil {
 		return taskWorkError(c, err)
+	}
+	if full.Collaborators == nil {
+		full.Collaborators = []*domain.TaskCollaborator{}
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &actorID, "collaborators_updated", fiber.Map{"count": len(ids)})
 	s.invalidateTasksCache(accountID)
