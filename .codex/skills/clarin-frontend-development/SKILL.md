@@ -13,6 +13,7 @@ description: Use when modifying Clarin frontend Next.js, React, TypeScript, dash
 
 ## UI Rules
 
+- Read `../clarin-interface-design-system/SKILL.md` and its relevant references for every visual, layout, control, window, interaction, motion, or responsive change. Treat appearance and complete behavior as one implementation.
 - Match the existing dashboard before inventing new visual language.
 - Use Tailwind and lucide-react consistently with the target page.
 - Operational SaaS screens should be dense, scannable, and calm. Avoid landing-page or marketing layouts inside the dashboard.

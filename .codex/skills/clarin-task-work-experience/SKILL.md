@@ -10,9 +10,10 @@ Implement Clarin Work as one complete collaboration surface. Keep hierarchy, sta
 ## Load Required Context
 
 1. Read repository `AGENTS.md`.
-2. Read every matching layer skill: frontend, backend, database, storage, and quality assurance as applicable.
-3. Read [product-contracts.md](references/product-contracts.md) before changing task behavior, persistence, ordering, layout, or realtime state.
-4. Read [verification-matrix.md](references/verification-matrix.md) before finalizing tests, deployment, or a completion claim.
+2. Read `../clarin-interface-design-system/SKILL.md` for every Clarin Work visual, control, window, drag, motion, or responsive change.
+3. Read every matching layer skill: frontend, backend, database, storage, and quality assurance as applicable.
+4. Read [product-contracts.md](references/product-contracts.md) before changing task behavior, persistence, ordering, layout, or realtime state.
+5. Read [verification-matrix.md](references/verification-matrix.md) before finalizing tests, deployment, or a completion claim.
 
 ## Execute The Work
 

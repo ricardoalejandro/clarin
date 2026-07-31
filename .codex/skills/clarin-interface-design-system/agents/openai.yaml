@@ -1,0 +1,4 @@
+interface:
+  display_name: "Clarin Interface Design System"
+  short_description: "Diseño funcional y elegante para todo Clarin"
+  default_prompt: "Use $clarin-interface-design-system to design and verify this Clarin interface with complete, polished behavior."

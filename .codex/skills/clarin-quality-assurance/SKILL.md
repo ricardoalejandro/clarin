@@ -32,6 +32,7 @@ npm run build
 
 ## Unit-Test Contract
 
+- For visual, layout, control, window, overlay, drag, motion, or responsive changes, read `../clarin-interface-design-system/references/verification-matrix.md` and cover both functional state and rendered geometry.
 - Every functional behavior change must add or update a deterministic unit test at the nearest stable layer: repository/service for backend invariants, and pure helper/reducer/hook/component boundary for frontend state.
 - Extract pure helpers instead of testing timing, geometry, selection, ordering, reconciliation, or payload rules only through a browser.
 - A build, TypeScript pass, manual click-through, or Playwright scenario never substitutes for the nearest-layer unit test.

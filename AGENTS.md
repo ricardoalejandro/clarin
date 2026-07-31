@@ -24,6 +24,7 @@ These instructions are the source of truth for Codex in this repository. Read th
 
 Before changing any area below, read the matching local skill completely:
 
+- Visual design, layouts, controls, forms, tables, cards, sidebars, windows, dialogs, comboboxes, dates, overlays, drag interaction, motion, responsive behavior, or aesthetic consistency: `.codex/skills/clarin-interface-design-system/SKILL.md` plus the frontend, quality-assurance, and affected module skills.
 - Backend/API/services/repositories/domain/WhatsApp: `.codex/skills/clarin-backend-development/SKILL.md`
 - Frontend/pages/components/API client/WebSocket UI state: `.codex/skills/clarin-frontend-development/SKILL.md`
 - Database schema, migrations, indexes, backfills, data repairs: `.codex/skills/clarin-database-changes/SKILL.md`
@@ -35,6 +36,15 @@ Before changing any area below, read the matching local skill completely:
 - Clarin Work, tasks, Kanban, task folders/lists/workflows/statuses, ordering, filters/saved views, task detail, subtasks, comments, dependencies, Gantt/calendar, or task realtime behavior: `.codex/skills/clarin-task-work-experience/SKILL.md` plus every matching layer skill above.
 
 If a task touches multiple areas, read all matching skills before editing.
+
+## Clarin Interface Design Invariants
+
+- Treat visual quality and functional completeness as one requirement. A beautiful control that is ambiguous, clipped, inaccessible, inert, or unreliable is unfinished.
+- Keep operational surfaces calm, dense, scannable, and proportional. Use measured available space, one deliberate scroll owner, progressive disclosure, and responsive reflow before truncation.
+- Use professional viewport-aware portaled controls when choices need search, hierarchy, semantics, icons, colors, dates, time, or timezone; never let a picker render behind or outside its owning surface.
+- Use simple modals for short blocking decisions and complete work-window behavior for complex creation/editing that benefits from drag, resize, docking, maximize/restore, remembered geometry, and mobile adaptation.
+- Give click, completion, selection, drag, resize, and pan one stable gesture and cursor owner. Motion must explain state, avoid layout oscillation, and respect reduced-motion preferences.
+- Design loading, empty, disabled, permission, validation, conflict, cancellation, rollback, retry, and canonical reconciliation states before calling a UI complete.
 
 ## Contact And Program Product Invariants
 
