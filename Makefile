@@ -71,9 +71,9 @@ deploy:
 	@BUILD_VERSION=$$(./version.sh) && \
 	echo "🚀 Deploying Clarin CRM v$$BUILD_VERSION" && \
 	docker compose build codex-bridge && \
-	docker compose build --build-arg BUILD_VERSION=$$BUILD_VERSION backend && \
+	docker compose build --build-arg BUILD_VERSION=$$BUILD_VERSION backend task-preview-worker && \
 	docker compose build --build-arg BUILD_VERSION=$$BUILD_VERSION frontend && \
-	docker compose up -d codex-bridge backend frontend && \
+	docker compose up -d codex-bridge backend task-preview-worker frontend && \
 	echo "✅ Deployed v$$BUILD_VERSION"
 
 # Install dependencies

@@ -20,6 +20,8 @@ import {
   TASK_TYPE_CONFIG,
   TaskDueFilter,
   TaskFilters,
+  TaskGroupBy,
+  TaskGroupDirection,
   TaskPriority,
   TaskSavedView,
   TaskType,
@@ -27,6 +29,7 @@ import {
   TaskWorkflowStatus,
 } from '@/types/task'
 import type { TaskAccountUser } from './TaskEditorModal'
+import TaskDateTimePicker from './TaskDateTimePicker'
 
 export const EMPTY_TASK_FILTERS: TaskFilters = {
   status_ids: [],
@@ -51,6 +54,9 @@ interface Props {
   scope: ScopeDescriptor
   view: TaskViewMode
   collapsedStatusIds: string[]
+  groupBy: TaskGroupBy
+  groupDirection: TaskGroupDirection
+  collapsedGroupKeys: string[]
   onChange: (filters: TaskFilters) => void
   onApplyView: (view: TaskSavedView) => void
   applyDefaultOnLoad: boolean
@@ -133,7 +139,7 @@ function Choice({ checked, label, detail, onChange }: { checked: boolean; label:
   </button>
 }
 
-function FilterPanel({ filters, statuses, users, onChange, onClose }: Omit<Props, 'scope' | 'view' | 'collapsedStatusIds' | 'onApplyView' | 'applyDefaultOnLoad' | 'onDefaultLoadHandled' | 'onError'> & { onClose: () => void }) {
+function FilterPanel({ filters, statuses, users, onChange, onClose }: Omit<Props, 'scope' | 'view' | 'collapsedStatusIds' | 'groupBy' | 'groupDirection' | 'collapsedGroupKeys' | 'onApplyView' | 'applyDefaultOnLoad' | 'onDefaultLoadHandled' | 'onError'> & { onClose: () => void }) {
   const [query, setQuery] = useState('')
   const needle = query.trim().toLocaleLowerCase('es')
   const shownStatuses = statuses.filter(status => !needle || status.name.toLocaleLowerCase('es').includes(needle))
@@ -155,10 +161,10 @@ function FilterPanel({ filters, statuses, users, onChange, onClose }: Omit<Props
 
       <div className="mt-4 grid gap-3 border-t border-slate-100 pt-4 md:grid-cols-3">
         <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Vencimiento<select value={filters.due} onChange={event => set('due', event.target.value as TaskDueFilter)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium normal-case tracking-normal text-slate-600 outline-none focus:border-emerald-400">{dueOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-        <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Creada desde<input type="date" value={filters.created_from} onChange={event => set('created_from', event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs font-medium normal-case tracking-normal text-slate-600 outline-none focus:border-emerald-400" /></label>
-        <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Creada hasta<input type="date" value={filters.created_to} onChange={event => set('created_to', event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs font-medium normal-case tracking-normal text-slate-600 outline-none focus:border-emerald-400" /></label>
-        <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Completada desde<input type="date" value={filters.completed_from} onChange={event => set('completed_from', event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs font-medium normal-case tracking-normal text-slate-600 outline-none focus:border-emerald-400" /></label>
-        <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Completada hasta<input type="date" value={filters.completed_to} onChange={event => set('completed_to', event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs font-medium normal-case tracking-normal text-slate-600 outline-none focus:border-emerald-400" /></label>
+        <TaskDateTimePicker label="Creada desde" allDay value={filters.created_from ? `${filters.created_from}T12:00` : ''} onChange={value => set('created_from', value ? value.slice(0, 10) : '')} />
+        <TaskDateTimePicker label="Creada hasta" allDay value={filters.created_to ? `${filters.created_to}T12:00` : ''} onChange={value => set('created_to', value ? value.slice(0, 10) : '')} />
+        <TaskDateTimePicker label="Completada desde" allDay value={filters.completed_from ? `${filters.completed_from}T12:00` : ''} onChange={value => set('completed_from', value ? value.slice(0, 10) : '')} />
+        <TaskDateTimePicker label="Completada hasta" allDay value={filters.completed_to ? `${filters.completed_to}T12:00` : ''} onChange={value => set('completed_to', value ? value.slice(0, 10) : '')} />
       </div>
 
       <section className="mt-4 border-t border-slate-100 pt-4"><h4 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">Contenido</h4><div className="grid gap-1 sm:grid-cols-2">{([
@@ -168,13 +174,16 @@ function FilterPanel({ filters, statuses, users, onChange, onClose }: Omit<Props
   </div>
 }
 
-function SavedViewsPanel({ views, loading, filters, scope, view, collapsedStatusIds, onReload, onApply, onError, onClose }: {
+function SavedViewsPanel({ views, loading, filters, scope, view, collapsedStatusIds, groupBy, groupDirection, collapsedGroupKeys, onReload, onApply, onError, onClose }: {
   views: TaskSavedView[]
   loading: boolean
   filters: TaskFilters
   scope: ScopeDescriptor
   view: TaskViewMode
   collapsedStatusIds: string[]
+  groupBy: TaskGroupBy
+  groupDirection: TaskGroupDirection
+  collapsedGroupKeys: string[]
   onReload: () => Promise<void>
   onApply: (view: TaskSavedView) => void
   onError: (message: string) => void
@@ -189,7 +198,7 @@ function SavedViewsPanel({ views, loading, filters, scope, view, collapsedStatus
     setBusyId('new')
     const result = await apiPost<{ view: TaskSavedView }>('/api/tasks/saved-views', {
       name: name.trim(), scope_type: scope.type, scope_id: scope.id || null, view_mode: view,
-      filters, collapsed_status_ids: collapsedStatusIds, is_default: makeDefault,
+      filters, collapsed_status_ids: collapsedStatusIds, group_by: groupBy, group_direction: groupDirection, collapsed_group_keys: collapsedGroupKeys, is_default: makeDefault,
     })
     if (!result.success) onError(result.error || 'No se pudo guardar la vista')
     else { setName(''); setMakeDefault(false); await onReload() }
@@ -201,7 +210,7 @@ function SavedViewsPanel({ views, loading, filters, scope, view, collapsedStatus
     setBusyId(saved.id)
     const result = await apiPut<{ view: TaskSavedView }>(`/api/tasks/saved-views/${saved.id}`, {
       name: saved.name, scope_type: scope.type, scope_id: scope.id || null, view_mode: view,
-      filters, collapsed_status_ids: collapsedStatusIds, is_default: saved.is_default,
+      filters, collapsed_status_ids: collapsedStatusIds, group_by: groupBy, group_direction: groupDirection, collapsed_group_keys: collapsedGroupKeys, is_default: saved.is_default,
     })
     if (!result.success) onError(result.error || 'No se pudo actualizar la vista')
     else await onReload()
@@ -218,6 +227,9 @@ function SavedViewsPanel({ views, loading, filters, scope, view, collapsedStatus
       view_mode: saved.view_mode,
       filters: saved.filters,
       collapsed_status_ids: saved.collapsed_status_ids || [],
+      group_by: saved.group_by || 'status',
+      group_direction: saved.group_direction || 'asc',
+      collapsed_group_keys: saved.collapsed_group_keys || [],
       is_default: !saved.is_default,
     })
     if (!result.success) onError(result.error || 'No se pudo cambiar la vista predeterminada')
@@ -278,7 +290,7 @@ export function TaskFilterChips({ filters, statuses, users, onChange, onOpenFilt
   </div>
 }
 
-export default function TaskFilterToolbar({ filters, statuses, users, scope, view, collapsedStatusIds, onChange, onApplyView, applyDefaultOnLoad, onDefaultLoadHandled, onError, showChips = true }: Props) {
+export default function TaskFilterToolbar({ filters, statuses, users, scope, view, collapsedStatusIds, groupBy, groupDirection, collapsedGroupKeys, onChange, onApplyView, applyDefaultOnLoad, onDefaultLoadHandled, onError, showChips = true }: Props) {
   const filterButtonRef = useRef<HTMLButtonElement>(null)
   const viewsButtonRef = useRef<HTMLButtonElement>(null)
   const [mode, setMode] = useState<'filters' | 'views' | null>(null)
@@ -333,7 +345,7 @@ export default function TaskFilterToolbar({ filters, statuses, users, scope, vie
     {showChips && chips.slice(0, 4).map(chip => <span key={`${chip.key}:${chip.value || chip.label}`} className="inline-flex max-w-36 items-center gap-1 rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-semibold text-slate-600"><span className="truncate">{chip.label}</span><button type="button" onClick={() => onChange(removeFilterChip(filters, chip.key, chip.value))} aria-label={`Quitar ${chip.label}`} className="rounded text-slate-400 hover:text-slate-700"><X className="h-3 w-3" /></button></span>)}
     {showChips && chips.length > 4 && <button type="button" onClick={() => setMode('filters')} className="rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-bold text-slate-500">+{chips.length - 4}</button>}
 
-    {mode && typeof document !== 'undefined' && createPortal(<><button type="button" aria-label="Cerrar panel" onMouseDown={close} className="fixed inset-0 z-[69] cursor-default" /><div role="dialog" aria-label={mode === 'filters' ? 'Filtros de tareas' : 'Vistas guardadas'} style={style} className="fixed z-[70] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15">{mode === 'filters' ? <FilterPanel filters={filters} statuses={uniqueStatuses} users={users} onChange={onChange} onClose={close} /> : <SavedViewsPanel views={views} loading={viewsLoading} filters={filters} scope={scope} view={view} collapsedStatusIds={collapsedStatusIds} onReload={loadViews} onApply={saved => { onApplyView({ ...saved, filters: normalizeFilters(saved.filters) }); close() }} onError={onError} onClose={close} />}</div></>, document.body)}
+    {mode && typeof document !== 'undefined' && createPortal(<><button type="button" aria-label="Cerrar panel" onMouseDown={close} className="fixed inset-0 z-[69] cursor-default bg-slate-950/30 backdrop-blur-[2px]" /><div role="dialog" aria-modal="true" aria-label={mode === 'filters' ? 'Filtros de tareas' : 'Vistas guardadas'} style={style} className="fixed z-[70] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/25">{mode === 'filters' ? <FilterPanel filters={filters} statuses={uniqueStatuses} users={users} onChange={onChange} onClose={close} /> : <SavedViewsPanel views={views} loading={viewsLoading} filters={filters} scope={scope} view={view} collapsedStatusIds={collapsedStatusIds} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} onReload={loadViews} onApply={saved => { onApplyView({ ...saved, filters: normalizeFilters(saved.filters) }); close() }} onError={onError} onClose={close} />}</div></>, document.body)}
   </div>
 }
 

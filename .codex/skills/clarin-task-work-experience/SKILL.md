@@ -42,6 +42,10 @@ Implement Clarin Work as one complete collaboration surface. Keep hierarchy, sta
 - Expose only actions with real success, loading, empty, permission, conflict, and failure behavior.
 - Keep one responsible owner and optional collaborators unless the product contract is intentionally migrated end to end.
 - Keep comments, mentions, attachments, activity, dependencies, and subtasks available from the task detail without losing the task context.
+- Treat List grouping as view state, not task truth. Persist grouping, direction and collapsed keys with saved views; a row drop may change exactly one represented property, while due-date groups require an explicit exact-date confirmation.
+- Use one stable drag handle for List rows. Selection, completion and opening own their cursors; selection mode must never cause hover-driven pointer/grab flicker.
+- Keep progress source explicit. Manual progress preserves its last manual value, automatic progress derives only from real child tasks, and neither progress nor completion can start Trash retention.
+- Preview task attachments only through account-scoped attachment lookup. Word derivatives run in an isolated durable worker, are inventoried like other media, and anchored comments remain distinct from general task comments while appearing in activity.
 - Measure the task surface itself for responsive layout. Keep docked/floating workspaces interactive and reserve modal blocking for maximized/mobile modes.
 - Keep task windows legible through the shared contrast contract, and portal workspace menus outside clipping containers but below task windows. Long descriptions need a visible pointer/keyboard resize handle plus an expanded editor that shares the canonical draft and never hides a save error.
 
@@ -72,4 +76,6 @@ Implement Clarin Work as one complete collaboration surface. Keep hierarchy, sta
 - Can touch scrolling start a drag accidentally, or can keyboard users move a task?
 - Can docked or floating detail unnecessarily block the board behind it?
 - Can a visible filter, menu item, quick action, or detail control fail to work end to end?
+- Can a bulk action write before the user confirms its prepared destination or canonical Trash phrase?
+- Can an attachment preview, derivative, comment, mention, or cleanup cross an account boundary or outlive all references?
 - Can Contact tags or another module's data be reused as task metadata without an explicit task model?

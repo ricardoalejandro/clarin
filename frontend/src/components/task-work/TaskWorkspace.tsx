@@ -9,7 +9,7 @@ import {
 import { apiDelete, apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
-  TASK_PRIORITY_CONFIG, Task, TaskFilters, TaskFolder, TaskGanttData, TaskList, TaskSavedView,
+  TASK_PRIORITY_CONFIG, Task, TaskFilters, TaskFolder, TaskGanttData, TaskGroupBy, TaskGroupDirection, TaskList, TaskSavedView,
   TaskTrashContainer, TaskTrashPolicy, TaskViewMode, TaskWorkflow, TaskWorkflowStatus, TaskWorkSummary,
 } from '@/types/task'
 import TaskBoard, { TaskInlineDraft } from './TaskBoard'
@@ -17,6 +17,7 @@ import TaskDetailDrawer from './TaskDetailDrawer'
 import TaskEditorModal, { TaskAccountUser } from './TaskEditorModal'
 import TaskFilterToolbar, { EMPTY_TASK_FILTERS, TaskFilterChips, taskFilterCount } from './TaskFilters'
 import TaskGanttView from './TaskGanttView'
+import TaskListView from './TaskListView'
 import TaskCalendarView from './TaskCalendarView'
 import TaskHierarchyTree from './TaskHierarchyTree'
 import TaskStructureModal from './TaskStructureModal'
@@ -292,6 +293,12 @@ export default function TaskWorkspace() {
   const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search.trim(), 500)
   const [filters, setFilters] = useState<TaskFilters>(EMPTY_TASK_FILTERS)
   const [collapsedStatusIds, setCollapsedStatusIds] = useState<string[]>([])
+  const [groupBy, setGroupBy] = useState<TaskGroupBy>(() => typeof window === 'undefined' ? 'status' : (localStorage.getItem('tasks:list-group-by') as TaskGroupBy) || 'status')
+  const [groupDirection, setGroupDirection] = useState<TaskGroupDirection>(() => typeof window === 'undefined' ? 'asc' : (localStorage.getItem('tasks:list-group-direction') as TaskGroupDirection) || 'asc')
+  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return []
+    try { return JSON.parse(localStorage.getItem('tasks:list-collapsed-groups') || '[]') as string[] } catch { return [] }
+  })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -668,7 +675,16 @@ export default function TaskWorkspace() {
       await loadTasks(false)
     } else setError(result.error || 'No se pudo actualizar la tarea')
   }
-  const moveGantt = async (task: Task, startAt: Date, dueAt: Date) => { await updateTask(task, { start_at: startAt.toISOString(), due_at: dueAt.toISOString() }); await loadTasks(false) }
+  const moveGantt = async (task: Task, startAt: Date, dueAt: Date, rescheduleDependencies: boolean) => {
+    const result = await apiPost<{ tasks: Task[]; operation_id: string }>('/api/tasks/gantt/reschedule', { task_id: task.id, version: task.version || 1, start_at: startAt.toISOString(), due_at: dueAt.toISOString(), reschedule_dependencies: rescheduleDependencies, operation_id: crypto.randomUUID() })
+    if (!result.success || !result.data?.tasks) {
+      setError(result.status === 409 ? 'El cronograma cambió en otra sesión. Restauramos las fechas actuales.' : result.error || 'No se pudo reprogramar la tarea.')
+      await loadTasks(false)
+      return
+    }
+    result.data.tasks.forEach(item => acceptCanonicalTask(item))
+    await loadTasks(false)
+  }
   const toggleStar = async (task: Task) => {
     const result = await apiPost<{ starred: boolean; task: Task }>(`/api/tasks/${task.id}/star`, {})
     if (result.success) {
@@ -711,8 +727,26 @@ export default function TaskWorkspace() {
     setFilters(saved.filters || EMPTY_TASK_FILTERS)
     setView(saved.view_mode)
     setCollapsedStatusIds(saved.collapsed_status_ids || [])
+    const savedGroupBy = saved.group_by || 'status'
+    const savedGroupDirection = saved.group_direction || 'asc'
+    const savedCollapsedGroups = saved.collapsed_group_keys || saved.collapsed_status_ids || []
+    setGroupBy(savedGroupBy)
+    setGroupDirection(savedGroupDirection)
+    setCollapsedGroupKeys(savedCollapsedGroups)
+    localStorage.setItem('tasks:list-group-by', savedGroupBy)
+    localStorage.setItem('tasks:list-group-direction', savedGroupDirection)
+    localStorage.setItem('tasks:list-collapsed-groups', JSON.stringify(savedCollapsedGroups))
     if (saved.scope_type === 'all') setScope({ type: 'all' })
     else if (saved.scope_id) setScope({ type: saved.scope_type, id: saved.scope_id })
+  }
+
+  const updateListGrouping = (nextGroup: TaskGroupBy, nextDirection: TaskGroupDirection, nextCollapsed: string[]) => {
+    setGroupBy(nextGroup)
+    setGroupDirection(nextDirection)
+    setCollapsedGroupKeys(nextCollapsed)
+    localStorage.setItem('tasks:list-group-by', nextGroup)
+    localStorage.setItem('tasks:list-group-direction', nextDirection)
+    localStorage.setItem('tasks:list-collapsed-groups', JSON.stringify(nextCollapsed))
   }
 
   const immersiveView = scope.type !== 'trash' && ['board', 'calendar', 'gantt'].includes(view)
@@ -743,7 +777,7 @@ export default function TaskWorkspace() {
               {search && <button type="button" aria-label="Limpiar búsqueda" onClick={() => { taskLoadAbortRef.current?.abort(); setSearch(''); setDebouncedSearch(''); setSearchOpen(false) }} className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-3.5 w-3.5" /></button>}
               {!searchOpen && search && <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-emerald-500" />}
             </div>
-            {scope.type !== 'trash' && structureReady && <TaskFilterToolbar filters={filters} statuses={allStatuses} users={users} scope={scope.type === 'all' ? { type: 'all' } : { type: scope.type, id: scope.id }} view={view} collapsedStatusIds={collapsedStatusIds} onChange={setFilters} onApplyView={applySavedView} applyDefaultOnLoad={!defaultViewLoadHandled.current} onDefaultLoadHandled={() => { defaultViewLoadHandled.current = true }} onError={setError} showChips={false} />}
+            {scope.type !== 'trash' && structureReady && <TaskFilterToolbar filters={filters} statuses={allStatuses} users={users} scope={scope.type === 'all' ? { type: 'all' } : { type: scope.type, id: scope.id }} view={view} collapsedStatusIds={collapsedStatusIds} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} onChange={setFilters} onApplyView={applySavedView} applyDefaultOnLoad={!defaultViewLoadHandled.current} onDefaultLoadHandled={() => { defaultViewLoadHandled.current = true }} onError={setError} showChips={false} />}
           </div>
         </div>
         {scope.type !== 'trash' && <TaskFilterChips filters={filters} statuses={allStatuses} users={users} onChange={setFilters} />}
@@ -754,7 +788,7 @@ export default function TaskWorkspace() {
         {error && <div className="m-2 mb-3 flex items-center justify-between rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"><span>{error}</span><button onClick={() => setError('')}><X className="h-4 w-4" /></button></div>}
         {loading ? <div className="space-y-3">{Array.from({length:5}).map((_,index) => <div key={index} className="h-16 animate-pulse rounded-2xl bg-slate-200/60" />)}</div> : <div className="h-full min-h-[420px]">
           {scope.type === 'trash' && <TrashView tasks={tasks} onChanged={async () => { await Promise.all([loadTasks(false), loadStructure()]) }} onError={setError} />}
-          {scope.type !== 'trash' && view === 'list' && <ListView tasks={tasks} statuses={statuses} allStatuses={allStatuses} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} />}
+          {scope.type !== 'trash' && view === 'list' && <TaskListView tasks={tasks} statuses={allStatuses} lists={lists} folders={folders} users={users} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} onGroupingChange={updateListGrouping} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} onCanonicalTask={acceptCanonicalTask} onRefresh={() => loadTasks(false)} onError={setError} />}
           {scope.type !== 'trash' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} allLists={lists} folders={folders} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setTasks} onCanonicalTask={acceptCanonicalTask} onOperation={handleBoardOperation} onTaskCreated={revealCreatedTask} recentlyCreatedTaskId={recentlyCreatedTaskId} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => setStructureOpen(true)} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={() => loadTasks(false)} onError={setError} />}
           {scope.type !== 'trash' && view === 'calendar' && <TaskCalendarView tasks={tasks} lists={editorLists} folders={folders} statuses={allStatuses} users={users} currentUserID={currentUserId} scopeListID={scope.type === 'list' ? scope.id : undefined} onOpen={task => setSelectedTaskId(task.id)} onCreated={revealCreatedTask} onOperation={handleBoardOperation} onMore={openCreate} />}
           {scope.type !== 'trash' && view === 'gantt' && <TaskGanttView data={gantt} onOpen={task => setSelectedTaskId(task.id)} onMove={moveGantt} />}

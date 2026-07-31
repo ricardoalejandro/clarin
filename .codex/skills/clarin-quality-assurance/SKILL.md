@@ -38,6 +38,7 @@ npm run build
 - Verify success, empty, conflict/error and rollback behavior when the change can mutate persisted state. Multi-item operations must also prove atomicity, deduplication and one-write semantics.
 - Keep focused browser tests for integration, animation, accessibility, drag sensors and real layout; do not duplicate every pure permutation there.
 - Geometry- or layer-driven UI must expose deterministic helpers/constants for unit coverage, then add a focused browser assertion for real pointer coordinates, clipping, focus restoration and overlay order.
+- Grouped and bulk task interactions must unit-test every grouping key, stable relative order, confirmation staging, cursor ownership, optimistic rollback and the exact one-write payload. Preview work must test format classification, anchor normalization, job retries, account isolation and derivative reference safety.
 
 General:
 

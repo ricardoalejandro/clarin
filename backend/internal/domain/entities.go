@@ -1433,6 +1433,9 @@ type Task struct {
 	Starred             bool        `json:"starred"`
 	SortOrder           int         `json:"sort_order"`
 	Progress            int         `json:"progress"`
+	ProgressMode        string      `json:"progress_mode"`
+	ManualProgress      int         `json:"manual_progress"`
+	ProgressSource      string      `json:"progress_source"`
 	IsMilestone         bool        `json:"is_milestone"`
 	DeletedAt           *time.Time  `json:"deleted_at,omitempty"`
 	DeletedBy           *uuid.UUID  `json:"deleted_by,omitempty"`
@@ -1483,6 +1486,9 @@ type TaskSavedView struct {
 	ViewMode           string          `json:"view_mode"`
 	Filters            json.RawMessage `json:"filters"`
 	CollapsedStatusIDs []string        `json:"collapsed_status_ids"`
+	GroupBy            string          `json:"group_by"`
+	GroupDirection     string          `json:"group_direction"`
+	CollapsedGroupKeys []string        `json:"collapsed_group_keys"`
 	IsDefault          bool            `json:"is_default"`
 	CreatedAt          time.Time       `json:"created_at"`
 	UpdatedAt          time.Time       `json:"updated_at"`
@@ -1542,17 +1548,54 @@ type TaskActivity struct {
 }
 
 type TaskAttachment struct {
-	ID           uuid.UUID  `json:"id"`
-	AccountID    uuid.UUID  `json:"account_id"`
-	TaskID       uuid.UUID  `json:"task_id"`
-	MediaAssetID uuid.UUID  `json:"media_asset_id"`
-	Filename     string     `json:"filename"`
-	ContentType  string     `json:"content_type"`
-	MediaType    string     `json:"media_type"`
-	SizeBytes    int64      `json:"size_bytes"`
-	URL          string     `json:"url"`
-	UploadedBy   *uuid.UUID `json:"uploaded_by,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID           uuid.UUID              `json:"id"`
+	AccountID    uuid.UUID              `json:"account_id"`
+	TaskID       uuid.UUID              `json:"task_id"`
+	MediaAssetID uuid.UUID              `json:"media_asset_id"`
+	Filename     string                 `json:"filename"`
+	ContentType  string                 `json:"content_type"`
+	MediaType    string                 `json:"media_type"`
+	SizeBytes    int64                  `json:"size_bytes"`
+	URL          string                 `json:"url"`
+	Preview      *TaskAttachmentPreview `json:"preview,omitempty"`
+	UploadedBy   *uuid.UUID             `json:"uploaded_by,omitempty"`
+	CreatedAt    time.Time              `json:"created_at"`
+}
+
+type TaskAttachmentPreview struct {
+	ID                uuid.UUID  `json:"id"`
+	AccountID         uuid.UUID  `json:"account_id"`
+	TaskID            uuid.UUID  `json:"task_id"`
+	AttachmentID      uuid.UUID  `json:"attachment_id"`
+	Kind              string     `json:"kind"`
+	Status            string     `json:"status"`
+	DerivativeAssetID *uuid.UUID `json:"derivative_asset_id,omitempty"`
+	URL               string     `json:"url,omitempty"`
+	PageCount         int        `json:"page_count"`
+	Error             string     `json:"error,omitempty"`
+	Version           int64      `json:"version"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+type TaskAttachmentComment struct {
+	ID           uuid.UUID             `json:"id"`
+	AccountID    uuid.UUID             `json:"account_id"`
+	TaskID       uuid.UUID             `json:"task_id"`
+	AttachmentID uuid.UUID             `json:"attachment_id"`
+	ParentID     *uuid.UUID            `json:"parent_id,omitempty"`
+	AuthorID     uuid.UUID             `json:"author_id"`
+	AuthorName   string                `json:"author_name"`
+	Body         string                `json:"body"`
+	Anchor       json.RawMessage       `json:"anchor"`
+	ResolvedAt   *time.Time            `json:"resolved_at,omitempty"`
+	ResolvedBy   *uuid.UUID            `json:"resolved_by,omitempty"`
+	Version      int64                 `json:"version"`
+	CreatedAt    time.Time             `json:"created_at"`
+	UpdatedAt    time.Time             `json:"updated_at"`
+	CanEdit      bool                  `json:"can_edit"`
+	CanResolve   bool                  `json:"can_resolve"`
+	Mentions     []*TaskCommentMention `json:"mentions"`
 }
 
 // TaskReminder represents a scheduled reminder for a task

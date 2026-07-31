@@ -303,9 +303,15 @@ func enqueueTaskMediaForTasks(ctx context.Context, tx pgx.Tx, accountID uuid.UUI
 		return nil
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO task_media_gc_jobs(account_id,media_asset_id,object_key)
-		SELECT DISTINCT attachment.account_id,asset.id,asset.object_key
-		FROM task_attachments attachment JOIN media_assets asset ON asset.account_id=attachment.account_id AND asset.id=attachment.media_asset_id
-		WHERE attachment.account_id=$1 AND attachment.task_id=ANY($2::uuid[])
+		SELECT DISTINCT candidates.account_id,candidates.media_asset_id,candidates.object_key FROM (
+			SELECT attachment.account_id,asset.id AS media_asset_id,asset.object_key
+			FROM task_attachments attachment JOIN media_assets asset ON asset.account_id=attachment.account_id AND asset.id=attachment.media_asset_id
+			WHERE attachment.account_id=$1 AND attachment.task_id=ANY($2::uuid[])
+			UNION ALL
+			SELECT preview.account_id,asset.id AS media_asset_id,asset.object_key
+			FROM task_attachment_previews preview JOIN media_assets asset ON asset.account_id=preview.account_id AND asset.id=preview.derivative_asset_id
+			WHERE preview.account_id=$1 AND preview.task_id=ANY($2::uuid[])
+		) candidates
 		ON CONFLICT(account_id,media_asset_id) DO UPDATE SET status='pending',available_at=NOW(),claim_token=NULL,updated_at=NOW()`, accountID, taskIDs)
 	return err
 }
@@ -585,6 +591,7 @@ func (r *TaskWorkRepository) PrepareTaskMediaGCDeletion(ctx context.Context, job
 	var referenced bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(
 		SELECT 1 FROM task_attachments WHERE account_id=$1 AND media_asset_id=$2
+		UNION ALL SELECT 1 FROM task_attachment_previews WHERE account_id=$1 AND derivative_asset_id=$2
 		UNION ALL SELECT 1 FROM messages WHERE account_id=$1 AND media_asset_id=$2
 		UNION ALL SELECT 1 FROM contacts WHERE account_id=$1 AND avatar_media_asset_id=$2
 		UNION ALL SELECT 1 FROM whatsapp_statuses WHERE account_id=$1 AND media_asset_id=$2

@@ -24,6 +24,9 @@ type taskSavedViewRequest struct {
 	ViewMode           *string          `json:"view_mode"`
 	Filters            *json.RawMessage `json:"filters"`
 	CollapsedStatusIDs *[]string        `json:"collapsed_status_ids"`
+	GroupBy            *string          `json:"group_by"`
+	GroupDirection     *string          `json:"group_direction"`
+	CollapsedGroupKeys *[]string        `json:"collapsed_group_keys"`
 	IsDefault          *bool            `json:"is_default"`
 }
 
@@ -61,6 +64,8 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Restaura primero la tarea padre", "code": "task_parent_archived"})
 	case errors.Is(err, repository.ErrTaskBulkMoveInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La selección contiene tareas que no se pueden mover juntas", "code": "invalid_bulk_move"})
+	case errors.Is(err, repository.ErrTaskBulkUpdateInvalid), errors.Is(err, repository.ErrTaskBulkTrashInvalid):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La selección contiene tareas que no se pueden modificar juntas", "code": "invalid_bulk_update"})
 	case errors.Is(err, repository.ErrDefaultTaskList):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La Bandeja general debe permanecer como lista raíz predeterminada", "code": "default_list_invariant"})
 	case errors.Is(err, repository.ErrTaskTrashConfirmation):
@@ -84,6 +89,12 @@ var taskContainerIconCatalog = map[string]struct{}{
 	"target": {}, "users": {}, "megaphone": {}, "graduation-cap": {},
 	"building": {}, "clipboard-list": {}, "layers": {}, "calendar": {},
 	"flag": {}, "phone": {}, "message-circle": {}, "bell": {}, "check-square": {},
+	"archive": {}, "award": {}, "book-open": {}, "box": {}, "brain": {}, "bug": {}, "camera": {}, "money": {},
+	"cloud": {}, "code": {}, "coffee": {}, "compass": {}, "file-text": {}, "gem": {}, "gift": {}, "globe": {},
+	"heart": {}, "home": {}, "key": {}, "laptop": {}, "lightbulb": {}, "link": {}, "lock": {}, "map-pin": {},
+	"package": {}, "palette": {}, "plane": {}, "settings": {}, "shield": {}, "shopping-cart": {}, "sparkles": {},
+	"star": {}, "store": {}, "tag": {}, "thumbs-up": {}, "trophy": {}, "truck": {}, "user": {}, "video": {},
+	"wallet": {}, "wrench": {},
 }
 
 func validTaskContainerIcon(value string) bool {
@@ -160,6 +171,35 @@ func validTaskSavedViewMode(value string) bool {
 	default:
 		return false
 	}
+}
+
+func validTaskGroupBy(value string) bool {
+	switch value {
+	case "none", "status", "list", "assignee", "priority", "type", "due":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeTaskGroupKeys(raw []string) ([]string, error) {
+	if len(raw) > 200 {
+		return nil, errors.New("too many collapsed groups")
+	}
+	result := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		value := strings.TrimSpace(item)
+		if value == "" || len(value) > 180 || strings.ContainsAny(value, "\r\n\x00") {
+			return nil, errors.New("invalid collapsed group")
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result, nil
 }
 
 func normalizeCollapsedTaskStatusIDs(raw []string) ([]string, []uuid.UUID, error) {
@@ -373,6 +413,33 @@ func (s *Server) applyTaskSavedViewRequest(c *fiber.Ctx, view *domain.TaskSavedV
 	} else if creating {
 		view.CollapsedStatusIDs = []string{}
 	}
+	if req.GroupBy != nil {
+		view.GroupBy = strings.ToLower(strings.TrimSpace(*req.GroupBy))
+	}
+	if view.GroupBy == "" {
+		view.GroupBy = "status"
+	}
+	if !validTaskGroupBy(view.GroupBy) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Agrupación de vista inválida"})
+	}
+	if req.GroupDirection != nil {
+		view.GroupDirection = strings.ToLower(strings.TrimSpace(*req.GroupDirection))
+	}
+	if view.GroupDirection == "" {
+		view.GroupDirection = "asc"
+	}
+	if view.GroupDirection != "asc" && view.GroupDirection != "desc" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Dirección de agrupación inválida"})
+	}
+	if req.CollapsedGroupKeys != nil {
+		keys, normalizeErr := normalizeTaskGroupKeys(*req.CollapsedGroupKeys)
+		if normalizeErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Grupo contraído inválido"})
+		}
+		view.CollapsedGroupKeys = keys
+	} else if creating {
+		view.CollapsedGroupKeys = append([]string(nil), view.CollapsedStatusIDs...)
+	}
 	if req.IsDefault != nil {
 		view.IsDefault = *req.IsDefault
 	}
@@ -533,6 +600,7 @@ func (s *Server) handleBulkMoveTasks(c *fiber.Ctx) error {
 		} `json:"items"`
 		DestinationListID         *string `json:"destination_list_id"`
 		DestinationStatusCategory string  `json:"destination_status_category"`
+		BeforeTaskID              *string `json:"before_task_id"`
 		OperationID               string  `json:"operation_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -571,7 +639,15 @@ func (s *Server) handleBulkMoveTasks(c *fiber.Ctx) error {
 		}
 		destinationListID = &id
 	}
-	result, err := s.repos.TaskWork.BulkMoveTasks(c.Context(), accountID, userID, items, destinationListID, strings.TrimSpace(req.DestinationStatusCategory), operationID.String())
+	var beforeTaskID *uuid.UUID
+	if req.BeforeTaskID != nil && strings.TrimSpace(*req.BeforeTaskID) != "" {
+		id, parseErr := uuid.Parse(strings.TrimSpace(*req.BeforeTaskID))
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Ancla de orden invalida"})
+		}
+		beforeTaskID = &id
+	}
+	result, err := s.repos.TaskWork.BulkMoveTasks(c.Context(), accountID, userID, items, destinationListID, beforeTaskID, strings.TrimSpace(req.DestinationStatusCategory), operationID.String())
 	if err != nil {
 		return taskWorkError(c, err)
 	}

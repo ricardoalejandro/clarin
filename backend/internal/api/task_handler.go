@@ -140,6 +140,8 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		ListID          *string  `json:"list_id"`
 		ParentTaskID    *string  `json:"parent_task_id"`
 		Progress        int      `json:"progress"`
+		ProgressMode    string   `json:"progress_mode"`
+		ManualProgress  *int     `json:"manual_progress"`
 		IsMilestone     bool     `json:"is_milestone"`
 		CollaboratorIDs []string `json:"collaborator_ids"`
 		RecurrenceRule  string   `json:"recurrence_rule"`
@@ -213,6 +215,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		ReminderMinutes: req.ReminderMinutes,
 		Notes:           req.Notes,
 		Progress:        req.Progress,
+		ProgressMode:    strings.ToLower(strings.TrimSpace(req.ProgressMode)),
 		IsMilestone:     req.IsMilestone,
 		Placement:       strings.ToLower(strings.TrimSpace(req.Placement)),
 	}
@@ -223,7 +226,15 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	if req.Priority == "" {
 		task.Priority = domain.TaskPriorityMedium
 	}
-	if !validTaskType(task.Type) || !validTaskPriority(task.Priority) || task.Progress < 0 || task.Progress > 100 {
+	if task.ProgressMode == "" {
+		task.ProgressMode = "manual"
+	}
+	task.ManualProgress = req.Progress
+	if req.ManualProgress != nil {
+		task.ManualProgress = *req.ManualProgress
+		task.Progress = *req.ManualProgress
+	}
+	if !validTaskType(task.Type) || !validTaskPriority(task.Priority) || task.Progress < 0 || task.Progress > 100 || task.ManualProgress < 0 || task.ManualProgress > 100 || (task.ProgressMode != "manual" && task.ProgressMode != "automatic") {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tipo, prioridad o progreso inválido"})
 	}
 	if !validTaskRecurrenceRule(task.RecurrenceRule) {
@@ -564,6 +575,8 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		ListID          *string   `json:"list_id"`
 		ParentTaskID    *string   `json:"parent_task_id"`
 		Progress        *int      `json:"progress"`
+		ProgressMode    *string   `json:"progress_mode"`
+		ManualProgress  *int      `json:"manual_progress"`
 		IsMilestone     *bool     `json:"is_milestone"`
 		Version         *int64    `json:"version"`
 		RecurrenceRule  *string   `json:"recurrence_rule"`
@@ -695,6 +708,26 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Progreso inválido"})
 		}
 		existing.Progress = *req.Progress
+		existing.ManualProgress = *req.Progress
+	}
+	if req.ManualProgress != nil {
+		if *req.ManualProgress < 0 || *req.ManualProgress > 100 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Progreso manual inválido"})
+		}
+		existing.ManualProgress = *req.ManualProgress
+		if existing.ProgressMode != "automatic" {
+			existing.Progress = *req.ManualProgress
+		}
+	}
+	if req.ProgressMode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*req.ProgressMode))
+		if mode != "manual" && mode != "automatic" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Modo de progreso inválido"})
+		}
+		existing.ProgressMode = mode
+		if mode == "manual" {
+			existing.Progress = existing.ManualProgress
+		}
 	}
 	if req.IsMilestone != nil {
 		existing.IsMilestone = *req.IsMilestone
@@ -839,8 +872,8 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		} else {
 			existing.CompletedAt = nil
 			existing.CompletedBy = nil
-			if wasDone && existing.Progress == 100 && req.Progress == nil {
-				existing.Progress = 0
+			if wasDone && existing.Progress == 100 && req.Progress == nil && req.ManualProgress == nil {
+				existing.Progress = existing.ManualProgress
 			}
 		}
 	} else if req.Status != nil {
@@ -869,8 +902,8 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 		} else {
 			existing.CompletedAt = nil
 			existing.CompletedBy = nil
-			if wasDone && existing.Progress == 100 && req.Progress == nil {
-				existing.Progress = 0
+			if wasDone && existing.Progress == 100 && req.Progress == nil && req.ManualProgress == nil {
+				existing.Progress = existing.ManualProgress
 			}
 		}
 	} else if req.ListID != nil && existing.StatusDetail != nil {

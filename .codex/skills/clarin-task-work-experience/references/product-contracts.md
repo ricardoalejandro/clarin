@@ -95,6 +95,17 @@ Read the sections relevant to the requested task change before editing.
 - Apply a user's default saved view only during the workspace bootstrap. Remounting the toolbar after visiting Trash or changing scope must not overwrite the user's current navigation.
 - A filtered reorder must use server anchors and must never submit a replacement order composed only of filtered cards.
 - Task labels require a dedicated account-scoped task label model. Never reuse Contact tags silently.
+- Lista starts grouped by status only for compatibility; users may choose none, status, list, responsible, priority, type or due date, plus direction and independently collapsed group keys. Saved views and local fallback preserve those fields. Dropping into a due bucket never invents a date: require an exact picker confirmation, including explicit confirmation before clearing a due date.
+- A List row has one stable reorder handle. Reordering sends a complete selected set plus one same-list server anchor, preserves hidden rows and relative selection order, and results in one atomic write. A group-property drop changes only the represented property or remaps workflow category through the existing bulk move contract.
+- Bulk destination pickers stage the operation. Selecting a list is not a write; show task count, destination, subtask movement and workflow remapping before Confirm. Bulk Trash requires the exact phrase `MOVER N TAREAS`, archives parents and their real subtasks atomically, and never exposes bulk permanent deletion.
+
+## Progress, Dates, Gantt, And Attachment Proofing
+
+- `progress_mode=manual` uses `manual_progress`; `automatic` derives the effective percentage from real one-level child tasks. Automatic tasks without children are 100 only when completed and 0 otherwise. Switching modes preserves manual progress, and completion remains independent from Trash.
+- Clarin Work dates use one viewport-aware portaled picker with calendar, time, all-day, timezone, quick values, removal and linked range validation. Do not reintroduce native date fields into task detail, full creation, filters, inline creation or precise Gantt editing.
+- Gantt supports day, week, month, quarter, year and flexible scales. Flexible zoom clamps to 8–120 px/day, wide ranges virtualize calendar cells, visible handles own start/end resize, and optional dependency cascading is one versioned transaction with complete rollback.
+- Image, PDF, text and converted Word previews are account-scoped. Word conversion runs headless as non-root with bounded resources and no public port, records durable idempotent jobs, inventories derivatives in `media_assets` and `storage_objects`, and rechecks references before physical cleanup.
+- Attachment comments use anchors appropriate to the medium: normalized image point; PDF/converted page, point and quote; text line, offset and context. Replies, mentions and resolution are versioned and appear in task activity without being merged into the general comment thread.
 
 ## Responsibility, Subtasks, And Detail
 

@@ -214,6 +214,39 @@ services:
       - "traefik.http.routers.clarin-mcp-well-known.service=clarin-mcp"
       - "traefik.http.routers.clarin-mcp-well-known.priority=200"
 
+  task-preview-worker:
+    build:
+      context: ./backend
+      dockerfile: ../deploy/Dockerfile.backend
+    container_name: clarin-task-preview-worker
+    restart: unless-stopped
+    user: "65532:65532"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-clarin}:${POSTGRES_PASSWORD}@clarin-postgres:5432/${POSTGRES_DB:-clarin}?sslmode=disable
+      MINIO_ENDPOINT: clarin-minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-clarinadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: clarin-media
+      MINIO_USE_SSL: "false"
+      MINIO_PUBLIC_URL: https://media.clarin.naperu.cloud
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      TASK_PREVIEW_WORKER_ONLY: "true"
+      HOME: /tmp/preview-home
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    mem_limit: 768m
+    cpus: 0.75
+    networks:
+      - clarin-internal
+
   frontend:
     build:
       context: ./frontend

@@ -47,6 +47,7 @@ import {
   Plus,
   RotateCcw,
   Star,
+  Trash2,
   X,
 } from 'lucide-react'
 import { apiPost } from '@/lib/api'
@@ -74,6 +75,7 @@ import {
 } from './taskDropTargets'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { taskWorkspaceMenuPosition } from './taskInteractionVisuals'
+import TaskDateTimePicker from './TaskDateTimePicker'
 
 export interface TaskInlineDraft {
   title: string
@@ -346,7 +348,7 @@ function TaskBoardCard({
   const touchOriginRef = useRef<TaskDropPoint | null>(null)
   const touchSelectedRef = useRef(false)
   const sortableData = useMemo(() => ({ type: 'task', columnId, listId: task.list_id }), [columnId, task.list_id])
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
     data: sortableData,
     animateLayoutChanges: animateTaskLayoutChanges,
@@ -366,8 +368,6 @@ function TaskBoardCard({
     data-task-id={task.id}
     data-task-column-id={columnId}
     style={{ transform: CSS.Transform.toString(transform), transition }}
-    {...attributes}
-    {...listeners}
     onTouchStartCapture={event => {
       const touch = event.touches[0]
       if (!touch || selected) return
@@ -399,7 +399,7 @@ function TaskBoardCard({
       }
       if (!suppressOpen()) onOpen()
     }}
-    className={`group relative cursor-grab touch-manipulation select-none overflow-hidden rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${selected ? 'border-emerald-400 bg-emerald-50/40 ring-2 ring-emerald-100' : highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
+    className={`group relative cursor-pointer touch-manipulation select-none overflow-hidden rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${selected ? 'border-emerald-400 bg-emerald-50/40 ring-2 ring-emerald-100' : highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
   >
     <span className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: task.status_detail?.color || '#64748b' }} />
     <div className="flex items-start gap-2">
@@ -414,7 +414,7 @@ function TaskBoardCard({
         className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border transition disabled:cursor-not-allowed disabled:opacity-50 ${done ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white hover:border-emerald-500 hover:bg-emerald-50'}`}
       >{done && <Check className="h-3 w-3" />}</button>
       <h4 className={`min-w-0 flex-1 text-sm font-semibold leading-5 ${done ? 'text-slate-400 line-through' : 'text-slate-800'}`}>{task.title}</h4>
-      <GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-slate-200 transition group-hover:text-slate-400" />
+      <button ref={setActivatorNodeRef} type="button" {...attributes} {...listeners} onClick={event => event.stopPropagation()} aria-label={`Arrastrar ${task.title}`} title="Arrastrar tarea" className="mt-[-3px] flex h-7 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg text-slate-300 outline-none transition hover:bg-slate-100 hover:text-slate-600 focus:ring-2 focus:ring-emerald-400 active:cursor-grabbing"><GripVertical className="h-4 w-4" /></button>
     </div>
 
     {showListName && <p className="ml-7 mt-1 truncate text-[10px] font-medium text-slate-400">{task.list_name || 'Bandeja general'}</p>}
@@ -428,7 +428,7 @@ function TaskBoardCard({
       <span className="ml-auto flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-100 px-1.5 font-bold text-slate-500" title={task.assigned_to_name || 'Sin responsable'}>{(task.assigned_to_name || '?').slice(0, 2).toUpperCase()}</span>
     </div>
 
-    <div className={`absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white p-0.5 shadow-lg transition ${selectionMode ? 'pointer-events-auto translate-y-0 opacity-100' : 'pointer-events-none -translate-y-1 opacity-0 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 [@media(pointer:coarse)]:pointer-events-auto [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100'}`}>
+    <div className={`absolute right-9 top-2 flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white p-0.5 shadow-lg transition ${selectionMode ? 'pointer-events-auto translate-y-0 opacity-100' : 'pointer-events-none -translate-y-1 opacity-0 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 [@media(pointer:coarse)]:pointer-events-auto [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100'}`}>
       <button type="button" role="checkbox" aria-checked={selected} aria-label={`${selected ? 'Quitar' : 'Seleccionar'} ${task.title}`} onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onSelect(event.shiftKey) }} title={selected ? 'Quitar de la selección' : 'Seleccionar tarea'} className={`rounded-md p-1.5 transition ${selected ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:bg-emerald-50 hover:text-emerald-700'}`}><Check className="h-3.5 w-3.5" /></button>
       {!selectionMode && <>
       <button type="button" onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onCreateSubtask() }} title="Crear subtarea" className="rounded-md p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"><Plus className="h-3.5 w-3.5" /></button>
@@ -525,7 +525,7 @@ function InlineCreate({
     {list && !targetStatus && <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] font-medium text-amber-700">La lista no tiene un estado equivalente.</p>}
     <div className="mt-2 grid grid-cols-2 gap-1.5">
       <TaskUserCombobox users={users} value={ownerId} onChange={setOwnerId} className="min-h-9 !rounded-lg !px-2 !py-1 text-xs" />
-      <input type="date" value={dueDate} onChange={event => setDueDate(event.target.value)} aria-label="Fecha de entrega" className="min-w-0 rounded-lg border border-slate-200 px-2 text-[11px] text-slate-500 outline-none focus:border-emerald-400" />
+      <TaskDateTimePicker label="Entrega" allDay value={dueDate ? `${dueDate}T17:00` : ''} onChange={value => setDueDate(value ? value.slice(0, 10) : '')} className="!min-h-9 !rounded-lg !px-2" />
       <select value={priority} onChange={event => setPriority(event.target.value as TaskPriority)} aria-label="Prioridad" className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-medium text-slate-600 outline-none focus:border-emerald-400">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(value => <option key={value} value={value}>{TASK_PRIORITY_CONFIG[value].label}</option>)}</select>
       <button type="button" onClick={() => { const snapshot = draft(); const selectedStatusId = targetStatus?.id; close(); onMore(selectedStatusId, snapshot) }} className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">Más opciones</button>
     </div>
@@ -733,6 +733,11 @@ export default function TaskBoard({
   const ordersRef = useRef<ColumnOrders>(initialOrders(tasks, statuses, lists, groupByList))
   const [activeId, setActiveId] = useState<string | null>(null)
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
+  const [bulkMoveDialogOpen, setBulkMoveDialogOpen] = useState(false)
+  const [pendingBulkListID, setPendingBulkListID] = useState('')
+  const [bulkTrashDialogOpen, setBulkTrashDialogOpen] = useState(false)
+  const [bulkTrashPhrase, setBulkTrashPhrase] = useState('')
+  const [bulkActionBusy, setBulkActionBusy] = useState(false)
   const [selectionAnchorID, setSelectionAnchorID] = useState('')
   const [dragTaskIds, setDragTaskIds] = useState<string[]>([])
   const [overColumnId, setOverColumnId] = useState<string | null>(null)
@@ -924,6 +929,31 @@ export default function TaskBoard({
       onOperation(operationID, false)
     }
   }, [onCanonicalTask, onError, onOperation, onRefresh, tasksById])
+
+  const bulkTrash = useCallback(async () => {
+    const affected = selectedTaskIds.map(id => tasksById.get(id)).filter((task): task is Task => Boolean(task && !task.parent_task_id))
+    if (!affected.length) return
+    setBulkActionBusy(true)
+    const operationID = crypto.randomUUID()
+    onOperation(operationID, true)
+    const result = await apiPost<{ task_ids: string[] }>('/api/tasks/bulk-trash', {
+      items: affected.map(task => ({ id: task.id, version: task.version || 1 })),
+      confirmation: bulkTrashPhrase,
+      operation_id: operationID,
+    })
+    onOperation(operationID, false)
+    setBulkActionBusy(false)
+    if (!result.success) {
+      onError(result.error || 'No se pudo mover la selección a Papelera. No se modificó ninguna tarea.')
+      return
+    }
+    setBulkTrashDialogOpen(false)
+    setBulkTrashPhrase('')
+    setSelectedTaskIds([])
+    setSelectionAnchorID('')
+    setAnnouncement(`${affected.length} tareas movidas a Papelera`)
+    await onRefresh()
+  }, [bulkTrashPhrase, onError, onOperation, onRefresh, selectedTaskIds, tasksById])
 
   const move = useCallback(async (taskId: string, destinationColumnId: string, nextOrders: ColumnOrders, snapshot: { tasks: Task[]; orders: ColumnOrders }) => {
     const task = snapshot.tasks.find(item => item.id === taskId) || localTasks.find(item => item.id === taskId)
@@ -1139,7 +1169,7 @@ export default function TaskBoard({
   return <div className="relative flex h-full min-h-[430px] flex-col">
     <div className="sr-only" aria-live="polite">{announcement}</div>
     {moveError && <div className="mb-2 flex shrink-0 items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700"><span className="min-w-0 flex-1">{moveError.message}</span><button type="button" onClick={moveError.retry} className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-white px-2.5 py-1.5 font-bold shadow-sm"><RotateCcw className="h-3 w-3" />Reintentar</button><button type="button" onClick={() => setMoveError(null)} aria-label="Cerrar" className="rounded p-1 hover:bg-white"><X className="h-3.5 w-3.5" /></button></div>}
-    {selectedTaskIds.length > 0 && !activeId && <div data-task-bulk-actions className="mx-3 mb-2 flex shrink-0 flex-wrap items-center gap-2 rounded-2xl border border-emerald-200 bg-white px-3 py-2 shadow-lg shadow-emerald-950/5 sm:mx-4"><span className="rounded-full bg-emerald-600 px-2.5 py-1 text-[11px] font-black text-white">{selectedTaskIds.length}</span><span className="text-xs font-semibold text-slate-700">{selectedTaskIds.length === 1 ? 'tarea seleccionada' : 'tareas seleccionadas'}</span><div className="ml-auto min-w-[220px]"><TaskListPicker value="" lists={allLists} folders={folders} onChange={listID => { void bulkMove(selectedTaskIds, listID) }} className="!min-h-9 !py-1" /></div><button type="button" onClick={() => { setSelectedTaskIds([]); setSelectionAnchorID('') }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Limpiar selección"><X className="h-4 w-4" /></button></div>}
+    {selectedTaskIds.length > 0 && !activeId && <div data-task-bulk-actions className="mx-3 mb-2 flex shrink-0 flex-wrap items-center gap-2 rounded-2xl border border-emerald-200 bg-white px-3 py-2 shadow-lg shadow-emerald-950/5 sm:mx-4"><span className="rounded-full bg-emerald-600 px-2.5 py-1 text-[11px] font-black text-white">{selectedTaskIds.length}</span><span className="text-xs font-semibold text-slate-700">{selectedTaskIds.length === 1 ? 'tarea seleccionada' : 'tareas seleccionadas'}</span><div className="ml-auto flex items-center gap-2"><button type="button" onClick={() => setBulkMoveDialogOpen(true)} className="min-h-9 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600 hover:border-emerald-300 hover:bg-emerald-50">Mover a lista…</button><button type="button" onClick={() => setBulkTrashDialogOpen(true)} className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-rose-200 px-3 text-xs font-bold text-rose-600 hover:bg-rose-50"><Trash2 className="h-3.5 w-3.5" />Papelera</button><button type="button" onClick={() => { setSelectedTaskIds([]); setSelectionAnchorID('') }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Limpiar selección"><X className="h-4 w-4" /></button></div></div>}
     <DndContext
       sensors={sensors}
       collisionDetection={collisionDetectionStrategy}
@@ -1186,6 +1216,8 @@ export default function TaskBoard({
       <DragOverlay dropAnimation={{ duration: 180, easing: 'ease-out' }} style={{ zIndex: TASK_OVERLAY_LAYERS.dragOverlay }}>{activeTask ? <OverlayCard task={activeTask} count={Math.max(1, dragTaskIds.length)} destination={externalDropTarget?.label || statuses.find(status => status.id === overColumnId)?.name} destinationColor={externalDropTarget?.color} /> : null}</DragOverlay>
     </DndContext>
     {gatherGhosts.length > 0 && typeof document !== 'undefined' && createPortal(<div className="pointer-events-none fixed inset-0 z-[160] motion-reduce:hidden" aria-hidden="true">{gatherGhosts.map(ghost => <div key={ghost.id} data-task-gather-ghost className="fixed overflow-hidden rounded-xl border border-emerald-300 bg-white px-3 py-2 shadow-xl" style={{ left: ghost.left, top: ghost.top, width: ghost.width, height: ghost.height, '--task-gather-x': `${ghost.dx}px`, '--task-gather-y': `${ghost.dy}px` } as React.CSSProperties}><span className="line-clamp-2 text-sm font-semibold text-slate-700">{ghost.title}</span></div>)}</div>, document.body)}
+    {bulkMoveDialogOpen && typeof document !== 'undefined' && createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }}><div role="dialog" aria-modal="true" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Acción preparada</p><h2 className="mt-1 text-xl font-black text-slate-900">Mover {selectedTaskIds.length} tareas</h2><p className="mt-2 text-sm leading-6 text-slate-500">Seleccionar una lista solo prepara el destino. Las subtareas acompañarán a sus tareas principales y los estados se remapearán por categoría cuando confirmes.</p><label className="mt-4 block text-xs font-bold text-slate-600">Lista destino<span className="mt-2 block"><TaskListPicker value={pendingBulkListID} lists={allLists} folders={folders} onChange={setPendingBulkListID} /></span></label>{pendingBulkListID && <p className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">Destino: {allLists.find(list => list.id === pendingBulkListID)?.name}</p>}<div className="mt-6 flex justify-end gap-2"><button type="button" onClick={() => { setBulkMoveDialogOpen(false); setPendingBulkListID('') }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600">Cancelar</button><button type="button" disabled={!pendingBulkListID || bulkActionBusy} onClick={() => { const ids = [...selectedTaskIds]; const destination = pendingBulkListID; setBulkActionBusy(true); void bulkMove(ids, destination).finally(() => { setBulkActionBusy(false); setBulkMoveDialogOpen(false); setPendingBulkListID('') }) }} className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{bulkActionBusy ? 'Moviendo…' : 'Confirmar movimiento'}</button></div></div></div>, document.body)}
+    {bulkTrashDialogOpen && typeof document !== 'undefined' && createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }}><div role="alertdialog" aria-modal="true" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-rose-600">Acción masiva protegida</p><h2 className="mt-1 text-xl font-black text-slate-900">Mover a Papelera</h2><p className="mt-2 text-sm leading-6 text-slate-500">Se moverán {selectedTaskIds.length} tareas principales y sus subtareas. Podrás restaurarlas dentro de la retención configurada; esto no es borrado permanente.</p><label className="mt-4 block text-xs font-bold text-slate-600">Escribe exactamente <strong>MOVER {selectedTaskIds.length} TAREAS</strong><input value={bulkTrashPhrase} onChange={event => setBulkTrashPhrase(event.target.value)} className="mt-2 min-h-11 w-full rounded-xl border border-slate-200 px-3 outline-none focus:border-rose-400 focus:ring-4 focus:ring-rose-100" /></label><div className="mt-6 flex justify-end gap-2"><button type="button" onClick={() => { setBulkTrashDialogOpen(false); setBulkTrashPhrase('') }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600">Cancelar</button><button type="button" disabled={bulkTrashPhrase !== `MOVER ${selectedTaskIds.length} TAREAS` || bulkActionBusy} onClick={() => void bulkTrash()} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{bulkActionBusy ? 'Moviendo…' : 'Mover a Papelera'}</button></div></div></div>, document.body)}
     {pendingFolderDrop && <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-sm" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPendingFolderDrop(null) }}><div role="dialog" aria-modal="true" aria-labelledby="task-folder-drop-title" className="w-full max-w-md rounded-3xl bg-white p-5 shadow-2xl"><div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Elegir destino</p><h2 id="task-folder-drop-title" className="mt-1 text-lg font-black text-slate-900">{pendingFolderDrop.folder.name}</h2><p className="mt-1 text-sm text-slate-500">Las tareas siempre pertenecen a una lista. Selecciona la lista concreta dentro de esta carpeta.</p></div><button type="button" onClick={() => setPendingFolderDrop(null)} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></div><div className="mt-4 space-y-2">{pendingFolderDrop.folder.lists.map(list => <button key={list.id} type="button" onClick={() => { const ids = pendingFolderDrop.taskIDs; setPendingFolderDrop(null); void bulkMove(ids, list.id) }} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:border-emerald-300 hover:bg-emerald-50"><span className="h-3 w-3 rounded-full" style={{ backgroundColor: list.color }} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-bold text-slate-700">{list.name}</span><span className="text-[10px] text-slate-400">{pendingFolderDrop.folder.name} / {list.name}</span></span></button>)}{!pendingFolderDrop.folder.lists.length && <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">Esta carpeta no tiene listas disponibles.</div>}</div></div></div>}
   </div>
 }

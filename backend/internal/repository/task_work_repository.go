@@ -1375,8 +1375,8 @@ func (r *TaskWorkRepository) MoveTask(ctx context.Context, accountID, taskID, st
 // tasks as one account-scoped transaction. The request order is the stable
 // relative order used at the destination; children follow their parent when a
 // list transfer occurs.
-func normalizeTaskBulkMoveRequest(items []TaskBulkMoveItem, destinationListID *uuid.UUID, destinationCategory string) ([]uuid.UUID, map[uuid.UUID]int64, error) {
-	if len(items) == 0 || len(items) > 200 || (destinationListID == nil && destinationCategory == "") {
+func normalizeTaskBulkMoveRequest(items []TaskBulkMoveItem, destinationListID, beforeTaskID *uuid.UUID, destinationCategory string) ([]uuid.UUID, map[uuid.UUID]int64, error) {
+	if len(items) == 0 || len(items) > 200 || (destinationListID == nil && destinationCategory == "" && beforeTaskID == nil) {
 		return nil, nil, ErrTaskBulkMoveInvalid
 	}
 	validCategory := destinationCategory == "" || destinationCategory == domain.TaskStatusCategoryNotStarted || destinationCategory == domain.TaskStatusCategoryActive || destinationCategory == domain.TaskStatusCategoryDone || destinationCategory == domain.TaskStatusCategoryCancelled
@@ -1395,11 +1395,19 @@ func normalizeTaskBulkMoveRequest(items []TaskBulkMoveItem, destinationListID *u
 		expectedVersions[item.ID] = item.Version
 		requestedIDs = append(requestedIDs, item.ID)
 	}
+	if beforeTaskID != nil {
+		if *beforeTaskID == uuid.Nil {
+			return nil, nil, ErrTaskBulkMoveInvalid
+		}
+		if _, selected := expectedVersions[*beforeTaskID]; selected {
+			return nil, nil, ErrTaskBulkMoveInvalid
+		}
+	}
 	return requestedIDs, expectedVersions, nil
 }
 
-func (r *TaskWorkRepository) BulkMoveTasks(ctx context.Context, accountID, actorID uuid.UUID, items []TaskBulkMoveItem, destinationListID *uuid.UUID, destinationCategory, operationID string) (*TaskBulkMoveResult, error) {
-	requestedIDs, expectedVersions, err := normalizeTaskBulkMoveRequest(items, destinationListID, destinationCategory)
+func (r *TaskWorkRepository) BulkMoveTasks(ctx context.Context, accountID, actorID uuid.UUID, items []TaskBulkMoveItem, destinationListID, beforeTaskID *uuid.UUID, destinationCategory, operationID string) (*TaskBulkMoveResult, error) {
+	requestedIDs, expectedVersions, err := normalizeTaskBulkMoveRequest(items, destinationListID, beforeTaskID, destinationCategory)
 	if err != nil {
 		return nil, err
 	}
@@ -1506,6 +1514,17 @@ func (r *TaskWorkRepository) BulkMoveTasks(ctx context.Context, accountID, actor
 		if item.version != expectedVersions[id] || item.listID != before.listID || statusChanged {
 			return nil, ErrTaskVersionConflict
 		}
+	}
+	var anchorListID *uuid.UUID
+	if beforeTaskID != nil {
+		var listID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT list_id FROM tasks WHERE account_id=$1 AND id=$2 AND parent_task_id IS NULL AND deleted_at IS NULL FOR UPDATE`, accountID, *beforeTaskID).Scan(&listID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrTaskBulkMoveInvalid
+			}
+			return nil, err
+		}
+		anchorListID = &listID
 	}
 
 	workflowIDs := make([]uuid.UUID, 0, len(listWorkflows))
@@ -1634,6 +1653,54 @@ func (r *TaskWorkRepository) BulkMoveTasks(ctx context.Context, accountID, actor
 		affectedListSet[item.listID] = struct{}{}
 		affectedListSet[targetListID] = struct{}{}
 	}
+	if beforeTaskID != nil && anchorListID != nil {
+		for _, requestedID := range requestedIDs {
+			targetListID := locked[requestedID].listID
+			if destinationListID != nil {
+				targetListID = *destinationListID
+			}
+			if targetListID != *anchorListID {
+				return nil, ErrTaskBulkMoveInvalid
+			}
+		}
+		rows, queryErr := tx.Query(ctx, `SELECT id FROM tasks WHERE account_id=$1 AND list_id=$2 AND parent_task_id IS NULL AND deleted_at IS NULL AND NOT (id=ANY($3::uuid[])) ORDER BY sort_order,id FOR UPDATE`, accountID, *anchorListID, requestedIDs)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		base := make([]uuid.UUID, 0)
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			base = append(base, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		anchorIndex := -1
+		for index, id := range base {
+			if id == *beforeTaskID {
+				anchorIndex = index
+				break
+			}
+		}
+		if anchorIndex < 0 {
+			return nil, ErrTaskBulkMoveInvalid
+		}
+		ordered := make([]uuid.UUID, 0, len(base)+len(requestedIDs))
+		ordered = append(ordered, base[:anchorIndex]...)
+		ordered = append(ordered, requestedIDs...)
+		ordered = append(ordered, base[anchorIndex:]...)
+		for index, id := range ordered {
+			if _, err := tx.Exec(ctx, `UPDATE tasks SET sort_order=$3 WHERE account_id=$1 AND id=$2`, accountID, id, (index+1)*1024); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	for _, child := range childMoves {
 		legacyStatus := domain.TaskStatusPending
@@ -1700,7 +1767,7 @@ func (r *TaskWorkRepository) SavedViewScopeExists(ctx context.Context, accountID
 
 func (r *TaskWorkRepository) ListSavedViews(ctx context.Context, accountID, userID uuid.UUID) ([]*domain.TaskSavedView, error) {
 	rows, err := r.db.Query(ctx, `SELECT id,account_id,user_id,name,scope_type,scope_id,view_mode,filters,
-		collapsed_status_ids,is_default,created_at,updated_at
+		collapsed_status_ids,group_by,group_direction,collapsed_group_keys,is_default,created_at,updated_at
 		FROM task_saved_views WHERE account_id=$1 AND user_id=$2
 		ORDER BY is_default DESC,updated_at DESC,name`, accountID, userID)
 	if err != nil {
@@ -1711,7 +1778,7 @@ func (r *TaskWorkRepository) ListSavedViews(ctx context.Context, accountID, user
 	for rows.Next() {
 		view := &domain.TaskSavedView{}
 		if err := rows.Scan(&view.ID, &view.AccountID, &view.UserID, &view.Name, &view.ScopeType, &view.ScopeID,
-			&view.ViewMode, &view.Filters, &view.CollapsedStatusIDs, &view.IsDefault, &view.CreatedAt, &view.UpdatedAt); err != nil {
+			&view.ViewMode, &view.Filters, &view.CollapsedStatusIDs, &view.GroupBy, &view.GroupDirection, &view.CollapsedGroupKeys, &view.IsDefault, &view.CreatedAt, &view.UpdatedAt); err != nil {
 			return nil, err
 		}
 		views = append(views, view)
@@ -1722,10 +1789,10 @@ func (r *TaskWorkRepository) ListSavedViews(ctx context.Context, accountID, user
 func (r *TaskWorkRepository) GetSavedView(ctx context.Context, accountID, userID, viewID uuid.UUID) (*domain.TaskSavedView, error) {
 	view := &domain.TaskSavedView{}
 	err := r.db.QueryRow(ctx, `SELECT id,account_id,user_id,name,scope_type,scope_id,view_mode,filters,
-		collapsed_status_ids,is_default,created_at,updated_at
+		collapsed_status_ids,group_by,group_direction,collapsed_group_keys,is_default,created_at,updated_at
 		FROM task_saved_views WHERE account_id=$1 AND user_id=$2 AND id=$3`, accountID, userID, viewID).
 		Scan(&view.ID, &view.AccountID, &view.UserID, &view.Name, &view.ScopeType, &view.ScopeID,
-			&view.ViewMode, &view.Filters, &view.CollapsedStatusIDs, &view.IsDefault, &view.CreatedAt, &view.UpdatedAt)
+			&view.ViewMode, &view.Filters, &view.CollapsedStatusIDs, &view.GroupBy, &view.GroupDirection, &view.CollapsedGroupKeys, &view.IsDefault, &view.CreatedAt, &view.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTaskWorkNotFound
 	}
@@ -1742,6 +1809,15 @@ func (r *TaskWorkRepository) CreateSavedView(ctx context.Context, view *domain.T
 	if view.CollapsedStatusIDs == nil {
 		view.CollapsedStatusIDs = []string{}
 	}
+	if view.GroupBy == "" {
+		view.GroupBy = "status"
+	}
+	if view.GroupDirection == "" {
+		view.GroupDirection = "asc"
+	}
+	if view.CollapsedGroupKeys == nil {
+		view.CollapsedGroupKeys = []string{}
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -1754,10 +1830,10 @@ func (r *TaskWorkRepository) CreateSavedView(ctx context.Context, view *domain.T
 		}
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO task_saved_views(id,account_id,user_id,name,scope_type,scope_id,
-		view_mode,filters,collapsed_status_ids,is_default,created_at,updated_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$11)`, view.ID, view.AccountID, view.UserID,
+		view_mode,filters,collapsed_status_ids,group_by,group_direction,collapsed_group_keys,is_default,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$14)`, view.ID, view.AccountID, view.UserID,
 		view.Name, view.ScopeType, view.ScopeID, view.ViewMode, view.Filters, view.CollapsedStatusIDs,
-		view.IsDefault, view.CreatedAt); err != nil {
+		view.GroupBy, view.GroupDirection, view.CollapsedGroupKeys, view.IsDefault, view.CreatedAt); err != nil {
 		return taskSavedViewWriteError(err)
 	}
 	return taskSavedViewWriteError(tx.Commit(ctx))
@@ -1771,6 +1847,15 @@ func (r *TaskWorkRepository) UpdateSavedView(ctx context.Context, view *domain.T
 	if view.CollapsedStatusIDs == nil {
 		view.CollapsedStatusIDs = []string{}
 	}
+	if view.GroupBy == "" {
+		view.GroupBy = "status"
+	}
+	if view.GroupDirection == "" {
+		view.GroupDirection = "asc"
+	}
+	if view.CollapsedGroupKeys == nil {
+		view.CollapsedGroupKeys = []string{}
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return taskSavedViewWriteError(err)
@@ -1783,9 +1868,9 @@ func (r *TaskWorkRepository) UpdateSavedView(ctx context.Context, view *domain.T
 		}
 	}
 	command, err := tx.Exec(ctx, `UPDATE task_saved_views SET name=$4,scope_type=$5,scope_id=$6,
-		view_mode=$7,filters=$8::jsonb,collapsed_status_ids=$9,is_default=$10,updated_at=$11
+		view_mode=$7,filters=$8::jsonb,collapsed_status_ids=$9,group_by=$10,group_direction=$11,collapsed_group_keys=$12,is_default=$13,updated_at=$14
 		WHERE account_id=$1 AND user_id=$2 AND id=$3`, view.AccountID, view.UserID, view.ID, view.Name,
-		view.ScopeType, view.ScopeID, view.ViewMode, view.Filters, view.CollapsedStatusIDs, view.IsDefault, view.UpdatedAt)
+		view.ScopeType, view.ScopeID, view.ViewMode, view.Filters, view.CollapsedStatusIDs, view.GroupBy, view.GroupDirection, view.CollapsedGroupKeys, view.IsDefault, view.UpdatedAt)
 	if err != nil {
 		return taskSavedViewWriteError(err)
 	}

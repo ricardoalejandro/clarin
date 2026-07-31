@@ -78,6 +78,9 @@ If a task touches multiple areas, read all matching skills before editing.
 - Base task detail layout on measured available surface width. Docked/floating modes leave the workspace interactive; maximized/mobile modes may block it.
 - Apply the same measured window contract to full task creation. Preserve dirty drafts behind an explicit discard confirmation, and use viewport-aware portaled pickers for hierarchy/workflow choices.
 - Keep task selection visually adaptive: completion is the only persistent card control, selection appears through hover/focus, modifiers, touch hold or active multi-select. Task dialogs and their portaled controls use one tested overlay order; floating dimming must not block the workspace.
+- Treat Lista grouping as saved-view state. Group drops change only the represented property; due groups require an exact-date confirmation, row ordering uses a stable handle/server anchor, and bulk destination selection never writes before explicit confirmation.
+- Keep progress source explicit: manual progress is preserved across mode changes, automatic progress derives only from real child tasks, and neither completion nor progress starts Trash retention.
+- Task attachment previews and anchored comments are account-scoped task data. Converted derivatives require a bounded non-root worker, durable idempotent jobs, storage inventory and reference-safe cleanup.
 - Render task workspace menus that may cross overflow boundaries through the shared portal layer below task windows. Long task descriptions must provide an accessible visible resize handle and an expanded editor that preserves the same draft and exposes save failures without closing.
 - Keep task labels separate from Contact tags. Never reuse Contact identity metadata as task metadata without an explicit task model.
 - Ship only task controls that work end to end across success, loading, empty, conflict, permission and failure states.

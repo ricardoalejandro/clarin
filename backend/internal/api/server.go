@@ -737,6 +737,9 @@ func (s *Server) setupRoutes() {
 	tasks.Delete("/saved-views/:viewId", s.handleDeleteTaskSavedView)
 	tasks.Post("/reorder", s.handleReorderTasks)
 	tasks.Post("/bulk-move", s.handleBulkMoveTasks)
+	tasks.Post("/bulk-update", s.handleBulkUpdateTasks)
+	tasks.Post("/bulk-trash", s.handleBulkTrashTasks)
+	tasks.Post("/gantt/reschedule", s.handleGanttReschedule)
 	tasks.Post("/", s.handleCreateTask)
 	tasks.Get("/", s.handleGetTasks)
 	tasks.Get("/:id", s.handleGetTask)
@@ -757,6 +760,10 @@ func (s *Server) setupRoutes() {
 	tasks.Get("/:id/activity", s.handleGetTaskActivity)
 	tasks.Get("/:id/attachments", s.handleGetTaskAttachments)
 	tasks.Post("/:id/attachments", s.handleAddTaskAttachment)
+	tasks.Get("/:id/attachments/:attachmentId/preview", s.handleGetTaskAttachmentPreview)
+	tasks.Get("/:id/attachments/:attachmentId/comments", s.handleGetTaskAttachmentComments)
+	tasks.Post("/:id/attachments/:attachmentId/comments", s.handleCreateTaskAttachmentComment)
+	tasks.Put("/:id/attachments/:attachmentId/comments/:commentId/resolve", s.handleResolveTaskAttachmentComment)
 	tasks.Delete("/:id/attachments/:attachmentId", s.handleDeleteTaskAttachment)
 	tasks.Get("/:id/dependencies", s.handleGetTaskDependencies)
 	tasks.Post("/:id/dependencies", s.handleAddTaskDependency)
@@ -15875,9 +15882,12 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 	}
 	avatarRows.Close()
 	attachmentRows, err := s.repos.DB().Query(ctx, `
-		SELECT ma.object_key
-		FROM task_attachments ta
+		SELECT ma.object_key FROM task_attachments ta
 		JOIN media_assets ma ON ma.id=ta.media_asset_id AND ma.account_id=ta.account_id
+		WHERE ma.object_key<>''
+		UNION
+		SELECT ma.object_key FROM task_attachment_previews preview
+		JOIN media_assets ma ON ma.id=preview.derivative_asset_id AND ma.account_id=preview.account_id
 		WHERE ma.object_key<>''
 	`)
 	if err != nil {

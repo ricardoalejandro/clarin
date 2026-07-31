@@ -55,14 +55,14 @@ func synchronizeTaskStatusCategory(task *domain.Task, category string) {
 		task.CompletedAt = nil
 		task.CompletedBy = nil
 		if previousStatus == domain.TaskStatusCompleted && task.Progress == 100 {
-			task.Progress = 0
+			task.Progress = task.ManualProgress
 		}
 	default:
 		task.Status = domain.TaskStatusPending
 		task.CompletedAt = nil
 		task.CompletedBy = nil
 		if previousStatus == domain.TaskStatusCompleted && task.Progress == 100 {
-			task.Progress = 0
+			task.Progress = task.ManualProgress
 		}
 	}
 }
@@ -73,7 +73,15 @@ const taskSelectFields = `
 	t.lead_id, t.event_id, t.program_id, t.contact_id, t.list_id,
 	t.parent_task_id,
 	COALESCE(t.starred, FALSE) AS starred, COALESCE(t.sort_order, 0) AS sort_order,
-	COALESCE(t.progress,0), COALESCE(t.is_milestone,FALSE), t.deleted_at, t.deleted_by, COALESCE(t.version,1),
+	CASE WHEN COALESCE(t.progress_mode,'manual')='automatic' THEN
+		CASE WHEN EXISTS(SELECT 1 FROM tasks auto_child WHERE auto_child.account_id=t.account_id AND auto_child.parent_task_id=t.id AND auto_child.deleted_at IS NULL)
+			THEN ROUND(100.0 * (SELECT COUNT(*) FROM tasks auto_done JOIN task_statuses auto_status ON auto_status.account_id=auto_done.account_id AND auto_status.id=auto_done.status_id WHERE auto_done.account_id=t.account_id AND auto_done.parent_task_id=t.id AND auto_done.deleted_at IS NULL AND auto_status.category='done') /
+				NULLIF((SELECT COUNT(*) FROM tasks auto_total WHERE auto_total.account_id=t.account_id AND auto_total.parent_task_id=t.id AND auto_total.deleted_at IS NULL),0))::int
+			WHEN t.status='completed' THEN 100 ELSE 0 END
+		ELSE COALESCE(t.manual_progress,t.progress,0) END AS effective_progress,
+	COALESCE(t.progress_mode,'manual'), COALESCE(t.manual_progress,t.progress,0),
+	CASE WHEN COALESCE(t.progress_mode,'manual')='automatic' THEN 'subtasks' ELSE 'manual' END,
+	COALESCE(t.is_milestone,FALSE), t.deleted_at, t.deleted_by, COALESCE(t.version,1),
 	t.recurrence_rule, t.recurrence_parent_id, t.reminder_minutes,
 	t.notes, t.created_at, t.updated_at,
 	COALESCE(ua.display_name, ua.username, '') AS assigned_to_name,
@@ -118,7 +126,7 @@ func (r *TaskRepository) scanTask(row interface {
 		&t.LeadID, &t.EventID, &t.ProgramID, &t.ContactID, &t.ListID,
 		&t.ParentTaskID,
 		&t.Starred, &t.SortOrder,
-		&t.Progress, &t.IsMilestone, &t.DeletedAt, &t.DeletedBy, &t.Version,
+		&t.Progress, &t.ProgressMode, &t.ManualProgress, &t.ProgressSource, &t.IsMilestone, &t.DeletedAt, &t.DeletedBy, &t.Version,
 		&t.RecurrenceRule, &t.RecurrenceParentID, &t.ReminderMinutes,
 		&t.Notes, &t.CreatedAt, &t.UpdatedAt,
 		&t.AssignedToName, &t.CreatedByName, &t.LeadName, &t.EventName, &t.ProgramName, &t.ContactName,
@@ -149,6 +157,12 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 	}
 	if t.Priority == "" {
 		t.Priority = domain.TaskPriorityMedium
+	}
+	if t.ProgressMode == "" {
+		t.ProgressMode = "manual"
+	}
+	if t.ManualProgress == 0 && t.Progress > 0 {
+		t.ManualProgress = t.Progress
 	}
 
 	tx, err := r.db.Begin(ctx)
@@ -220,13 +234,13 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 		INSERT INTO tasks (id, account_id, created_by, assigned_to, title, description, type,
 			start_at, due_at, due_end_at, is_all_day, priority, status, status_id, completed_at, completed_by,
 			lead_id, event_id, program_id, contact_id, list_id, parent_task_id,
-			starred, sort_order, progress, is_milestone, recurrence_rule, recurrence_parent_id,
+			starred, sort_order, progress, progress_mode, manual_progress, is_milestone, recurrence_rule, recurrence_parent_id,
 			reminder_minutes, notes, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
 	`, t.ID, t.AccountID, t.CreatedBy, t.AssignedTo, t.Title, t.Description, t.Type,
 		t.StartAt, t.DueAt, t.DueEndAt, t.IsAllDay, t.Priority, t.Status, t.StatusID,
 		t.CompletedAt, t.CompletedBy, t.LeadID, t.EventID, t.ProgramID, t.ContactID, t.ListID, t.ParentTaskID,
-		t.Starred, t.SortOrder, t.Progress, t.IsMilestone, t.RecurrenceRule, t.RecurrenceParentID,
+		t.Starred, t.SortOrder, t.Progress, t.ProgressMode, t.ManualProgress, t.IsMilestone, t.RecurrenceRule, t.RecurrenceParentID,
 		t.ReminderMinutes, t.Notes, t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
@@ -358,14 +372,14 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 			completed_at=$12, completed_by=$13,
 			lead_id=$14, event_id=$15, program_id=$16, contact_id=$17,
 			list_id=$18, parent_task_id=$19, starred=$20, sort_order=$21, progress=$22,
-			is_milestone=$23, recurrence_rule=$24, reminder_minutes=$25, notes=$26,
-			updated_at=$27, version=COALESCE(version,1)+1,
+			progress_mode=$23,manual_progress=$24,is_milestone=$25, recurrence_rule=$26, reminder_minutes=$27, notes=$28,
+			updated_at=$29, version=COALESCE(version,1)+1,
 			overdue_notified_at=CASE WHEN due_at IS DISTINCT FROM $6 OR status_id IS DISTINCT FROM $11 THEN NULL ELSE overdue_notified_at END
-		WHERE id=$28 AND account_id=$29 AND COALESCE(version,1)=$30
+		WHERE id=$30 AND account_id=$31 AND COALESCE(version,1)=$32
 	`, t.AssignedTo, t.Title, t.Description, t.Type,
 		t.StartAt, t.DueAt, t.DueEndAt, t.IsAllDay, t.Priority, t.Status, t.StatusID,
 		t.CompletedAt, t.CompletedBy, t.LeadID, t.EventID, t.ProgramID, t.ContactID,
-		t.ListID, t.ParentTaskID, t.Starred, t.SortOrder, t.Progress, t.IsMilestone,
+		t.ListID, t.ParentTaskID, t.Starred, t.SortOrder, t.Progress, t.ProgressMode, t.ManualProgress, t.IsMilestone,
 		t.RecurrenceRule, t.ReminderMinutes, t.Notes, t.UpdatedAt,
 		t.ID, t.AccountID, t.Version,
 	)

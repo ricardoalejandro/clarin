@@ -16,7 +16,9 @@ function makeTask() {
   return {
     id: 'task-refinement', account_id: 'account-work', created_by: 'user-owner', assigned_to: 'user-owner', assigned_to_name: 'Ricardo Rojas',
     title: 'Preparar propuesta profesional', description: '', type: 'reminder', priority: 'medium', status: 'pending', status_id: todoStatus.id,
-    status_detail: todoStatus, list_id: 'list-work', list_name: 'Trabajo principal', sort_order: 1024, progress: 0, version: 1,
+    status_detail: todoStatus, list_id: 'list-work', list_name: 'Trabajo principal', sort_order: 1024, progress: 0,
+    progress_mode: 'manual', manual_progress: 0, progress_source: 'manual', subtask_done: 0, subtask_count: 0,
+    start_at: '2026-07-30T09:00:00.000Z', due_at: '2026-08-01T09:00:00.000Z', version: 1,
     recurrence_rule: '', reminder_minutes: 0, notes: '', created_at: now, updated_at: now,
     collaborators: [{ user_id: 'user-admin', display_name: 'Administrador', username: 'admin', created_at: now }],
   }
@@ -52,6 +54,13 @@ async function installWorkspaceMock(page: Page) {
   const bulkMoves: Array<Record<string, unknown>> = []
   const taskQueries: Array<{ search: string; at: number }> = []
   const trashWrites: Array<{ path: string; method: string; body: Record<string, unknown> }> = []
+  const attachmentCommentWrites: Array<Record<string, unknown>> = []
+  const textAttachment = {
+    id: 'attachment-text', account_id: 'account-work', task_id: 'task-refinement', media_asset_id: 'asset-text',
+    filename: 'notas-operativas.txt', content_type: 'text/plain', media_type: 'document', size_bytes: 76,
+    url: '/api/media/file/account-work/notas-operativas.txt', uploaded_by: 'user-owner', created_at: now,
+  }
+  let attachmentComments: Array<Record<string, unknown>> = []
   let failNextDescriptionWrite = false
 
   await page.routeWebSocket('**/ws**', socket => { workspaceSocket = socket; socket.onMessage(() => undefined) })
@@ -87,6 +96,9 @@ async function installWorkspaceMock(page: Page) {
       const activeItems = [task, ...createdTasks].filter(item => !search || `${item.title} ${item.description}`.toLocaleLowerCase().includes(search))
       const items = url.searchParams.get('deleted') === 'true' ? trashTasks : activeItems
       await json(route, { tasks: items, total: items.length }); return
+    }
+    if (path === '/api/tasks/gantt' && request.method() === 'GET') {
+      await json(route, { tasks: [task], dependencies: [], critical_task_ids: [], slack_minutes: {}, unscheduled_count: 0 }); return
     }
 
     if (path === `/api/tasks/${task.id}` && request.method() === 'DELETE') { trashWrites.push({ path, method: request.method(), body }); await json(route, { success: true, task: { ...task, deleted_at: now, version: task.version + 1 }, version: task.version + 1 }); return }
@@ -181,7 +193,22 @@ async function installWorkspaceMock(page: Page) {
     if (path === `/api/tasks/${task.id}/children`) { await json(route, { tasks: [] }); return }
     if (path === `/api/tasks/${task.id}/comments`) { await json(route, { comments: [], total: 0, limit: 100, offset: 0 }); return }
     if (path === `/api/tasks/${task.id}/activity`) { await json(route, { activity: [] }); return }
-    if (path === `/api/tasks/${task.id}/attachments`) { await json(route, { attachments: [] }); return }
+    if (path === `/api/tasks/${task.id}/attachments`) { await json(route, { attachments: [textAttachment] }); return }
+    if (path === `/api/tasks/${task.id}/attachments/${textAttachment.id}/preview`) {
+      await json(route, { preview: { id: 'preview-text', account_id: 'account-work', task_id: task.id, attachment_id: textAttachment.id, kind: 'text', status: 'ready', url: '/api/media/file/account-work/notas-operativas.txt', page_count: 0, version: 1, created_at: now, updated_at: now } }); return
+    }
+    if (path === `/api/tasks/${task.id}/attachments/${textAttachment.id}/comments` && request.method() === 'GET') {
+      await json(route, { comments: attachmentComments }); return
+    }
+    if (path === `/api/tasks/${task.id}/attachments/${textAttachment.id}/comments` && request.method() === 'POST') {
+      attachmentCommentWrites.push(body)
+      const comment = { id: `attachment-comment-${attachmentComments.length + 1}`, account_id: 'account-work', task_id: task.id, attachment_id: textAttachment.id, author_id: 'user-owner', author_name: 'Ricardo Rojas', body: body.body, anchor: body.anchor, version: 1, created_at: now, updated_at: now, can_resolve: true, mentions: [] }
+      attachmentComments = [...attachmentComments, comment]
+      await json(route, { comment }, 201); return
+    }
+    if (path === '/api/media/file/account-work/notas-operativas.txt') {
+      await route.fulfill({ status: 200, contentType: 'text/plain; charset=utf-8', body: 'Primera línea de contexto.\nSegunda línea para comentarios anclados.\n' }); return
+    }
     if (path === `/api/tasks/${task.id}/dependencies`) { await json(route, { dependencies: [] }); return }
     if (path.startsWith('/api/notifications')) { await json(route, { notifications: [], unread_count: 0, total: 0 }); return }
     await json(route, { success: true })
@@ -196,7 +223,7 @@ async function installWorkspaceMock(page: Page) {
     localStorage.setItem('tasks:detail-mode', 'maximized')
   })
 
-  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, bulkMoves, trashWrites, taskQueries, failNextDescriptionWrite: () => { failNextDescriptionWrite = true } }
+  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, bulkMoves, trashWrites, taskQueries, attachmentCommentWrites, failNextDescriptionWrite: () => { failNextDescriptionWrite = true } }
 }
 
 async function drag(page: Page, source: Locator, target: Locator) {
@@ -229,11 +256,12 @@ async function dragSortable(page: Page, source: Locator, target: Locator) {
 }
 
 async function dragTaskToNavigation(page: Page, source: Locator, target: Locator) {
-  const sourceBox = await source.boundingBox()
+  const handle = source.locator('button[aria-label^="Arrastrar "]').first()
+  const sourceBox = await handle.boundingBox()
   const targetBox = await target.boundingBox()
   expect(sourceBox).not.toBeNull()
   expect(targetBox).not.toBeNull()
-  const start = { x: sourceBox!.x + sourceBox!.width * 0.55, y: sourceBox!.y + Math.min(34, sourceBox!.height / 2) }
+  const start = { x: sourceBox!.x + sourceBox!.width / 2, y: sourceBox!.y + sourceBox!.height / 2 }
   const end = { x: targetBox!.x + targetBox!.width / 2, y: targetBox!.y + targetBox!.height / 2 }
   await page.mouse.move(start.x, start.y)
   await page.mouse.down()
@@ -502,6 +530,89 @@ test.describe('Clarin Work workspace refinement', () => {
     expect(mock.collaboratorWrites[0].user_ids).toEqual([])
     await expect(detail.getByRole('button', { name: 'Quitar a Administrador' })).toHaveCount(0)
     await expect(detail.getByRole('button', { name: 'Añadir colaborador' })).toBeVisible()
+  })
+
+  test('persists professional list grouping and preserves manual progress across automatic mode', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+
+    const groupingTrigger = page.getByText('Agrupar por', { exact: true }).locator('..').locator('button[aria-haspopup="listbox"]')
+    await expect(groupingTrigger).toContainText('Estado')
+    await groupingTrigger.click()
+    await page.getByRole('option', { name: /Prioridad/ }).click()
+    await expect(page.locator('[data-task-list-group="medium"]')).toContainText('Media')
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('tasks:list-group-by'))).toBe('priority')
+
+    await page.reload()
+    await expect(page.getByText('Agrupar por', { exact: true }).locator('..').locator('button[aria-haspopup="listbox"]')).toContainText('Prioridad')
+    await expect(page.locator('[data-task-list-group="medium"]')).toBeVisible()
+
+    await page.getByText('Preparar propuesta profesional', { exact: true }).click()
+    const detail = page.getByRole('dialog', { name: 'Detalle de tarea' })
+    await detail.getByRole('button', { name: '75%' }).click()
+    await expect.poll(() => mock.taskWrites.some(write => write.progress_mode === 'manual' && write.manual_progress === 75)).toBeTruthy()
+    await detail.getByRole('button', { name: 'Automático' }).click()
+    await expect.poll(() => mock.taskWrites.some(write => write.progress_mode === 'automatic' && write.manual_progress === 75)).toBeTruthy()
+    await expect(detail.getByText('0% calculado')).toBeVisible()
+    await detail.getByRole('button', { name: 'Manual' }).click()
+    await expect(detail.getByRole('spinbutton', { name: 'Porcentaje manual' })).toHaveValue('75')
+  })
+
+  test('supports every Gantt scale, the full flexible zoom range and dependency mode', async ({ page }) => {
+    await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByRole('button', { name: 'Gantt' }).click()
+    await expect(page.getByText('Cronograma del proyecto')).toBeVisible()
+
+    let currentScale = 'Flexible'
+    for (const nextScale of ['Día', 'Semana', 'Mes', 'Trimestre', 'Año', 'Flexible']) {
+      await page.getByRole('button', { name: new RegExp(currentScale) }).click()
+      await page.getByRole('option', { name: nextScale, exact: true }).click()
+      currentScale = nextScale
+    }
+
+    const zoomOut = page.getByRole('button', { name: 'Alejar Gantt' })
+    const zoomIn = page.getByRole('button', { name: 'Acercar Gantt' })
+    for (let index = 0; index < 12; index += 1) await zoomIn.click()
+    await expect(page.getByText('120px', { exact: true })).toBeVisible()
+    for (let index = 0; index < 15; index += 1) await zoomOut.click()
+    await expect(page.getByText('8px', { exact: true })).toBeVisible()
+    await page.getByText('Reprogramar dependencias').locator('input').check()
+    await expect(page.getByText('Reprogramar dependencias').locator('input')).toBeChecked()
+    await expect(page.getByRole('button', { name: 'Cambiar inicio' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Cambiar entrega' })).toBeVisible()
+  })
+
+  test('previews text attachments and publishes a task-scoped anchored comment', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 818 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByText('Preparar propuesta profesional', { exact: true }).click()
+    const detail = page.getByRole('dialog', { name: 'Detalle de tarea' })
+    await detail.getByText('notas-operativas.txt', { exact: true }).click()
+    const viewer = page.getByRole('dialog', { name: 'Vista previa de notas-operativas.txt' })
+    await expect(viewer).toBeVisible()
+    const documentText = viewer.locator('pre')
+    await expect(documentText).toContainText('Segunda línea para comentarios anclados.')
+    await documentText.evaluate(element => {
+      const node = element.firstChild
+      if (!node) return
+      const range = document.createRange()
+      range.setStart(node, 0)
+      range.setEnd(node, Math.min(14, node.textContent?.length || 0))
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    })
+    const composer = viewer.getByPlaceholder('Comenta sobre este punto…')
+    await composer.fill('Este fragmento necesita validación.')
+    await composer.locator('..').locator('button').last().click()
+    await expect.poll(() => mock.attachmentCommentWrites.length).toBe(1)
+    expect(mock.attachmentCommentWrites[0]).toMatchObject({ body: 'Este fragmento necesita validación.', anchor: { kind: 'text', offset: 0 } })
+    await expect(viewer.getByText('Este fragmento necesita validación.')).toBeVisible()
   })
 
   test('separates the task detail visually and provides an accessible expanded description editor', async ({ page }) => {

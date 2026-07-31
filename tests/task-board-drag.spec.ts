@@ -232,7 +232,9 @@ async function openBoard(page: Page) {
 }
 
 async function startMouseDrag(page: Page, source: Locator, target: Locator) {
-  const sourceBox = await source.boundingBox()
+  const activator = source.getByRole('button', { name: /^Arrastrar / })
+  const dragSource = await activator.count() ? activator.first() : source
+  const sourceBox = await dragSource.boundingBox()
   const targetBox = await target.boundingBox()
   expect(sourceBox).not.toBeNull()
   expect(targetBox).not.toBeNull()
@@ -309,7 +311,7 @@ test.describe('Clarin Work Kanban drag stability', () => {
     expect(todoOrder.indexOf('todo-1')).toBeGreaterThan(0)
 
     const beforeCancel = await column(page, 'status-todo').locator('[data-task-id]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-task-id')).join('|'))
-    await card(page, 'todo-2').focus()
+    await card(page, 'todo-2').getByRole('button', { name: /^Arrastrar / }).focus()
     await page.keyboard.press('Space')
     await page.keyboard.press('ArrowDown')
     await page.keyboard.press('Escape')
@@ -321,7 +323,7 @@ test.describe('Clarin Work Kanban drag stability', () => {
     const mock = await installTaskBoardMock(page)
     await openBoard(page)
 
-    await card(page, 'todo-1').focus()
+    await card(page, 'todo-1').getByRole('button', { name: /^Arrastrar / }).focus()
     await page.keyboard.press('Space')
     await page.waitForTimeout(100)
     await page.keyboard.press('ArrowDown')

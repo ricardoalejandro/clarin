@@ -47,6 +47,8 @@ import TaskUserCombobox from './TaskUserCombobox'
 import useTaskDetailWindow, { type TaskDetailResizeEdge } from './useTaskDetailWindow'
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 import { TaskListPicker } from './TaskSelectPicker'
+import TaskDateTimePicker from './TaskDateTimePicker'
+import TaskAttachmentViewer from './TaskAttachmentViewer'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import {
   TASK_DESCRIPTION_DEFAULT_HEIGHT,
@@ -94,6 +96,7 @@ const activityLabels: Record<string, string> = {
   collaborators_updated: 'cambió los colaboradores',
   attachment_added: 'adjuntó un archivo',
   attachment_deleted: 'quitó un archivo',
+  attachment_comment_added: 'comentó sobre un adjunto',
   dependency_added: 'añadió una dependencia',
   dependency_deleted: 'quitó una dependencia',
 }
@@ -148,6 +151,8 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const [startDraft, setStartDraft] = useState('')
   const [dueDraft, setDueDraft] = useState('')
   const [progressDraft, setProgressDraft] = useState(0)
+  const [progressMode, setProgressMode] = useState<'manual' | 'automatic'>('manual')
+  const [previewAttachment, setPreviewAttachment] = useState<TaskAttachment | null>(null)
   const [subtaskTitle, setSubtaskTitle] = useState('')
 
   const [comment, setComment] = useState('')
@@ -217,7 +222,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       start_at: startDraft ? new Date(startDraft).toISOString() : '',
       due_at: dueDraft ? new Date(dueDraft).toISOString() : '',
     },
-    progress: { progress: progressDraft },
+    progress: { progress_mode: progressMode, manual_progress: progressDraft },
   }
 
   const beginPending = useCallback((key: string) => {
@@ -257,7 +262,10 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       setStartDraft(localDateTime(next.start_at))
       setDueDraft(localDateTime(next.due_at))
     }
-    if (forceDrafts || (!editingProgressRef.current && !preservedDraftKeysRef.current.has('progress'))) setProgressDraft(next.progress || 0)
+    if (forceDrafts || (!editingProgressRef.current && !preservedDraftKeysRef.current.has('progress'))) {
+      setProgressDraft(next.manual_progress ?? next.progress ?? 0)
+      setProgressMode(next.progress_mode || 'manual')
+    }
   }, [])
 
   const refreshTask = useCallback(async () => {
@@ -646,20 +654,20 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     }
     setDescriptionExpanded(taskDescriptionEditorRemainsOpen(saved))
   }
-  const saveDates = async () => {
+  const saveDates = async (startValue = startDraft, dueValue = dueDraft) => {
     editingDatesRef.current = false
     if (!task) return
-    if (startDraft && dueDraft && new Date(dueDraft) < new Date(startDraft)) {
+    if (startValue && dueValue && new Date(dueValue) < new Date(startValue)) {
       showFailure('La entrega no puede ser anterior al inicio.')
       return
     }
-    const nextStart = startDraft ? new Date(startDraft).toISOString() : ''
-    const nextDue = dueDraft ? new Date(dueDraft).toISOString() : ''
+    const nextStart = startValue ? new Date(startValue).toISOString() : ''
+    const nextDue = dueValue ? new Date(dueValue).toISOString() : ''
     if (nextStart !== (task.start_at || '') || nextDue !== (task.due_at || '')) await updateTask('dates', { start_at: nextStart, due_at: nextDue })
   }
-  const saveProgress = async () => {
+  const saveProgress = async (mode = progressMode, manual = progressDraft) => {
     editingProgressRef.current = false
-    if (task && progressDraft !== (task.progress || 0)) await updateTask('progress', { progress: progressDraft })
+    if (task && (mode !== (task.progress_mode || 'manual') || manual !== (task.manual_progress ?? task.progress ?? 0))) await updateTask('progress', { progress_mode: mode, manual_progress: manual })
   }
 
   const setCollaborator = async (userId: string, intendedSelected?: boolean) => {
@@ -986,9 +994,11 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
         <div className="text-xs font-semibold text-slate-500">Responsable<div className="mt-1.5"><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={isPending('owner')} /></div></div>
         <div className="text-xs font-semibold text-slate-500">Prioridad<div className="mt-1.5"><TaskPriorityPicker value={task.priority} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></div></div>
         <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5"><TaskListPicker value={task.list_id || ''} lists={lists} folders={folders} disabled={Boolean(task.parent_task_id) || isPending('list')} onChange={listID => { void updateTask('list', { list_id: listID }) }} /></div>{task.parent_task_id && <p className="mt-1.5 text-[10px] font-normal leading-4 text-slate-400">Las subtareas heredan la lista de su tarea principal y se trasladan junto con ella.</p>}</div>
-        <label className="text-xs font-semibold text-slate-500"><span className="flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Inicio</span><input type="datetime-local" value={startDraft} disabled={isPending('dates')} onFocus={() => { editingDatesRef.current = true }} onChange={event => setStartDraft(event.target.value)} onBlur={() => { void saveDates() }} className={`${inputClass} mt-1.5`} /></label>
-        <label className="text-xs font-semibold text-slate-500"><span className="flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Entrega</span><input type="datetime-local" value={dueDraft} disabled={isPending('dates')} onFocus={() => { editingDatesRef.current = true }} onChange={event => setDueDraft(event.target.value)} onBlur={() => { void saveDates() }} className={`${inputClass} mt-1.5`} /></label>
-        <label className="text-xs font-semibold text-slate-500 sm:col-span-2"><span className="flex items-center justify-between"><span>Progreso</span><span className="text-emerald-700">{progressDraft}%</span></span><input type="range" min="0" max="100" step="5" value={progressDraft} disabled={isPending('progress') || task.status_detail?.category === 'done'} onFocus={() => { editingProgressRef.current = true }} onChange={event => setProgressDraft(Number(event.target.value))} onPointerUp={() => { void saveProgress() }} onKeyUp={() => { void saveProgress() }} className="mt-2 w-full accent-emerald-600 disabled:opacity-50" /></label>
+        <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Inicio</span><TaskDateTimePicker label="Inicio" value={startDraft} disabled={isPending('dates')} onChange={setStartDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(value, dueDraft) }} /></div>
+        <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Entrega</span><TaskDateTimePicker label="Entrega" value={dueDraft} min={startDraft} disabled={isPending('dates')} onChange={setDueDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(startDraft, value) }} /></div>
+        <div className="text-xs font-semibold text-slate-500 sm:col-span-2"><div className="flex flex-wrap items-center justify-between gap-2"><span>Progreso</span><div className="flex rounded-xl bg-slate-100 p-1">{(['manual','automatic'] as const).map(mode => <button key={mode} type="button" disabled={isPending('progress')} onClick={() => { setProgressMode(mode); void saveProgress(mode, progressDraft) }} className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition ${progressMode === mode ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-400'}`}>{mode === 'manual' ? 'Manual' : 'Automático'}</button>)}</div></div>
+          {progressMode === 'automatic' ? <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-3"><div className="flex items-center justify-between"><span className="text-xs font-bold text-emerald-800">{task.progress || 0}% calculado</span><span className="text-[10px] text-emerald-600">{task.subtask_done || 0}/{task.subtask_count || 0} subtareas</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${task.progress || 0}%` }} /></div><p className="mt-2 text-[10px] font-normal leading-4 text-slate-500">Sin subtareas: 0% si está abierta y 100% si está completada.</p></div> : <div className="mt-3 rounded-2xl border border-slate-200 p-3"><div className="flex items-center gap-3"><input aria-label="Progreso manual" type="range" min="0" max="100" step="1" value={progressDraft} disabled={isPending('progress')} onFocus={() => { editingProgressRef.current = true }} onChange={event => setProgressDraft(Number(event.target.value))} onPointerUp={() => { void saveProgress('manual', progressDraft) }} onKeyUp={() => { void saveProgress('manual', progressDraft) }} className="min-w-0 flex-1 accent-emerald-600 disabled:opacity-50" /><div className="flex min-h-10 w-20 items-center rounded-xl bg-slate-50 px-2"><input aria-label="Porcentaje manual" type="number" min="0" max="100" value={progressDraft} onChange={event => setProgressDraft(Math.max(0, Math.min(100, Number(event.target.value))))} onBlur={() => { void saveProgress('manual', progressDraft) }} className="w-full bg-transparent text-right text-sm font-black text-emerald-700 outline-none" /><span className="text-xs text-slate-400">%</span></div></div><div className="mt-2 flex gap-1.5">{[0,25,50,75,100].map(value => <button key={value} type="button" onClick={() => { setProgressDraft(value); void saveProgress('manual', value) }} className="flex-1 rounded-lg bg-slate-50 py-1.5 text-[10px] font-bold text-slate-500 hover:bg-emerald-50 hover:text-emerald-700">{value}%</button>)}</div></div>}
+        </div>
       </div>
     </section>
 
@@ -1006,7 +1016,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
     <section>
       <div className="mb-3 flex items-center justify-between"><h3 className="flex items-center gap-2 text-sm font-bold text-slate-800"><Paperclip className="h-4 w-4 text-emerald-600" /> Archivos <span className="font-normal text-slate-400">{attachments.length}</span></h3><button onClick={() => fileRef.current?.click()} disabled={isPending('upload:task')} className="flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40">{isPending('upload:task') && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Adjuntar</button><input ref={fileRef} type="file" className="hidden" onChange={event => void upload(event.target.files?.[0])} /></div>
-      <div className="grid gap-2 sm:grid-cols-2">{attachments.map(item => <div key={item.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-2.5"><div className="rounded-lg bg-slate-100 p-2"><File className="h-4 w-4 text-slate-500" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{item.filename}</p><p className="text-[10px] text-slate-400">{Math.max(1, Math.round(item.size_bytes / 1024))} KB</p></div><a aria-label={`Abrir ${item.filename}`} href={item.url} target="_blank" rel="noreferrer" className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><Download className="h-4 w-4" /></a><button aria-label={`Quitar ${item.filename}`} disabled={isPending(`attachment-delete:${item.id}`)} onClick={() => { void removeAttachment(item) }} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-3.5 w-3.5" /></button></div>)}{!attachments.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400 sm:col-span-2">Adjunta documentos, imágenes o entregables.</div>}</div>
+      <div className="grid gap-2 sm:grid-cols-2">{attachments.map(item => <div key={item.id} className="group flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-2.5 transition hover:border-emerald-200 hover:shadow-sm"><button type="button" onClick={() => setPreviewAttachment(item)} className="flex min-w-0 flex-1 items-center gap-2 text-left"><div className="rounded-lg bg-slate-100 p-2 transition group-hover:bg-emerald-50"><File className="h-4 w-4 text-slate-500 group-hover:text-emerald-600" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{item.filename}</p><p className="text-[10px] text-slate-400">{Math.max(1, Math.round(item.size_bytes / 1024))} KB · Ver y comentar</p></div></button><a aria-label={`Descargar ${item.filename}`} href={item.url} target="_blank" rel="noreferrer" className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><Download className="h-4 w-4" /></a><button aria-label={`Quitar ${item.filename}`} disabled={isPending(`attachment-delete:${item.id}`)} onClick={() => { void removeAttachment(item) }} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-3.5 w-3.5" /></button></div>)}{!attachments.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400 sm:col-span-2">Adjunta documentos, imágenes o entregables.</div>}</div>
     </section>
 
     <section>
@@ -1058,6 +1068,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
         </> : <div className="flex flex-1 flex-col items-center justify-center px-6 text-center"><AlertCircle className="h-8 w-8 text-rose-300" /><p className="mt-3 text-sm font-semibold text-slate-700">No pudimos abrir esta tarea.</p><button onClick={() => { void load() }} className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Reintentar</button></div>}
       </aside>
       <TaskDestructiveConfirmDialog open={archiveConfirmOpen} title="Mover tarea a Papelera" description={`${task?.subtask_count ? `También se moverán ${task.subtask_count} subtarea${task.subtask_count === 1 ? '' : 's'}. ` : ''}La tarea podrá restaurarse durante el plazo configurado. Completar una tarea nunca la envía aquí.`} actionLabel="Mover a Papelera" busy={isPending('archive')} error={archiveError} onClose={() => { if (!isPending('archive')) { setArchiveConfirmOpen(false); setArchiveError('') } }} onConfirm={() => { void removeTask() }} />
+      {previewAttachment && task && <TaskAttachmentViewer taskId={task.id} attachment={previewAttachment} users={users} onClose={() => setPreviewAttachment(null)} />}
     </div>,
     document.body,
   )

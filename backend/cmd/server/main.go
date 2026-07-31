@@ -20,6 +20,7 @@ import (
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/storage"
+	"github.com/naperu/clarin/internal/taskpreview"
 	"github.com/naperu/clarin/internal/whatsapp"
 	"github.com/naperu/clarin/internal/ws"
 	"github.com/naperu/clarin/pkg/cache"
@@ -82,6 +83,14 @@ func main() {
 		} else {
 			log.Printf("✅ MinIO storage initialized at %s", cfg.MinioEndpoint)
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TASK_PREVIEW_WORKER_ONLY")), "true") {
+		workerCtx, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stopWorker()
+		if err := taskpreview.Run(workerCtx, db, store); err != nil {
+			log.Fatalf("Task preview worker stopped: %v", err)
+		}
+		return
 	}
 
 	// Initialize repositories

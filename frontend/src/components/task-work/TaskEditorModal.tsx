@@ -22,6 +22,7 @@ import { TaskListPicker, TaskSelectPicker } from './TaskSelectPicker'
 import useTaskWindow, { type TaskWindowResizeEdge } from './useTaskWindow'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { taskWindowVisualState } from './taskInteractionVisuals'
+import TaskDateTimePicker from './TaskDateTimePicker'
 
 export interface TaskAccountUser {
   id: string
@@ -199,7 +200,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
       list_id: listId, status_id: statusId,
       start_at: startAt ? new Date(startAt).toISOString() : '',
       due_at: dueAt ? new Date(dueAt).toISOString() : '',
-      is_all_day: allDay, progress, is_milestone: milestone,
+      is_all_day: allDay, progress, progress_mode: 'manual', manual_progress: progress, is_milestone: milestone,
       recurrence_rule: recurrence, reminder_minutes: reminder || 0,
       ...(parentTaskId && !task ? { parent_task_id: parentTaskId } : {}),
       ...(task ? { version: editVersion } : {}),
@@ -273,7 +274,7 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
 
             <section className="space-y-4 rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-800"><CalendarRange className="h-4 w-4 text-emerald-600" /> Planificación</div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><label className="text-xs font-semibold text-slate-500">Inicio<input type="datetime-local" value={startAt} onChange={event => { setStartAt(event.target.value); markDirty() }} className={`${inputClass} mt-1.5`} /></label><label className="text-xs font-semibold text-slate-500">Entrega<input type="datetime-local" value={dueAt} onChange={event => { setDueAt(event.target.value); markDirty() }} className={`${inputClass} mt-1.5`} /></label></div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><TaskDateTimePicker label="Inicio" value={startAt} onChange={value => { setStartAt(value); markDirty() }} allDay={allDay} onAllDayChange={value => { setAllDay(value); markDirty() }} /><TaskDateTimePicker label="Entrega" value={dueAt} min={startAt} onChange={value => { setDueAt(value); markDirty() }} allDay={allDay} onAllDayChange={value => { setAllDay(value); markDirty() }} /></div>
               {startAt && dueAt && new Date(dueAt) < new Date(startAt) && <p className="text-xs font-medium text-rose-600">La entrega no puede ser anterior al inicio.</p>}
               <div className="flex flex-wrap gap-2"><button onClick={() => { setAllDay(value => !value); markDirty() }} className={`rounded-xl border px-3 py-2 text-xs font-medium ${allDay ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600'}`}>Todo el día</button><button onClick={() => { setMilestone(value => !value); markDirty() }} className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium ${milestone ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-slate-200 text-slate-600'}`}><Flag className="h-3.5 w-3.5" /> Hito</button></div>
               <label className="block text-xs font-semibold text-slate-500">Progreso · {progress}%<input type="range" min="0" max="100" step="5" value={progress} disabled={statuses.find(status => status.id === statusId)?.category === 'done'} onChange={event => { setProgress(Number(event.target.value)); markDirty() }} className="mt-2 w-full accent-emerald-600 disabled:opacity-50" /></label>

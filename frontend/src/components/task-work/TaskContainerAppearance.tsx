@@ -3,15 +3,15 @@
 import { useEffect, useState, type ComponentType } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Bell, Briefcase, Building2, CalendarDays, CheckSquare2, ClipboardList,
+  Archive, Award, Bell, BookOpen, Box, Brain, Briefcase, Bug, Building2, CalendarDays, Camera, CheckSquare2, CircleDollarSign, ClipboardList, Cloud, Code2, Coffee, Compass, FileText,
   Flag, Folder, GraduationCap, Inbox, Layers3, ListTodo, Megaphone,
-  MessageCircle, Phone, Rocket, Target, Users, X,
+  Gem, Gift, Globe2, Heart, Home, KeyRound, Laptop, Lightbulb, Link2, LockKeyhole, MapPin, MessageCircle, Package, Palette, Phone, Plane, Rocket, Search, Settings2, ShieldCheck, ShoppingCart, Sparkles, Star, Store, Tag, Target, ThumbsUp, Trophy, Truck, UserRound, Users, Video, Wallet, Wrench, X,
 } from 'lucide-react'
 import { apiDelete, apiPut } from '@/lib/api'
 import type { TaskFolder, TaskList } from '@/types/task'
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 
-export const TASK_CONTAINER_COLORS = ['#10b981', '#14b8a6', '#3b82f6', '#6366f1', '#8b5cf6', '#d946ef', '#f59e0b', '#f97316', '#ef4444', '#64748b']
+export const TASK_CONTAINER_COLORS = ['#059669', '#10b981', '#0d9488', '#14b8a6', '#0891b2', '#06b6d4', '#0284c7', '#3b82f6', '#4f46e5', '#6366f1', '#7c3aed', '#8b5cf6', '#a855f7', '#c026d3', '#d946ef', '#db2777', '#e11d48', '#dc2626', '#ef4444', '#ea580c', '#f97316', '#d97706', '#f59e0b', '#475569']
 
 export const TASK_CONTAINER_ICONS: Array<{ value: string; label: string; icon: ComponentType<{ className?: string }> }> = [
   { value: 'inbox', label: 'Bandeja', icon: Inbox },
@@ -32,6 +32,27 @@ export const TASK_CONTAINER_ICONS: Array<{ value: string; label: string; icon: C
   { value: 'message-circle', label: 'Mensajes', icon: MessageCircle },
   { value: 'bell', label: 'Recordatorios', icon: Bell },
   { value: 'check-square', label: 'Checklist', icon: CheckSquare2 },
+  { value: 'archive', label: 'Archivo', icon: Archive }, { value: 'award', label: 'Reconocimiento', icon: Award },
+  { value: 'book-open', label: 'Conocimiento', icon: BookOpen }, { value: 'box', label: 'Caja', icon: Box },
+  { value: 'brain', label: 'Ideas', icon: Brain }, { value: 'bug', label: 'Incidencias', icon: Bug },
+  { value: 'camera', label: 'Fotografía', icon: Camera }, { value: 'money', label: 'Finanzas', icon: CircleDollarSign },
+  { value: 'cloud', label: 'Nube', icon: Cloud }, { value: 'code', label: 'Desarrollo', icon: Code2 },
+  { value: 'coffee', label: 'Pausa', icon: Coffee }, { value: 'compass', label: 'Dirección', icon: Compass },
+  { value: 'file-text', label: 'Documentos', icon: FileText }, { value: 'gem', label: 'Especial', icon: Gem },
+  { value: 'gift', label: 'Beneficios', icon: Gift }, { value: 'globe', label: 'Global', icon: Globe2 },
+  { value: 'heart', label: 'Bienestar', icon: Heart }, { value: 'home', label: 'Inicio', icon: Home },
+  { value: 'key', label: 'Accesos', icon: KeyRound }, { value: 'laptop', label: 'Tecnología', icon: Laptop },
+  { value: 'lightbulb', label: 'Innovación', icon: Lightbulb }, { value: 'link', label: 'Enlaces', icon: Link2 },
+  { value: 'lock', label: 'Seguridad', icon: LockKeyhole }, { value: 'map-pin', label: 'Ubicación', icon: MapPin },
+  { value: 'package', label: 'Entregables', icon: Package }, { value: 'palette', label: 'Diseño', icon: Palette },
+  { value: 'plane', label: 'Viajes', icon: Plane }, { value: 'settings', label: 'Configuración', icon: Settings2 },
+  { value: 'shield', label: 'Protección', icon: ShieldCheck }, { value: 'shopping-cart', label: 'Compras', icon: ShoppingCart },
+  { value: 'sparkles', label: 'Destacado', icon: Sparkles }, { value: 'star', label: 'Favorito', icon: Star },
+  { value: 'store', label: 'Comercio', icon: Store }, { value: 'tag', label: 'Categoría', icon: Tag },
+  { value: 'thumbs-up', label: 'Aprobación', icon: ThumbsUp }, { value: 'trophy', label: 'Logros', icon: Trophy },
+  { value: 'truck', label: 'Logística', icon: Truck }, { value: 'user', label: 'Persona', icon: UserRound },
+  { value: 'video', label: 'Video', icon: Video }, { value: 'wallet', label: 'Presupuesto', icon: Wallet },
+  { value: 'wrench', label: 'Mantenimiento', icon: Wrench },
 ]
 
 const iconByValue = new Map(TASK_CONTAINER_ICONS.map(item => [item.value, item.icon]))
@@ -54,6 +75,7 @@ export function TaskAppearanceDialog({ item, type, onClose, onSaved, onError, on
   const isDefault = 'is_default' in item && Boolean(item.is_default)
   const [icon, setIcon] = useState(item.icon || (type === 'folder' ? 'folder' : isDefault ? 'inbox' : 'list'))
   const [saving, setSaving] = useState(false)
+  const [iconQuery, setIconQuery] = useState('')
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [archiveError, setArchiveError] = useState('')
   useEffect(() => {
@@ -101,7 +123,7 @@ export function TaskAppearanceDialog({ item, type, onClose, onSaved, onError, on
       <div className="space-y-5 p-5">
         <label className="block text-xs font-bold text-slate-600">Nombre<input autoFocus value={name} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void save() }} maxLength={120} className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100" /></label>
         <fieldset><legend className="text-xs font-bold text-slate-600">Color</legend><div className="mt-2 flex flex-wrap gap-2">{TASK_CONTAINER_COLORS.map(value => <button key={value} type="button" aria-label={`Color ${value}`} aria-pressed={color === value} onClick={() => setColor(value)} className={`h-9 w-9 rounded-xl border-4 transition ${color === value ? 'scale-110 border-slate-900 shadow-lg' : 'border-white shadow-sm ring-1 ring-slate-200 hover:scale-105'}`} style={{ backgroundColor: value }} />)}</div></fieldset>
-        <fieldset><legend className="text-xs font-bold text-slate-600">Icono</legend><div className="mt-2 grid grid-cols-6 gap-2 sm:grid-cols-9">{TASK_CONTAINER_ICONS.map(option => <button key={option.value} type="button" title={option.label} aria-label={option.label} aria-pressed={icon === option.value} onClick={() => setIcon(option.value)} className={`flex h-10 items-center justify-center rounded-xl border transition ${icon === option.value ? 'border-emerald-400 bg-emerald-50 text-emerald-700 ring-2 ring-emerald-100' : 'border-slate-200 text-slate-500 hover:border-slate-300 hover:bg-slate-50'}`}><option.icon className="h-4 w-4" /></button>)}</div></fieldset>
+        <fieldset><legend className="text-xs font-bold text-slate-600">Icono</legend><div className="mt-2 flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3"><Search className="h-4 w-4 text-slate-400" /><input value={iconQuery} onChange={event => setIconQuery(event.target.value)} placeholder="Buscar entre más de 48 iconos…" className="min-w-0 flex-1 bg-transparent py-2.5 text-sm outline-none" /></div><div className="mt-2 grid max-h-52 grid-cols-6 gap-2 overflow-y-auto pr-1 sm:grid-cols-9">{TASK_CONTAINER_ICONS.filter(option => `${option.label} ${option.value}`.toLowerCase().includes(iconQuery.trim().toLowerCase())).map(option => <button key={option.value} type="button" title={option.label} aria-label={option.label} aria-pressed={icon === option.value} onClick={() => setIcon(option.value)} className={`flex h-10 items-center justify-center rounded-xl border transition ${icon === option.value ? 'border-emerald-400 bg-emerald-50 text-emerald-700 ring-2 ring-emerald-100' : 'border-slate-200 text-slate-500 hover:border-slate-300 hover:bg-slate-50'}`}><option.icon className="h-4 w-4" /></button>)}</div></fieldset>
       </div>
       <footer className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">{!isDefault && <button type="button" disabled={saving || item.task_count > 0} title={item.task_count > 0 ? 'Mueve o envía primero las tareas activas a Papelera' : 'Mover a Papelera'} onClick={() => { setArchiveError(''); setArchiveOpen(true) }} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30">Mover a Papelera</button>}<button type="button" disabled={saving} onClick={onClose} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-white">Cancelar</button><button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg disabled:opacity-40">{saving ? 'Guardando…' : 'Guardar cambios'}</button></footer>
     </section>

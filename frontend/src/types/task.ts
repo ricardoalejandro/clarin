@@ -3,6 +3,8 @@ export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent'
 export type TaskStatus = 'pending' | 'completed' | 'overdue' | 'cancelled'
 export type TaskStatusCategory = 'not_started' | 'active' | 'done' | 'cancelled'
 export type TaskViewMode = 'list' | 'board' | 'calendar' | 'gantt' | 'summary'
+export type TaskGroupBy = 'none' | 'status' | 'list' | 'assignee' | 'priority' | 'type' | 'due'
+export type TaskGroupDirection = 'asc' | 'desc'
 
 export interface TaskWorkflowStatus {
   id: string
@@ -62,6 +64,9 @@ export interface Task {
   starred?: boolean
   sort_order?: number
   progress?: number
+  progress_mode?: 'manual' | 'automatic'
+  manual_progress?: number
+  progress_source?: 'manual' | 'subtasks'
   is_milestone?: boolean
   deleted_at?: string
   deleted_by?: string
@@ -124,6 +129,9 @@ export interface TaskSavedView {
   view_mode: TaskViewMode
   filters: TaskFilters
   collapsed_status_ids: string[]
+  group_by: TaskGroupBy
+  group_direction: TaskGroupDirection
+  collapsed_group_keys: string[]
   is_default: boolean
   created_at: string
   updated_at: string
@@ -283,8 +291,55 @@ export interface TaskAttachment {
   media_type: string
   size_bytes: number
   url: string
+  preview?: TaskAttachmentPreview
   uploaded_by?: string
   created_at: string
+}
+
+export interface TaskAttachmentPreview {
+  id: string
+  account_id: string
+  task_id: string
+  attachment_id: string
+  kind: 'image' | 'pdf' | 'text' | 'word_pdf' | 'unsupported'
+  status: 'pending' | 'processing' | 'ready' | 'failed' | 'unsupported'
+  derivative_asset_id?: string
+  url?: string
+  page_count: number
+  error?: string
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskAttachmentAnchor {
+  kind: 'image' | 'pdf' | 'text'
+  page?: number
+  x?: number
+  y?: number
+  line?: number
+  offset?: number
+  quote?: string
+}
+
+export interface TaskAttachmentComment {
+  id: string
+  account_id: string
+  task_id: string
+  attachment_id: string
+  parent_id?: string
+  author_id: string
+  author_name: string
+  body: string
+  anchor: TaskAttachmentAnchor
+  resolved_at?: string
+  resolved_by?: string
+  version: number
+  created_at: string
+  updated_at: string
+  can_edit?: boolean
+  can_resolve?: boolean
+  mentions: TaskCommentMention[]
 }
 
 export interface TaskDependency {

@@ -13,7 +13,7 @@ func TestNormalizeTaskBulkMoveRequestPreservesRelativeOrderAndVersions(t *testin
 	ids, versions, err := normalizeTaskBulkMoveRequest([]TaskBulkMoveItem{
 		{ID: second, Version: 7},
 		{ID: first, Version: 3},
-	}, &destination, domain.TaskStatusCategoryActive)
+	}, &destination, nil, domain.TaskStatusCategoryActive)
 	if err != nil {
 		t.Fatalf("valid bulk move rejected: %v", err)
 	}
@@ -42,9 +42,20 @@ func TestNormalizeTaskBulkMoveRequestRejectsPartialOrAmbiguousWork(t *testing.T)
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if _, _, err := normalizeTaskBulkMoveRequest(test.items, test.destination, test.category); !errors.Is(err, ErrTaskBulkMoveInvalid) {
+			if _, _, err := normalizeTaskBulkMoveRequest(test.items, test.destination, nil, test.category); !errors.Is(err, ErrTaskBulkMoveInvalid) {
 				t.Fatalf("unsafe bulk move accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestNormalizeTaskBulkMoveRequestAllowsAnchorOnlyReorderAndRejectsSelectedAnchor(t *testing.T) {
+	taskID := uuid.New()
+	anchorID := uuid.New()
+	if _, _, err := normalizeTaskBulkMoveRequest([]TaskBulkMoveItem{{ID: taskID, Version: 2}}, nil, &anchorID, ""); err != nil {
+		t.Fatalf("expected anchor-only reorder to be valid, got %v", err)
+	}
+	if _, _, err := normalizeTaskBulkMoveRequest([]TaskBulkMoveItem{{ID: taskID, Version: 2}}, nil, &taskID, ""); !errors.Is(err, ErrTaskBulkMoveInvalid) {
+		t.Fatalf("expected selected anchor rejection, got %v", err)
 	}
 }

@@ -2,6 +2,15 @@
 
 ## 2026-07-31
 
+### Build 3 — Vistas configurables, progreso real y adjuntos comentables
+- ✨ Lista permite agrupar por estado, lista, responsable, prioridad, tipo o vencimiento, conservar grupos contraídos y reordenar o cambiar propiedades mediante un handle estable y acciones atómicas.
+- 🔒 Mover varias tareas ahora prepara el destino antes de confirmar; Papelera exige la frase canónica y archiva padres/subtareas en una sola transacción sin convertir “Completada” en eliminación.
+- ✨ El progreso puede ser manual o calcularse desde subtareas reales, preservando el último valor manual; las fechas de Clarin Work usan un picker portaled con hora, todo el día, zona horaria y rangos vinculados.
+- 📅 Gantt incorpora escalas Día–Año y Flexible, zoom de 8–120 px/día, virtualización, handles visibles y reprogramación transaccional opcional de dependencias.
+- 📎 PDF, imagen, TXT y Word convertido se previsualizan en un visor seguro con zoom, páginas y comentarios anclados; un worker aislado y durable inventaría los derivados por cuenta.
+- 💄 Carpetas y listas ofrecen 24 colores y más de 48 iconos validados; el panel de filtros usa contraste, blur, foco modal y el mismo contrato de capas.
+- ✅ Las pruebas unitarias cubren agrupación, orden, cursor, fechas, escalas virtualizadas, anchors, progreso, clasificación de archivos y contratos masivos.
+
 ### Build 2 — Administración de cuentas sin invalidar la experiencia
 - 🐛 Asignar o cambiar una cuenta del propio superadministrador conserva la invalidación segura, renueva la sesión transparentemente y evita el falso `401` posterior al guardado.
 - ✨ Las asignaciones existentes permiten editar su rol entre Agente, Admin, Super Admin o un rol personalizado sin quitar y volver a agregar la cuenta.

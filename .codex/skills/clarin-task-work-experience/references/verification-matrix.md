@@ -1,5 +1,15 @@
 # Clarin Work Verification Matrix
 
+## Grouped List, progress, Gantt and previews
+
+- Unit: all seven grouping modes, special empty keys, direction/collapse persistence, one stable drag cursor, relative-order insertion and exact-date confirmation before any due write.
+- Backend: bulk property and Trash requests reject duplicates, stale versions, subtasks and cross-account IDs; lock in stable order, move children with parents, emit one operation event and roll back all rows on one failure.
+- Progress: manual/automatic round trip, mode switching preserves manual value, child completion updates the derived count, zero-child open/done rules and proof that `deleted_at` remains null.
+- Gantt: every fixed scale, flexible 8/120 clamps, virtual ranges, start/end/move validation, optional dependency-chain scheduling and complete `409`/error rollback.
+- Preview: classify image/PDF/TXT/Word/unsupported, generate Word on demand in the isolated worker, retry idempotently, inventory derivative objects and deny cross-account attachment/comment/mention access.
+- Anchors: normalized/clamped image coordinates, PDF page/point/quote, TXT line/offset/context, replies, mentions, resolve/reopen and separate-but-visible task activity.
+- Browser: group and drag individual/stacked rows; stage move and protected bulk Trash; operate professional dates; zoom/resize Gantt; open and comment each supported preview; verify the filter veil, keyboard/focus order and absence of React errors.
+
 ## Bulk movement and calendar creation
 
 - Unit: checkbox toggle, Shift range, dragging selected/unselected cards, maximum stack/ghost counts, reduced motion state, unique payload items, relative order and destination resolution.
