@@ -9,9 +9,12 @@ export default defineConfig({
     setupFiles: ['./vitest.setup.ts'],
     include: [
       'src/lib/useDebouncedValue.test.tsx',
+      'src/lib/searchRequestLifecycle.test.ts',
       'src/lib/useKanbanPan.test.tsx',
       'src/lib/dashboardSidebarState.test.ts',
       'src/lib/adminUserAccountAssignments.test.ts',
+      'src/components/TagInput.test.tsx',
+      'src/components/reports/WhatsAppGroupSelector.test.tsx',
       'src/components/task-work/**/*.test.{ts,tsx}',
     ],
     restoreMocks: true,

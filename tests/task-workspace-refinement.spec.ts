@@ -9,7 +9,7 @@ const doneStatus = { id: 'status-done', account_id: 'account-work', workflow_id:
 const statuses = [todoStatus, activeStatus, doneStatus]
 
 function list(id: string, name: string, folderId = '', order = 1024, taskCount = 0, isDefault = false) {
-  return { id, account_id: 'account-work', folder_id: folderId || undefined, workflow_id: 'workflow-main', workflow_inherited: Boolean(folderId), is_default: isDefault, name, description: '', color: isDefault ? '#10b981' : '#3b82f6', icon: isDefault ? 'inbox' : 'list', sort_order: order, created_by: 'user-owner', created_at: now, updated_at: now, task_count: taskCount }
+  return { id, account_id: 'account-work', folder_id: folderId || undefined, workflow_id: 'workflow-main', workflow_inherited: Boolean(folderId), is_default: isDefault, name, description: '', color: isDefault ? '#10b981' : '#3b82f6', icon: isDefault ? 'inbox' : 'list', sort_order: order, created_by: 'user-owner', created_at: now, updated_at: now, task_count: taskCount, open_task_count: taskCount, completed_task_count: 0, cancelled_task_count: 0 }
 }
 
 function makeTask() {
@@ -38,10 +38,10 @@ async function installWorkspaceMock(page: Page) {
   let hierarchy = {
     folders: [{
       id: 'folder-client', account_id: 'account-work', workflow_id: 'workflow-main', name: 'Cliente Alfa', description: '', color: '#8b5cf6', sort_order: 1024,
-      icon: 'folder', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, lists: [list('list-folder', 'Lista de carpeta', 'folder-client', 1024)],
+      icon: 'folder', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0, lists: [list('list-folder', 'Lista de carpeta', 'folder-client', 1024)],
     }, {
       id: 'folder-beta', account_id: 'account-work', workflow_id: 'workflow-main', name: 'Cliente Beta', description: '', color: '#f59e0b', sort_order: 2048,
-      icon: 'briefcase', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, lists: [],
+      icon: 'briefcase', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0, lists: [],
     }],
     root_lists: [list('list-default', 'Bandeja general', '', 0, 0, true), list('list-work', 'Trabajo principal', '', 2048, 1)],
   }
@@ -281,7 +281,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(page.getByTitle('La Bandeja general permanece fija en la raíz')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Mover Bandeja general' })).toHaveCount(0)
 
-    await drag(page, page.getByRole('button', { name: 'Mover Trabajo principal' }), page.getByRole('button', { name: 'Cliente Alfa 0' }))
+    await drag(page, page.getByRole('button', { name: 'Mover Trabajo principal' }), page.getByRole('button', { name: 'Cliente Alfa 0 tareas abiertas' }))
     await expect.poll(() => mock.structureWrites.length).toBe(1)
     expect(mock.structureWrites[0]).toMatchObject({ folder_id: 'folder-client', before_list_id: null, workflow_inherited: true })
     await expect(page.locator('[data-task-hierarchy-container="container:folder-client"] [data-task-hierarchy-list="list-work"]')).toBeVisible()
@@ -357,11 +357,15 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.getByRole('button', { name: 'Personalizar Trabajo principal' }).click()
     const dialog = page.getByRole('dialog', { name: 'Personalizar lista' })
     await dialog.getByRole('textbox', { name: 'Nombre' }).fill('Seguimiento comercial')
-    await dialog.getByRole('button', { name: 'Color #f97316' }).click()
-    await dialog.getByRole('button', { name: 'Objetivo' }).click()
+    await dialog.getByRole('button', { name: 'Color de lista: #3B82F6' }).click()
+    const colorPicker = page.getByRole('dialog', { name: 'Color de lista' })
+    await colorPicker.getByRole('button', { name: 'Color #f97316' }).click()
+    await colorPicker.getByRole('button', { name: 'Usar este color' }).click()
+    await dialog.getByRole('button', { name: 'Icono de lista: Lista' }).click()
+    await page.getByRole('dialog', { name: 'Icono de lista' }).getByRole('button', { name: 'Objetivo' }).click()
     await dialog.getByRole('button', { name: 'Guardar cambios' }).click()
     await expect.poll(() => mock.appearanceWrites.length).toBe(1)
-    expect(mock.appearanceWrites[0].body).toMatchObject({ name: 'Seguimiento comercial', color: '#f97316', icon: 'target' })
+    expect(mock.appearanceWrites[0].body).toMatchObject({ name: 'Seguimiento comercial', color: '#F97316', icon: 'target' })
     await expect(page.getByText('Seguimiento comercial', { exact: true })).toBeVisible()
   })
 
@@ -455,7 +459,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await installWorkspaceMock(page)
     await page.setViewportSize({ width: 1398, height: 620 })
     await page.goto(`${baseURL}/dashboard/tasks`)
-    const row = page.getByRole('button', { name: 'Cliente Alfa 0', exact: true })
+    const row = page.getByRole('button', { name: 'Cliente Alfa 0 tareas abiertas', exact: true })
     await row.click()
     await expect(page.getByRole('button', { name: 'Expandir Cliente Alfa' })).toHaveAttribute('aria-expanded', 'false')
     await expect(page.locator('[data-task-hierarchy-list="list-folder"]')).not.toBeVisible()
@@ -478,7 +482,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect.poll(() => mock.bulkMoves.length).toBe(1)
     expect(mock.bulkMoves[0]).toMatchObject({ destination_list_id: 'list-folder' })
 
-    const folderTarget = page.getByRole('button', { name: 'Cliente Alfa 0', exact: true })
+    const folderTarget = page.getByRole('button', { name: 'Cliente Alfa 0 tareas abiertas', exact: true })
     await dragTaskToNavigation(page, taskCard, folderTarget)
     await page.mouse.up()
     const chooser = page.getByRole('dialog', { name: 'Cliente Alfa' })

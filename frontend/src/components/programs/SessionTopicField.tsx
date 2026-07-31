@@ -1,8 +1,9 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { AlertTriangle, BookOpen, Check, Search, Sparkles, X } from 'lucide-react'
+import { AlertTriangle, BookOpen, Check, Loader2, Search, Sparkles, X } from 'lucide-react'
 import type { CourseTopic, ProgramCourse, ProgramSession, ProgramSessionTopic } from '@/types/program'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 interface SessionTopicFieldProps {
   courses: ProgramCourse[]
@@ -135,12 +136,14 @@ export default function SessionTopicField({
 }: SessionTopicFieldProps) {
   const [manualMode, setManualMode] = useState<'plan' | 'free' | null>(null)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search, SEARCH_DEBOUNCE_MS)
   const orderedCourses = useMemo(() => [...courses].sort((left, right) => left.position - right.position), [courses])
   const allTopics = useMemo(() => orderedCourses.flatMap(course => [...course.topics]
     .sort((left, right) => left.position - right.position)
     .map(topic => ({ course, topic }))), [orderedCourses])
   const mode = manualMode || (selectedTopics.some(topic => topic.kind === 'free') ? 'free' : allTopics.length > 0 ? 'plan' : 'free')
-  const normalizedSearch = useMemo(() => normalizeSearch(search), [search])
+  const normalizedSearch = useMemo(() => normalizeSearch(debouncedSearch), [debouncedSearch])
+  const searchPending = search !== debouncedSearch
   const groupedTopics = useMemo(() => orderedCourses.map(course => ({
     course,
     topics: [...course.topics]
@@ -207,7 +210,15 @@ export default function SessionTopicField({
           )}
           {!normalizedSearch && recommendation.suggestions.length === 0 && recommendation.message && <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2.5 text-xs text-amber-800"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{recommendation.message}</p>}
 
-          <div className="relative"><Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={search} onChange={event => setSearch(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 pl-10 pr-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20" placeholder="Buscar tema o curso" aria-label="Buscar tema del plan" /></div>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input value={search} onChange={event => { const next = event.target.value; setSearch(next); if (!next) setDebouncedSearch('') }} className="h-11 w-full rounded-xl border border-slate-200 pl-10 pr-10 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20" placeholder="Buscar tema o curso" aria-label="Buscar tema del plan" aria-busy={searchPending} />
+            {searchPending ? (
+              <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-slate-400" aria-label="Buscando temas" />
+            ) : search ? (
+              <button type="button" onClick={() => { setSearch(''); setDebouncedSearch('') }} className="absolute right-2 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="Limpiar búsqueda de temas"><X className="h-3.5 w-3.5" /></button>
+            ) : null}
+          </div>
 
           <div className="max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white">
             {groupedTopics.length === 0 ? <div className="px-4 py-8 text-center text-sm text-slate-400">No hay temas que coincidan con la búsqueda.</div> : groupedTopics.map(group => (

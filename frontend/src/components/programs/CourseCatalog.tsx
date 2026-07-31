@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { api } from '@/lib/api'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import type {
   Course,
   CourseInput,
@@ -813,9 +814,18 @@ export default function CourseCatalog() {
 
   const dirty = Boolean(draft && comparableDraft(draft) !== baseline)
   const totalPages = Math.max(1, Math.ceil(totalCourses / PAGE_SIZE))
+  const searchPending = search.trim() !== debouncedSearch
+
+  const updateSearch = (value: string) => {
+    listRequestRef.current?.abort()
+    listSequenceRef.current += 1
+    setLoading(false)
+    setSearch(value)
+    if (!value) setDebouncedSearch('')
+  }
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 300)
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
   }, [search])
 
@@ -1308,15 +1318,17 @@ export default function CourseCatalog() {
                 <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 <input
                   value={search}
-                  onChange={event => setSearch(event.target.value)}
+                  onChange={event => updateSearch(event.target.value)}
                   placeholder="Buscar por nombre o descripción…"
                   aria-label="Buscar cursos"
-                  className="min-h-11 w-full rounded-xl border border-slate-300 bg-slate-50 pl-10 pr-10 text-base text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-500/20 sm:text-sm"
+                  aria-busy={searchPending || loading}
+                  className="min-h-11 w-full rounded-xl border border-slate-300 bg-slate-50 pl-10 pr-16 text-base text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:ring-2 focus:ring-emerald-500/20 sm:text-sm"
                 />
+                {searchPending && <Loader2 aria-label="Esperando para buscar cursos" className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
                 {search && (
                   <button
                     type="button"
-                    onClick={() => setSearch('')}
+                    onClick={() => updateSearch('')}
                     className="absolute right-0 top-0 flex h-11 w-11 items-center justify-center text-slate-400 hover:text-slate-700"
                     aria-label="Limpiar búsqueda"
                   >

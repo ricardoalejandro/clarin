@@ -13,6 +13,7 @@ import type {
   WhatsAppGroupCoverageReport, WhatsAppGroupOption,
 } from '@/types/report'
 import { exportWhatsAppGroupReportCSV, exportWhatsAppGroupReportExcel } from '@/utils/whatsappGroupReportExport'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
 const PAGE_SIZE = 50
 
@@ -80,6 +81,8 @@ export default function WhatsAppGroupCoveragePage() {
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState('')
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search)
+  const searchPending = search !== debouncedSearch
   const [statusFilter, setStatusFilter] = useState<'all' | CoverageStatus>('all')
   const [page, setPage] = useState(1)
   const groupRequestRef = useRef<AbortController | null>(null)
@@ -157,6 +160,7 @@ export default function WhatsAppGroupCoveragePage() {
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo generar el reporte')
       setReport(data.report)
       setSearch('')
+      setDebouncedSearch('')
       setStatusFilter('all')
       setPage(1)
     } catch (error) {
@@ -177,7 +181,7 @@ export default function WhatsAppGroupCoveragePage() {
 
   const filteredMembers = useMemo(() => {
     if (!report) return []
-    const term = search.trim().toLocaleLowerCase('es')
+    const term = debouncedSearch.trim().toLocaleLowerCase('es')
     return report.members
       .filter(member => statusFilter === 'all' || member.coverage_status === statusFilter)
       .filter(member => {
@@ -193,9 +197,9 @@ export default function WhatsAppGroupCoveragePage() {
         const priority = statusMeta[a.coverage_status].priority - statusMeta[b.coverage_status].priority
         return priority || a.whatsapp_name.localeCompare(b.whatsapp_name, 'es')
       })
-  }, [report, search, statusFilter])
+  }, [debouncedSearch, report, statusFilter])
 
-  useEffect(() => setPage(1), [search, statusFilter])
+  useEffect(() => setPage(1), [debouncedSearch, statusFilter])
   const pageCount = Math.max(1, Math.ceil(filteredMembers.length / PAGE_SIZE))
   const visibleMembers = filteredMembers.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
@@ -301,7 +305,8 @@ export default function WhatsAppGroupCoveragePage() {
                 <div className="flex flex-1 flex-col gap-3 sm:flex-row">
                   <div className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 lg:max-w-sm">
                     <Search className="h-4 w-4 text-slate-400" />
-                    <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Buscar nombre, teléfono o etiqueta…" className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-slate-400" />
+                    <input value={search} onChange={event => { const next = event.target.value; setSearch(next); if (!next) setDebouncedSearch('') }} placeholder="Buscar nombre, teléfono o etiqueta…" className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-slate-400" />
+                    {searchPending && <Loader2 aria-label="Buscando integrantes" className="h-4 w-4 shrink-0 animate-spin text-emerald-500" />}
                   </div>
                   <select value={statusFilter} onChange={event => setStatusFilter(event.target.value as 'all' | CoverageStatus)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 outline-none focus:border-emerald-400">
                     <option value="all">Todos los estados</option>

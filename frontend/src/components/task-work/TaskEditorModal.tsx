@@ -23,6 +23,7 @@ import useTaskWindow, { type TaskWindowResizeEdge } from './useTaskWindow'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { taskWindowVisualState } from './taskInteractionVisuals'
 import TaskDateTimePicker from './TaskDateTimePicker'
+import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 
 export interface TaskAccountUser {
   id: string
@@ -49,7 +50,7 @@ interface Props {
   workflows: TaskWorkflow[]
   users: TaskAccountUser[]
   onClose: () => void
-  onSaved: (task: Task, operationId?: string) => void
+  onSaved: (task: Task, operationId?: string, hierarchyCounts?: TaskHierarchyCounts) => void
   onOperation?: (operationId: string, active: boolean) => void
 }
 
@@ -192,8 +193,8 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
     if (!canSave || saving) return
     setSaving(true)
     setError('')
-    const operationId = !task ? crypto.randomUUID() : undefined
-    if (operationId) onOperation?.(operationId, true)
+    const operationId = crypto.randomUUID()
+    onOperation?.(operationId, true)
     const body = {
       title: title.trim(), description, type, priority,
       assigned_to: ownerId, collaborator_ids: collaboratorIds,
@@ -204,11 +205,11 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
       recurrence_rule: recurrence, reminder_minutes: reminder || 0,
       ...(parentTaskId && !task ? { parent_task_id: parentTaskId } : {}),
       ...(task ? { version: editVersion } : {}),
-      ...(operationId ? { operation_id: operationId } : {}),
+      operation_id: operationId,
     }
     const result = task
-      ? await apiPut<{ task: Task }>(`/api/tasks/${task.id}`, body)
-      : await apiPost<{ task: Task }>('/api/tasks', body)
+      ? await apiPut<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>(`/api/tasks/${task.id}`, body)
+      : await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', body)
     if (!result.success || !result.data?.task) {
       if (task && result.status === 409) {
         const latest = await apiGet<{ task: Task }>(`/api/tasks/${task.id}`)
@@ -216,12 +217,12 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
         setError('La tarea cambió en otra sesión. Conservamos todos tus campos; revisa y vuelve a guardar sobre la versión más reciente.')
       } else setError(result.error || 'No se pudo guardar la tarea')
       setSaving(false)
-      if (operationId) onOperation?.(operationId, false)
+      onOperation?.(operationId, false)
       return
     }
-    onSaved(result.data.task, operationId)
+    onSaved(result.data.task, result.data.operation_id || operationId, result.data.hierarchy_counts)
     setSaving(false)
-    if (operationId) onOperation?.(operationId, false)
+    onOperation?.(operationId, false)
     onClose()
   }
 

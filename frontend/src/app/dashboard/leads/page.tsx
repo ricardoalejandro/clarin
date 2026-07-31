@@ -2,9 +2,10 @@
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
-import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, AlertTriangle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, AlertTriangle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download, Loader2 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { useKanbanPan } from '@/lib/useKanbanPan'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import { es } from 'date-fns/locale'
 import FormulaEditor from '@/components/FormulaEditor'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -479,6 +480,7 @@ export default function LeadsPage() {
   const [excludeFilterTagNames, setExcludeFilterTagNames] = useState<Set<string>>(new Set())
   const [tagFilterMode, setTagFilterMode] = useState<'OR' | 'AND'>('OR')
   const [tagSearchTerm, setTagSearchTerm] = useState('')
+  const [debouncedTagSearchTerm, setDebouncedTagSearchTerm] = useDebouncedValue(tagSearchTerm)
   // Advanced formula filter
   const [leadFormulaType, setLeadFormulaType] = useState<'simple' | 'advanced'>('simple')
   const [leadFormulaText, setLeadFormulaText] = useState('')
@@ -673,6 +675,8 @@ export default function LeadsPage() {
   const activePipelineIdRef = useRef<string | null>(null)
   const kanbanRequestRef = useRef(0)
   const listRequestRef = useRef(0)
+  const kanbanSearchAbortRef = useRef<AbortController | null>(null)
+  const listSearchAbortRef = useRef<AbortController | null>(null)
   const [resultsError, setResultsError] = useState('')
   const filterSnapshotRef = useRef<{
     stageIds: Set<string>
@@ -813,6 +817,9 @@ export default function LeadsPage() {
   }, [activePipeline])
 
   const fetchLeadsPaginated = useCallback(async () => {
+    kanbanSearchAbortRef.current?.abort()
+    const controller = new AbortController()
+    kanbanSearchAbortRef.current = controller
     const requestId = ++kanbanRequestRef.current
     const token = localStorage.getItem('token')
     setResultsError('')
@@ -840,9 +847,10 @@ export default function LeadsPage() {
       }
       const res = await fetch(`/api/leads/paginated?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
       })
       const data = await res.json()
-      if (requestId !== kanbanRequestRef.current) return
+      if (requestId !== kanbanRequestRef.current || controller.signal.aborted) return
       if (data.success) {
         setStageData((data.stages || []).map((s: StageData) => ({ ...s, leads: s.leads || [] })))
         const ua = data.unassigned || { total_count: 0, leads: [], has_more: false }
@@ -851,7 +859,7 @@ export default function LeadsPage() {
         setHiddenByStatus(data.hidden_by_status || 0)
       } else setResultsError(data.error || 'No pudimos cargar las oportunidades.')
     } catch (err) {
-      if (requestId !== kanbanRequestRef.current) return
+      if (requestId !== kanbanRequestRef.current || controller.signal.aborted) return
       console.error('Failed to fetch leads:', err)
       setResultsError('No pudimos cargar las oportunidades. Revisa tu conexión e inténtalo otra vez.')
     } finally {
@@ -860,6 +868,9 @@ export default function LeadsPage() {
   }, [statusFilter, activePipeline, debouncedSearchTerm, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterDeviceIds, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const fetchListLeads = useCallback(async (reset: boolean = false) => {
+    listSearchAbortRef.current?.abort()
+    const controller = new AbortController()
+    listSearchAbortRef.current = controller
     const requestId = ++listRequestRef.current
     setListLoading(true)
     setResultsError('')
@@ -893,9 +904,10 @@ export default function LeadsPage() {
       if (cfFilters.length > 0) params.set('cf_filter', JSON.stringify(cfFilters))
       const res = await fetch(`/api/leads/list-paginated?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
       })
       const data = await res.json()
-      if (requestId !== listRequestRef.current) return
+      if (requestId !== listRequestRef.current || controller.signal.aborted) return
       if (data.success) {
         const newLeads = data.leads || []
         if (reset) {
@@ -909,7 +921,7 @@ export default function LeadsPage() {
         setListHasMore(data.has_more || false)
       } else setResultsError(data.error || 'No pudimos cargar las oportunidades.')
     } catch (err) {
-      if (requestId !== listRequestRef.current) return
+      if (requestId !== listRequestRef.current || controller.signal.aborted) return
       console.error('Failed to fetch list leads:', err)
       setResultsError('No pudimos cargar las oportunidades. Revisa tu conexión e inténtalo otra vez.')
     } finally {
@@ -1330,14 +1342,33 @@ export default function LeadsPage() {
 
   // Debounce search term (500ms)
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearchTerm(searchTerm), 500)
+    const timer = setTimeout(() => setDebouncedSearchTerm(searchTerm), SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [searchTerm])
+
+  useEffect(() => () => {
+    kanbanSearchAbortRef.current?.abort()
+    listSearchAbortRef.current?.abort()
+  }, [])
+
+  const searchPending = searchTerm.trim() !== debouncedSearchTerm
+
+  const updateSearchTerm = (value: string) => {
+    kanbanSearchAbortRef.current?.abort()
+    listSearchAbortRef.current?.abort()
+    kanbanRequestRef.current += 1
+    listRequestRef.current += 1
+    setLoading(false)
+    setListLoading(false)
+    setSearchTerm(value)
+    if (!value) setDebouncedSearchTerm('')
+  }
 
   // Click outside to close filter dropdown + reset tag search
   useEffect(() => {
     if (!showFilterDropdown) {
       setTagSearchTerm('')
+      setDebouncedTagSearchTerm('')
       setFilterPanelPosition(null)
       return
     }
@@ -2461,8 +2492,8 @@ export default function LeadsPage() {
 
   // Filter tags by search term (% = wildcard like Kommo/SQL LIKE)
   const filteredTags = allUniqueTags.filter(tag => {
-    if (!tagSearchTerm.trim()) return true
-    const term = tagSearchTerm.trim()
+    if (!debouncedTagSearchTerm.trim()) return true
+    const term = debouncedTagSearchTerm.trim()
     if (term.includes('%')) {
       const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*')
       try {
@@ -2473,6 +2504,7 @@ export default function LeadsPage() {
     }
     return tag.name.toLowerCase().includes(term.toLowerCase())
   })
+  const tagSearchPending = tagSearchTerm !== debouncedTagSearchTerm
 
   const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + filterDeviceIds.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + cfFilters.length
 
@@ -2784,11 +2816,14 @@ export default function LeadsPage() {
             <input
               type="search"
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => updateSearchTerm(e.target.value)}
               placeholder="Buscar oportunidades…"
               aria-label="Buscar oportunidades en todos los pipelines"
-              className={`h-11 w-full rounded-xl border bg-white pl-9 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500 ${activeFilterCount > 0 ? 'border-emerald-300 pr-20' : 'border-slate-200 pr-12'}`}
+              aria-busy={searchPending || loading || listLoading}
+              className={`h-11 w-full rounded-xl border bg-white pl-9 pr-24 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500 ${activeFilterCount > 0 ? 'border-emerald-300' : 'border-slate-200'}`}
             />
+            {searchPending && <Loader2 aria-label="Esperando para buscar oportunidades" className="absolute right-[4.75rem] top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
+            {searchTerm && <button type="button" onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de oportunidades" className="absolute right-11 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
             <button
               type="button"
               onClick={() => showFilterDropdown ? discardFilterDraft() : openFilters()}
@@ -3262,15 +3297,29 @@ export default function LeadsPage() {
                               </p>
                             </div>
                             <div className="relative">
-                              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                              {tagSearchPending
+                                ? <Loader2 className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-hidden="true" />
+                                : <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />}
                               <input
                                 type="text"
                                 value={tagSearchTerm}
                                 onChange={(e) => setTagSearchTerm(e.target.value)}
                                 onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault() }}
                                 placeholder="Buscar etiquetas... (% = comodín)"
-                                className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-9 pr-3 text-xs text-slate-800 placeholder:text-slate-400 transition-all focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/30"
+                                aria-busy={tagSearchPending}
+                                className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-9 pr-9 text-xs text-slate-800 placeholder:text-slate-400 transition-all focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/30"
                               />
+                              {tagSearchTerm && (
+                                <button
+                                  type="button"
+                                  onClick={() => { setTagSearchTerm(''); setDebouncedTagSearchTerm('') }}
+                                  className="absolute right-1 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                  aria-label="Limpiar búsqueda de etiquetas"
+                                >
+                                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                                </button>
+                              )}
+                              {tagSearchPending && <span className="sr-only" role="status">Actualizando etiquetas…</span>}
                             </div>
                           </>
                         )}
@@ -3317,10 +3366,10 @@ export default function LeadsPage() {
                                 </button>
                               )
                             })}
-                            {filteredTags.length === 0 && tagSearchTerm.trim() && (
+                            {filteredTags.length === 0 && debouncedTagSearchTerm.trim() && !tagSearchPending && (
                               <div className="text-center py-6">
                                 <Search className="w-5 h-5 text-slate-300 mx-auto mb-1.5" />
-                                <p className="text-xs text-slate-400">Sin resultados para &quot;{tagSearchTerm}&quot;</p>
+                                <p className="text-xs text-slate-400">Sin resultados para &quot;{debouncedTagSearchTerm}&quot;</p>
                               </div>
                             )}
                           </div>

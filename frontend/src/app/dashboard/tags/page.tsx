@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Plus, Trash2, Edit, Tag, X, Check, LayoutGrid, List, Grid3X3, Search, Loader2 } from 'lucide-react'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
+import { SearchRequestLifecycle } from '@/lib/searchRequestLifecycle'
 
 interface TagItem {
   id: string
@@ -32,6 +34,7 @@ export default function TagsPage() {
   const [hasMore, setHasMore] = useState(false)
   const offsetRef = useRef(0)
   const requestSeqRef = useRef(0)
+  const searchLifecycleRef = useRef(new SearchRequestLifecycle())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const [showCreateModal, setShowCreateModal] = useState(false)
@@ -48,6 +51,7 @@ export default function TagsPage() {
 
   const fetchTags = useCallback(async (reset: boolean = true, search: string = debouncedSearchQuery) => {
     if (!token) return
+    const lease = searchLifecycleRef.current.begin()
     const offset = reset ? 0 : offsetRef.current
     const requestSeq = ++requestSeqRef.current
     if (reset) setRefreshing(true)
@@ -62,9 +66,10 @@ export default function TagsPage() {
 
       const res = await fetch(`/api/tags?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: lease.signal,
       })
       const data = await res.json()
-      if (requestSeq !== requestSeqRef.current) return
+      if (requestSeq !== requestSeqRef.current || !searchLifecycleRef.current.isCurrent(lease)) return
       if (data.success) {
         const newTags: TagItem[] = data.tags || []
         const serverTotal: number = data.total ?? 0
@@ -84,9 +89,10 @@ export default function TagsPage() {
         setHasMore((offset + newTags.length) < serverTotal)
       }
     } catch (err) {
+      if (!searchLifecycleRef.current.isCurrent(lease)) return
       console.error('Failed to fetch tags:', err)
     } finally {
-      if (requestSeq === requestSeqRef.current) {
+      if (requestSeq === requestSeqRef.current && searchLifecycleRef.current.finish(lease)) {
         setLoading(false)
         setRefreshing(false)
         setLoadingMore(false)
@@ -123,14 +129,27 @@ export default function TagsPage() {
 
   useEffect(() => { fetchTags(true, debouncedSearchQuery) }, [fetchTags, debouncedSearchQuery])
 
+  useEffect(() => () => searchLifecycleRef.current.invalidate(), [])
+
   // Debounced search
   useEffect(() => {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
     searchTimerRef.current = setTimeout(() => {
       setDebouncedSearchQuery(searchQuery)
-    }, 300)
+    }, SEARCH_DEBOUNCE_MS)
     return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
   }, [searchQuery])
+
+  const searchPending = searchQuery.trim() !== debouncedSearchQuery
+
+  const updateSearchQuery = (value: string) => {
+    searchLifecycleRef.current.invalidate()
+    requestSeqRef.current += 1
+    setRefreshing(false)
+    setLoadingMore(false)
+    setSearchQuery(value)
+    if (!value) setDebouncedSearchQuery('')
+  }
 
   // Close modals on Escape
   useEffect(() => {
@@ -255,13 +274,15 @@ export default function TagsPage() {
           <input
             type="text"
             value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
+            onChange={e => updateSearchQuery(e.target.value)}
             placeholder="Buscar etiquetas..."
-            className="w-full pl-9 pr-8 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 placeholder:text-gray-400"
+            aria-busy={searchPending || refreshing}
+            className="w-full pl-9 pr-16 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 placeholder:text-gray-400"
           />
-          {refreshing && (
-            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-green-600 animate-spin" />
+          {(searchPending || refreshing) && (
+            <Loader2 aria-label={searchPending ? 'Esperando para buscar etiquetas' : 'Buscando etiquetas'} className="absolute right-10 top-1/2 -translate-y-1/2 w-4 h-4 text-green-600 animate-spin" />
           )}
+          {searchQuery && <button type="button" onClick={() => updateSearchQuery('')} aria-label="Limpiar búsqueda de etiquetas" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
         </div>
         <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
           <button

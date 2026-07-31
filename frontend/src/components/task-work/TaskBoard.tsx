@@ -76,6 +76,7 @@ import {
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { taskWorkspaceMenuPosition } from './taskInteractionVisuals'
 import TaskDateTimePicker from './TaskDateTimePicker'
+import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 
 export interface TaskInlineDraft {
   title: string
@@ -104,8 +105,9 @@ interface Props {
   onCollapsedStatusIdsChange: (ids: string[]) => void
   onTasksChange: Dispatch<SetStateAction<Task[]>>
   onCanonicalTask: (task: Task, action?: string) => boolean
+  onHierarchyCounts?: (counts?: TaskHierarchyCounts | null, operationID?: string) => boolean | void
   onOperation: (operationId: string, active: boolean) => void
-  onTaskCreated: (task: Task, operationId: string) => void
+  onTaskCreated: (task: Task, operationId: string, hierarchyCounts?: TaskHierarchyCounts) => void
   recentlyCreatedTaskId?: string
   onDragStateChange: (active: boolean) => void
   onExternalDropTargetChange?: (target: TaskExternalDropTarget | null) => void
@@ -456,7 +458,7 @@ function InlineCreate({
   defaultListId?: string
   users: TaskAccountUser[]
   currentUserId: string
-  onCreated: (task: Task, operationId: string) => void
+  onCreated: (task: Task, operationId: string, hierarchyCounts?: TaskHierarchyCounts) => void
   onOperation: (operationId: string, active: boolean) => void
   onMore: (statusId?: string, draft?: TaskInlineDraft) => void
 }) {
@@ -490,7 +492,7 @@ function InlineCreate({
     setError('')
     const operationId = crypto.randomUUID()
     onOperation(operationId, true)
-    const result = await apiPost<{ task: Task; operation_id?: string }>('/api/tasks', {
+    const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', {
       title: title.trim(),
       description: '',
       type: 'reminder',
@@ -510,7 +512,7 @@ function InlineCreate({
       onOperation(operationId, false)
       return
     }
-    onCreated(result.data.task, result.data.operation_id || operationId)
+    onCreated(result.data.task, result.data.operation_id || operationId, result.data.hierarchy_counts)
     setSaving(false)
     onOperation(operationId, false)
     close()
@@ -577,7 +579,7 @@ function BoardColumn({
   suppressOpen: () => boolean
   onCollapse: () => void
   onConfigureStatuses: () => void
-  onTaskCreated: (task: Task, operationId: string) => void
+  onTaskCreated: (task: Task, operationId: string, hierarchyCounts?: TaskHierarchyCounts) => void
   onCreateFull: (statusId?: string, draft?: TaskInlineDraft) => void
   onOpen: (task: Task) => void
   onEdit: (task: Task) => void
@@ -712,6 +714,7 @@ export default function TaskBoard({
   onCollapsedStatusIdsChange,
   onTasksChange,
   onCanonicalTask,
+  onHierarchyCounts,
   onOperation,
   onTaskCreated,
   recentlyCreatedTaskId,
@@ -905,7 +908,7 @@ export default function TaskBoard({
     onOperation(operationID, true)
     setAnnouncement(`Moviendo ${items.length} ${items.length === 1 ? 'tarea' : 'tareas'}`)
     try {
-      const result = await apiPost<{ tasks: Task[]; operation_id: string }>(`/api/tasks/bulk-move`, {
+      const result = await apiPost<{ tasks: Task[]; operation_id: string; hierarchy_counts?: TaskHierarchyCounts }>(`/api/tasks/bulk-move`, {
         items,
         destination_list_id: destinationListID,
         destination_status_category: destinationCategory,
@@ -919,6 +922,7 @@ export default function TaskBoard({
         await onRefresh()
         return
       }
+      onHierarchyCounts?.(result.data.hierarchy_counts, result.data.operation_id || operationID)
       result.data.tasks.forEach(task => onCanonicalTask(task, 'bulk_moved'))
       setSelectedTaskIds([])
       setSelectionAnchorID('')
@@ -928,7 +932,7 @@ export default function TaskBoard({
     } finally {
       onOperation(operationID, false)
     }
-  }, [onCanonicalTask, onError, onOperation, onRefresh, tasksById])
+  }, [onCanonicalTask, onError, onHierarchyCounts, onOperation, onRefresh, tasksById])
 
   const bulkTrash = useCallback(async () => {
     const affected = selectedTaskIds.map(id => tasksById.get(id)).filter((task): task is Task => Boolean(task && !task.parent_task_id))
@@ -936,7 +940,7 @@ export default function TaskBoard({
     setBulkActionBusy(true)
     const operationID = crypto.randomUUID()
     onOperation(operationID, true)
-    const result = await apiPost<{ task_ids: string[] }>('/api/tasks/bulk-trash', {
+    const result = await apiPost<{ task_ids: string[]; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks/bulk-trash', {
       items: affected.map(task => ({ id: task.id, version: task.version || 1 })),
       confirmation: bulkTrashPhrase,
       operation_id: operationID,
@@ -947,13 +951,14 @@ export default function TaskBoard({
       onError(result.error || 'No se pudo mover la selección a Papelera. No se modificó ninguna tarea.')
       return
     }
+    onHierarchyCounts?.(result.data?.hierarchy_counts, result.data?.operation_id || operationID)
     setBulkTrashDialogOpen(false)
     setBulkTrashPhrase('')
     setSelectedTaskIds([])
     setSelectionAnchorID('')
     setAnnouncement(`${affected.length} tareas movidas a Papelera`)
     await onRefresh()
-  }, [bulkTrashPhrase, onError, onOperation, onRefresh, selectedTaskIds, tasksById])
+  }, [bulkTrashPhrase, onError, onHierarchyCounts, onOperation, onRefresh, selectedTaskIds, tasksById])
 
   const move = useCallback(async (taskId: string, destinationColumnId: string, nextOrders: ColumnOrders, snapshot: { tasks: Task[]; orders: ColumnOrders }) => {
     const task = snapshot.tasks.find(item => item.id === taskId) || localTasks.find(item => item.id === taskId)
@@ -985,7 +990,7 @@ export default function TaskBoard({
     onOperation(operationId, true)
 
     const execute = async () => {
-      const result = await apiPost<TaskMoveResponse>(`/api/tasks/${task.id}/move`, {
+      const result = await apiPost<TaskMoveResponse & { operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>(`/api/tasks/${task.id}/move`, {
         status_id: targetStatus.id,
         before_task_id: beforeTaskId,
         version: task.version,
@@ -999,6 +1004,7 @@ export default function TaskBoard({
         onError(message)
         return
       }
+      onHierarchyCounts?.(result.data.hierarchy_counts, result.data.operation_id || operationId)
       if (!onCanonicalTask(result.data.task, 'moved')) {
         await onRefresh()
         return
@@ -1016,7 +1022,7 @@ export default function TaskBoard({
     } finally {
       onOperation(operationId, false)
     }
-  }, [allStatuses, groupByList, lists, localTasks, onCanonicalTask, onError, onOperation, onRefresh, onTasksChange, statuses])
+  }, [allStatuses, groupByList, lists, localTasks, onCanonicalTask, onError, onHierarchyCounts, onOperation, onRefresh, onTasksChange, statuses])
 
   const handleDragStart = (event: DragStartEvent) => {
     const id = String(event.active.id)

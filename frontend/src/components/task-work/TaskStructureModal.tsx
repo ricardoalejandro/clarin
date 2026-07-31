@@ -5,12 +5,15 @@ import { createPortal } from 'react-dom'
 import { DndContext, DragEndEvent, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { ChevronDown, ChevronUp, FolderPlus, GripVertical, Layers3, ListPlus, Plus, Save, Trash2, Workflow, X } from 'lucide-react'
+import { ChevronDown, ChevronUp, FolderPlus, GripVertical, Layers3, ListPlus, Plus, Save, Settings2, Trash2, Workflow } from 'lucide-react'
 import { apiDelete, apiPost, apiPut } from '@/lib/api'
 import type { TaskFolder, TaskList, TaskStatusCategory, TaskWorkflow, TaskWorkflowStatus } from '@/types/task'
 import TaskHierarchyTree from './TaskHierarchyTree'
-import { TASK_CONTAINER_COLORS, TASK_CONTAINER_ICONS, TaskContainerIcon } from './TaskContainerAppearance'
+import { TaskColorPicker, TaskContainerIcon, TaskIconPicker } from './TaskContainerAppearance'
 import { TaskSelectPicker, type TaskSelectOption } from './TaskSelectPicker'
+import TaskWorkWindowShell from './TaskWorkWindowShell'
+import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
+import { mergeCanonicalTaskFolderWorkflowDrafts, mergeCanonicalTaskStatusDrafts, taskStatusDraftChanged, taskStructureHasPendingChanges } from './taskStructureDraftState'
 
 interface Props { open: boolean; folders: TaskFolder[]; lists: TaskList[]; workflows: TaskWorkflow[]; onClose: () => void; onChanged: () => Promise<void> | void; onOperation?: (operationID: string, active: boolean) => void }
 const field = 'w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50'
@@ -20,8 +23,6 @@ const categories: Array<{ value: TaskStatusCategory; label: string; description:
   { value: 'done', label: 'Completada', description: 'Trabajo finalizado', color: '#10b981' },
   { value: 'cancelled', label: 'Cancelada', description: 'Trabajo que no continuará', color: '#ef4444' },
 ]
-const colorOptions: TaskSelectOption[] = TASK_CONTAINER_COLORS.map(color => ({ value: color, label: color.toUpperCase(), description: 'Color de identificación', leading: <i className="h-4 w-4 rounded-full" style={{ backgroundColor: color }} /> }))
-const iconOptions: TaskSelectOption[] = TASK_CONTAINER_ICONS.map(option => ({ value: option.value, label: option.label, leading: <option.icon className="h-4 w-4" /> }))
 const categoryOptions: TaskSelectOption[] = categories.map(item => ({ value: item.value, label: item.label, description: item.description, leading: <i className="h-3 w-3 rounded-full" style={{ backgroundColor: item.color }} /> }))
 
 function workflowOptions(workflows: TaskWorkflow[]): TaskSelectOption[] {
@@ -35,7 +36,7 @@ function StatusRow({ original, status, index, count, busy, onDraft, onMove, onSa
   const sortable = useSortable({ id: status.id })
   return <div ref={sortable.setNodeRef} style={{ transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition }} className={`grid grid-cols-[34px_minmax(120px,1fr)] items-center gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-2.5 shadow-sm ${sortable.isDragging ? 'z-10 opacity-40' : ''} sm:grid-cols-[34px_54px_minmax(140px,1fr)_190px_108px_36px]`}>
     <button ref={sortable.setActivatorNodeRef} {...sortable.attributes} {...sortable.listeners} type="button" aria-label={`Mover ${status.name}`} className="flex h-9 w-8 cursor-grab items-center justify-center rounded-lg text-slate-300 hover:bg-white hover:text-slate-600"><GripVertical className="h-4 w-4" /></button>
-    <div className="col-span-1 sm:col-span-1"><TaskSelectPicker value={status.color} options={colorOptions} onChange={color => onDraft({ ...status, color })} label={`Color de ${status.name}`} className="min-h-9 px-2 [&>span:nth-child(2)]:hidden [&>svg]:hidden" /></div>
+    <div className="col-span-1 sm:col-span-1"><TaskColorPicker compact value={status.color} onChange={color => onDraft({ ...status, color })} label={`Color de ${status.name}`} disabled={busy} /></div>
     <input value={status.name} onChange={event => onDraft({ ...status, name: event.target.value })} className="col-span-2 min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-emerald-400 sm:col-span-1" />
     <div className="col-span-2 sm:col-span-1"><TaskSelectPicker value={status.category} options={categoryOptions} onChange={value => onDraft({ ...status, category: value as TaskStatusCategory })} disabled={original.is_default} label={`Categoría de ${status.name}`} /></div>
     <div className="col-span-2 flex justify-end gap-0.5 sm:col-span-1"><button type="button" aria-label={`Subir ${status.name}`} disabled={busy || index === 0} onClick={() => onMove(index, index - 1)} className="rounded-lg p-2 text-slate-400 hover:bg-white disabled:opacity-20"><ChevronUp className="h-4 w-4" /></button><button type="button" aria-label={`Bajar ${status.name}`} disabled={busy || index === count - 1} onClick={() => onMove(index, index + 1)} className="rounded-lg p-2 text-slate-400 hover:bg-white disabled:opacity-20"><ChevronDown className="h-4 w-4" /></button><button type="button" aria-label={`Guardar ${status.name}`} disabled={busy || !status.name.trim()} onClick={onSave} className="rounded-lg p-2 text-emerald-600 hover:bg-emerald-100"><Save className="h-4 w-4" /></button></div>
@@ -45,15 +46,20 @@ function StatusRow({ original, status, index, count, busy, onDraft, onMove, onSa
 
 export default function TaskStructureModal({ open, folders, lists, workflows, onClose, onChanged, onOperation }: Props) {
   const [tab, setTab] = useState<'structure' | 'workflow'>('structure')
+  const [structureInspector, setStructureInspector] = useState<'folder' | 'list' | 'flows'>('folder')
   const [folderName, setFolderName] = useState(''); const [folderColor, setFolderColor] = useState('#10b981'); const [folderIcon, setFolderIcon] = useState('folder'); const [folderWorkflow, setFolderWorkflow] = useState('')
   const [listName, setListName] = useState(''); const [listColor, setListColor] = useState('#10b981'); const [listIcon, setListIcon] = useState('list'); const [listFolder, setListFolder] = useState(''); const [listWorkflow, setListWorkflow] = useState('')
   const [workflowName, setWorkflowName] = useState(''); const [selectedWorkflow, setSelectedWorkflow] = useState('')
   const [newStatus, setNewStatus] = useState({ name: '', color: '#64748b', category: 'active' as TaskStatusCategory })
   const [drafts, setDrafts] = useState<Record<string, TaskWorkflowStatus>>({})
+  const [dirtyStatusIDs, setDirtyStatusIDs] = useState<string[]>([])
   const [statusOrder, setStatusOrder] = useState<string[]>([])
   const [folderWorkflows, setFolderWorkflows] = useState<Record<string, string>>({})
+  const [dirtyFolderWorkflowIDs, setDirtyFolderWorkflowIDs] = useState<string[]>([])
   const [busy, setBusy] = useState(false); const [error, setError] = useState('')
-  const dialogRef = useRef<HTMLDivElement>(null); const previousFocusRef = useRef<HTMLElement | null>(null); const busyRef = useRef(false); busyRef.current = busy
+  const [discardConfirm, setDiscardConfirm] = useState(false)
+  const discardDialogRef = useRef<HTMLDivElement>(null)
+  const discardReturnFocusRef = useRef<HTMLElement | null>(null)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 8 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }))
   const workflow = workflows.find(item => item.id === selectedWorkflow) || workflows.find(item => item.is_default) || workflows[0]
   const orderedStatuses = useMemo(() => statusOrder.map(id => workflow?.statuses.find(item => item.id === id)).filter(Boolean) as TaskWorkflowStatus[], [statusOrder, workflow])
@@ -64,19 +70,20 @@ export default function TaskStructureModal({ open, folders, lists, workflows, on
   useEffect(() => {
     if (!open) return
     const current = workflows.find(item => item.id === selectedWorkflow) || workflows.find(item => item.is_default) || workflows[0]
+    const defaultWorkflowID = workflows.find(item => item.is_default)?.id || ''
+    const mergedFolderWorkflows = mergeCanonicalTaskFolderWorkflowDrafts(
+      folders,
+      folderWorkflows,
+      new Set(dirtyFolderWorkflowIDs),
+      defaultWorkflowID,
+    )
     if (current) { setSelectedWorkflow(current.id); setStatusOrder(current.statuses.map(item => item.id)) }
-    setDrafts(Object.fromEntries(workflows.flatMap(item => item.statuses.map(status => [status.id, { ...status }]))))
-    setFolderWorkflows(Object.fromEntries(folders.map(folder => [folder.id, folder.workflow_id || workflows.find(item => item.is_default)?.id || ''])))
+    setDrafts(currentDrafts => mergeCanonicalTaskStatusDrafts(workflows, currentDrafts, new Set(dirtyStatusIDs)))
+    setFolderWorkflows(mergedFolderWorkflows.drafts)
+    setDirtyFolderWorkflowIDs(mergedFolderWorkflows.dirtyFolderIDs)
     setError('')
   }, [folders, open, workflows]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (workflow) setStatusOrder(workflow.statuses.map(item => item.id)) }, [workflow?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (!open) return
-    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const frame = requestAnimationFrame(() => dialogRef.current?.focus({ preventScroll: true }))
-    const keyboard = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busyRef.current) { event.preventDefault(); onClose() } }
-    window.addEventListener('keydown', keyboard); return () => { cancelAnimationFrame(frame); window.removeEventListener('keydown', keyboard); previousFocusRef.current?.focus({ preventScroll: true }) }
-  }, [onClose, open])
 
   const run = async (operation: () => Promise<{ success: boolean; error?: string }>, reset?: () => void) => {
     setBusy(true); setError('')
@@ -86,7 +93,10 @@ export default function TaskStructureModal({ open, folders, lists, workflows, on
   const createList = () => run(() => apiPost('/api/tasks/lists', { name: listName.trim(), color: listColor, icon: listIcon, folder_id: listFolder || undefined, workflow_id: listFolder ? undefined : listWorkflow || undefined }), () => setListName(''))
   const createWorkflow = () => run(() => apiPost('/api/tasks/workflows', { name: workflowName.trim() }), () => setWorkflowName(''))
   const addStatus = () => workflow && run(() => apiPost(`/api/tasks/workflows/${workflow.id}/statuses`, newStatus), () => setNewStatus({ name: '', color: '#64748b', category: 'active' }))
-  const saveStatus = (status: TaskWorkflowStatus, index: number) => run(() => apiPut(`/api/tasks/statuses/${status.id}`, { name: status.name.trim(), color: status.color, category: status.category, sort_order: index }))
+  const saveStatus = (status: TaskWorkflowStatus, index: number) => run(
+    () => apiPut(`/api/tasks/statuses/${status.id}`, { name: status.name.trim(), color: status.color, category: status.category, sort_order: index }),
+    () => setDirtyStatusIDs(current => current.filter(id => id !== status.id)),
+  )
   const persistStatusOrder = async (next: string[], previous = statusOrder) => {
     if (!workflow || next.every((id, index) => id === previous[index])) return
     setStatusOrder(next); setBusy(true); setError('')
@@ -95,20 +105,108 @@ export default function TaskStructureModal({ open, folders, lists, workflows, on
   const deleteStatus = (status: TaskWorkflowStatus) => { if (!workflow) return; const replacement = workflow.statuses.find(item => item.id !== status.id && item.category === status.category); void run(() => apiDelete(`/api/tasks/statuses/${status.id}${replacement ? `?replacement_status_id=${replacement.id}` : ''}`)) }
   const saveFolderWorkflow = (folder: TaskFolder) => { const value = folderWorkflows[folder.id]; if (value !== folder.workflow_id && folder.task_count > 0 && !window.confirm('Cambiar el flujo remapeará todas las tareas por categoría equivalente. Si falta una equivalencia, no se guardará nada. ¿Continuar?')) return; void run(() => apiPut(`/api/tasks/folders/${folder.id}`, { workflow_id: value || null })) }
 
-  if (!open || typeof document === 'undefined') return null
-  return createPortal(<div data-task-structure-modal className="fixed inset-0 z-[125] flex items-center justify-center bg-slate-950/45 p-3 backdrop-blur-sm" onMouseDown={event => event.target === event.currentTarget && !busy && onClose()}><div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="task-structure-title" className="flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl outline-none">
-    <header className="flex items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-7"><div><p className="text-xs font-bold uppercase tracking-[.18em] text-emerald-600">Configuración</p><h2 id="task-structure-title" className="mt-1 text-xl font-bold text-slate-900">Organiza Clarin Work</h2></div><button disabled={busy} aria-label="Cerrar configuración" onClick={onClose} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-5 w-5" /></button></header>
-    <nav className="border-b border-slate-100 px-5 pt-3 sm:px-7"><div className="flex gap-5">{([['structure','Carpetas y listas'],['workflow','Flujos y estados']] as const).map(([key,label]) => <button key={key} onClick={() => setTab(key)} className={`border-b-2 px-1 pb-3 text-sm font-semibold ${tab === key ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400'}`}>{label}</button>)}</div></nav>
-    <div className="overflow-y-auto px-5 py-5 sm:px-7">{error && <div className="mb-4 rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{error}</div>}
-      {tab === 'structure' && <div className="space-y-6"><div className="grid gap-5 lg:grid-cols-2">
-        <section className="rounded-2xl border border-slate-200 p-4"><h3 className="flex items-center gap-2 text-sm font-bold text-slate-800"><FolderPlus className="h-4 w-4 text-emerald-600" /> Nueva carpeta</h3><p className="mt-1 text-xs text-slate-400">Agrupa listas que comparten propósito y flujo.</p><div className="mt-4 space-y-3"><input value={folderName} onChange={event => setFolderName(event.target.value)} placeholder="Ej. Operaciones" className={field} /><div className="grid grid-cols-2 gap-2"><TaskSelectPicker value={folderColor} options={colorOptions} onChange={setFolderColor} label="Color de carpeta" /><TaskSelectPicker value={folderIcon} options={iconOptions} onChange={setFolderIcon} label="Icono de carpeta" searchable /></div><TaskSelectPicker value={folderWorkflow || workflows.find(item => item.is_default)?.id || ''} options={workflowPickerOptions} onChange={setFolderWorkflow} label="Flujo de carpeta" /><button disabled={!folderName.trim() || busy} onClick={() => void createFolder()} className="w-full rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-30">Crear carpeta</button></div></section>
-        <section className="rounded-2xl border border-slate-200 p-4"><h3 className="flex items-center gap-2 text-sm font-bold text-slate-800"><ListPlus className="h-4 w-4 text-emerald-600" /> Nueva lista</h3><p className="mt-1 text-xs text-slate-400">Una lista contiene tareas y puede vivir en la raíz o una carpeta.</p><div className="mt-4 space-y-3"><input value={listName} onChange={event => setListName(event.target.value)} placeholder="Ej. Lanzamiento de campaña" className={field} /><div className="grid grid-cols-2 gap-2"><TaskSelectPicker value={listColor} options={colorOptions} onChange={setListColor} label="Color de lista" /><TaskSelectPicker value={listIcon} options={iconOptions} onChange={setListIcon} label="Icono de lista" searchable /></div><TaskSelectPicker value={listFolder} options={folderPickerOptions} onChange={setListFolder} label="Ubicación de lista" searchable />{!listFolder && <TaskSelectPicker value={listWorkflow || workflows.find(item => item.is_default)?.id || ''} options={workflowPickerOptions} onChange={setListWorkflow} label="Flujo de lista" />}<button disabled={!listName.trim() || busy} onClick={() => void createList()} className="w-full rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-30">Crear lista</button></div></section>
-      </div><section className="grid gap-5 lg:grid-cols-[minmax(280px,1fr)_minmax(300px,1fr)]"><div className="rounded-2xl border border-slate-200 p-4"><h3 className="mb-1 flex items-center gap-2 text-sm font-bold text-slate-800"><Layers3 className="h-4 w-4 text-emerald-600" /> Estructura y orden</h3><p className="mb-3 text-xs text-slate-400">Arrastra carpetas o listas. Usa ⋯ para cambiar nombre, color o icono.</p><TaskHierarchyTree folders={folders} rootLists={rootLists} scope={{ type: 'all' }} collapsed={false} onSelect={() => {}} onChanged={onChanged} onError={setError} onOperation={onOperation} /></div><div className="rounded-2xl border border-slate-200 p-4"><h3 className="text-sm font-bold text-slate-800">Flujo por carpeta</h3><p className="mb-3 mt-1 text-xs text-slate-400">Las listas heredadas usan el flujo de su carpeta.</p><div className="space-y-2">{folders.map(folder => <div key={folder.id} className="rounded-xl bg-slate-50 p-3"><div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-700"><span style={{ color: folder.color }}><TaskContainerIcon value={folder.icon} className="h-4 w-4" /></span>{folder.name}</div><div className="flex items-center gap-2"><TaskSelectPicker value={folderWorkflows[folder.id] || ''} options={workflowPickerOptions} onChange={value => setFolderWorkflows(current => ({ ...current, [folder.id]: value }))} label={`Flujo de ${folder.name}`} /><button type="button" disabled={busy || folderWorkflows[folder.id] === folder.workflow_id} onClick={() => saveFolderWorkflow(folder)} className="rounded-xl p-3 text-emerald-600 hover:bg-emerald-50 disabled:opacity-25"><Save className="h-4 w-4" /></button></div></div>)}{!folders.length && <div className="rounded-xl border border-dashed border-slate-200 p-6 text-center text-xs text-slate-400">Crea una carpeta para asignar su flujo.</div>}</div></div></section></div>}
-      {tab === 'workflow' && <div className="space-y-5"><section className="flex flex-col gap-3 rounded-2xl border border-slate-200 p-4 sm:flex-row sm:items-center"><div className="flex-1"><h3 className="flex items-center gap-2 text-sm font-bold text-slate-800"><Workflow className="h-4 w-4 text-emerald-600" /> Crear flujo</h3><p className="mt-1 text-xs text-slate-400">Comienza con estados inicial, en curso, completada y cancelada.</p></div><input value={workflowName} onChange={event => setWorkflowName(event.target.value)} placeholder="Nombre del flujo" className={`${field} sm:w-64`} /><button disabled={!workflowName.trim() || busy} onClick={() => void createWorkflow()} className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-30"><Plus className="mr-1 inline h-4 w-4" />Crear</button></section>
-        <section className="rounded-2xl border border-slate-200 p-4"><div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div><h3 className="text-sm font-bold text-slate-800">Estados del flujo</h3><p className="mt-1 text-xs text-slate-400">Arrastra para definir el orden del tablero.</p></div><div className="sm:w-72"><TaskSelectPicker value={workflow?.id || ''} options={workflowPickerOptions} onChange={setSelectedWorkflow} label="Seleccionar flujo" searchable /></div></div>
-          <DndContext sensors={sensors} onDragEnd={(event: DragEndEvent) => { const from = statusOrder.indexOf(String(event.active.id)); const to = statusOrder.indexOf(String(event.over?.id || '')); if (from >= 0 && to >= 0 && from !== to) void persistStatusOrder(arrayMove(statusOrder, from, to)) }}><SortableContext items={statusOrder} strategy={verticalListSortingStrategy}><div className="space-y-2">{orderedStatuses.map((original, index) => <StatusRow key={original.id} original={original} status={drafts[original.id] || original} index={index} count={orderedStatuses.length} busy={busy} onDraft={status => setDrafts(current => ({ ...current, [status.id]: status }))} onMove={(from, to) => void persistStatusOrder(arrayMove(statusOrder, from, to))} onSave={() => void saveStatus(drafts[original.id] || original, index)} onDelete={() => deleteStatus(original)} />)}</div></SortableContext></DndContext>
-          <div className="mt-4 grid gap-2 rounded-2xl border border-dashed border-slate-300 p-3 sm:grid-cols-[minmax(160px,1fr)_160px_210px_90px]"><input value={newStatus.name} onChange={event => setNewStatus(current => ({ ...current, name: event.target.value }))} placeholder="Nuevo estado" className={field} /><TaskSelectPicker value={newStatus.color} options={colorOptions} onChange={color => setNewStatus(current => ({ ...current, color }))} label="Color del nuevo estado" /><TaskSelectPicker value={newStatus.category} options={categoryOptions} onChange={category => setNewStatus(current => ({ ...current, category: category as TaskStatusCategory }))} label="Categoría del nuevo estado" /><button disabled={!newStatus.name.trim() || busy || !workflow} onClick={() => void addStatus()} className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-30">Añadir</button></div>
-        </section></div>}
-    </div>
-  </div></div>, document.body)
+  const updateStatusDraft = (status: TaskWorkflowStatus) => {
+    const original = workflows.flatMap(item => item.statuses).find(item => item.id === status.id)
+    setDrafts(current => ({ ...current, [status.id]: status }))
+    setDirtyStatusIDs(current => {
+      const dirty = taskStatusDraftChanged(original, status)
+      return dirty ? Array.from(new Set([...current, status.id])) : current.filter(id => id !== status.id)
+    })
+  }
+  const hasPendingChanges = taskStructureHasPendingChanges({
+    dirtyStatusIDs,
+    folderName,
+    listName,
+    workflowName,
+    newStatusName: newStatus.name,
+    folders,
+    folderWorkflows,
+  })
+  const discardDrafts = () => {
+    setFolderName(''); setListName(''); setWorkflowName('')
+    setNewStatus({ name: '', color: '#64748b', category: 'active' })
+    setDirtyStatusIDs([])
+    setDirtyFolderWorkflowIDs([])
+    setDrafts(Object.fromEntries(workflows.flatMap(item => item.statuses.map(status => [status.id, { ...status }]))))
+    setFolderWorkflows(Object.fromEntries(folders.map(folder => [folder.id, folder.workflow_id || workflows.find(item => item.is_default)?.id || ''])))
+  }
+  const requestClose = () => {
+    if (busy) return
+    if (hasPendingChanges) {
+      discardReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      setDiscardConfirm(true)
+      return
+    }
+    onClose()
+  }
+
+  useEffect(() => {
+    if (!discardConfirm) return
+    const handleKeyboard = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        setDiscardConfirm(false)
+        requestAnimationFrame(() => discardReturnFocusRef.current?.focus({ preventScroll: true }))
+        return
+      }
+      if (event.key !== 'Tab' || !discardDialogRef.current) return
+      const focusable = Array.from(discardDialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]),[href],input:not([disabled]),[tabindex]:not([tabindex="-1"])'))
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    window.addEventListener('keydown', handleKeyboard)
+    return () => window.removeEventListener('keydown', handleKeyboard)
+  }, [discardConfirm])
+
+  if (!open) return null
+  return <><TaskWorkWindowShell
+    open={open}
+    storageKey="clarin:tasks:structure-window:v1"
+    title="Organiza Clarin Work"
+    eyebrow="Configuración"
+    description="Administra la jerarquía, la identidad visual y los estados desde un inspector común."
+    icon={Settings2}
+    defaultWidth={1120}
+    defaultHeight={820}
+    minWidth={620}
+    minHeight={540}
+    busy={busy}
+    onRequestClose={requestClose}
+    dataAttribute="task-structure-window"
+    contentClassName="min-h-0 flex-1 overflow-y-auto bg-slate-50/60"
+  >
+    <nav role="tablist" aria-label="Configuración de Clarin Work" className="sticky top-0 z-10 flex gap-2 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur sm:px-6">
+      {([['structure', 'Carpetas y listas', Layers3], ['workflow', 'Flujos y estados', Workflow]] as const).map(([key, label, TabIcon]) => <button key={key} role="tab" aria-selected={tab === key} onClick={() => setTab(key)} className={`inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-sm font-bold transition ${tab === key ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'}`}><TabIcon className="h-4 w-4" />{label}</button>)}
+    </nav>
+    {error && <div role="alert" className="mx-4 mt-4 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 sm:mx-6">{error}</div>}
+    {hasPendingChanges && <div role="status" className="mx-4 mt-4 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-800 sm:mx-6"><span>Tienes cambios sin guardar. Se conservarán al navegar dentro de Configuración.</span><span className="shrink-0 rounded-full bg-white px-2 py-1 text-[9px] font-black uppercase tracking-wide text-amber-700 shadow-sm">Pendiente</span></div>}
+
+    {tab === 'structure' ? <div className="grid gap-0 lg:grid-cols-[minmax(270px,0.72fr)_minmax(380px,1.28fr)]">
+      <aside className="border-b border-slate-200 bg-white p-4 lg:border-b-0 lg:border-r sm:p-5">
+        <div className="grid grid-cols-3 gap-2">
+          <button type="button" onClick={() => setStructureInspector('folder')} className={`rounded-xl border p-3 text-left transition ${structureInspector === 'folder' ? 'border-slate-900 bg-slate-900 text-white shadow-lg' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}><FolderPlus className="h-4 w-4" /><span className="mt-2 block text-[11px] font-bold">Carpeta</span></button>
+          <button type="button" onClick={() => setStructureInspector('list')} className={`rounded-xl border p-3 text-left transition ${structureInspector === 'list' ? 'border-emerald-600 bg-emerald-600 text-white shadow-lg' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}><ListPlus className="h-4 w-4" /><span className="mt-2 block text-[11px] font-bold">Lista</span></button>
+          <button type="button" onClick={() => setStructureInspector('flows')} className={`rounded-xl border p-3 text-left transition ${structureInspector === 'flows' ? 'border-violet-600 bg-violet-600 text-white shadow-lg' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}><Workflow className="h-4 w-4" /><span className="mt-2 block text-[11px] font-bold">Flujos</span></button>
+        </div>
+        <div className="mt-5 border-t border-slate-100 pt-5"><h3 className="flex items-center gap-2 text-sm font-black text-slate-800"><Layers3 className="h-4 w-4 text-emerald-600" />Estructura y orden</h3><p className="mb-3 mt-1 text-[10px] leading-4 text-slate-400">Arrastra para ordenar. Usa el menú de cada elemento para editar su identidad.</p><TaskHierarchyTree folders={folders} rootLists={rootLists} scope={{ type: 'all' }} collapsed={false} onSelect={() => {}} onChanged={onChanged} onError={setError} onOperation={onOperation} /></div>
+      </aside>
+      <main className="p-4 sm:p-6">
+        {structureInspector === 'folder' && <section className="mx-auto max-w-2xl rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-700"><FolderPlus className="h-5 w-5" /></span><div><h3 className="text-base font-black text-slate-900">Nueva carpeta</h3><p className="mt-1 text-xs leading-5 text-slate-400">Agrupa listas que comparten un propósito y un flujo de trabajo.</p></div></div><div className="mt-5 space-y-4"><label className="block text-xs font-bold text-slate-600">Nombre<input value={folderName} onChange={event => setFolderName(event.target.value)} placeholder="Ej. Operaciones" className={`${field} mt-1.5`} /></label><div className="grid gap-3 sm:grid-cols-2"><div><p className="mb-1.5 text-xs font-bold text-slate-600">Color</p><TaskColorPicker value={folderColor} onChange={setFolderColor} label="Color de carpeta" disabled={busy} /></div><div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><TaskIconPicker value={folderIcon} onChange={setFolderIcon} label="Icono de carpeta" disabled={busy} /></div></div><div><p className="mb-1.5 text-xs font-bold text-slate-600">Flujo compartido</p><TaskSelectPicker value={folderWorkflow || workflows.find(item => item.is_default)?.id || ''} options={workflowPickerOptions} onChange={setFolderWorkflow} label="Flujo de carpeta" /></div><button disabled={!folderName.trim() || busy} onClick={() => void createFolder()} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-black text-white shadow-lg disabled:opacity-30"><FolderPlus className="h-4 w-4" />Crear carpeta</button></div></section>}
+        {structureInspector === 'list' && <section className="mx-auto max-w-2xl rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><ListPlus className="h-5 w-5" /></span><div><h3 className="text-base font-black text-slate-900">Nueva lista</h3><p className="mt-1 text-xs leading-5 text-slate-400">Crea el destino real de las tareas dentro de una carpeta o al nivel principal.</p></div></div><div className="mt-5 space-y-4"><label className="block text-xs font-bold text-slate-600">Nombre<input value={listName} onChange={event => setListName(event.target.value)} placeholder="Ej. Lanzamiento de campaña" className={`${field} mt-1.5`} /></label><div className="grid gap-3 sm:grid-cols-2"><div><p className="mb-1.5 text-xs font-bold text-slate-600">Color</p><TaskColorPicker value={listColor} onChange={setListColor} label="Color de lista" disabled={busy} /></div><div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><TaskIconPicker value={listIcon} onChange={setListIcon} label="Icono de lista" disabled={busy} /></div></div><div><p className="mb-1.5 text-xs font-bold text-slate-600">Ubicación</p><TaskSelectPicker value={listFolder} options={folderPickerOptions} onChange={setListFolder} label="Ubicación de lista" searchable /></div>{!listFolder && <div><p className="mb-1.5 text-xs font-bold text-slate-600">Flujo propio</p><TaskSelectPicker value={listWorkflow || workflows.find(item => item.is_default)?.id || ''} options={workflowPickerOptions} onChange={setListWorkflow} label="Flujo de lista" /></div>}<button disabled={!listName.trim() || busy} onClick={() => void createList()} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-black text-white shadow-lg shadow-emerald-600/15 disabled:opacity-30"><ListPlus className="h-4 w-4" />Crear lista</button></div></section>}
+        {structureInspector === 'flows' && <section className="mx-auto max-w-2xl"><div className="mb-4"><h3 className="text-base font-black text-slate-900">Flujo por carpeta</h3><p className="mt-1 text-xs leading-5 text-slate-400">Las listas heredadas usan el flujo de su carpeta. Guardar puede remapear estados por categoría.</p></div><div className="space-y-3">{folders.map(folder => <div key={folder.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-700"><span className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ color: folder.color, backgroundColor: `${folder.color}18` }}><TaskContainerIcon value={folder.icon} className="h-4 w-4" /></span><span className="min-w-0 flex-1 truncate">{folder.name}</span></div><div className="flex items-center gap-2"><TaskSelectPicker value={folderWorkflows[folder.id] || ''} options={workflowPickerOptions} onChange={value => { const canonical = folder.workflow_id || workflows.find(item => item.is_default)?.id || ''; setFolderWorkflows(current => ({ ...current, [folder.id]: value })); setDirtyFolderWorkflowIDs(current => value === canonical ? current.filter(id => id !== folder.id) : Array.from(new Set([...current, folder.id]))) }} label={`Flujo de ${folder.name}`} /><button type="button" aria-label={`Guardar flujo de ${folder.name}`} disabled={busy || folderWorkflows[folder.id] === folder.workflow_id} onClick={() => saveFolderWorkflow(folder)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-25"><Save className="h-4 w-4" /></button></div></div>)}{!folders.length && <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-400">Crea una carpeta para asignar su flujo.</div>}</div></section>}
+      </main>
+    </div> : <div className="grid gap-0 lg:grid-cols-[280px_minmax(0,1fr)]">
+      <aside className="border-b border-slate-200 bg-white p-4 lg:border-b-0 lg:border-r sm:p-5"><h3 className="text-sm font-black text-slate-800">Flujos disponibles</h3><p className="mt-1 text-[10px] leading-4 text-slate-400">Selecciona un flujo para editar sus estados y orden.</p><div className="mt-4 space-y-1.5">{workflows.map(item => <button key={item.id} type="button" onClick={() => setSelectedWorkflow(item.id)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition ${workflow?.id === item.id ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200' : 'text-slate-600 hover:bg-slate-50'}`}><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white shadow-sm"><Workflow className="h-4 w-4" /></span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold">{item.name}</span><span className="block text-[9px] text-slate-400">{item.statuses.length} estados</span></span>{item.is_default && <span className="rounded-full bg-slate-100 px-2 py-1 text-[8px] font-black text-slate-500">GENERAL</span>}</button>)}</div><div className="mt-5 border-t border-slate-100 pt-5"><label className="block text-xs font-bold text-slate-600">Crear flujo<input value={workflowName} onChange={event => setWorkflowName(event.target.value)} placeholder="Nombre del flujo" className={`${field} mt-1.5`} /></label><button disabled={!workflowName.trim() || busy} onClick={() => void createWorkflow()} className="mt-2 flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 text-xs font-black text-white disabled:opacity-30"><Plus className="h-4 w-4" />Crear flujo</button></div></aside>
+      <main className="p-4 sm:p-6"><div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div><p className="text-[10px] font-black uppercase tracking-[.14em] text-emerald-600">Inspector de estados</p><h3 className="mt-1 text-lg font-black text-slate-900">{workflow?.name || 'Selecciona un flujo'}</h3><p className="mt-1 text-xs text-slate-400">Arrastra los estados o usa los botones accesibles para definir el tablero.</p></div><div className="sm:hidden"><TaskSelectPicker value={workflow?.id || ''} options={workflowPickerOptions} onChange={setSelectedWorkflow} label="Seleccionar flujo" searchable /></div></div>
+        <DndContext sensors={sensors} onDragEnd={(event: DragEndEvent) => { const from = statusOrder.indexOf(String(event.active.id)); const to = statusOrder.indexOf(String(event.over?.id || '')); if (from >= 0 && to >= 0 && from !== to) void persistStatusOrder(arrayMove(statusOrder, from, to)) }}><SortableContext items={statusOrder} strategy={verticalListSortingStrategy}><div className="space-y-2">{orderedStatuses.map((original, index) => <StatusRow key={original.id} original={original} status={drafts[original.id] || original} index={index} count={orderedStatuses.length} busy={busy} onDraft={updateStatusDraft} onMove={(from, to) => void persistStatusOrder(arrayMove(statusOrder, from, to))} onSave={() => void saveStatus(drafts[original.id] || original, index)} onDelete={() => deleteStatus(original)} />)}</div></SortableContext></DndContext>
+        <section className="mt-5 rounded-2xl border border-dashed border-slate-300 bg-white p-4"><h4 className="text-sm font-black text-slate-800">Añadir estado</h4><div className="mt-3 grid gap-3 md:grid-cols-[minmax(160px,1fr)_170px_minmax(190px,0.8fr)_96px]"><input value={newStatus.name} onChange={event => setNewStatus(current => ({ ...current, name: event.target.value }))} placeholder="Nuevo estado" className={field} /><TaskColorPicker value={newStatus.color} onChange={color => setNewStatus(current => ({ ...current, color }))} label="Color del nuevo estado" disabled={busy} /><TaskSelectPicker value={newStatus.category} options={categoryOptions} onChange={category => setNewStatus(current => ({ ...current, category: category as TaskStatusCategory }))} label="Categoría del nuevo estado" /><button disabled={!newStatus.name.trim() || busy || !workflow} onClick={() => void addStatus()} className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white disabled:opacity-30">Añadir</button></div></section>
+      </main>
+    </div>}
+  </TaskWorkWindowShell>
+  {discardConfirm && createPortal(<div data-task-destructive-dialog className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }} role="presentation"><div ref={discardDialogRef} role="alertdialog" aria-modal="true" aria-labelledby="task-structure-discard-title" className="w-full max-w-md rounded-3xl border border-white/70 bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-amber-600">Cambios pendientes</p><h2 id="task-structure-discard-title" className="mt-1 text-xl font-black text-slate-900">¿Descartar la configuración?</h2><p className="mt-2 text-sm leading-6 text-slate-500">Los nombres, estados o asignaciones de flujo que todavía no guardaste se perderán.</p><div className="mt-6 flex justify-end gap-2"><button type="button" autoFocus onClick={() => { setDiscardConfirm(false); requestAnimationFrame(() => discardReturnFocusRef.current?.focus({ preventScroll: true })) }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-100">Seguir editando</button><button type="button" onClick={() => { setDiscardConfirm(false); discardDrafts(); onClose() }} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-black text-white hover:bg-rose-700">Descartar cambios</button></div></div></div>, document.body)}
+  </>
 }

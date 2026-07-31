@@ -19,6 +19,10 @@ type TaskRepository struct {
 	db *pgxpool.Pool
 }
 
+type taskListQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
 func nextTaskCreateSortOrder(count, minOrder, maxOrder int, placement string) int {
 	if count == 0 {
 		return 1024
@@ -536,6 +540,29 @@ func firstTaskFilter(filters map[string]string, keys ...string) string {
 	return ""
 }
 
+// taskFiltersExcludeClosed preserves an explicit status choice: selecting a
+// completed/cancelled status must show it even when Clarin Work explicitly
+// requests the operational default that hides closed work. Calls from older or
+// non-Work surfaces omit include_closed and preserve their historical result.
+func taskFiltersExcludeClosed(filters map[string]string) bool {
+	// Trash is a historical surface: archived tasks must remain discoverable
+	// regardless of the operational default used by active work views.
+	if strings.EqualFold(strings.TrimSpace(filters["deleted"]), "true") {
+		return false
+	}
+	if firstTaskFilter(filters, "status_ids", "status") != "" {
+		return false
+	}
+	if raw, specified := filters["include_closed"]; specified {
+		return strings.EqualFold(strings.TrimSpace(raw), "false")
+	}
+	// Clarin Work sends the status_ids key even while no status is selected.
+	// Preserve the operational default for that request shape without changing
+	// legacy callers that do not know either include_closed or status_ids.
+	_, workFilterShape := filters["status_ids"]
+	return workFilterShape
+}
+
 func normalizeTaskDateFilter(key, value, operator string) (string, string) {
 	parsed, err := time.ParseInLocation("2006-01-02", value, time.FixedZone("America/Lima", -5*60*60))
 	if err != nil {
@@ -558,6 +585,9 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 	}
 	args := []interface{}{accountID}
 	idx := 2
+	if taskFiltersExcludeClosed(filters) {
+		where = append(where, "COALESCE(ts.category,CASE t.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')")
+	}
 
 	if raw := firstTaskFilter(filters, "status_ids", "status"); raw != "" {
 		ids := make([]uuid.UUID, 0)
@@ -1114,11 +1144,28 @@ func (r *TaskRepository) GetSubtasksByTask(ctx context.Context, taskID uuid.UUID
 // ─── Task List methods ──
 
 func (r *TaskRepository) GetListsByAccount(ctx context.Context, accountID uuid.UUID) ([]*domain.TaskList, error) {
-	rows, err := r.db.Query(ctx, `
+	return getTaskListsByAccount(ctx, r.db, accountID)
+}
+
+func getTaskListsByAccount(ctx context.Context, querier taskListQuerier, accountID uuid.UUID) ([]*domain.TaskList, error) {
+	rows, err := querier.Query(ctx, `
 		SELECT tl.id, tl.account_id, tl.folder_id, tl.workflow_id, COALESCE(tl.workflow_inherited,TRUE), COALESCE(tl.is_default,FALSE), tl.name, COALESCE(tl.description,''), tl.color, COALESCE(tl.icon,CASE WHEN tl.is_default THEN 'inbox' ELSE 'list' END),
 			tl.sort_order, tl.created_by, tl.archived_at, tl.created_at, tl.updated_at,
-			COALESCE((SELECT COUNT(*) FROM tasks t WHERE t.account_id=tl.account_id AND t.list_id=tl.id AND t.parent_task_id IS NULL AND t.deleted_at IS NULL), 0) AS task_count
+			COALESCE(task_counts.task_count,0), COALESCE(task_counts.open_task_count,0),
+			COALESCE(task_counts.completed_task_count,0), COALESCE(task_counts.cancelled_task_count,0)
 		FROM task_lists tl
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*)::int AS task_count,
+				COUNT(*) FILTER (WHERE COALESCE(status.category,
+					CASE task.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled'))::int AS open_task_count,
+				COUNT(*) FILTER (WHERE COALESCE(status.category,
+					CASE task.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END)='done')::int AS completed_task_count,
+				COUNT(*) FILTER (WHERE COALESCE(status.category,
+					CASE task.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END)='cancelled')::int AS cancelled_task_count
+			FROM tasks task
+			LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+			WHERE task.account_id=tl.account_id AND task.list_id=tl.id AND task.parent_task_id IS NULL AND task.deleted_at IS NULL
+		) task_counts ON TRUE
 		WHERE tl.account_id=$1 AND tl.archived_at IS NULL
 		ORDER BY tl.sort_order, tl.created_at
 	`, accountID)
@@ -1131,10 +1178,14 @@ func (r *TaskRepository) GetListsByAccount(ctx context.Context, accountID uuid.U
 	for rows.Next() {
 		l := &domain.TaskList{}
 		if err := rows.Scan(&l.ID, &l.AccountID, &l.FolderID, &l.WorkflowID, &l.WorkflowInherited, &l.IsDefault, &l.Name, &l.Description, &l.Color, &l.Icon,
-			&l.SortOrder, &l.CreatedBy, &l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt, &l.TaskCount); err != nil {
+			&l.SortOrder, &l.CreatedBy, &l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt, &l.TaskCount,
+			&l.OpenTaskCount, &l.CompletedTaskCount, &l.CancelledTaskCount); err != nil {
 			return nil, err
 		}
 		lists = append(lists, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return lists, nil
 }
@@ -1145,7 +1196,7 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 	l.CreatedAt = now
 	l.UpdatedAt = now
 	if strings.TrimSpace(l.Color) == "" {
-		l.Color = "#10b981"
+		l.Color = "#10B981"
 	}
 	if strings.TrimSpace(l.Icon) == "" {
 		l.Icon = "list"

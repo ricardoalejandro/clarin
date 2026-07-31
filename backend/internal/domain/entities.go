@@ -1321,6 +1321,9 @@ type TaskList struct {
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 	TaskCount          int        `json:"task_count"`
+	OpenTaskCount      int        `json:"open_task_count"`
+	CompletedTaskCount int        `json:"completed_task_count"`
+	CancelledTaskCount int        `json:"cancelled_task_count"`
 }
 
 // TaskTrashPolicy is the account-wide manual trash policy. A nil retention
@@ -1390,20 +1393,56 @@ type TaskStatus struct {
 }
 
 type TaskFolder struct {
-	ID          uuid.UUID   `json:"id"`
-	AccountID   uuid.UUID   `json:"account_id"`
-	WorkflowID  *uuid.UUID  `json:"workflow_id,omitempty"`
-	Name        string      `json:"name"`
-	Description string      `json:"description,omitempty"`
-	Color       string      `json:"color"`
-	Icon        string      `json:"icon"`
-	SortOrder   int         `json:"sort_order"`
-	CreatedBy   uuid.UUID   `json:"created_by"`
-	ArchivedAt  *time.Time  `json:"archived_at,omitempty"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
-	TaskCount   int         `json:"task_count"`
-	Lists       []*TaskList `json:"lists"`
+	ID                 uuid.UUID   `json:"id"`
+	AccountID          uuid.UUID   `json:"account_id"`
+	WorkflowID         *uuid.UUID  `json:"workflow_id,omitempty"`
+	Name               string      `json:"name"`
+	Description        string      `json:"description,omitempty"`
+	Color              string      `json:"color"`
+	Icon               string      `json:"icon"`
+	SortOrder          int         `json:"sort_order"`
+	CreatedBy          uuid.UUID   `json:"created_by"`
+	ArchivedAt         *time.Time  `json:"archived_at,omitempty"`
+	CreatedAt          time.Time   `json:"created_at"`
+	UpdatedAt          time.Time   `json:"updated_at"`
+	TaskCount          int         `json:"task_count"`
+	OpenTaskCount      int         `json:"open_task_count"`
+	CompletedTaskCount int         `json:"completed_task_count"`
+	CancelledTaskCount int         `json:"cancelled_task_count"`
+	Lists              []*TaskList `json:"lists"`
+}
+
+// TaskHierarchyCounts is the canonical account-scoped count snapshot returned
+// after task mutations. task_count remains the total active top-level count;
+// open_task_count excludes completed and cancelled workflow categories.
+type TaskHierarchyCounts struct {
+	// Revision is the database-wide monotonic transaction revision assigned
+	// after the canonical count query. It lets clients reject a delayed HTTP or
+	// WebSocket snapshot without relying on wall-clock ordering.
+	Revision           int64                     `json:"revision"`
+	CapturedAt         time.Time                 `json:"captured_at"`
+	TaskCount          int                       `json:"task_count"`
+	OpenTaskCount      int                       `json:"open_task_count"`
+	CompletedTaskCount int                       `json:"completed_task_count"`
+	CancelledTaskCount int                       `json:"cancelled_task_count"`
+	Lists              []TaskListCountSnapshot   `json:"lists"`
+	Folders            []TaskFolderCountSnapshot `json:"folders"`
+}
+
+type TaskListCountSnapshot struct {
+	ID                 uuid.UUID `json:"id"`
+	TaskCount          int       `json:"task_count"`
+	OpenTaskCount      int       `json:"open_task_count"`
+	CompletedTaskCount int       `json:"completed_task_count"`
+	CancelledTaskCount int       `json:"cancelled_task_count"`
+}
+
+type TaskFolderCountSnapshot struct {
+	ID                 uuid.UUID `json:"id"`
+	TaskCount          int       `json:"task_count"`
+	OpenTaskCount      int       `json:"open_task_count"`
+	CompletedTaskCount int       `json:"completed_task_count"`
+	CancelledTaskCount int       `json:"cancelled_task_count"`
 }
 
 // Task represents a scheduled action (call, follow-up, meeting, reminder)

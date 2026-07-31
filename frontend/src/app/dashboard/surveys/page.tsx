@@ -8,6 +8,7 @@ import {
   Layers3, Loader2, Plus, RotateCcw, Search, X,
 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import type { SurveyInstanceSummary, SurveyTemplate } from '@/types/survey-template';
 
 export default function SurveyTemplatesPage() {
@@ -16,6 +17,8 @@ export default function SurveyTemplatesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useDebouncedValue(query);
+  const searchPending = query !== debouncedQuery;
   const [showArchived, setShowArchived] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState('');
@@ -40,9 +43,9 @@ export default function SurveyTemplatesPage() {
 
   const filtered = useMemo(() => templates.filter(template => {
     if ((template.status === 'archived') !== showArchived) return false;
-    const normalized = query.trim().toLocaleLowerCase('es');
+    const normalized = debouncedQuery.trim().toLocaleLowerCase('es');
     return !normalized || `${template.name} ${template.description}`.toLocaleLowerCase('es').includes(normalized);
-  }), [query, showArchived, templates]);
+  }), [debouncedQuery, showArchived, templates]);
 
   const create = async () => {
     if (!name.trim()) return;
@@ -85,14 +88,14 @@ export default function SurveyTemplatesPage() {
           <button type="button" onClick={() => setCreateOpen(true)} className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-xl bg-emerald-600 px-3.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700"><Plus className="h-4 w-4" /><span className="hidden sm:inline">Nueva plantilla</span><span className="sm:hidden">Nueva</span></button>
         </div>
         <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-          <div className="relative min-w-0 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar plantilla" className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-3 text-sm outline-none focus:border-emerald-500 focus:bg-white" /></div>
+          <div className="relative min-w-0 flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={query} onChange={event => { const next = event.target.value; setQuery(next); if (!next) setDebouncedQuery('') }} placeholder="Buscar plantilla" className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-10 text-sm outline-none focus:border-emerald-500 focus:bg-white" />{searchPending && <Loader2 aria-label="Buscando plantillas" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}</div>
           <div className="grid min-h-11 grid-cols-2 rounded-xl bg-slate-100 p-1 sm:w-64"><button type="button" onClick={() => setShowArchived(false)} className={`rounded-lg text-sm font-medium ${!showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Activas</button><button type="button" onClick={() => setShowArchived(true)} className={`rounded-lg text-sm font-medium ${showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Archivadas</button></div>
         </div>
       </header>
 
       <main className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
         {loading ? <TemplateSkeleton /> : error ? <div className="mx-auto max-w-xl rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center text-sm text-rose-700"><p>{error}</p><button type="button" onClick={() => void load()} className="mt-3 min-h-11 font-semibold underline">Reintentar</button></div> : filtered.length === 0 ? (
-          <div className="mx-auto flex min-h-72 max-w-lg flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-center"><Layers3 className="mb-4 h-10 w-10 text-slate-300" /><h2 className="font-semibold text-slate-800">{query ? 'No hay coincidencias' : showArchived ? 'No hay plantillas archivadas' : 'Crea tu primera plantilla'}</h2><p className="mt-1 text-sm text-slate-500">Las aplicaciones y sus respuestas permanecerán separadas por programa.</p>{!query && !showArchived && <button type="button" onClick={() => setCreateOpen(true)} className="mt-5 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white">Nueva plantilla</button>}</div>
+          <div className="mx-auto flex min-h-72 max-w-lg flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-center"><Layers3 className="mb-4 h-10 w-10 text-slate-300" /><h2 className="font-semibold text-slate-800">{debouncedQuery ? 'No hay coincidencias' : showArchived ? 'No hay plantillas archivadas' : 'Crea tu primera plantilla'}</h2><p className="mt-1 text-sm text-slate-500">Las aplicaciones y sus respuestas permanecerán separadas por programa.</p>{!debouncedQuery && !showArchived && <button type="button" onClick={() => setCreateOpen(true)} className="mt-5 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white">Nueva plantilla</button>}</div>
         ) : <div className="mx-auto grid max-w-6xl grid-cols-1 gap-4 lg:grid-cols-2">{filtered.map(template => {
           const expanded = expandedId === template.id;
           const instances = instancesByTemplate[template.id] || [];

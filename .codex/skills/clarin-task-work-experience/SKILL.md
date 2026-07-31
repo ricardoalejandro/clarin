@@ -47,6 +47,9 @@ Implement Clarin Work as one complete collaboration surface. Keep hierarchy, sta
 - Use one stable drag handle for List rows. Selection, completion and opening own their cursors; selection mode must never cause hover-driven pointer/grab flicker.
 - Keep progress source explicit. Manual progress preserves its last manual value, automatic progress derives only from real child tasks, and neither progress nor completion can start Trash retention.
 - Preview task attachments only through account-scoped attachment lookup. Word derivatives run in an isolated durable worker, are inventoried like other media, and anchored comments remain distinct from general task comments while appearing in activity.
+- Treat each attachment opening as a disposable task-plus-attachment session. Abort fetch/poll, cancel PDF rendering, destroy parser/worker state, revoke object URLs, and clear canvas/comments when closing, switching, deleting, retrying, or unmounting.
+- Default operational views to open work while keeping closed history available explicitly and in Resumen. Navigation badges represent open top-level tasks and explain total/completed/cancelled counts on demand.
+- Use the shared task work-window shell for complex Filters and Configuration: draft/apply filters once, protect dirty inspectors, and support measured move, resize, dock, maximize and mobile modes.
 - Measure the task surface itself for responsive layout. Keep docked/floating workspaces interactive and reserve modal blocking for maximized/mobile modes.
 - Keep task windows legible through the shared contrast contract, and portal workspace menus outside clipping containers but below task windows. Long descriptions need a visible pointer/keyboard resize handle plus an expanded editor that shares the canonical draft and never hides a save error.
 
@@ -55,6 +58,7 @@ Implement Clarin Work as one complete collaboration surface. Keep hierarchy, sta
 - Include stable task IDs, versions, actions, and operation IDs in account-scoped events.
 - Patch canonical task payloads and ordering without replacing a populated board with skeletons or resetting scroll, focus, filters, drafts, or selection.
 - Recognize the initiating client's echo and queue conflicting remote events while a drag is active.
+- Patch hierarchy inventory with the same optimistic task mutation, then apply account-scoped canonical `hierarchy_counts` from HTTP or WebSocket even when its operation ID originated locally. Deduplication must not leave stale badges.
 - Abort obsolete filtered/search requests. A local create carries one operation ID through HTTP and WebSocket; when current filters would hide it, clear that query before inserting the canonical task, then highlight and scroll to exactly one card.
 - Reload task hierarchy only for structural events; comments and task moves must not refetch folders or workflows.
 - Guard every async task switch so a late response cannot replace the newly selected task.

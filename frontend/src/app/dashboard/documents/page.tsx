@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Search, FileText, Trash2, Copy, MoreVertical, Download, Upload, Pencil, LayoutGrid, Grid3X3, List, Grid2X2 } from 'lucide-react';
+import { Plus, Search, FileText, Trash2, Copy, MoreVertical, Download, Upload, Pencil, LayoutGrid, Grid3X3, List, Grid2X2, Loader2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { DocumentTemplate } from '@/types/document';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { useRouter } from 'next/navigation';
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue';
 
 const PAGE_SIZES: Record<string, { label: string; w: number; h: number }> = {
   a4: { label: 'A4', w: 210, h: 297 },
@@ -18,6 +19,8 @@ export default function DocumentsPage() {
   const [templates, setTemplates] = useState<DocumentTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useDebouncedValue(searchQuery, SEARCH_DEBOUNCE_MS);
+  const searchPending = searchQuery !== debouncedSearchQuery;
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [menuOpen, setMenuOpen] = useState<string | null>(null);
@@ -178,7 +181,7 @@ export default function DocumentsPage() {
   };
 
   const filteredTemplates = templates.filter(t => {
-    if (searchQuery && !t.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+    if (debouncedSearchQuery && !t.name.toLowerCase().includes(debouncedSearchQuery.toLowerCase())) return false;
     return true;
   });
 
@@ -229,9 +232,16 @@ export default function DocumentsPage() {
               type="text"
               placeholder="Buscar plantillas..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+              onChange={(e) => {
+                const next = e.target.value;
+                setSearchQuery(next);
+                if (!next) setDebouncedSearchQuery('');
+              }}
+              className="w-full pl-10 pr-10 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
             />
+            {searchPending && (
+              <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" aria-label="Actualizando resultados" />
+            )}
           </div>
           <div className="flex items-center bg-slate-100 rounded-lg p-0.5">
             {[
@@ -288,14 +298,14 @@ export default function DocumentsPage() {
               <FileText className="w-8 h-8 text-slate-400" />
             </div>
             <h3 className="text-lg font-semibold text-slate-700 mb-1">
-              {searchQuery ? 'Sin resultados' : 'No hay plantillas'}
+              {debouncedSearchQuery ? 'Sin resultados' : 'No hay plantillas'}
             </h3>
             <p className="text-sm text-slate-500 mb-4">
-              {searchQuery
+              {debouncedSearchQuery
                 ? 'Intenta con otra búsqueda'
                 : 'Crea tu primera plantilla de documento para generar certificados, credenciales y más'}
             </p>
-            {!searchQuery && (
+            {!debouncedSearchQuery && (
               <button
                 onClick={() => setIsCreateModalOpen(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-sm"

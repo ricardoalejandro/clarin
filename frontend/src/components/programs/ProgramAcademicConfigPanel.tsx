@@ -21,6 +21,7 @@ import ContactSelector, { type SelectedPerson } from '@/components/ContactSelect
 import ContactPhotoPreview from '@/components/ContactPhotoPreview'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { api } from '@/lib/api'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import type { ProgramAcademicConfig, ProgramCourse, ProgramCourseCatalogResponse, ProgramInstructor } from '@/types/program'
 
 interface ProgramAcademicConfigPanelProps {
@@ -76,8 +77,11 @@ export default function ProgramAcademicConfigPanel({
   const courseOptionsSequenceRef = useRef(0)
   const closeCoursePicker = useCallback(() => {
     courseOptionsRequestRef.current?.abort()
+    courseOptionsSequenceRef.current += 1
     setCoursePickerOpen(false)
     setCourseSearch('')
+    setDebouncedCourseSearch('')
+    setCourseOptionsLoading(false)
   }, [])
 
   useAccessibleDialog(coursePickerOpen, courseDialogRef, closeCoursePicker, courseSearchRef)
@@ -92,9 +96,19 @@ export default function ProgramAcademicConfigPanel({
   }, [config])
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedCourseSearch(courseSearch.trim()), 250)
+    const timer = window.setTimeout(() => setDebouncedCourseSearch(courseSearch.trim()), SEARCH_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
   }, [courseSearch])
+
+  const courseSearchPending = courseSearch.trim() !== debouncedCourseSearch
+
+  const updateCourseSearch = (value: string) => {
+    courseOptionsRequestRef.current?.abort()
+    courseOptionsSequenceRef.current += 1
+    setCourseOptionsLoading(false)
+    setCourseSearch(value)
+    if (!value) setDebouncedCourseSearch('')
+  }
 
   const loadCourseOptions = useCallback(async () => {
     if (!coursePickerOpen) return
@@ -125,7 +139,7 @@ export default function ProgramAcademicConfigPanel({
 
   const associatedCourseIDs = useMemo(() => new Set(courses.map(course => course.id)), [courses])
   const excludedInstructorIDs = useMemo(() => new Set(instructors.map(instructor => instructor.contact_id)), [instructors])
-  const normalizedCourseSearch = useMemo(() => normalizeSearch(courseSearch), [courseSearch])
+  const normalizedCourseSearch = useMemo(() => normalizeSearch(debouncedCourseSearch), [debouncedCourseSearch])
   const availableCourses = useMemo(() => courseOptions
     .filter(course => course.status === 'active' && !associatedCourseIDs.has(course.id))
     .filter(course => !normalizedCourseSearch || normalizeSearch(`${course.name} ${course.description || ''}`).includes(normalizedCourseSearch))
@@ -320,7 +334,7 @@ export default function ProgramAcademicConfigPanel({
         <div className="app-viewport fixed inset-0 z-[80] flex items-stretch justify-center bg-slate-950/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div ref={courseDialogRef} role="dialog" aria-modal="true" aria-labelledby="course-picker-title" tabIndex={-1} className="flex h-full w-full max-w-2xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[85vh] sm:rounded-2xl">
             <div className="flex shrink-0 items-center justify-between border-b border-slate-100 p-4"><div><h2 id="course-picker-title" className="font-bold text-slate-800">Agregar curso al programa</h2><p className="text-xs text-slate-500">Solo se muestran cursos activos.</p></div><button type="button" onClick={closeCoursePicker} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Cerrar"><X className="h-5 w-5" /></button></div>
-            <div className="shrink-0 p-4"><div className="relative"><Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input ref={courseSearchRef} value={courseSearch} onChange={event => setCourseSearch(event.target.value)} maxLength={160} placeholder="Buscar por nombre o descripción" className="h-11 w-full rounded-xl border border-slate-200 pl-10 pr-10 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20" />{courseOptionsLoading && <Loader2 className="absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div></div>
+            <div className="shrink-0 p-4"><div className="relative"><Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input ref={courseSearchRef} value={courseSearch} onChange={event => updateCourseSearch(event.target.value)} maxLength={160} placeholder="Buscar por nombre o descripción" aria-busy={courseSearchPending || courseOptionsLoading} className="h-11 w-full rounded-xl border border-slate-200 pl-10 pr-16 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20" />{(courseSearchPending || courseOptionsLoading) && <Loader2 aria-label={courseSearchPending ? 'Esperando para buscar cursos' : 'Buscando cursos'} className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}{courseSearch && <button type="button" aria-label="Limpiar búsqueda de cursos" onClick={() => updateCourseSearch('')} className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}</div></div>
             <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
               {courseOptionsLoading && courseOptions.length === 0 ? (
                 <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-slate-500" role="status"><Loader2 className="h-5 w-5 animate-spin text-emerald-600" />Buscando cursos…</div>

@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Upload, FileText, X, AlertTriangle, CheckCircle2, Download, Loader2, ShieldCheck, Search, Plus, Check } from 'lucide-react'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 interface ImportCSVModalProps {
   open: boolean
@@ -142,6 +143,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   const [importTagMode, setImportTagMode] = useState<'none' | 'custom'>('none')
   const [importTag, setImportTag] = useState('')
   const [tagSearch, setTagSearch] = useState('')
+  const [debouncedTagSearch, setDebouncedTagSearch] = useDebouncedValue(tagSearch, SEARCH_DEBOUNCE_MS)
   const [tagOptions, setTagOptions] = useState<ImportTagOption[]>([])
   const [creatingTag, setCreatingTag] = useState(false)
   const [newTagColor, setNewTagColor] = useState(TAG_PRESET_COLORS[6])
@@ -159,6 +161,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     setImportTagMode('none')
     setImportTag('')
     setTagSearch('')
+    setDebouncedTagSearch('')
     setNewTagColor(TAG_PRESET_COLORS[6])
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', h)
@@ -192,6 +195,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     setImportTagMode('custom')
     setImportTag(tag.name)
     setTagSearch('')
+    setDebouncedTagSearch('')
     setPreview(null)
     setResult(null)
   }
@@ -389,6 +393,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     setImportTagMode('none')
     setImportTag('')
     setTagSearch('')
+    setDebouncedTagSearch('')
     setNewTagColor(TAG_PRESET_COLORS[6])
     onClose()
   }
@@ -410,14 +415,19 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   const selectedImportTag = importTag
     ? tagOptions.find(tag => tag.name.toLowerCase() === importTag.toLowerCase())
     : null
-  const normalizedTagSearch = tagSearch.trim().toLowerCase()
+  const normalizedRawTagSearch = tagSearch.trim().toLowerCase()
+  const normalizedTagSearch = debouncedTagSearch.trim().toLowerCase()
+  const tagSearchPending = tagSearch !== debouncedTagSearch
   const filteredTagOptions = normalizedTagSearch
     ? tagOptions.filter(tag => tag.name.toLowerCase().includes(normalizedTagSearch))
     : tagOptions
   const exactTagMatch = normalizedTagSearch
     ? tagOptions.find(tag => tag.name.toLowerCase() === normalizedTagSearch)
     : null
-  const canCreateImportTag = Boolean(tagSearch.trim()) && !exactTagMatch
+  const actionableExactTagMatch = normalizedRawTagSearch
+    ? tagOptions.find(tag => tag.name.toLowerCase() === normalizedRawTagSearch)
+    : null
+  const canCreateImportTag = !tagSearchPending && Boolean(normalizedTagSearch) && !exactTagMatch
   const needsImportTagSelection = defaultType !== 'contacts' && importTagMode === 'custom' && !importTag.trim()
   const canPreview = Boolean(file) && !previewing && !needsImportTagSelection
 
@@ -683,7 +693,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => { setImportTagMode('none'); setImportTag(''); setTagSearch('') }}
+                    onClick={() => { setImportTagMode('none'); setImportTag(''); setTagSearch(''); setDebouncedTagSearch('') }}
                     className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
                       importTagMode === 'none'
                         ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -726,24 +736,27 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                       <input
                         value={tagSearch}
                         onChange={e => {
-                          setTagSearch(e.target.value)
+                          const next = e.target.value
+                          setTagSearch(next)
+                          if (!next) setDebouncedTagSearch('')
                           setPreview(null)
                           setResult(null)
                         }}
                         onKeyDown={e => {
                           if (e.key !== 'Enter') return
                           e.preventDefault()
-                          if (exactTagMatch) {
-                            handleSelectImportTag(exactTagMatch)
-                          } else if (canCreateImportTag) {
+                          if (actionableExactTagMatch) {
+                            handleSelectImportTag(actionableExactTagMatch)
+                          } else if (normalizedRawTagSearch) {
                             handleCreateImportTag()
-                          } else if (normalizedTagSearch && filteredTagOptions[0]) {
+                          } else if (!tagSearchPending && normalizedTagSearch && filteredTagOptions[0]) {
                             handleSelectImportTag(filteredTagOptions[0])
                           }
                         }}
                         placeholder="Buscar etiqueta existente o crear una nueva"
-                        className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-3 text-sm text-slate-800 outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
+                        className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-9 text-sm text-slate-800 outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
                       />
+                      {tagSearchPending && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-slate-400" aria-label="Buscando etiquetas" />}
                     </div>
 
                     {filteredTagOptions.length > 0 && (
@@ -776,7 +789,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                       <div className="rounded-lg border border-dashed border-emerald-200 bg-emerald-50/60 p-3">
                         <div className="flex items-center justify-between gap-3">
                           <div className="min-w-0">
-                            <p className="truncate text-xs font-medium text-emerald-800">Crear etiqueta "{tagSearch.trim()}"</p>
+                            <p className="truncate text-xs font-medium text-emerald-800">Crear etiqueta "{debouncedTagSearch.trim()}"</p>
                             <p className="text-[11px] text-emerald-600">Se creará antes de analizar el Excel.</p>
                           </div>
                           <button

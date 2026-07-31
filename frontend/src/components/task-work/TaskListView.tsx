@@ -15,6 +15,7 @@ import TaskDateTimePicker from './TaskDateTimePicker'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { buildTaskListGroups, reorderTaskSelection, taskListDropMutation, type TaskListGroup } from './taskListGrouping'
 import { taskListDensity } from './taskListDensity'
+import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 
 interface Props {
   tasks: Task[]
@@ -30,6 +31,7 @@ interface Props {
   onStatus: (task: Task, statusId: string) => void
   onStar: (task: Task) => void
   onCanonicalTask: (task: Task, action?: string) => boolean
+  onHierarchyCounts?: (counts?: TaskHierarchyCounts | null, operationID?: string) => boolean | void
   onRefresh: () => void | Promise<void>
   onError: (message: string) => void
 }
@@ -59,7 +61,7 @@ function SortableRow({ task, groupKey, selected, selectionMode, density, allStat
   </div>
 }
 
-export default function TaskListView({ tasks, statuses, lists, folders, users: _users, groupBy, groupDirection, collapsedGroupKeys, onGroupingChange, onOpen, onStatus, onStar, onCanonicalTask, onRefresh, onError }: Props) {
+export default function TaskListView({ tasks, statuses, lists, folders, users: _users, groupBy, groupDirection, collapsedGroupKeys, onGroupingChange, onOpen, onStatus, onStar, onCanonicalTask, onHierarchyCounts, onRefresh, onError }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
   const [localTasks, setLocalTasks] = useState(tasks)
@@ -109,11 +111,12 @@ export default function TaskListView({ tasks, statuses, lists, folders, users: _
     const operationID = crypto.randomUUID()
     setBusy(true)
     const result = mutation.endpoint === 'move'
-      ? await apiPost<{ tasks: Task[] }>('/api/tasks/bulk-move', { items, destination_list_id: mutation.listId, destination_status_category: mutation.statusCategory, operation_id: operationID })
-      : await apiPost<{ tasks: Task[] }>('/api/tasks/bulk-update', { items, property: mutation.property, value: mutation.property === 'due_at' ? dateValue : mutation.value, operation_id: operationID })
+      ? await apiPost<{ tasks: Task[]; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks/bulk-move', { items, destination_list_id: mutation.listId, destination_status_category: mutation.statusCategory, operation_id: operationID })
+      : await apiPost<{ tasks: Task[]; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks/bulk-update', { items, property: mutation.property, value: mutation.property === 'due_at' ? dateValue : mutation.value, operation_id: operationID })
     setBusy(false)
     if (!result.success || !result.data?.tasks) { onError(result.error || 'No se pudo aplicar el cambio masivo. No se modificó ninguna tarea.'); await onRefresh(); return }
     result.data.tasks.forEach(task => onCanonicalTask(task, 'bulk_updated'))
+    onHierarchyCounts?.(result.data.hierarchy_counts, result.data.operation_id || operationID)
     setSelectedIDs([]); setSelectionAnchor(''); setAnnouncement(`${result.data.tasks.length} tareas actualizadas`)
     await onRefresh()
   }
@@ -125,19 +128,22 @@ export default function TaskListView({ tasks, statuses, lists, folders, users: _
   }
   const bulkTrash = async () => {
     const affected = selectedTasks()
+    const operationID = crypto.randomUUID()
     setBusy(true)
-    const result = await apiPost<{ task_ids: string[] }>('/api/tasks/bulk-trash', { items: affected.map(task => ({ id: task.id, version: task.version || 1 })), confirmation: trashPhrase, operation_id: crypto.randomUUID() })
+    const result = await apiPost<{ task_ids: string[]; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks/bulk-trash', { items: affected.map(task => ({ id: task.id, version: task.version || 1 })), confirmation: trashPhrase, operation_id: operationID })
     setBusy(false)
     if (!result.success) { onError(result.error || 'No se pudo mover la selección a Papelera'); return }
+    onHierarchyCounts?.(result.data?.hierarchy_counts, result.data?.operation_id || operationID)
     setTrashDialog(false); setTrashPhrase(''); setSelectedIDs([]); await onRefresh()
   }
   const reorder = async (ids: string[], beforeTaskID: string) => {
     const affected = ids.map(id => localTasks.find(task => task.id === id)).filter((task): task is Task => Boolean(task && !task.parent_task_id))
     if (!affected.length || ids.includes(beforeTaskID)) return
     const snapshot = localTasks
+    const operationID = crypto.randomUUID()
     setLocalTasks(current => reorderTaskSelection(current, ids, beforeTaskID))
     setBusy(true)
-    const result = await apiPost<{ tasks: Task[] }>('/api/tasks/bulk-move', { items: affected.map(task => ({ id: task.id, version: task.version || 1 })), before_task_id: beforeTaskID, operation_id: crypto.randomUUID() })
+    const result = await apiPost<{ tasks: Task[]; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks/bulk-move', { items: affected.map(task => ({ id: task.id, version: task.version || 1 })), before_task_id: beforeTaskID, operation_id: operationID })
     setBusy(false)
     if (!result.success || !result.data?.tasks) {
       setLocalTasks(snapshot)
@@ -145,6 +151,7 @@ export default function TaskListView({ tasks, statuses, lists, folders, users: _
       return
     }
     result.data.tasks.forEach(task => onCanonicalTask(task, 'bulk_reordered'))
+    onHierarchyCounts?.(result.data.hierarchy_counts, result.data.operation_id || operationID)
     setAnnouncement(`${result.data.tasks.length} tareas reordenadas`)
     await onRefresh()
   }

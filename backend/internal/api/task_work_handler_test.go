@@ -48,15 +48,32 @@ func TestParseTaskOperationID(t *testing.T) {
 	}
 }
 
-func TestTaskCreateResponseCarriesOptionalOperationID(t *testing.T) {
+func TestResolveTaskOperationIDAlwaysReturnsCanonicalUUID(t *testing.T) {
+	generated, err := resolveTaskOperationID("")
+	if err != nil || generated == nil || *generated == uuid.Nil {
+		t.Fatalf("an omitted operation id was not generated: %v, %#v", err, generated)
+	}
+	want := uuid.New()
+	got, err := resolveTaskOperationID("  " + want.String() + "  ")
+	if err != nil || got == nil || *got != want {
+		t.Fatalf("a supplied operation id changed: %v, %#v", err, got)
+	}
+	if _, err := resolveTaskOperationID("not-a-uuid"); err == nil {
+		t.Fatal("a malformed operation id was accepted")
+	}
+}
+
+func TestTaskCreateResponseCarriesCanonicalReconciliationEnvelope(t *testing.T) {
 	task := &domain.Task{ID: uuid.New(), AccountID: uuid.New(), Version: 1}
 	operationID := uuid.New()
-	response := taskCreateResponse(task, &operationID)
+	capturedAt := time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)
+	counts := &domain.TaskHierarchyCounts{Revision: 42, CapturedAt: capturedAt, TaskCount: 1, OpenTaskCount: 1}
+	response := taskCreateResponse(task, operationID, counts)
 	if response["task"] != task || response["operation_id"] != operationID.String() {
 		t.Fatalf("create response lost its canonical identity: %#v", response)
 	}
-	if _, exists := taskCreateResponse(task, nil)["operation_id"]; exists {
-		t.Fatal("response fabricated an omitted operation id")
+	if response["hierarchy_counts"] != counts {
+		t.Fatalf("create response lost its canonical hierarchy snapshot: %#v", response)
 	}
 }
 
@@ -80,6 +97,29 @@ func TestInvalidTaskQueryDateFilter(t *testing.T) {
 	}
 	if key := invalidTaskQueryDateFilter(map[string]string{"created_from": "2026-07-29", "completed_to": "2026-07-29T23:59:59-05:00"}); key != "" {
 		t.Fatalf("valid task dates were rejected: %q", key)
+	}
+}
+
+func TestNormalizeTaskQueryBooleanFilterCanonicalizesAndRejectsInvalidValues(t *testing.T) {
+	missing := map[string]string{}
+	if !normalizeTaskQueryBooleanFilter(missing, "include_closed") {
+		t.Fatal("an omitted optional boolean filter was rejected")
+	}
+
+	for raw, want := range map[string]string{" TRUE ": "true", "false": "false"} {
+		filters := map[string]string{"include_closed": raw}
+		if !normalizeTaskQueryBooleanFilter(filters, "include_closed") {
+			t.Fatalf("valid boolean query value %q was rejected", raw)
+		}
+		if filters["include_closed"] != want {
+			t.Fatalf("boolean query value %q normalized to %q, want %q", raw, filters["include_closed"], want)
+		}
+	}
+
+	for _, raw := range []string{"yes", "1", "closed", "false please"} {
+		if normalizeTaskQueryBooleanFilter(map[string]string{"include_closed": raw}, "include_closed") {
+			t.Fatalf("invalid boolean query value %q was accepted", raw)
+		}
 	}
 }
 
@@ -194,7 +234,7 @@ func TestTaskCommentRealtimeDoesNotBroadcastViewerPermissions(t *testing.T) {
 
 func TestValidateTaskSavedViewFiltersRejectsMalformedShape(t *testing.T) {
 	server := &Server{}
-	valid := json.RawMessage(`{"status_ids":[],"priorities":["high"],"due":"today","has_comments":true}`)
+	valid := json.RawMessage(`{"status_ids":[],"priorities":["high"],"due":"today","has_comments":true,"include_closed":false}`)
 	if err := server.validateTaskSavedViewFilters(nil, uuid.Nil, valid); err != nil {
 		t.Fatalf("valid saved filters were rejected: %v", err)
 	}
@@ -202,10 +242,71 @@ func TestValidateTaskSavedViewFiltersRejectsMalformedShape(t *testing.T) {
 		json.RawMessage(`{"status_ids":"not-an-array"}`),
 		json.RawMessage(`{"priorities":["impossible"]}`),
 		json.RawMessage(`{"due":"someday"}`),
+		json.RawMessage(`{"include_closed":"yes"}`),
 		json.RawMessage(`{"unknown_filter":true}`),
 	} {
 		if err := server.validateTaskSavedViewFilters(nil, uuid.Nil, raw); err == nil {
 			t.Fatalf("malformed saved filters were accepted: %s", raw)
 		}
+	}
+}
+
+func TestNormalizeTaskColorUsesCanonicalOpaqueRGB(t *testing.T) {
+	got, err := normalizeTaskColor("  #10b981 ", "#64748B")
+	if err != nil || got != "#10B981" {
+		t.Fatalf("valid task color was not normalized: got=%q err=%v", got, err)
+	}
+	fallback, err := normalizeTaskColor("", "#64748b")
+	if err != nil || fallback != "#64748B" {
+		t.Fatalf("default task color was not normalized: got=%q err=%v", fallback, err)
+	}
+	for _, invalid := range []string{"10B981", "#abc", "#10B98180", "linear-gradient(red,blue)", "var(--accent)"} {
+		if _, err := normalizeTaskColor(invalid, ""); err == nil {
+			t.Fatalf("unsafe task color was accepted: %q", invalid)
+		}
+	}
+}
+
+func TestPutTaskHierarchyCountsUsesStableResponseShape(t *testing.T) {
+	listID, folderID := uuid.New(), uuid.New()
+	capturedAt := time.Date(2026, time.July, 31, 12, 34, 56, 0, time.UTC)
+	counts := &domain.TaskHierarchyCounts{
+		Revision: 97, CapturedAt: capturedAt,
+		TaskCount: 3, OpenTaskCount: 1, CompletedTaskCount: 1, CancelledTaskCount: 1,
+		Lists:   []domain.TaskListCountSnapshot{{ID: listID, TaskCount: 3, OpenTaskCount: 1, CompletedTaskCount: 1, CancelledTaskCount: 1}},
+		Folders: []domain.TaskFolderCountSnapshot{{ID: folderID, TaskCount: 3, OpenTaskCount: 1, CompletedTaskCount: 1, CancelledTaskCount: 1}},
+	}
+	payload := putTaskHierarchyCounts(map[string]any{"success": true}, counts)
+	if payload["hierarchy_counts"] != counts {
+		t.Fatalf("hierarchy counts were not attached canonically: %#v", payload)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("hierarchy response could not be encoded: %v", err)
+	}
+	var decoded struct {
+		HierarchyCounts struct {
+			Revision   int64     `json:"revision"`
+			CapturedAt time.Time `json:"captured_at"`
+		} `json:"hierarchy_counts"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("hierarchy response could not be decoded: %v", err)
+	}
+	if decoded.HierarchyCounts.Revision != counts.Revision || !decoded.HierarchyCounts.CapturedAt.Equal(capturedAt) {
+		t.Fatalf("monotonic hierarchy metadata was lost: %s", encoded)
+	}
+	withoutCounts := putTaskHierarchyCounts(map[string]any{"success": true}, nil)
+	if _, exists := withoutCounts["hierarchy_counts"]; exists {
+		t.Fatalf("a failed optional snapshot fabricated counts: %#v", withoutCounts)
+	}
+}
+
+func TestPutTaskMutationReconciliationUsesOneOperationAndSnapshot(t *testing.T) {
+	operationID := uuid.New()
+	counts := &domain.TaskHierarchyCounts{Revision: 11, CapturedAt: time.Now().UTC(), TaskCount: 2, OpenTaskCount: 2}
+	payload := putTaskMutationReconciliation(map[string]any{"success": true}, operationID, counts)
+	if payload["operation_id"] != operationID.String() || payload["hierarchy_counts"] != counts {
+		t.Fatalf("mutation reconciliation envelope diverged: %#v", payload)
 	}
 }

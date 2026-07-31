@@ -22,6 +22,30 @@ func TestTaskFilterUUIDsIgnoresMalformedValues(t *testing.T) {
 	}
 }
 
+func TestTaskFiltersExcludeClosedUnlessStatusIsExplicit(t *testing.T) {
+	statusID := uuid.New().String()
+	tests := []struct {
+		name    string
+		filters map[string]string
+		want    bool
+	}{
+		{name: "legacy caller keeps closed", filters: map[string]string{}, want: false},
+		{name: "explicit include", filters: map[string]string{"include_closed": "TrUe"}, want: false},
+		{name: "explicit exclude", filters: map[string]string{"include_closed": "false"}, want: true},
+		{name: "status id wins", filters: map[string]string{"status_ids": statusID, "include_closed": "false"}, want: false},
+		{name: "legacy status wins", filters: map[string]string{"status": "completed"}, want: false},
+		{name: "blank status does not win", filters: map[string]string{"status_ids": "  "}, want: true},
+		{name: "trash keeps closed history", filters: map[string]string{"deleted": "true"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := taskFiltersExcludeClosed(test.filters); got != test.want {
+				t.Fatalf("taskFiltersExcludeClosed()=%v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeTaskDateFilterMakesDateOnlyEndInclusive(t *testing.T) {
 	value, operator := normalizeTaskDateFilter("completed_to", "2026-07-29", "<=")
 	if operator != "<" || value != "2026-07-30T00:00:00-05:00" {

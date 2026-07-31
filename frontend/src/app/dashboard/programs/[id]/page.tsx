@@ -27,6 +27,7 @@ import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { calendarDateKey, formatCalendarDate, limaDateInputValue, localDateInputValue } from '@/utils/calendarDate';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue';
 import ProgramAcademicConfigPanel from '@/components/programs/ProgramAcademicConfigPanel';
 import ProgramSurveyPanel from '@/components/programs/ProgramSurveyPanel';
 import SessionTopicField, { normalizedSessionTopics, pendingActiveCourseTopics } from '@/components/programs/SessionTopicField';
@@ -486,7 +487,7 @@ export default function ProgramDetailPage() {
   }, [toastMessage]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedParticipantSearch(participantSearch), 500);
+    const timer = window.setTimeout(() => setDebouncedParticipantSearch(participantSearch), SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [participantSearch]);
 

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, Loader2, Megaphone, Search, UsersRound } from 'lucide-react'
 import type { WhatsAppGroupOption } from '@/types/report'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 interface Props {
   groups: WhatsAppGroupOption[]
@@ -21,15 +22,17 @@ const kindLabels: Record<WhatsAppGroupOption['kind'], string> = {
 export default function WhatsAppGroupSelector({ groups, value, onChange, loading = false, disabled = false }: Props) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search, SEARCH_DEBOUNCE_MS)
   const [activeIndex, setActiveIndex] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const selected = groups.find(group => group.id === value)
   const filtered = useMemo(() => {
-    const term = search.trim().toLocaleLowerCase('es')
+    const term = debouncedSearch.trim().toLocaleLowerCase('es')
     if (!term) return groups
     return groups.filter(group => group.name.toLocaleLowerCase('es').includes(term))
-  }, [groups, search])
+  }, [debouncedSearch, groups])
+  const searchPending = search !== debouncedSearch
 
   useEffect(() => {
     if (!open) return
@@ -43,12 +46,13 @@ export default function WhatsAppGroupSelector({ groups, value, onChange, loading
 
   useEffect(() => {
     setActiveIndex(0)
-  }, [search, groups])
+  }, [debouncedSearch, groups])
 
   const select = (group: WhatsAppGroupOption) => {
     onChange(group)
     setOpen(false)
     setSearch('')
+    setDebouncedSearch('')
   }
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
@@ -107,10 +111,16 @@ export default function WhatsAppGroupSelector({ groups, value, onChange, loading
               <input
                 ref={searchRef}
                 value={search}
-                onChange={event => setSearch(event.target.value)}
+                onChange={event => {
+                  const next = event.target.value
+                  setSearch(next)
+                  if (!next) setDebouncedSearch('')
+                }}
                 placeholder="Buscar grupo…"
                 className="h-10 w-full bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400"
+                aria-busy={searchPending}
               />
+              {searchPending && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" aria-label="Buscando grupos" />}
             </div>
           </div>
           <div id="whatsapp-group-options" role="listbox" className="max-h-[380px] overflow-y-auto p-2">

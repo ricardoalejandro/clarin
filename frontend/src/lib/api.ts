@@ -330,15 +330,18 @@ export const apiDelete = <T>(endpoint: string, body?: unknown) =>
 		...(body === undefined ? {} : { body: JSON.stringify(body) }),
 	})
 
-export async function apiBlob(endpoint: string): Promise<{ success: boolean; blob?: Blob; error?: string }> {
-  const request = () => fetch(`${API_BASE}${endpoint}`, { credentials: 'include' })
+export async function apiBlob(endpoint: string, options: { signal?: AbortSignal } = {}): Promise<{ success: boolean; blob?: Blob; error?: string }> {
+  const request = () => fetch(`${API_BASE}${endpoint}`, { credentials: 'include', signal: options.signal })
   try {
     let response = await request()
-    if (response.status === 401 && await tryRefreshToken()) response = await request()
+    if (response.status === 401 && !options.signal?.aborted && await tryRefreshToken()) response = await request()
     if (!response.ok) return { success: false, error: `No se pudo abrir el archivo (${response.status})` }
     markAuthActivity()
     return { success: true, blob: await response.blob() }
-  } catch {
+  } catch (error) {
+    if ((error instanceof Error && error.name === 'AbortError') || options.signal?.aborted) {
+      return { success: false, error: 'Solicitud cancelada' }
+    }
     return { success: false, error: 'No se pudo descargar la vista previa' }
   }
 }

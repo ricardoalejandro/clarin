@@ -2,6 +2,15 @@
 
 ## 2026-07-31
 
+### Build 4 — Clarin Work estable, enfocado y sin estados residuales
+- ⚡ Todas las búsquedas usan un contrato compartido de 500 ms, indicador pendiente y cancelación/descarte de respuestas remotas obsoletas.
+- 🔄 Los contadores laterales muestran trabajo abierto, explican el desglose total/completado/cancelado y se actualizan con cada creación, movimiento, cierre, reapertura, restauración o envío a Papelera sin F5.
+- ✨ Lista, Tablero, Calendario y Gantt ocultan inicialmente tareas completadas/canceladas; “Mostrar cerradas” y la selección explícita de estados conservan acceso inmediato, mientras Resumen mantiene el histórico.
+- 🪟 Filtros y Configuración usan ventanas de trabajo movibles, redimensionables, acoplables y maximizables; los filtros se preparan como borrador y consultan una sola vez al aplicar.
+- 🎨 La identidad de carpetas, listas y estados admite paleta profesional y color personalizado normalizado con previsualización de contraste.
+- 📎 El visor PDF usa el worker local compatible, fases y tiempos acotados, y destruye descargas, renders, documentos y URLs al cerrar o cambiar de tarea; Word solo reintenta conversiones fallidas mediante una acción explícita.
+- 📐 La skill global de diseño fija búsquedas a 500 ms, inventarios derivados inmediatos, ventanas complejas, colores seguros y ciclos de vida asíncronos como requisitos obligatorios.
+
 ### Build 3 — Vistas configurables, progreso real y adjuntos comentables
 - ✨ Lista permite agrupar por estado, lista, responsable, prioridad, tipo o vencimiento, conservar grupos contraídos y reordenar o cambiar propiedades mediante un handle estable y acciones atómicas.
 - 🔒 Mover varias tareas ahora prepara el destino antes de confirmar; Papelera exige la frase canónica y archiva padres/subtareas en una sola transacción sin convertir “Completada” en eliminación.

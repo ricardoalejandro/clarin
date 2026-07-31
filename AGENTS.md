@@ -45,6 +45,11 @@ If a task touches multiple areas, read all matching skills before editing.
 - Use simple modals for short blocking decisions and complete work-window behavior for complex creation/editing that benefits from drag, resize, docking, maximize/restore, remembered geometry, and mobile adaptation.
 - Give click, completion, selection, drag, resize, and pan one stable gesture and cursor owner. Motion must explain state, avoid layout oscillation, and respect reduced-motion preferences.
 - Design loading, empty, disabled, permission, validation, conflict, cancellation, rollback, retry, and canonical reconciliation states before calling a UI complete.
+- Every user-typed search changes local results or starts remote work exactly 500 ms after the last keystroke. Text, clear, and selection feedback remain immediate; remote searches abort predecessors and reject stale completions.
+- Derived counters and badges update with the source mutation and reconcile canonical server snapshots without requiring F5. A local `operation_id` may deduplicate echoes but must never suppress authoritative derived state.
+- File viewers and other long async surfaces own a resource-scoped session and destroy fetches, polls, workers, documents, render tasks, URLs, canvas, and annotations when closed or switched.
+- Complex filters and configuration surfaces use the same measured work-window contract when drag, resize, dock, maximize, draft/apply, or contextual inspection improves the workflow.
+- Custom identity colors persist only as validated `#RRGGBB` values with contrast preview; icons remain allow-listed identifiers.
 
 ## Contact And Program Product Invariants
 

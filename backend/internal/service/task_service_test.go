@@ -101,3 +101,44 @@ func TestTaskCreatedEventPayloadCarriesOperationID(t *testing.T) {
 		t.Fatalf("optional operation id was fabricated: %#v", withoutOperation)
 	}
 }
+
+func TestTaskHierarchyCountsChangedOnlyForTopLevelCountDimensions(t *testing.T) {
+	firstList, secondList := uuid.New(), uuid.New()
+	active := &domain.Task{ListID: &firstList, Status: domain.TaskStatusPending}
+	titleOnly := *active
+	if taskHierarchyCountsChanged(active, &titleOnly) {
+		t.Fatal("an unrelated task edit requested a hierarchy count snapshot")
+	}
+	stillOpen := *active
+	stillOpen.StatusDetail = &domain.TaskStatus{Category: domain.TaskStatusCategoryActive}
+	if taskHierarchyCountsChanged(active, &stillOpen) {
+		t.Fatal("moving between open categories requested a hierarchy count snapshot")
+	}
+
+	moved := *active
+	moved.ListID = &secondList
+	if !taskHierarchyCountsChanged(active, &moved) {
+		t.Fatal("a list transfer did not request a hierarchy count snapshot")
+	}
+
+	completed := *active
+	completed.Status = domain.TaskStatusCompleted
+	if !taskHierarchyCountsChanged(active, &completed) {
+		t.Fatal("a closed-category transition did not request a hierarchy count snapshot")
+	}
+
+	childID := uuid.New()
+	child := *active
+	child.ParentTaskID = &childID
+	if !taskHierarchyCountsChanged(active, &child) {
+		t.Fatal("converting a top-level task into a child did not request hierarchy counts")
+	}
+	if !taskHierarchyCountsChanged(&child, active) {
+		t.Fatal("promoting a child to the top level did not request hierarchy counts")
+	}
+	childClosed := child
+	childClosed.Status = domain.TaskStatusCompleted
+	if taskHierarchyCountsChanged(&child, &childClosed) {
+		t.Fatal("a child status transition requested top-level hierarchy counts")
+	}
+}

@@ -66,6 +66,8 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La selección contiene tareas que no se pueden mover juntas", "code": "invalid_bulk_move"})
 	case errors.Is(err, repository.ErrTaskBulkUpdateInvalid), errors.Is(err, repository.ErrTaskBulkTrashInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La selección contiene tareas que no se pueden modificar juntas", "code": "invalid_bulk_update"})
+	case errors.Is(err, repository.ErrTaskAttachmentPreviewRetryInvalid):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Solo se puede reintentar una conversión de Word fallida", "code": "attachment_preview_retry_invalid"})
 	case errors.Is(err, repository.ErrDefaultTaskList):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La Bandeja general debe permanecer como lista raíz predeterminada", "code": "default_list_invariant"})
 	case errors.Is(err, repository.ErrTaskTrashConfirmation):
@@ -253,7 +255,7 @@ func (s *Server) validateTaskSavedViewFilters(c *fiber.Ctx, accountID uuid.UUID,
 		"priorities": true, "types": true, "creator_ids": true, "due": true,
 		"created_from": true, "created_to": true, "completed_from": true, "completed_to": true,
 		"has_subtasks": true, "has_comments": true, "has_attachments": true,
-		"has_dependencies": true, "starred": true,
+		"has_dependencies": true, "starred": true, "include_closed": true,
 	}
 	for key := range fields {
 		if !allowed[key] {
@@ -277,6 +279,7 @@ func (s *Server) validateTaskSavedViewFilters(c *fiber.Ctx, accountID uuid.UUID,
 		HasAttachments  *bool    `json:"has_attachments"`
 		HasDependencies *bool    `json:"has_dependencies"`
 		Starred         *bool    `json:"starred"`
+		IncludeClosed   *bool    `json:"include_closed"`
 	}
 	if err := json.Unmarshal(raw, &filters); err != nil {
 		return err
@@ -577,17 +580,19 @@ func (s *Server) handleMoveTask(c *fiber.Ctx) error {
 	}
 	order := fiber.Map{"list_id": move.ListID, "status_id": move.StatusID, "task_ids": move.TaskIDs}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "moved", fiber.Map{
+	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	payload := putTaskHierarchyCounts(fiber.Map{
 		"operation_id": operationID,
 		"task":         full,
 		"order":        order,
-	})
-	return c.JSON(fiber.Map{
+	}, counts)
+	s.broadcastTaskWork(accountID, "moved", payload)
+	return c.JSON(putTaskHierarchyCounts(fiber.Map{
 		"success":      true,
 		"operation_id": operationID,
 		"task":         full,
 		"order":        order,
-	})
+	}, counts))
 }
 
 func (s *Server) handleBulkMoveTasks(c *fiber.Ctx) error {
@@ -670,9 +675,10 @@ func (s *Server) handleBulkMoveTasks(c *fiber.Ctx) error {
 		canonical = append(canonical, full)
 	}
 	s.invalidateTasksCache(accountID)
-	payload := fiber.Map{"operation_id": operationID.String(), "tasks": canonical, "orders": result.Orders}
+	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	payload := putTaskMutationReconciliation(fiber.Map{"tasks": canonical, "orders": result.Orders}, operationID, counts)
 	s.broadcastTaskWork(accountID, "bulk_moved", payload)
-	return c.JSON(fiber.Map{"success": true, "operation_id": operationID.String(), "tasks": canonical, "orders": result.Orders})
+	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "tasks": canonical, "orders": result.Orders}, operationID, counts))
 }
 
 func (s *Server) handleGetTaskHierarchy(c *fiber.Ctx) error {
@@ -681,7 +687,11 @@ func (s *Server) handleGetTaskHierarchy(c *fiber.Ctx) error {
 	if err != nil {
 		return taskWorkError(c, err)
 	}
-	return c.JSON(fiber.Map{"success": true, "folders": folders, "root_lists": rootLists})
+	counts, err := s.repos.TaskWork.HierarchyCounts(c.Context(), accountID)
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	return c.JSON(putTaskHierarchyCounts(fiber.Map{"success": true, "folders": folders, "root_lists": rootLists}, counts))
 }
 
 func (s *Server) handleCreateTaskFolder(c *fiber.Ctx) error {
@@ -697,6 +707,11 @@ func (s *Server) handleCreateTaskFolder(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || strings.TrimSpace(req.Name) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "El nombre es obligatorio"})
 	}
+	normalizedColor, colorErr := normalizeTaskColor(req.Color, "#10B981")
+	if colorErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
+	}
+	req.Color = normalizedColor
 	req.Icon = strings.TrimSpace(req.Icon)
 	if req.Icon == "" {
 		req.Icon = "folder"
@@ -759,6 +774,9 @@ func (s *Server) handleUpdateTaskFolder(c *fiber.Ctx) error {
 	}
 	if req.Icon != nil && !validTaskContainerIcon(*req.Icon) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Icono inválido"})
+	}
+	if colorErr := normalizeOptionalTaskColor(&req.Color); colorErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
 	}
 	operationID, err := taskStructureOperationID(req.OperationID)
 	if err != nil {
@@ -878,6 +896,9 @@ func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
 	if req.Icon != nil && !validTaskContainerIcon(*req.Icon) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Icono inválido"})
 	}
+	if colorErr := normalizeOptionalTaskColor(&req.Color); colorErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
+	}
 	operationID, err := taskStructureOperationID(req.OperationID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
@@ -904,7 +925,7 @@ func (s *Server) handleGetTaskWorkflows(c *fiber.Ctx) error {
 }
 
 func defaultWorkflowStatuses() []*domain.TaskStatus {
-	return []*domain.TaskStatus{{Name: "Por hacer", Color: "#64748b", Category: domain.TaskStatusCategoryNotStarted, IsDefault: true}, {Name: "En curso", Color: "#3b82f6", Category: domain.TaskStatusCategoryActive}, {Name: "Completada", Color: "#10b981", Category: domain.TaskStatusCategoryDone}, {Name: "Cancelada", Color: "#ef4444", Category: domain.TaskStatusCategoryCancelled}}
+	return []*domain.TaskStatus{{Name: "Por hacer", Color: "#64748B", Category: domain.TaskStatusCategoryNotStarted, IsDefault: true}, {Name: "En curso", Color: "#3B82F6", Category: domain.TaskStatusCategoryActive}, {Name: "Completada", Color: "#10B981", Category: domain.TaskStatusCategoryDone}, {Name: "Cancelada", Color: "#EF4444", Category: domain.TaskStatusCategoryCancelled}}
 }
 
 func (s *Server) handleCreateTaskWorkflow(c *fiber.Ctx) error {
@@ -945,9 +966,9 @@ func (s *Server) handleCreateTaskWorkflow(c *fiber.Ctx) error {
 				}
 				hasDefault = true
 			}
-			color := raw.Color
-			if color == "" {
-				color = "#64748b"
+			color, colorErr := normalizeTaskColor(raw.Color, "#64748B")
+			if colorErr != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color de estado inválido; usa #RRGGBB"})
 			}
 			statuses = append(statuses, &domain.TaskStatus{Name: strings.TrimSpace(raw.Name), Color: color, Category: raw.Category, IsDefault: raw.IsDefault})
 		}
@@ -995,9 +1016,11 @@ func (s *Server) handleCreateTaskStatus(c *fiber.Ctx) error {
 	if req.IsDefault && req.Category != domain.TaskStatusCategoryNotStarted {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El estado predeterminado debe ser inicial"})
 	}
-	if req.Color == "" {
-		req.Color = "#64748b"
+	normalizedColor, colorErr := normalizeTaskColor(req.Color, "#64748B")
+	if colorErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color de estado inválido; usa #RRGGBB"})
 	}
+	req.Color = normalizedColor
 	status := &domain.TaskStatus{AccountID: accountID, WorkflowID: workflowID, Name: strings.TrimSpace(req.Name), Color: req.Color, Category: req.Category, IsDefault: req.IsDefault}
 	if err := s.repos.TaskWork.CreateStatus(c.Context(), status); err != nil {
 		return taskWorkError(c, err)
@@ -1021,6 +1044,9 @@ func (s *Server) handleUpdateTaskStatus(c *fiber.Ctx) error {
 	}
 	if req.Category != nil && !validTaskStatusCategory(*req.Category) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Categoría inválida"})
+	}
+	if colorErr := normalizeOptionalTaskColor(&req.Color); colorErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color de estado inválido; usa #RRGGBB"})
 	}
 	if err := s.repos.TaskWork.UpdateStatus(c.Context(), accountID, statusID, req.Name, req.Color, req.Category, req.SortOrder); err != nil {
 		return taskWorkError(c, err)
@@ -1616,13 +1642,14 @@ func (s *Server) handleRestoreTask(c *fiber.Ctx) error {
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "restored", fiber.Map{})
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "restored", fiber.Map{"task_id": taskID, "task": full, "operation_id": operationID})
+	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	s.broadcastTaskWork(accountID, "restored", putTaskMutationReconciliation(fiber.Map{"task_id": taskID, "task": full}, operationID, counts))
 	parentID := taskID
 	if full.ParentTaskID != nil {
 		parentID = *full.ParentTaskID
 	}
 	s.services.Task.NotifySubtasksUpdated(c.Context(), accountID, parentID)
-	return c.JSON(fiber.Map{"success": true, "task": full, "operation_id": operationID})
+	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "task": full}, operationID, counts))
 }
 
 func parseTaskScope(c *fiber.Ctx) (*uuid.UUID, *uuid.UUID, error) {
@@ -1663,6 +1690,9 @@ func (s *Server) handleGetTaskGantt(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Ámbito inválido"})
 	}
 	filters := taskQueryFilters(c)
+	if !normalizeTaskQueryBooleanFilter(filters, "include_closed") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Filtro booleano inválido", "field": "include_closed"})
+	}
 	if key := invalidTaskQueryDateFilter(filters); key != "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Filtro de fecha inválido", "field": key})
 	}

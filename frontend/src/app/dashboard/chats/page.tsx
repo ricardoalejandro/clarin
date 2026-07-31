@@ -6,6 +6,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { Search, Plus, X, Trash2, CheckSquare, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp, MoreVertical, PanelRight, ListChecks, AlertTriangle, Loader2, RotateCcw, Sparkles, SlidersHorizontal } from 'lucide-react'
 import { formatTime } from '@/utils/format'
 import { subscribeWebSocket } from '@/lib/api'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import DeviceSelector from '@/components/chat/DeviceSelector'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ChatPanel from '@/components/chat/ChatPanel'
@@ -136,6 +137,8 @@ export default function ChatsPage() {
   const chatListRef = useRef<HTMLDivElement>(null)
   const chatsRequestSequenceRef = useRef(0)
   const chatsReconcileSequenceRef = useRef(0)
+  const chatsRequestAbortRef = useRef<AbortController | null>(null)
+  const chatsReconcileAbortRef = useRef<AbortController | null>(null)
   const devicesRequestSequenceRef = useRef(0)
   const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const processedMessageEventsRef = useRef(new Map<string, number>())
@@ -404,6 +407,10 @@ export default function ChatsPage() {
   const fetchChats = useCallback(async (reset: boolean = true, options: { silent?: boolean } = {}) => {
     const silent = Boolean(options.silent && reset)
     const sequenceRef = silent ? chatsReconcileSequenceRef : chatsRequestSequenceRef
+    const abortRef = silent ? chatsReconcileAbortRef : chatsRequestAbortRef
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
     const requestSequence = ++sequenceRef.current
     const requestQueryKey = chatQueryKey
     const token = localStorage.getItem('token')
@@ -442,11 +449,12 @@ export default function ChatsPage() {
       params.append('offset', String(offset))
 
       const res = await fetch(`/api/chats?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
       })
       const data = await res.json().catch(() => null)
       if (!res.ok || !data?.success) throw new Error(data?.error || 'No se pudieron cargar las conversaciones.')
-      if (requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current) return
+      if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current) return
       if (data.success) {
         setChatListError('')
         const newChats: Chat[] = data.chats || []
@@ -473,7 +481,7 @@ export default function ChatsPage() {
         setHasMore((offset + newChats.length) < total)
       }
     } catch (err) {
-      if (requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
+      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
         if (silent) console.warn('Silent chat reconciliation failed', err)
         else {
           console.error('Failed to fetch chats', err)
@@ -481,7 +489,7 @@ export default function ChatsPage() {
         }
       }
     } finally {
-      if (requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
+      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
         if (!silent) setLoading(false)
         if (!reset) setLoadingMore(false)
       }
@@ -519,9 +527,27 @@ export default function ChatsPage() {
 
   // Debounce search
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(searchTerm), 500)
+    const timer = setTimeout(() => setDebouncedSearch(searchTerm), SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [searchTerm])
+
+  useEffect(() => () => {
+    chatsRequestAbortRef.current?.abort()
+    chatsReconcileAbortRef.current?.abort()
+  }, [])
+
+  const searchPending = searchTerm !== debouncedSearch
+
+  const updateSearchTerm = (value: string) => {
+    chatsRequestAbortRef.current?.abort()
+    chatsReconcileAbortRef.current?.abort()
+    chatsRequestSequenceRef.current += 1
+    chatsReconcileSequenceRef.current += 1
+    setLoading(false)
+    setLoadingMore(false)
+    setSearchTerm(value)
+    if (!value) setDebouncedSearch('')
+  }
 
   // A selection always belongs to the currently visible result set.
   useEffect(() => {
@@ -940,11 +966,14 @@ export default function ChatsPage() {
                 type="text"
                 placeholder="Buscar chats..."
                 value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
+                onChange={(e) => updateSearchTerm(e.target.value)}
                 onFocus={() => setListSearchFocused(true)}
                 onBlur={() => setListSearchFocused(false)}
-                className={`w-full pl-9 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 focus:bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 outline-none transition-all placeholder:text-slate-400 ${layoutMode === 'compact' ? 'pr-12' : 'pr-3'}`}
+                aria-busy={searchPending || loading}
+                className={`w-full pl-9 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 focus:bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 outline-none transition-all placeholder:text-slate-400 ${layoutMode === 'compact' ? 'pr-24' : 'pr-16'}`}
                 />
+                {searchPending && <Loader2 aria-label="Esperando para buscar chats" className={`absolute top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500 ${layoutMode === 'compact' ? 'right-20' : 'right-10'}`} />}
+                {searchTerm && <button type="button" onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de chats" className={`absolute top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 ${layoutMode === 'compact' ? 'right-11' : 'right-1'}`}><X className="h-4 w-4" /></button>}
                 {layoutMode === 'compact' && (
                   <button
                     type="button"

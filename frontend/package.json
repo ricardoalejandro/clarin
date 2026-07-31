@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "prepare:pdf-worker": "node scripts/prepare-pdf-worker.mjs",
+    "build": "npm run prepare:pdf-worker && next build",
     "start": "next start",
     "lint": "next lint",
     "test:unit": "vitest run"

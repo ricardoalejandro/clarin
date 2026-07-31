@@ -46,7 +46,7 @@ var taskQueryFilterKeys = []string{
 	"priority", "priorities", "created_by", "creator_ids", "due", "lead_id", "event_id", "program_id",
 	"contact_id", "list_id", "folder_id", "parent_task_id", "include_subtasks", "starred", "from", "to",
 	"created_from", "created_to", "completed_from", "completed_to", "has_subtasks", "has_comments",
-	"has_attachments", "has_dependencies", "search", "deleted",
+	"has_attachments", "has_dependencies", "search", "deleted", "include_closed",
 }
 
 func taskQueryFilters(c *fiber.Ctx) map[string]string {
@@ -57,6 +57,26 @@ func taskQueryFilters(c *fiber.Ctx) map[string]string {
 		}
 	}
 	return filters
+}
+
+// normalizeTaskQueryBooleanFilter keeps boolean query contracts strict while
+// accepting harmless case/spacing differences. Callers can then pass the
+// canonical lower-case value through every task surface consistently.
+func normalizeTaskQueryBooleanFilter(filters map[string]string, key string) bool {
+	raw, exists := filters[key]
+	if !exists {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true":
+		filters[key] = "true"
+		return true
+	case "false":
+		filters[key] = "false"
+		return true
+	default:
+		return false
+	}
 }
 
 func invalidTaskQueryDateFilter(filters map[string]string) string {
@@ -158,7 +178,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	if req.Title == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Title is required"})
 	}
-	operationID, operationErr := parseTaskOperationID(req.OperationID)
+	operationID, operationErr := resolveTaskOperationID(req.OperationID)
 	if operationErr != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
 	}
@@ -450,19 +470,16 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 
 	// Re-read to get joined names
 	full, err := s.services.Task.GetByID(c.Context(), task.ID, accountID)
+	counts := s.taskHierarchyCounts(c.Context(), accountID)
 	if err != nil {
-		return c.JSON(taskCreateResponse(task, operationID))
+		return c.JSON(taskCreateResponse(task, *operationID, counts))
 	}
 	s.invalidateTasksCache(accountID)
-	return c.JSON(taskCreateResponse(full, operationID))
+	return c.JSON(taskCreateResponse(full, *operationID, counts))
 }
 
-func taskCreateResponse(task *domain.Task, operationID *uuid.UUID) fiber.Map {
-	response := fiber.Map{"success": true, "task": task}
-	if operationID != nil {
-		response["operation_id"] = operationID.String()
-	}
-	return response
+func taskCreateResponse(task *domain.Task, operationID uuid.UUID, counts *domain.TaskHierarchyCounts) fiber.Map {
+	return putTaskMutationReconciliation(fiber.Map{"success": true, "task": task}, operationID, counts)
 }
 
 func parseTaskOperationID(raw string) (*uuid.UUID, error) {
@@ -477,6 +494,18 @@ func parseTaskOperationID(raw string) (*uuid.UUID, error) {
 	return &parsed, nil
 }
 
+func resolveTaskOperationID(raw string) (*uuid.UUID, error) {
+	operationID, err := parseTaskOperationID(raw)
+	if err != nil {
+		return nil, err
+	}
+	if operationID == nil {
+		generated := uuid.New()
+		operationID = &generated
+	}
+	return operationID, nil
+}
+
 // handleGetTasks lists tasks with filters
 func (s *Server) handleGetTasks(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -487,6 +516,9 @@ func (s *Server) handleGetTasks(c *fiber.Ctx) error {
 	}
 
 	filters := taskQueryFilters(c)
+	if !normalizeTaskQueryBooleanFilter(filters, "include_closed") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Filtro booleano inválido", "field": "include_closed"})
+	}
 	if key := invalidTaskQueryDateFilter(filters); key != "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Filtro de fecha inválido", "field": key})
 	}
@@ -588,7 +620,7 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	operationID, operationErr := parseTaskOperationID(req.OperationID)
+	operationID, operationErr := resolveTaskOperationID(req.OperationID)
 	if operationErr != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
 	}
@@ -949,22 +981,16 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	full, err := s.services.Task.GetByID(c.Context(), existing.ID, accountID)
 	if err != nil {
 		s.invalidateTasksCache(accountID)
-		response := fiber.Map{"success": true, "task": existing}
-		if operationID != nil {
-			response["operation_id"] = operationID.String()
-		}
-		return c.JSON(response)
+		counts := s.taskHierarchyCounts(c.Context(), accountID)
+		return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "task": existing}, *operationID, counts))
 	}
 	if !wasDone && full.StatusDetail != nil && full.StatusDetail.Category == domain.TaskStatusCategoryDone {
 		s.services.Task.EnsureNextOccurrence(c.Context(), full)
 	}
 
 	s.invalidateTasksCache(accountID)
-	response := fiber.Map{"success": true, "task": full}
-	if operationID != nil {
-		response["operation_id"] = operationID.String()
-	}
-	return c.JSON(response)
+	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "task": full}, *operationID, counts))
 }
 
 func taskRequestUUIDPointersEqual(left, right *uuid.UUID) bool {
@@ -1006,12 +1032,13 @@ func (s *Server) handleDeleteTask(c *fiber.Ctx) error {
 	if loadErr != nil {
 		archivedTask = taskDeleteTombstone(existing, userID)
 	}
-	deletePayload := fiber.Map{"task_id": taskID, "task": archivedTask, "version": archivedTask.Version, "operation_id": operationID}
+	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	deletePayload := putTaskMutationReconciliation(fiber.Map{"task_id": taskID, "task": archivedTask, "version": archivedTask.Version}, operationID, counts)
 	s.broadcastTaskWork(accountID, "deleted", deletePayload)
 	if existing.ParentTaskID != nil {
 		s.services.Task.NotifySubtasksUpdated(c.Context(), accountID, *existing.ParentTaskID)
 	}
-	return c.JSON(fiber.Map{"success": true, "task": archivedTask, "version": archivedTask.Version, "operation_id": operationID})
+	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "task": archivedTask, "version": archivedTask.Version}, operationID, counts))
 }
 
 func taskDeleteTombstone(task *domain.Task, deletedBy uuid.UUID) *domain.Task {
@@ -1054,7 +1081,7 @@ func (s *Server) handleCompleteTask(c *fiber.Ctx) error {
 	}
 
 	s.invalidateTasksCache(accountID)
-	return c.JSON(fiber.Map{"success": true, "task": full})
+	return c.JSON(putTaskHierarchyCounts(fiber.Map{"success": true, "task": full}, s.taskHierarchyCounts(c.Context(), accountID)))
 }
 
 // handleGetTasksCalendar returns tasks for a date range (calendar view)
@@ -1370,6 +1397,11 @@ func (s *Server) handleCreateTaskList(c *fiber.Ctx) error {
 	if req.Name == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
 	}
+	normalizedColor, colorErr := normalizeTaskColor(req.Color, "#10B981")
+	if colorErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
+	}
+	req.Color = normalizedColor
 	req.Icon = strings.TrimSpace(req.Icon)
 	if req.Icon == "" {
 		req.Icon = "list"
@@ -1438,6 +1470,9 @@ func (s *Server) handleUpdateTaskList(c *fiber.Ctx) error {
 	}
 	if req.Icon != nil && !validTaskContainerIcon(*req.Icon) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Icono inválido"})
+	}
+	if colorErr := normalizeOptionalTaskColor(&req.Color); colorErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
 	}
 
 	if err := s.repos.Task.UpdateList(c.Context(), listID, accountID, req.Name, req.Color, req.Icon, req.SortOrder); err != nil {

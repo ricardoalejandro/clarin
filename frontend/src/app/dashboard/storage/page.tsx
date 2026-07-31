@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   ArrowDownAZ,
@@ -21,6 +21,8 @@ import {
   Video,
   X,
 } from 'lucide-react'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
+import { SearchRequestLifecycle } from '@/lib/searchRequestLifecycle'
 
 interface StorageUsage {
   limit_bytes: number
@@ -132,6 +134,7 @@ export default function StoragePage() {
   const [status, setStatus] = useState('all')
   const [sortBy, setSortBy] = useState('date')
   const [order, setOrder] = useState('desc')
+  const storageSearchLifecycleRef = useRef(new SearchRequestLifecycle())
 
   useEffect(() => {
     const saved = localStorage.getItem('storage_view_mode')
@@ -143,9 +146,20 @@ export default function StoragePage() {
   }, [])
 
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 500)
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [query])
+
+  useEffect(() => () => storageSearchLifecycleRef.current.invalidate(), [])
+
+  const searchPending = query.trim() !== debouncedQuery
+
+  const updateQuery = (value: string) => {
+    storageSearchLifecycleRef.current.invalidate()
+    setLoading(false)
+    setQuery(value)
+    if (!value) setDebouncedQuery('')
+  }
 
   const changeView = (mode: ViewMode) => {
     setViewMode(mode)
@@ -158,6 +172,7 @@ export default function StoragePage() {
   }, [])
 
   const fetchStorage = useCallback(async () => {
+    const lease = storageSearchLifecycleRef.current.begin()
     setLoading(true)
     const token = localStorage.getItem('token')
     const params = new URLSearchParams({
@@ -171,20 +186,22 @@ export default function StoragePage() {
 
     try {
       const [usageRes, filesRes] = await Promise.all([
-        fetch('/api/storage/usage', { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`/api/storage/files?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch('/api/storage/usage', { headers: { Authorization: `Bearer ${token}` }, signal: lease.signal }),
+        fetch(`/api/storage/files?${params.toString()}`, { headers: { Authorization: `Bearer ${token}` }, signal: lease.signal }),
       ])
       const usageData = await usageRes.json()
       const filesData = await filesRes.json()
+      if (!storageSearchLifecycleRef.current.isCurrent(lease)) return
       if (usageData.success) setUsage(usageData)
       if (filesData.success) setFiles(filesData.files || [])
       if (!usageData.success || !filesData.success) {
         showMessage('error', filesData.error || usageData.error || 'No se pudo cargar el almacenamiento')
       }
     } catch {
+      if (!storageSearchLifecycleRef.current.isCurrent(lease)) return
       showMessage('error', 'No se pudo cargar el almacenamiento')
     } finally {
-      setLoading(false)
+      if (storageSearchLifecycleRef.current.finish(lease)) setLoading(false)
     }
   }, [debouncedQuery, order, showMessage, sortBy, status, type])
 
@@ -309,10 +326,13 @@ export default function StoragePage() {
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     value={query}
-                    onChange={e => setQuery(e.target.value)}
+                    onChange={e => updateQuery(e.target.value)}
                     placeholder="Buscar por nombre de archivo..."
-                    className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none"
+                    aria-busy={searchPending || loading}
+                    className="w-full pl-9 pr-16 py-2 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none"
                   />
+                  {searchPending && <Loader2 aria-label="Esperando para buscar archivos" className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
+                  {query && <button type="button" onClick={() => updateQuery('')} aria-label="Limpiar búsqueda de archivos" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <select value={status} onChange={e => setStatus(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-xl text-sm bg-white text-slate-700">

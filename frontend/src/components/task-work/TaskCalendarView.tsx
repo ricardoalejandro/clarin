@@ -9,6 +9,7 @@ import type { TaskInlineDraft } from './TaskBoard'
 import { TaskListPicker } from './TaskSelectPicker'
 import TaskUserCombobox from './TaskUserCombobox'
 import { calendarDefaultList, calendarSlot, type TaskCalendarMode } from './taskCalendarState'
+import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 
 interface Props {
   tasks: Task[]
@@ -19,7 +20,7 @@ interface Props {
   currentUserID: string
   scopeListID?: string
   onOpen: (task: Task) => void
-  onCreated: (task: Task, operationID: string) => void
+  onCreated: (task: Task, operationID: string, hierarchyCounts?: TaskHierarchyCounts) => void
   onOperation: (operationID: string, active: boolean) => void
   onMore: (statusID?: string, draft?: TaskInlineDraft) => void
 }
@@ -62,10 +63,10 @@ export default function TaskCalendarView({ tasks, lists, folders, statuses, user
     const operationID = crypto.randomUUID()
     onOperation(operationID, true)
     try {
-      const result = await apiPost<{ task: Task; operation_id?: string }>('/api/tasks', { title: title.trim(), description: '', type: 'reminder', priority: 'medium', assigned_to: ownerID, list_id: listID, status_id: status.id, start_at: composer.startAt, due_at: composer.dueAt, is_all_day: composer.allDay, recurrence_rule: '', reminder_minutes: 0, placement: 'top', operation_id: operationID })
+      const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', { title: title.trim(), description: '', type: 'reminder', priority: 'medium', assigned_to: ownerID, list_id: listID, status_id: status.id, start_at: composer.startAt, due_at: composer.dueAt, is_all_day: composer.allDay, recurrence_rule: '', reminder_minutes: 0, placement: 'top', operation_id: operationID })
       if (!result.success || !result.data?.task) { setError(result.error || 'No se pudo crear la tarea'); return }
       setLastListID(listID)
-      onCreated(result.data.task, result.data.operation_id || operationID)
+      onCreated(result.data.task, result.data.operation_id || operationID, result.data.hierarchy_counts)
       close()
     } finally { setSaving(false); onOperation(operationID, false) }
   }

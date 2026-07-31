@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Search, X, ChevronDown, ChevronRight,
+  Search, X, ChevronDown, ChevronRight, Loader2,
   Type, Hash, AtSign, Calendar, Tag, MapPin, Phone, CreditCard,
   Briefcase, FileText, QrCode, Workflow, GraduationCap, CalendarClock,
 } from 'lucide-react'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 export interface DynamicField {
   key: string
@@ -59,6 +60,7 @@ export default function DynamicFieldsPicker({
   open, anchorRef, categories, onSelect, onClose,
 }: Props) {
   const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useDebouncedValue(query, SEARCH_DEBOUNCE_MS)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [activeIdx, setActiveIdx] = useState(0)
   const [pos, setPos] = useState<{ left: number; top: number; placement: 'right' | 'left' } | null>(null)
@@ -99,6 +101,7 @@ export default function DynamicFieldsPicker({
   useEffect(() => {
     if (open) {
       setQuery('')
+      setDebouncedQuery('')
       setActiveIdx(0)
       setCollapsed({})
       requestAnimationFrame(() => inputRef.current?.focus())
@@ -127,7 +130,7 @@ export default function DynamicFieldsPicker({
 
   // Filtered categories
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
+    const q = debouncedQuery.trim().toLowerCase()
     if (!q) return categories
     return categories
       .map(cat => ({
@@ -137,19 +140,19 @@ export default function DynamicFieldsPicker({
         ),
       }))
       .filter(cat => cat.fields.length > 0)
-  }, [categories, query])
+  }, [categories, debouncedQuery])
 
   // Flat list of visible fields (for keyboard nav)
   const flat = useMemo(() => {
     const out: { cat: string; field: DynamicField }[] = []
     filtered.forEach(cat => {
-      const isCollapsed = query.trim() ? false : (collapsed[cat.label] ?? !(CATEGORY_DEFAULT_OPEN[cat.label] ?? true))
+      const isCollapsed = debouncedQuery.trim() ? false : (collapsed[cat.label] ?? !(CATEGORY_DEFAULT_OPEN[cat.label] ?? true))
       if (!isCollapsed) {
         cat.fields.forEach(field => out.push({ cat: cat.label, field }))
       }
     })
     return out
-  }, [filtered, collapsed, query])
+  }, [filtered, collapsed, debouncedQuery])
 
   // Reset active when list shrinks
   useEffect(() => {
@@ -180,6 +183,7 @@ export default function DynamicFieldsPicker({
 
   const total = categories.reduce((s, c) => s + c.fields.length, 0)
   const filteredCount = filtered.reduce((s, c) => s + c.fields.length, 0)
+  const queryPending = query !== debouncedQuery
 
   let runningIdx = 0
 
@@ -201,7 +205,7 @@ export default function DynamicFieldsPicker({
         <div>
           <p className="text-xs font-semibold text-slate-100">Campos dinámicos</p>
           <p className="text-[10px] text-slate-500">
-            {query ? `${filteredCount} de ${total}` : `${total} campos disponibles`}
+            {debouncedQuery ? `${filteredCount} de ${total}` : `${total} campos disponibles`}
           </p>
         </div>
         <button
@@ -221,11 +225,17 @@ export default function DynamicFieldsPicker({
             ref={inputRef}
             type="text"
             value={query}
-            onChange={e => { setQuery(e.target.value); setActiveIdx(0) }}
+            onChange={e => {
+              const next = e.target.value
+              setQuery(next)
+              if (!next) setDebouncedQuery('')
+              setActiveIdx(0)
+            }}
             onKeyDown={handleKey}
             placeholder="Buscar campo…"
-            className="w-full pl-7 pr-2 py-1.5 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none placeholder:text-slate-600 dark-input"
+            className="w-full py-1.5 pl-7 pr-7 text-xs text-slate-100 bg-[#2a2a3d] border border-[#3a3a4d] rounded focus:bg-[#333348] focus:border-emerald-500 outline-none placeholder:text-slate-600 dark-input"
           />
+          {queryPending && <Loader2 className="absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-slate-500" aria-label="Buscando campos" />}
         </div>
       </div>
 
@@ -233,11 +243,11 @@ export default function DynamicFieldsPicker({
       <div className="flex-1 overflow-y-auto py-1">
         {filtered.length === 0 ? (
           <div className="px-4 py-8 text-center text-xs text-slate-500">
-            No se encontraron campos para <span className="text-slate-300 font-medium">"{query}"</span>
+            No se encontraron campos para <span className="text-slate-300 font-medium">"{debouncedQuery}"</span>
           </div>
         ) : (
           filtered.map(cat => {
-            const isCollapsed = query.trim() ? false : (collapsed[cat.label] ?? !(CATEGORY_DEFAULT_OPEN[cat.label] ?? true))
+            const isCollapsed = debouncedQuery.trim() ? false : (collapsed[cat.label] ?? !(CATEGORY_DEFAULT_OPEN[cat.label] ?? true))
             return (
               <div key={cat.label} className="mb-0.5">
                 <button

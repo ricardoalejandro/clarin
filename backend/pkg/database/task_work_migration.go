@@ -58,7 +58,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 			workflow_id UUID NOT NULL REFERENCES task_workflows(id) ON DELETE CASCADE,
 			name TEXT NOT NULL,
-			color VARCHAR(20) NOT NULL DEFAULT '#64748b',
+			color VARCHAR(20) NOT NULL DEFAULT '#64748B',
 			category VARCHAR(20) NOT NULL DEFAULT 'not_started',
 			sort_order INT NOT NULL DEFAULT 0,
 			is_default BOOLEAN NOT NULL DEFAULT FALSE,
@@ -76,7 +76,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			workflow_id UUID REFERENCES task_workflows(id) ON DELETE RESTRICT,
 			name TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '',
-			color VARCHAR(20) NOT NULL DEFAULT '#10b981',
+			color VARCHAR(20) NOT NULL DEFAULT '#10B981',
 			sort_order INT NOT NULL DEFAULT 0,
 			created_by UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
 			archived_at TIMESTAMPTZ,
@@ -406,10 +406,10 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			RETURNING id INTO workflow_uuid;
 			INSERT INTO task_statuses(account_id,workflow_id,name,color,category,sort_order,is_default)
 			VALUES
-				(NEW.id,workflow_uuid,'Por hacer','#64748b','not_started',0,TRUE),
-				(NEW.id,workflow_uuid,'En curso','#3b82f6','active',1,FALSE),
-				(NEW.id,workflow_uuid,'Completada','#10b981','done',2,FALSE),
-				(NEW.id,workflow_uuid,'Cancelada','#ef4444','cancelled',3,FALSE)
+				(NEW.id,workflow_uuid,'Por hacer','#64748B','not_started',0,TRUE),
+				(NEW.id,workflow_uuid,'En curso','#3B82F6','active',1,FALSE),
+				(NEW.id,workflow_uuid,'Completada','#10B981','done',2,FALSE),
+				(NEW.id,workflow_uuid,'Cancelada','#EF4444','cancelled',3,FALSE)
 			ON CONFLICT(workflow_id,name) DO NOTHING;
 			RETURN NEW;
 		END;
@@ -423,7 +423,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		`CREATE OR REPLACE FUNCTION ensure_account_task_default_list() RETURNS TRIGGER AS $$
 		BEGIN
 			INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,icon,sort_order,created_by,is_default)
-			SELECT NEW.account_id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981','inbox',0,NEW.user_id,TRUE
+			SELECT NEW.account_id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10B981','inbox',0,NEW.user_id,TRUE
 			FROM task_workflows w
 			WHERE w.account_id=NEW.account_id AND w.is_default
 			ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING;
@@ -462,10 +462,10 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			CASE WHEN seed.is_default AND NOT EXISTS (SELECT 1 FROM task_statuses existing_default WHERE existing_default.workflow_id=w.id AND existing_default.is_default) THEN TRUE ELSE FALSE END
 		FROM task_workflows w
 		CROSS JOIN (VALUES
-			('Por hacer', '#64748b', 'not_started', 0, TRUE),
-			('En curso', '#3b82f6', 'active', 1, FALSE),
-			('Completada', '#10b981', 'done', 2, FALSE),
-			('Cancelada', '#ef4444', 'cancelled', 3, FALSE)
+			('Por hacer', '#64748B', 'not_started', 0, TRUE),
+			('En curso', '#3B82F6', 'active', 1, FALSE),
+			('Completada', '#10B981', 'done', 2, FALSE),
+			('Cancelada', '#EF4444', 'cancelled', 3, FALSE)
 		) AS seed(name,color,category,sort_order,is_default)
 		WHERE w.is_default
 		  AND NOT EXISTS (SELECT 1 FROM task_statuses s WHERE s.workflow_id=w.id AND s.name=seed.name)
@@ -514,7 +514,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 	}
 	if _, err := db.Exec(ctx, `
 		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,icon,sort_order,created_by,is_default)
-		SELECT a.id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981','inbox',0,owner.user_id,TRUE
+		SELECT a.id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10B981','inbox',0,owner.user_id,TRUE
 		FROM accounts a
 		JOIN task_workflows w ON w.account_id=a.id AND w.is_default
 		JOIN LATERAL (

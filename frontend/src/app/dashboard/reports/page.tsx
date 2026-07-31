@@ -2,14 +2,17 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { ArrowRight, BarChart3, Search, ShieldAlert, Sparkles, UsersRound } from 'lucide-react'
+import { ArrowRight, BarChart3, Loader2, Search, ShieldAlert, Sparkles, UsersRound } from 'lucide-react'
 import { REPORT_CATALOG } from '@/lib/reportCatalog'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
 type AccessState = 'loading' | 'allowed' | 'denied'
 
 export default function ReportsPage() {
   const [access, setAccess] = useState<AccessState>('loading')
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search)
+  const searchPending = search !== debouncedSearch
 
   useEffect(() => {
     let active = true
@@ -30,7 +33,7 @@ export default function ReportsPage() {
   }, [])
 
   const reports = REPORT_CATALOG.filter(report => {
-    const term = search.trim().toLocaleLowerCase('es')
+    const term = debouncedSearch.trim().toLocaleLowerCase('es')
     return !term || `${report.title} ${report.description} ${report.category}`.toLocaleLowerCase('es').includes(term)
   })
 
@@ -61,7 +64,8 @@ export default function ReportsPage() {
           </div>
           <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 shadow-sm">
             <Search className="h-4 w-4 text-slate-400" />
-            <input value={search} onChange={event => setSearch(event.target.value)} placeholder="Buscar reporte…" className="h-10 w-56 bg-transparent text-sm outline-none placeholder:text-slate-400" />
+            <input value={search} onChange={event => { const next = event.target.value; setSearch(next); if (!next) setDebouncedSearch('') }} placeholder="Buscar reporte…" className="h-10 w-56 bg-transparent text-sm outline-none placeholder:text-slate-400" />
+            {searchPending && <Loader2 aria-label="Buscando reportes" className="h-4 w-4 animate-spin text-emerald-500" />}
           </div>
         </div>
 

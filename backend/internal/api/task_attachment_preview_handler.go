@@ -42,6 +42,34 @@ func (s *Server) handleGetTaskAttachmentPreview(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "preview": preview})
 }
 
+func (s *Server) handleRetryTaskAttachmentPreview(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	taskID, attachmentID, err := taskAttachmentPathIDs(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Adjunto inválido"})
+	}
+	var req struct {
+		OperationID string `json:"operation_id"`
+	}
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+		}
+	}
+	operationID, err := taskStructureOperationID(req.OperationID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Identificador de operación inválido"})
+	}
+	preview, requeued, err := s.repos.TaskWork.RetryAttachmentPreview(c.Context(), accountID, taskID, attachmentID)
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	if requeued {
+		s.broadcastTaskWork(accountID, "attachment_preview_retried", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "preview": preview, "operation_id": operationID})
+	}
+	return c.JSON(fiber.Map{"success": true, "preview": preview, "requeued": requeued, "operation_id": operationID})
+}
+
 func (s *Server) handleGetTaskAttachmentComments(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID := c.Locals("user_id").(uuid.UUID)

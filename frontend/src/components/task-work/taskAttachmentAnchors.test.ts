@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizedAttachmentPoint, textAttachmentAnchor } from './taskAttachmentAnchors'
+import { emptyAttachmentAnchor, hasUsableAttachmentAnchor, normalizedAttachmentPoint, textAttachmentAnchor } from './taskAttachmentAnchors'
 
 describe('task attachment anchors', () => {
   it('normalizes image and PDF coordinates and clamps outside clicks', () => {
@@ -10,5 +10,13 @@ describe('task attachment anchors', () => {
   it('anchors safe text context by line, offset and bounded quote', () => {
     expect(textAttachmentAnchor('one\ntwo\nthree', 7, 'two')).toEqual({ kind: 'text', line: 2, offset: 7, quote: 'two' })
     expect(textAttachmentAnchor('short', 99, 'x'.repeat(700)).quote).toHaveLength(500)
+  })
+
+  it('requires a real point or text selection before publishing a root comment', () => {
+    expect(emptyAttachmentAnchor('word_pdf')).toEqual({ kind: 'pdf' })
+    expect(hasUsableAttachmentAnchor(emptyAttachmentAnchor('pdf'))).toBe(false)
+    expect(hasUsableAttachmentAnchor({ kind: 'pdf', page: 2, x: .4, y: .7 })).toBe(true)
+    expect(hasUsableAttachmentAnchor({ kind: 'text', line: 1, offset: 0, quote: '' })).toBe(false)
+    expect(hasUsableAttachmentAnchor(textAttachmentAnchor('one', 2, 'on'))).toBe(true)
   })
 })

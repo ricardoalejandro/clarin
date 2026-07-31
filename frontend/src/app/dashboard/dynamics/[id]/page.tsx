@@ -12,8 +12,9 @@ import {
   Upload, ExternalLink, Copy, Check, Eye, EyeOff, Palette, Volume2, VolumeX,
   PartyPopper, Sparkles, Image as ImageIcon, LayoutGrid, Grid3X3, Grid2X2, List,
   CheckSquare, Square, XCircle, Tag, MessageCircle, Pencil, X, Film, FileText,
-  Calendar, Download, Users, RefreshCw, ArrowUp, ArrowDown
+  Calendar, Download, Users, RefreshCw, ArrowUp, ArrowDown, Loader2
 } from 'lucide-react';
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue';
 
 type Tab = 'content' | 'config' | 'links';
 type ViewMode = 'large' | 'medium' | 'small' | 'details';
@@ -1084,6 +1085,8 @@ function OptionsSection({
   const [editEmoji, setEditEmoji] = useState('');
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [filterText, setFilterText] = useState('');
+  const [debouncedFilterText, setDebouncedFilterText] = useDebouncedValue(filterText, SEARCH_DEBOUNCE_MS);
+  const filterPending = filterText !== debouncedFilterText;
   const [filterOption, setFilterOption] = useState<string>('all'); // 'all' | 'none' | option_id
 
   const handleCreate = async () => {
@@ -1159,8 +1162,8 @@ function OptionsSection({
 
   // Filter items
   const filteredItems = items.filter(item => {
-    if (filterText) {
-      const q = filterText.toLowerCase();
+    if (debouncedFilterText) {
+      const q = debouncedFilterText.toLowerCase();
       if (!item.thought_text.toLowerCase().includes(q) && !item.author.toLowerCase().includes(q) && !(item.tipo || '').toLowerCase().includes(q)) return false;
     }
     if (filterOption === 'none') return item.option_ids.length === 0;
@@ -1236,12 +1239,30 @@ function OptionsSection({
         <div className="border-t border-slate-200 pt-3 space-y-2">
           <div className="flex items-center gap-2 flex-wrap">
             <p className="text-xs font-medium text-slate-500">Asignar imágenes:</p>
-            <input
-              value={filterText}
-              onChange={e => setFilterText(e.target.value)}
-              className="px-2 py-1 bg-white border border-slate-200 rounded text-xs flex-1 min-w-[120px]"
-              placeholder="Filtrar por texto o autor..."
-            />
+            <div className="relative min-w-[120px] flex-1">
+              <input
+                value={filterText}
+                onChange={e => setFilterText(e.target.value)}
+                className="w-full rounded border border-slate-200 bg-white py-1 pl-2 pr-14 text-xs"
+                placeholder="Filtrar por texto o autor..."
+              />
+              {filterPending && (
+                <Loader2
+                  className="absolute right-7 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500"
+                  aria-label="Actualizando resultados"
+                />
+              )}
+              {filterText && (
+                <button
+                  type="button"
+                  onClick={() => { setFilterText(''); setDebouncedFilterText(''); }}
+                  className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                  aria-label="Limpiar filtro"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
             <select
               value={filterOption}
               onChange={e => { setFilterOption(e.target.value); setSelectedItems(new Set()); }}

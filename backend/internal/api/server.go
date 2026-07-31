@@ -761,6 +761,7 @@ func (s *Server) setupRoutes() {
 	tasks.Get("/:id/attachments", s.handleGetTaskAttachments)
 	tasks.Post("/:id/attachments", s.handleAddTaskAttachment)
 	tasks.Get("/:id/attachments/:attachmentId/preview", s.handleGetTaskAttachmentPreview)
+	tasks.Post("/:id/attachments/:attachmentId/preview/retry", s.handleRetryTaskAttachmentPreview)
 	tasks.Get("/:id/attachments/:attachmentId/comments", s.handleGetTaskAttachmentComments)
 	tasks.Post("/:id/attachments/:attachmentId/comments", s.handleCreateTaskAttachmentComment)
 	tasks.Put("/:id/attachments/:attachmentId/comments/:commentId/resolve", s.handleResolveTaskAttachmentComment)

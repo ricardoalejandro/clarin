@@ -7,7 +7,9 @@ const statuses = [
   taskStatus('status-todo', 'Por hacer', 'not_started', '#64748b', 0, true),
   taskStatus('status-active', 'En curso', 'active', '#3b82f6', 1),
   taskStatus('status-done', 'Completada', 'done', '#10b981', 2),
-  taskStatus('status-paused', 'Pausada', 'cancelled', '#f59e0b', 3),
+  // Keep this empty destination operational (not closed) so the drag test is
+  // independent from the default policy that intentionally hides cancelled work.
+  taskStatus('status-paused', 'Pausada', 'active', '#f59e0b', 3),
 ]
 
 function taskStatus(id: string, name: string, category: 'not_started' | 'active' | 'done' | 'cancelled', color: string, sortOrder: number, isDefault = false) {
@@ -102,7 +104,9 @@ async function installTaskBoardMock(page: Page) {
         root_lists: [{
           id: 'list-kanban', account_id: 'account-kanban', workflow_id: 'workflow-kanban', is_default: true,
           name: 'Operaciones QA', description: '', color: '#10b981', sort_order: 1024, created_by: 'user-kanban',
-          created_at: now, updated_at: now, task_count: tasks.length,
+          created_at: now, updated_at: now, task_count: tasks.length, open_task_count: tasks.filter(item => !['done', 'cancelled'].includes(item.status_detail.category)).length,
+          completed_task_count: tasks.filter(item => item.status_detail.category === 'done').length,
+          cancelled_task_count: tasks.filter(item => item.status_detail.category === 'cancelled').length,
         }],
       })
       return

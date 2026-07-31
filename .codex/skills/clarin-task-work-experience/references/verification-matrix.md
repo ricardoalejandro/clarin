@@ -60,6 +60,10 @@
 - Create inline with title only and with responsible, due date, priority, and More options.
 - Search for a non-matching term, create inline, and deliver HTTP plus the matching WebSocket echo in both orders. Assert one write, one card, cleared search/filters, unchanged scope, explanatory notice, highlight/scroll, and persistence after reload.
 - Type several search values rapidly with fake timers and browser requests: no query before 500 ms, one final query, prior tasks/Gantt requests aborted, cancellation silent, and no stale response rendered.
+- Verify 499/500 ms boundaries for every task catalog search, including local pickers. Clear/select remain immediate and the pending indicator exists only between raw and settled values.
+- Create, move between lists, complete, reopen, restore and trash tasks; confirm open badges and breakdown tooltips update without F5, then accept canonical `hierarchy_counts` exactly once for local and remote operation IDs.
+- Default Lista, Tablero, Calendario and Gantt to open work; enable Mostrar cerradas, explicitly select a completed/cancelled status, save/reload the view, and prove Resumen remains historically complete.
+- Change several filter draft fields and assert zero task queries until one Apply. Cancel/Escape must preserve prior applied filters; move, resize, dock and maximize both Filters and Configuration on desktop and verify full-screen mobile behavior.
 - Verify ambiguous folder/all scopes require a list and created tasks appear in the selected hierarchy.
 - Combine multi-value filters, remove individual chips, clear all, and preserve visible data while loading.
 - Create, apply, update, default, and delete a saved view from another session/device; deny another user/account.
@@ -85,6 +89,7 @@
 - Merge activity/comments without duplicates and preserve scroll/composer during realtime events.
 - Edit remotely a comment from an already-loaded older page and confirm its body updates without changing local edit/delete permissions.
 - Open attachments and related dependency tasks; verify empty, loading, error, and retry states.
+- Open a PDF, close during download/render and immediately open another task. Assert local worker configuration, abort/cancel/destroy/revoke cleanup, no previous canvas/comment residue, slow notice at 8 seconds, recoverable error at 30 seconds, and top-layer Escape semantics. Word polling exists only while open and failed conversion retries only by explicit idempotent action.
 - Collapse and expand Lista groups while measuring the 200 ms grid/opacity transition, `aria-expanded`, hidden-region inertness and reduced-motion fallback. Collapse the main sidebar and verify the brand is absent, one centered expansion control remains, and expansion restores the full header.
 
 ## Baseline And Production

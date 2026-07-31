@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Search, X, Filter, Users, CheckCircle2, User, Tag, ChevronDown, CheckSquare, FileText, Code, Calendar, Smartphone, AlertCircle, Loader2, Eye, UserCheck, RotateCcw } from 'lucide-react'
 import FormulaEditor from '@/components/FormulaEditor'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
 interface PersonResult {
   id: string
@@ -154,7 +155,7 @@ export default function ContactSelector({
   refreshKey = 0,
 }: ContactSelectorProps) {
   const [search, setSearch] = useState('')
-  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search)
   const [results, setResults] = useState<PersonResult[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -176,6 +177,7 @@ export default function ContactSelector({
   const [allTags, setAllTags] = useState<TagItem[]>([])
   const [filterTagIds, setFilterTagIds] = useState<Set<string>>(new Set())
   const [tagSearch, setTagSearch] = useState('')
+  const [debouncedTagSearch, setDebouncedTagSearch] = useDebouncedValue(tagSearch)
   const [hasPhone, setHasPhone] = useState(false)
 
   // Advanced Filters (only used when advancedFilters=true)
@@ -211,11 +213,17 @@ export default function ContactSelector({
 
   useAccessibleDialog(open, dialogRef, handleDialogEscape, searchRef)
 
-  // Debounce search
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(search), 500)
-    return () => clearTimeout(t)
-  }, [search])
+  const updateSearch = useCallback((value: string) => {
+    peopleRequestRef.current += 1
+    peopleAbortRef.current?.abort()
+    peopleAbortRef.current = null
+    setLoading(false)
+    setLoadingMore(false)
+    setLoadError('')
+    setLoadMoreError('')
+    setSearch(value)
+    if (!value) setDebouncedSearch('')
+  }, [setDebouncedSearch])
 
   // Focus search on open
   useEffect(() => {
@@ -248,6 +256,7 @@ export default function ContactSelector({
       setHasPhone(false)
       setShowFilterDropdown(false)
       setTagSearch('')
+      setDebouncedTagSearch('')
       // Reset advanced state
       setFilterTagNames(new Set())
       setExcludeFilterTagNames(new Set())
@@ -278,7 +287,7 @@ export default function ContactSelector({
 
   // Click outside to close filter dropdown
   useEffect(() => {
-    if (!showFilterDropdown) { setTagSearch(''); return }
+    if (!showFilterDropdown) { setTagSearch(''); setDebouncedTagSearch(''); return }
     const handler = (e: MouseEvent) => {
       if (filterRef.current && !filterRef.current.contains(e.target as Node)) {
         setShowFilterDropdown(false)
@@ -305,6 +314,7 @@ export default function ContactSelector({
   }, [token])
 
   const fetchPeople = useCallback(async (offset = 0, append = false) => {
+    if (search !== debouncedSearch) return
     peopleAbortRef.current?.abort()
     const abortController = new AbortController()
     peopleAbortRef.current = abortController
@@ -494,7 +504,7 @@ export default function ContactSelector({
         setLoadingMore(false)
       }
     }
-  }, [debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, excludeLabels, eventId, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
+  }, [search, debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, excludeLabels, eventId, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
 
   const isSelectable = useCallback((person: PersonResult) => {
     if (eventId) return person.can_add === true
@@ -565,14 +575,16 @@ export default function ContactSelector({
 
   // Tag search with wildcard support (% as wildcard, like leads page)
   const filteredTags = allTags.filter(tag => {
-    if (!tagSearch.trim()) return true
-    const term = tagSearch.trim()
+    if (!debouncedTagSearch.trim()) return true
+    const term = debouncedTagSearch.trim()
     if (term.includes('%')) {
       const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*')
       try { return new RegExp(`^${escaped}$`, 'i').test(tag.name) } catch { return true }
     }
     return tag.name.toLowerCase().includes(term.toLowerCase())
   })
+  const searchPending = search !== debouncedSearch
+  const tagSearchPending = tagSearch !== debouncedTagSearch
   const selectableResults = results.filter(isSelectable)
   const eventIsFrozen = candidateEventStatus === 'completed' || candidateEventStatus === 'cancelled'
 
@@ -596,15 +608,29 @@ export default function ContactSelector({
         <div className="px-6 py-4 border-b border-gray-100 space-y-3">
           <div className="flex gap-3">
             <div ref={filterRef} className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              {searchPending
+                ? <Loader2 className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" aria-hidden="true" />
+                : <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden="true" />}
               <input
                 ref={searchRef}
                 value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => updateSearch(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); setShowFilterDropdown(false) } }}
                 placeholder="Buscar por nombre, teléfono, email..."
-                className="w-full pl-10 pr-10 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 text-sm"
+                aria-busy={searchPending}
+                className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-20 text-sm text-gray-900 focus:border-transparent focus:ring-2 focus:ring-green-500"
               />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => updateSearch('')}
+                  className="absolute right-10 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                  aria-label="Limpiar búsqueda de contactos"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              )}
+              {searchPending && <span className="sr-only" role="status">Buscando contactos…</span>}
               <button
                 onClick={() => setShowFilterDropdown(!showFilterDropdown)}
                 className={`absolute right-1 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
@@ -764,13 +790,27 @@ export default function ContactSelector({
 
                             {/* Tag search */}
                             <div className="relative">
-                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                              {tagSearchPending
+                                ? <Loader2 className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-hidden="true" />
+                                : <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />}
                               <input
                                 value={tagSearch}
                                 onChange={e => setTagSearch(e.target.value)}
                                 placeholder="Buscar etiquetas..."
-                                className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                                aria-busy={tagSearchPending}
+                                className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-8 pr-9 text-xs text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500"
                               />
+                              {tagSearch && (
+                                <button
+                                  type="button"
+                                  onClick={() => { setTagSearch(''); setDebouncedTagSearch('') }}
+                                  className="absolute right-1 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                  aria-label="Limpiar búsqueda de etiquetas"
+                                >
+                                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                                </button>
+                              )}
+                              {tagSearchPending && <span className="sr-only" role="status">Actualizando etiquetas…</span>}
                             </div>
 
                             {/* Tag list with 3-click cycle */}
@@ -808,7 +848,7 @@ export default function ContactSelector({
                                   </div>
                                 )
                               })}
-                              {filteredTags.length === 0 && tagSearch.trim() && (
+                              {filteredTags.length === 0 && debouncedTagSearch.trim() && !tagSearchPending && (
                                 <p className="text-xs text-slate-400 text-center py-2">Sin resultados</p>
                               )}
                             </div>
@@ -880,13 +920,27 @@ export default function ContactSelector({
                         <div className="p-3">
                           <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Etiquetas</p>
                           <div className="relative mb-2">
-                            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                            {tagSearchPending
+                              ? <Loader2 className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-hidden="true" />
+                              : <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" aria-hidden="true" />}
                             <input
                               value={tagSearch}
                               onChange={e => setTagSearch(e.target.value)}
                               placeholder="Buscar... (usa % como comodín)"
-                              className="w-full pl-8 pr-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-800 placeholder:text-gray-400 focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                              aria-busy={tagSearchPending}
+                              className="w-full rounded-lg border border-gray-200 bg-gray-50 py-1.5 pl-8 pr-9 text-xs text-gray-800 placeholder:text-gray-400 focus:border-green-500 focus:ring-2 focus:ring-green-500"
                             />
+                            {tagSearch && (
+                              <button
+                                type="button"
+                                onClick={() => { setTagSearch(''); setDebouncedTagSearch('') }}
+                                className="absolute right-1 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                aria-label="Limpiar búsqueda de etiquetas"
+                              >
+                                <X className="h-3.5 w-3.5" aria-hidden="true" />
+                              </button>
+                            )}
+                            {tagSearchPending && <span className="sr-only" role="status">Actualizando etiquetas…</span>}
                           </div>
                           {filterTagIds.size > 0 && (
                             <div className="flex flex-wrap gap-1 mb-2">
@@ -931,7 +985,7 @@ export default function ContactSelector({
                                 </label>
                               )
                             })}
-                            {filteredTags.length === 0 && tagSearch.trim() && (
+                            {filteredTags.length === 0 && debouncedTagSearch.trim() && !tagSearchPending && (
                               <p className="text-xs text-gray-400 text-center py-2">Sin resultados</p>
                             )}
                           </div>

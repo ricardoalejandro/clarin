@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, Plus, Search, Tag, X } from 'lucide-react'
 import { api } from '@/lib/api'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import type {
   ContactProfileAvailableTag,
   ContactProfileContext,
@@ -70,7 +71,7 @@ export default function ContactTagEditor({
         setResults(Array.isArray(result.data.tags) ? result.data.tags : [])
       }
       setSearching(false)
-    }, 500)
+    }, SEARCH_DEBOUNCE_MS)
     return () => {
       window.clearTimeout(timer)
       controller.abort()

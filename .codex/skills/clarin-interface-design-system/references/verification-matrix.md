@@ -23,6 +23,8 @@
 - Verify ArrowUp/Down, Home/End where supported, Enter/Space, Escape, outside close, focus restoration, and touch selection.
 - Confirm the menu flips/clamps and renders above its owning window without covering indispensable context unnecessarily.
 - For staged operations, prove option selection performs no write and Confirm performs exactly one logical write.
+- With fake timers, type several values and assert unchanged results/no request at 499 ms, one final local update or remote request at 500 ms, a visible pending state in between, immediate clear/select, aborted prior requests, and no stale render.
+- Enter a curated and custom color, normalize case, preview light/dark/tinted contrast, reload persisted `#RRGGBB`, and reject alpha, gradients, CSS functions, malformed hex, or an icon outside the catalog.
 
 ## Dates
 
@@ -39,6 +41,7 @@
 - Verify non-blocking modes leave the workspace operable and modal modes actually trap focus and block it.
 - Open nested picker, confirmation, tooltip, and notification surfaces together; assert monotonic overlay order and no clipping.
 - Compare backdrop darkness, blur, border, ring, and shadow in floating, docked, modal, and mobile modes.
+- Apply the work-window matrix to complex Filters and Configuration. Verify filter changes remain a draft until one Apply, Cancel/Escape discards it, Clear does not query prematurely, and configuration warns before abandoning dirty inspector state.
 
 ## Cards, Lists, Selection, And Drag
 
@@ -70,3 +73,5 @@
 - Trace state-changing controls through API success, canonical response, realtime echo, stale-response protection, error, conflict, retry, and reload.
 - Confirm destructive and bulk scopes, phrases, descendants, permissions, disabled submission, and recovery.
 - Never accept a static screenshot, TypeScript pass, or production build as proof that an interaction works.
+- Create, move, complete, reopen, restore, and trash an item; assert its row/card and every affected navigation/group badge update in the same render, then reconcile the canonical count snapshot without double application or F5.
+- Open a file, close it mid-download/render, switch records rapidly, delete the resource, and retry a failure. Assert abort, render/document/worker destruction, URL revocation, cleared annotations/canvas, bounded slow/error phases, and zero residual content from the previous session.

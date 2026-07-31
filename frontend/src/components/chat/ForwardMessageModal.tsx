@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { X, Search, Send, User, Image as ImageIcon, FileText, Video, Mic, Check, RefreshCw } from 'lucide-react'
 import { Chat, Message } from '@/types/chat'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
+import { SearchRequestLifecycle, type SearchRequestLease } from '@/lib/searchRequestLifecycle'
 
 interface Props {
   message: Message
@@ -18,6 +20,7 @@ const PAGE_SIZE = 50
 export default function ForwardMessageModal({ message, deviceId, chatId, onClose, onSuccess }: Props) {
   const [chats, setChats] = useState<Chat[]>([])
   const [search, setSearch] = useState('')
+  const [settledSearch, setSettledSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -26,6 +29,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   const [sendError, setSendError] = useState('')
   const [selectedChats, setSelectedChats] = useState<Chat[]>([])
   const searchRef = useRef<HTMLInputElement>(null)
+  const searchLifecycleRef = useRef(new SearchRequestLifecycle())
 
   useEffect(() => {
     const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 100)
@@ -39,47 +43,66 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
     }
   }, [onClose, sending])
 
-  const fetchChats = useCallback(async (offset: number, append: boolean, signal?: AbortSignal) => {
+  const fetchChats = useCallback(async (offset: number, append: boolean, query: string, lease: SearchRequestLease) => {
     const token = localStorage.getItem('token')
     if (append) setLoadingMore(true)
     else setLoading(true)
     setLoadError('')
     const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
-    if (search.trim()) params.set('search', search.trim())
+    if (query) params.set('search', query)
     try {
       const res = await fetch(`/api/chats?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
-        signal,
+        signal: lease.signal,
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data.success || !Array.isArray(data.chats)) throw new Error(data.error || 'No se pudieron cargar los chats.')
+      if (!searchLifecycleRef.current.isCurrent(lease)) return
       setChats(current => append ? [...current, ...data.chats.filter((chat: Chat) => !current.some(item => item.id === chat.id))] : data.chats)
       setTotal(Number(data.total) || data.chats.length)
     } catch (error) {
-      if (signal?.aborted) return
+      if (!searchLifecycleRef.current.isCurrent(lease)) return
       setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar los chats.')
       if (!append) {
         setChats([])
         setTotal(0)
       }
     } finally {
-      if (!signal?.aborted) {
+      if (searchLifecycleRef.current.finish(lease)) {
         setLoading(false)
         setLoadingMore(false)
       }
     }
-  }, [search])
+  }, [])
+
+  const runSearch = useCallback((offset: number, append: boolean, query = settledSearch) => {
+    const lease = searchLifecycleRef.current.begin()
+    void fetchChats(offset, append, query, lease)
+  }, [fetchChats, settledSearch])
+
+  const updateSearch = (value: string) => {
+    searchLifecycleRef.current.invalidate()
+    setLoading(false)
+    setLoadingMore(false)
+    setSearch(value)
+    if (!value) setSettledSearch('')
+  }
 
   useEffect(() => {
-    const controller = new AbortController()
     const timer = window.setTimeout(() => {
-      void fetchChats(0, false, controller.signal)
-    }, search.trim() ? 250 : 0)
+      const query = search.trim()
+      setSettledSearch(query)
+      const lease = searchLifecycleRef.current.begin()
+      void fetchChats(0, false, query, lease)
+    }, search.trim() ? SEARCH_DEBOUNCE_MS : 0)
     return () => {
       window.clearTimeout(timer)
-      controller.abort()
     }
   }, [fetchChats, search])
+
+  useEffect(() => () => searchLifecycleRef.current.invalidate(), [])
+
+  const searchPending = search.trim() !== settledSearch
 
   const toggleSelect = (chat: Chat) => {
     setSelectedChats(previous => {
@@ -204,9 +227,12 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
               type="text"
               placeholder="Buscar por nombre, teléfono..."
               value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="w-full pl-10 pr-4 py-2.5 bg-slate-100 border-none rounded-xl text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+              onChange={e => updateSearch(e.target.value)}
+              aria-busy={searchPending || loading}
+              className="w-full pl-10 pr-16 py-2.5 bg-slate-100 border-none rounded-xl text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
             />
+            {searchPending && <RefreshCw aria-label="Esperando para buscar chats" className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
+            {search && <button type="button" onClick={() => updateSearch('')} aria-label="Limpiar búsqueda de chats" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-200"><X className="h-4 w-4" /></button>}
           </div>
         </div>
 
@@ -217,7 +243,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
               <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
             </div>
           ) : loadError ? (
-            <div className="px-4 py-8 text-center"><p className="text-sm text-red-600">{loadError}</p><button type="button" onClick={() => void fetchChats(0, false)} className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-semibold text-red-700 hover:bg-red-50"><RefreshCw className="h-4 w-4" /> Reintentar</button></div>
+            <div className="px-4 py-8 text-center"><p className="text-sm text-red-600">{loadError}</p><button type="button" onClick={() => runSearch(0, false)} className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-semibold text-red-700 hover:bg-red-50"><RefreshCw className="h-4 w-4" /> Reintentar</button></div>
           ) : chats.length === 0 ? (
             <p className="text-center py-8 text-sm text-slate-400">No se encontraron chats</p>
           ) : (
@@ -256,7 +282,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
                 </button>
               )
             })}
-            {hasMore && <button type="button" onClick={() => void fetchChats(chats.length, true)} disabled={loadingMore} className="mx-auto my-2 flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-50">{loadingMore && <RefreshCw className="h-4 w-4 animate-spin" />} {loadingMore ? 'Cargando…' : 'Cargar más'}</button>}
+            {hasMore && <button type="button" onClick={() => runSearch(chats.length, true)} disabled={loadingMore} className="mx-auto my-2 flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-50">{loadingMore && <RefreshCw className="h-4 w-4 animate-spin" />} {loadingMore ? 'Cargando…' : 'Cargar más'}</button>}
             </>
           )}
         </div>

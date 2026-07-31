@@ -47,6 +47,9 @@ func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
 				payload["operation_id"] = operationID.String()
 			}
 		}
+		if canonical.ParentTaskID == nil {
+			s.attachTaskHierarchyCounts(ctx, canonical.AccountID, payload)
+		}
 		s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, payload)
 	}
 	if canonical.ParentTaskID != nil {
@@ -90,6 +93,9 @@ func (s *TaskService) Update(ctx context.Context, task *domain.Task) error {
 		}
 		if canonical.MutationOperationID != nil {
 			payload["operation_id"] = canonical.MutationOperationID.String()
+		}
+		if taskHierarchyCountsChanged(previous, canonical) {
+			s.attachTaskHierarchyCounts(ctx, canonical.AccountID, payload)
 		}
 		s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, payload)
 		if previous != nil && previous.ParentTaskID == nil && !taskNullableUUIDEqual(previous.ListID, canonical.ListID) {
@@ -159,10 +165,12 @@ func (s *TaskService) Delete(ctx context.Context, id, accountID uuid.UUID) error
 	}
 
 	if s.hub != nil {
-		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
+		payload := map[string]interface{}{
 			"action":  "deleted",
 			"task_id": id.String(),
-		})
+		}
+		s.attachTaskHierarchyCounts(ctx, accountID, payload)
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, payload)
 	}
 
 	return nil
@@ -183,16 +191,72 @@ func (s *TaskService) Complete(ctx context.Context, id, accountID, completedBy u
 	}
 	s.RebuildReminder(ctx, canonical)
 	if s.hub != nil {
-		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, map[string]interface{}{
+		payload := map[string]interface{}{
 			"action": "completed",
 			"task":   canonical,
-		})
+		}
+		if canonical.ParentTaskID == nil {
+			s.attachTaskHierarchyCounts(ctx, accountID, payload)
+		}
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, payload)
 	}
 	if canonical.ParentTaskID != nil {
 		s.NotifySubtasksUpdated(ctx, canonical.AccountID, *canonical.ParentTaskID)
 	}
 
 	return nil
+}
+
+func taskHierarchyCountsChanged(before, after *domain.Task) bool {
+	if after == nil {
+		return false
+	}
+	afterIsTopLevel := after.ParentTaskID == nil
+	if before == nil {
+		return afterIsTopLevel
+	}
+	beforeIsTopLevel := before.ParentTaskID == nil
+	if beforeIsTopLevel != afterIsTopLevel {
+		return true
+	}
+	if !afterIsTopLevel {
+		return false
+	}
+	if !taskNullableUUIDEqual(before.ListID, after.ListID) {
+		return true
+	}
+	return taskClosedCategory(before) != taskClosedCategory(after)
+}
+
+func taskClosedCategory(task *domain.Task) string {
+	if task == nil {
+		return ""
+	}
+	if task.StatusDetail != nil {
+		switch task.StatusDetail.Category {
+		case domain.TaskStatusCategoryDone, domain.TaskStatusCategoryCancelled:
+			return task.StatusDetail.Category
+		default:
+			return "open"
+		}
+	}
+	switch task.Status {
+	case domain.TaskStatusCompleted:
+		return domain.TaskStatusCategoryDone
+	case domain.TaskStatusCancelled:
+		return domain.TaskStatusCategoryCancelled
+	default:
+		return "open"
+	}
+}
+
+func (s *TaskService) attachTaskHierarchyCounts(ctx context.Context, accountID uuid.UUID, payload map[string]interface{}) {
+	counts, err := s.repos.TaskWork.HierarchyCounts(ctx, accountID)
+	if err != nil {
+		log.Printf("[TASK] Warning: failed to load hierarchy counts for account %s: %v", accountID, err)
+		return
+	}
+	payload["hierarchy_counts"] = counts
 }
 
 // NotifySubtasksUpdated broadcasts the canonical parent after a child mutation.

@@ -7,6 +7,7 @@ import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import type { Lead, PipelineStage, StructuredTag } from '@/types/contact'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 
 interface Contact {
   id: string
@@ -85,9 +86,11 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   const mutationEpochRef = useRef(0)
 	const activeContactIdRef = useRef<string | null>(null)
   const contactSearchAbortRef = useRef<AbortController | null>(null)
+  const contactSearchSequenceRef = useRef(0)
   const contactLinkBusyRef = useRef(false)
   const [showContactLinker, setShowContactLinker] = useState(false)
   const [contactSearch, setContactSearch] = useState('')
+  const [debouncedContactSearch, setDebouncedContactSearch] = useState('')
   const [contactMatches, setContactMatches] = useState<ContactSearchResult[]>([])
   const [contactSearchLoading, setContactSearchLoading] = useState(false)
   const [newContactName, setNewContactName] = useState('')
@@ -128,6 +131,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
     }
     const controller = new AbortController()
     contactSearchAbortRef.current = controller
+    const sequence = ++contactSearchSequenceRef.current
     setContactSearchLoading(true)
     setContactLinkError('')
     try {
@@ -138,14 +142,14 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
       })
       const data = await response.json().catch(() => null)
       if (!response.ok || !data?.success) throw new Error(data?.error || 'No se pudieron buscar contactos.')
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted || sequence !== contactSearchSequenceRef.current) return
       setContactMatches(Array.isArray(data.contacts) ? data.contacts : [])
     } catch (error) {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted || sequence !== contactSearchSequenceRef.current) return
       setContactMatches([])
       setContactLinkError(error instanceof Error ? error.message : 'No se pudieron buscar contactos.')
     } finally {
-      if (contactSearchAbortRef.current === controller) {
+      if (contactSearchAbortRef.current === controller && sequence === contactSearchSequenceRef.current) {
         contactSearchAbortRef.current = null
         setContactSearchLoading(false)
       }
@@ -155,16 +159,33 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   useEffect(() => {
     if (!showContactLinker) {
       contactSearchAbortRef.current?.abort()
+      contactSearchSequenceRef.current += 1
       setContactSearchLoading(false)
       return
     }
-    const timer = window.setTimeout(() => void searchContacts(contactSearch), 250)
+    const timer = window.setTimeout(() => setDebouncedContactSearch(contactSearch.trim()), SEARCH_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [contactSearch, searchContacts, showContactLinker])
+  }, [contactSearch, showContactLinker])
+
+  useEffect(() => {
+    if (showContactLinker) void searchContacts(debouncedContactSearch)
+  }, [debouncedContactSearch, searchContacts, showContactLinker])
+
+  const contactSearchPending = showContactLinker && contactSearch.trim() !== debouncedContactSearch
+
+  const updateContactSearch = (value: string) => {
+    contactSearchAbortRef.current?.abort()
+    contactSearchSequenceRef.current += 1
+    setContactSearchLoading(false)
+    setContactMatches([])
+    setContactSearch(value)
+    if (!value) setDebouncedContactSearch('')
+  }
 
   const openContactLinker = () => {
     const initialPhone = (chatPhone || '').replace(/^\+/, '')
     setContactSearch(initialPhone)
+    setDebouncedContactSearch('')
     setContactMatches([])
     setNewContactName('')
     setContactLinkError('')
@@ -737,8 +758,9 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
                     <label htmlFor="chat-contact-search" className="text-xs font-bold text-slate-700">Buscar contacto existente</label>
                     <div className="relative mt-1.5">
                       <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                      <input id="chat-contact-search" autoFocus value={contactSearch} onChange={event => setContactSearch(event.target.value)} placeholder="Nombre, organización o teléfono" className="h-11 w-full rounded-xl border border-slate-300 pl-9 pr-10 text-sm text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />
-                      {contactSearchLoading && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" aria-label="Buscando contactos" />}
+                      <input id="chat-contact-search" autoFocus value={contactSearch} onChange={event => updateContactSearch(event.target.value)} placeholder="Nombre, organización o teléfono" aria-busy={contactSearchPending || contactSearchLoading} className="h-11 w-full rounded-xl border border-slate-300 pl-9 pr-16 text-sm text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />
+                      {(contactSearchPending || contactSearchLoading) && <Loader2 className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" aria-label={contactSearchPending ? 'Esperando para buscar contactos' : 'Buscando contactos'} />}
+                      {contactSearch && <button type="button" onClick={() => updateContactSearch('')} aria-label="Limpiar búsqueda de contactos" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
                     </div>
                     {contactMatches.length > 0 && (
                       <div className="mt-2 max-h-48 space-y-1 overflow-y-auto" role="listbox" aria-label="Contactos encontrados">
@@ -755,7 +777,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
                         })}
                       </div>
                     )}
-                    {contactSearch.trim().length >= 2 && !contactSearchLoading && contactMatches.length === 0 && !contactLinkError && <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">No encontramos coincidencias. Puedes crear la ficha debajo.</p>}
+                    {debouncedContactSearch.length >= 2 && !contactSearchPending && !contactSearchLoading && contactMatches.length === 0 && !contactLinkError && <p className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500">No encontramos coincidencias. Puedes crear la ficha debajo.</p>}
                     <div className="my-3 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-400"><span className="h-px flex-1 bg-slate-200" /> o crear uno nuevo <span className="h-px flex-1 bg-slate-200" /></div>
                     <label htmlFor="chat-new-contact-name" className="text-xs font-bold text-slate-700">Nombre del contacto</label>
                     <input id="chat-new-contact-name" value={newContactName} onChange={event => { setNewContactName(event.target.value); setContactLinkError('') }} onKeyDown={event => { if (event.key === 'Enter' && newContactName.trim()) void linkChatContact({ name: newContactName.trim() }, 'new') }} maxLength={160} placeholder="Ej. María López" className="mt-1.5 h-11 w-full rounded-xl border border-slate-300 px-3 text-sm text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />

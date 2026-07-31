@@ -21,8 +21,10 @@ import {
   X,
   ChevronDown,
   ChevronRight,
+  Loader2,
 } from 'lucide-react'
 import type { Automation, AutoTrigger } from '@/types/automation'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 function apiFetch(url: string, options?: RequestInit) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : ''
@@ -436,6 +438,8 @@ export default function AutomationsPage() {
   const [automations, setAutomations] = useState<Automation[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search, SEARCH_DEBOUNCE_MS)
+  const searchPending = search !== debouncedSearch
   const [showCreate, setShowCreate] = useState(false)
   const [showGuide, setShowGuide] = useState(false)
   const [deleteId, setDeleteId] = useState<string | null>(null)
@@ -467,8 +471,8 @@ export default function AutomationsPage() {
   }
 
   const filtered = automations.filter(a => {
-    const matchSearch = a.name.toLowerCase().includes(search.toLowerCase()) ||
-      a.description.toLowerCase().includes(search.toLowerCase())
+    const matchSearch = a.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+      a.description.toLowerCase().includes(debouncedSearch.toLowerCase())
     const matchFilter = filterActive === 'all' ? true : filterActive === 'active' ? a.is_active : !a.is_active
     return matchSearch && matchFilter
   })
@@ -502,8 +506,11 @@ export default function AutomationsPage() {
       <div className="flex items-center gap-3 shrink-0">
         <div className="flex-1 relative max-w-sm">
           <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar..."
-            className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 bg-white text-xs transition-all" />
+          <input value={search} onChange={e => { const next = e.target.value; setSearch(next); if (!next) setDebouncedSearch('') }} placeholder="Buscar..."
+            className="w-full pl-9 pr-9 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 bg-white text-xs transition-all" />
+          {searchPending && (
+            <Loader2 className="absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-label="Actualizando resultados" />
+          )}
         </div>
         <div className="flex gap-0.5 bg-white border border-slate-200 rounded-xl p-0.5">
           {(['all', 'active', 'inactive'] as const).map(f => (

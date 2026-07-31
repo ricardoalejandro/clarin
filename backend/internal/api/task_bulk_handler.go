@@ -116,9 +116,10 @@ func (s *Server) handleBulkUpdateTasks(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	payload := fiber.Map{"operation_id": operation.String(), "property": property, "tasks": tasks}
+	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	payload := putTaskMutationReconciliation(fiber.Map{"property": property, "tasks": tasks}, operation, counts)
 	s.broadcastTaskWork(accountID, "bulk_updated", payload)
-	return c.JSON(fiber.Map{"success": true, "operation_id": operation.String(), "tasks": tasks})
+	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "tasks": tasks}, operation, counts))
 }
 
 func (s *Server) handleBulkTrashTasks(c *fiber.Ctx) error {
@@ -153,9 +154,10 @@ func (s *Server) handleBulkTrashTasks(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	payload := fiber.Map{"operation_id": operation.String(), "task_ids": result.TaskIDs}
+	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	payload := putTaskMutationReconciliation(fiber.Map{"task_ids": result.TaskIDs}, operation, counts)
 	s.broadcastTaskWork(accountID, "bulk_deleted", payload)
-	return c.JSON(fiber.Map{"success": true, "operation_id": operation.String(), "task_ids": result.TaskIDs})
+	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "task_ids": result.TaskIDs}, operation, counts))
 }
 
 func (s *Server) handleGanttReschedule(c *fiber.Ctx) error {

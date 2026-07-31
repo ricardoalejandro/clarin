@@ -4,12 +4,13 @@
 
 1. Product character
 2. Visual hierarchy and density
-3. Controls and forms
-4. Windows, dialogs, and overlays
-5. Drag, selection, and direct manipulation
-6. Responsive layout and scroll
-7. Motion and feedback
-8. Accessibility and functional completeness
+3. Search and asynchronous state
+4. Controls and forms
+5. Windows, dialogs, and overlays
+6. Drag, selection, and direct manipulation
+7. Responsive layout and scroll
+8. Motion and feedback
+9. Accessibility and functional completeness
 
 ## Product Character
 
@@ -39,7 +40,8 @@
 
 - Use a portaled combobox when options require search, remote loading, grouping, icons, colors, descriptions, breadcrumbs, counts, roles, or semantic categories.
 - Show the current value with enough context to understand it without opening the menu. Inside the menu show one clear label, optional description/breadcrumb, selection mark, and empty/loading/error state.
-- Keep search bounded and debounced when the catalog can be large. Abort stale requests and never let an older result replace the newest query.
+- All user-typed searches use the shared `SEARCH_DEBOUNCE_MS=500`. The input value paints immediately, but local filtering and remote querying change at exactly 500 ms. Clearing and selecting remain immediate. Show a quiet pending indicator between the raw and settled value.
+- Remote search owns an `AbortController` per settled query and a monotonically increasing generation. Abort the prior request and reject stale completions even if the transport does not honor abort in time. Cancellation is not an error state.
 - Clamp and flip the menu inside the viewport, reposition on scroll/resize, close on Escape/outside interaction, and restore focus to its trigger.
 - Support Arrow keys, Home/End when useful, Enter/Space selection, and visible focus.
 - Selecting a value may write immediately only when the effect is local, obvious, and reversible. Bulk, structural, workflow-changing, or destructive choices must stage a summary and require Confirm.
@@ -57,6 +59,21 @@
 - Show selected participants or tags as removable chips and search the remaining catalog on demand rather than rendering an unbounded list.
 - Explain the difference between owner, collaborator, watcher, creator, or other roles instead of relying on proximity.
 - Keep the final removal and explicit empty collection canonical; never preserve a stale visual chip.
+
+### Color And Icon Identity
+
+- Offer a curated contrast-safe palette for quick selection and a deliberate custom color path when identity—not status semantics—supports customization.
+- Normalize persisted colors to uppercase `#RRGGBB`. Reject alpha, gradients, CSS functions, arbitrary class names, and untrusted SVG. Frontend and backend apply the same validation contract.
+- Preview a custom color against light, dark, and softly tinted surfaces. Report contrast meaningfully and never rely on color alone for the identity or state.
+- Icons remain allow-listed identifiers grouped and searchable by human labels. Show recent choices without weakening validation.
+
+## Search And Asynchronous State
+
+- Centralize time constants and lifecycle helpers; do not scatter `250`, `300`, or ad-hoc `500` millisecond search timers through components.
+- Treat counts and badges as derived state with a declared source. Patch them in the same optimistic mutation as the visible item, then accept the canonical server snapshot even for the initiating operation. Realtime deduplication prevents duplicate writes/cards, not authoritative count reconciliation.
+- A long-lived viewer or preview session is identified by the owning entity plus resource ID. Every callback checks its session generation before rendering.
+- Changing entity/resource, closing, deleting, unmounting, or retrying must abort fetches/polls, cancel render tasks, destroy parser/worker documents, revoke object URLs, clear canvas and annotations, and reset phase/error state.
+- Expose meaningful async phases such as downloading, opening, rendering, converting, retrying, and failed. Provide a delayed notice for slow work and a bounded timeout with Retry/Download rather than an endless spinner.
 
 ### Destructive And Bulk Actions
 
@@ -83,6 +100,7 @@
 - Remember geometry per user only after clamping it to the current measured viewport.
 - Keep floating and docked workspaces interactive when the product contract allows it; maximized/mobile modes may be modal.
 - Protect dirty drafts on close or Escape. A cancelled discard keeps the complete draft and window state.
+- Complex filters use a local draft: option changes do not query, Apply commits once, Cancel/Escape restores the canonical applied state, and Clear edits the draft first. Configuration windows use selection protection, sticky save actions, and contextual inspectors rather than one undifferentiated scrolling form.
 
 ### Contrast And Layering
 
@@ -121,6 +139,7 @@
 - Respect `prefers-reduced-motion`: remove travel, rotation, and convergence while retaining clear state feedback.
 - Show pending work close to the initiating control without replacing populated content with skeletons.
 - Make success calm and temporary; make errors persistent enough to read, actionable, and specific about whether the write occurred.
+- Derived badges and navigation counts update with the visible mutation. Tooltips may explain the total and category breakdown, while the resting badge shows the operational number the user acts on.
 
 ## Accessibility And Functional Completeness
 

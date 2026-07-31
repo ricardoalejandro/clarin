@@ -7,11 +7,13 @@ import {
   Eye, LayoutGrid, List, ChevronRight, Home, FolderPlus, MoreHorizontal,
   LayoutTemplate, FolderOpen, ArrowLeft, MoveRight, Tag, X, ChevronDown, Check,
   Code, FileText, AlertCircle, CheckCircle2, Copy, GripVertical,
+  Loader2,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import FormulaEditor from '@/components/FormulaEditor'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -151,6 +153,7 @@ export default function EventsPage() {
   const hasMoreRef = useRef(true)
   const loadingMoreRef = useRef(false)
   const eventsRequestRef = useRef(0)
+  const eventsAbortControllerRef = useRef<AbortController | null>(null)
   const eventsScrollRef = useRef<HTMLDivElement | null>(null)
   const setEventsPageRef = useCallback((node: HTMLDivElement | null) => {
     eventsScrollRef.current = node
@@ -164,6 +167,8 @@ export default function EventsPage() {
 
   // Filters & View
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search, SEARCH_DEBOUNCE_MS)
+  const searchPending = search !== debouncedSearch
   const [statusFilter, setStatusFilter] = useState('active')
   const [hideCancelled, setHideCancelled] = useState(true)
   const [viewMode, setViewMode] = useState<'grid' | 'compact' | 'list'>('list')
@@ -185,6 +190,8 @@ export default function EventsPage() {
   const [availableTags, setAvailableTags] = useState<TagItem[]>([])
   const [showTagDropdown, setShowTagDropdown] = useState(false)
   const [tagSearch, setTagSearch] = useState('')
+  const [debouncedTagSearch, setDebouncedTagSearch] = useDebouncedValue(tagSearch, SEARCH_DEBOUNCE_MS)
+  const tagSearchPending = tagSearch !== debouncedTagSearch
   const tagDropdownRef = useRef<HTMLDivElement>(null)
 
   // Formula validation state
@@ -240,6 +247,9 @@ export default function EventsPage() {
       loadingMoreRef.current = true
       setLoadingMore(true)
     }
+    eventsAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    eventsAbortControllerRef.current = controller
     const requestID = ++eventsRequestRef.current
     if (reset) setEventsError('')
     try {
@@ -248,13 +258,14 @@ export default function EventsPage() {
         hasMoreRef.current = true
       }
       const params = new URLSearchParams()
-      if (search) params.set('search', search)
+      if (debouncedSearch) params.set('search', debouncedSearch)
       if (statusFilter) params.set('status', statusFilter)
       params.set('folder', currentFolderID ?? 'root')
       params.set('limit', String(EVENTS_PAGE_SIZE))
       params.set('offset', String(offsetRef.current))
       const res = await fetch(`/api/events?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
       })
       const data = await res.json().catch(() => ({}))
       if (requestID !== eventsRequestRef.current) return
@@ -279,17 +290,24 @@ export default function EventsPage() {
         setHasMore(nextHasMore)
       }
     } catch (e) {
+      if (controller.signal.aborted || (e instanceof Error && e.name === 'AbortError')) return
       if (requestID !== eventsRequestRef.current) return
       console.error(e)
       setEventsError(e instanceof Error ? e.message : 'No se pudieron cargar los eventos')
     } finally {
       if (requestID === eventsRequestRef.current) {
+        if (eventsAbortControllerRef.current === controller) eventsAbortControllerRef.current = null
         setLoading(false)
         setLoadingMore(false)
         loadingMoreRef.current = false
       }
     }
-  }, [token, search, statusFilter, currentFolderID])
+  }, [token, debouncedSearch, statusFilter, currentFolderID])
+
+  useEffect(() => () => {
+    eventsRequestRef.current += 1
+    eventsAbortControllerRef.current?.abort()
+  }, [])
 
   // Restore folder from URL on mount
   useEffect(() => {
@@ -349,7 +367,7 @@ export default function EventsPage() {
 
       // Escape always dismisses only the topmost layer. A filter/dropdown must
       // never collapse the form behind it or navigate away from the page.
-      if (showTagDropdown) { closeLayer(() => { setShowTagDropdown(false); setTagSearch('') }); return }
+      if (showTagDropdown) { closeLayer(() => { setShowTagDropdown(false); setTagSearch(''); setDebouncedTagSearch('') }); return }
       if (showMoveMenu) { closeLayer(() => setShowMoveMenu(null)); return }
       if (menuEventID) { closeLayer(() => setMenuEventID(null)); return }
       if (showCreate || editEvent) {
@@ -374,6 +392,7 @@ export default function EventsPage() {
       if (tagDropdownRef.current && !tagDropdownRef.current.contains(e.target as Node)) {
         setShowTagDropdown(false)
         setTagSearch('')
+        setDebouncedTagSearch('')
       }
     }
     document.addEventListener('mousedown', h)
@@ -442,6 +461,7 @@ export default function EventsPage() {
     setCurrentFolderID(folder.id)
     setFolderPath(prev => [...prev, folder])
     setSearch('')
+    setDebouncedSearch('')
     setStatusFilter('')
     setLoading(true)
   }
@@ -455,6 +475,7 @@ export default function EventsPage() {
       setFolderPath(prev => prev.slice(0, index + 1))
     }
     setSearch('')
+    setDebouncedSearch('')
     setStatusFilter('')
     setLoading(true)
   }
@@ -509,6 +530,7 @@ export default function EventsPage() {
     setFormData({ name: '', description: '', event_date: '', event_end: '', location: '', color: '#3b82f6', status: 'active', tag_ids: [], formula_mode: 'OR', include_tag_ids: [], exclude_tag_ids: [], tag_formula: '', tag_formula_type: 'simple' })
     setShowTagDropdown(false)
     setTagSearch('')
+    setDebouncedTagSearch('')
     setFormulaIsValid(true)
     setRuleRevision(0)
   }
@@ -1107,14 +1129,17 @@ export default function EventsPage() {
                     </button>
                     {showTagDropdown && (
                       <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 overflow-hidden">
-                        <div className="p-2 border-b border-slate-100">
+                        <div className="relative p-2 border-b border-slate-100">
                           <input value={tagSearch} onChange={e => setTagSearch(e.target.value)}
                             placeholder="Buscar etiqueta..." autoFocus
-                            className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+                            className="w-full py-1.5 pl-3 pr-9 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+                          {tagSearchPending && (
+                            <Loader2 className="absolute right-5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-label="Actualizando resultados" />
+                          )}
                         </div>
                         <div className="max-h-48 overflow-y-auto">
                           {availableTags
-                            .filter(t => !tagSearch || t.name.toLowerCase().includes(tagSearch.toLowerCase()))
+                            .filter(t => !debouncedTagSearch || t.name.toLowerCase().includes(debouncedTagSearch.toLowerCase()))
                             .map(tag => {
                               const isInclude = formData.include_tag_ids.includes(tag.id)
                               const isExclude = formData.exclude_tag_ids.includes(tag.id)
@@ -1165,7 +1190,7 @@ export default function EventsPage() {
                                 </div>
                               )
                             })}
-                          {availableTags.filter(t => !tagSearch || t.name.toLowerCase().includes(tagSearch.toLowerCase())).length === 0 && (
+                          {availableTags.filter(t => !debouncedTagSearch || t.name.toLowerCase().includes(debouncedTagSearch.toLowerCase())).length === 0 && (
                             <p className="px-3 py-3 text-xs text-slate-400 text-center">No se encontraron etiquetas</p>
                           )}
                         </div>
@@ -1338,8 +1363,20 @@ export default function EventsPage() {
         )}
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar eventos..."
-            className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+          <input
+            value={search}
+            onChange={e => {
+              const next = e.target.value
+              eventsRequestRef.current += 1
+              eventsAbortControllerRef.current?.abort()
+              setSearch(next)
+              if (!next) setDebouncedSearch('')
+            }}
+            placeholder="Buscar eventos..."
+            className="w-full pl-10 pr-10 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
+          {searchPending && (
+            <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" aria-label="Buscando eventos" />
+          )}
         </div>
         <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
           className="px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900">

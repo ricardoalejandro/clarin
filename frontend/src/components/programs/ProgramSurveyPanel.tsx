@@ -7,6 +7,7 @@ import {
   FileText, Loader2, Plus, Search, Send, Users, X,
 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue';
 import type { SurveyInstanceRecipient, SurveyInstanceSummary, SurveyTemplate } from '@/types/survey-template';
 
 interface ProgramSurveyPanelProps {
@@ -219,12 +220,25 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
   const [error, setError] = useState('');
   const [copiedId, setCopiedId] = useState('');
   const requestRef = useRef<AbortController | null>(null);
+  const requestSequenceRef = useRef(0);
+
+  const updateQuery = (value: string) => {
+    requestRef.current?.abort();
+    requestSequenceRef.current += 1;
+    setLoading(false);
+    setQuery(value);
+    if (!value) {
+      setAppliedQuery('');
+      setOffset(0);
+    }
+  };
 
   useEffect(() => {
+    if (!query.trim()) return;
     const timer = window.setTimeout(() => {
       setAppliedQuery(query.trim());
       setOffset(0);
-    }, 500);
+    }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [query]);
 
@@ -232,6 +246,7 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
     const controller = new AbortController();
     requestRef.current?.abort();
     requestRef.current = controller;
+    const sequence = ++requestSequenceRef.current;
     const load = async () => {
       setLoading(true);
       setError('');
@@ -240,6 +255,7 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
           `/api/programs/${programId}/surveys/${instance.id}/recipients?q=${encodeURIComponent(appliedQuery)}&limit=50&offset=${offset}`,
           { signal: controller.signal },
         );
+        if (controller.signal.aborted || sequence !== requestSequenceRef.current) return;
         if (!response.success || !response.data) throw new Error(response.error || 'No se pudieron cargar los destinatarios.');
         const incoming = response.data.recipients || [];
         setRecipients(current => {
@@ -250,14 +266,16 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
         });
         setTotal(response.data.total || 0);
       } catch (loadError) {
-        if (!controller.signal.aborted) setError(loadError instanceof Error ? loadError.message : 'No se pudieron cargar los destinatarios.');
+        if (!controller.signal.aborted && sequence === requestSequenceRef.current) setError(loadError instanceof Error ? loadError.message : 'No se pudieron cargar los destinatarios.');
       } finally {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted && sequence === requestSequenceRef.current) setLoading(false);
       }
     };
     void load();
     return () => controller.abort();
   }, [appliedQuery, instance.id, offset, programId]);
+
+  const searchPending = query.trim() !== appliedQuery;
 
   const copy = async (recipient: SurveyInstanceRecipient) => {
     await navigator.clipboard.writeText(`${window.location.origin}/f/${instance.slug}?recipient=${recipient.recipient_token}`);
@@ -273,7 +291,7 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
           <button type="button" onClick={onClose} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-slate-500" aria-label="Cerrar"><X className="h-5 w-5" /></button>
         </header>
         <div className="border-b border-slate-100 p-4">
-          <div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar por nombre o teléfono" className="min-h-11 w-full rounded-xl border border-slate-200 pl-10 pr-3 text-sm outline-none focus:border-emerald-500" /></div>
+          <div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={query} onChange={event => updateQuery(event.target.value)} placeholder="Buscar por nombre o teléfono" aria-busy={searchPending || loading} className="min-h-11 w-full rounded-xl border border-slate-200 pl-10 pr-16 text-sm outline-none focus:border-emerald-500" />{searchPending && <Loader2 aria-label="Esperando para buscar destinatarios" className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}{query && <button type="button" onClick={() => updateQuery('')} aria-label="Limpiar búsqueda de destinatarios" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}</div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
           {loading && offset === 0 ? <div className="flex min-h-40 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : error ? <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : recipients.length === 0 ? <p className="p-8 text-center text-sm text-slate-500">No hay destinatarios para esta búsqueda.</p> : (

@@ -1,8 +1,9 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
-import { X, Calendar, Clock, AlertCircle, Search, User, List } from 'lucide-react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { X, Calendar, Clock, AlertCircle, Search, List, Loader2 } from 'lucide-react'
 import { Task, TaskType, TaskPriority, TaskList, TASK_TYPE_CONFIG, TASK_PRIORITY_CONFIG, REMINDER_OPTIONS } from '@/types/task'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 interface User {
   id: string
@@ -41,8 +42,18 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
   const [users, setUsers] = useState<User[]>([])
   const [currentUserId, setCurrentUserId] = useState('')
   const [userSearch, setUserSearch] = useState('')
+  const [debouncedUserSearch, setDebouncedUserSearch] = useDebouncedValue(userSearch, SEARCH_DEBOUNCE_MS)
   const [showUserDropdown, setShowUserDropdown] = useState(false)
   const userDropdownRef = useRef<HTMLDivElement>(null)
+  const filteredUsers = useMemo(() => {
+    const query = debouncedUserSearch.trim().toLocaleLowerCase('es')
+    if (!query) return users
+    return users.filter(user => (
+      user.display_name?.toLocaleLowerCase('es').includes(query)
+      || user.username.toLocaleLowerCase('es').includes(query)
+    ))
+  }, [debouncedUserSearch, users])
+  const userSearchPending = showUserDropdown && userSearch !== debouncedUserSearch
 
   // Close user dropdown on click outside
   useEffect(() => {
@@ -75,6 +86,8 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
 
   useEffect(() => {
     if (isOpen) {
+      setUserSearch('')
+      setDebouncedUserSearch('')
       fetchUsers()
       if (task) {
         setTitle(task.title)
@@ -314,21 +327,22 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
                   <input
                     type="text"
                     value={showUserDropdown ? userSearch : (users.find(u => u.id === assignedTo)?.display_name || users.find(u => u.id === assignedTo)?.username || (assignedTo === currentUserId && assignedTo ? 'Yo' : 'Seleccionar...'))}
-                    onChange={e => { setUserSearch(e.target.value); setShowUserDropdown(true) }}
-                    onFocus={() => { setUserSearch(''); setShowUserDropdown(true) }}
+                    onChange={e => {
+                      const next = e.target.value
+                      setUserSearch(next)
+                      if (!next) setDebouncedUserSearch('')
+                      setShowUserDropdown(true)
+                    }}
+                    onFocus={() => { setUserSearch(''); setDebouncedUserSearch(''); setShowUserDropdown(true) }}
                     placeholder="Buscar usuario..."
-                    className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-sm text-slate-800 placeholder:text-slate-400"
+                    className="w-full py-2 pl-8 pr-9 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-sm text-slate-800 placeholder:text-slate-400"
+                    aria-busy={userSearchPending}
                   />
+                  {userSearchPending && <Loader2 className="absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-slate-400" aria-label="Buscando usuarios" />}
                 </div>
                 {showUserDropdown && (
                   <div className="absolute z-50 mt-1 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-40 overflow-y-auto">
-                    {users
-                      .filter(u => {
-                        if (!userSearch) return true
-                        const q = userSearch.toLowerCase()
-                        return (u.display_name?.toLowerCase().includes(q) || u.username.toLowerCase().includes(q))
-                      })
-                      .map(u => {
+                    {filteredUsers.map(u => {
                         const isMe = u.id === currentUserId
                         const isSelected = u.id === assignedTo
                         const initials = (u.display_name || u.username).slice(0, 2).toUpperCase()
@@ -342,6 +356,7 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
                               setAssignedTo(u.id)
                               setShowUserDropdown(false)
                               setUserSearch('')
+                              setDebouncedUserSearch('')
                             }}
                             className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-sm transition hover:bg-emerald-50 ${
                               isSelected ? 'bg-emerald-50' : ''
@@ -359,11 +374,7 @@ export default function TaskFormModal({ isOpen, onClose, onSave, task, leadId, l
                           </button>
                         )
                       })}
-                    {users.filter(u => {
-                      if (!userSearch) return true
-                      const q = userSearch.toLowerCase()
-                      return (u.display_name?.toLowerCase().includes(q) || u.username.toLowerCase().includes(q))
-                    }).length === 0 && (
+                    {filteredUsers.length === 0 && (
                       <div className="px-3 py-2 text-sm text-slate-400 text-center">Sin resultados</div>
                     )}
                   </div>

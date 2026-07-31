@@ -1,13 +1,14 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Search, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, ChevronDown, MoreHorizontal, LayoutGrid, LayoutTemplate, List, AlertCircle, Settings2, BookOpenText } from 'lucide-react';
+import { Plus, Search, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, ChevronDown, MoreHorizontal, LayoutGrid, LayoutTemplate, List, AlertCircle, Settings2, BookOpenText, Loader2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program, ProgramDashboardSummary, ProgramFolder, ProgramGoal } from '@/types/program';
 import Link from 'next/link';
 import { es } from 'date-fns/locale';
 import { formatCalendarDate } from '@/utils/calendarDate';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
+import { useDebouncedValue } from '@/lib/useDebouncedValue';
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: React.ReactNode }> = {
   active: { label: 'Activo', bg: 'bg-emerald-50', text: 'text-emerald-700', icon: <CheckCircle2 className="w-3 h-3" /> },
@@ -31,6 +32,8 @@ export default function ProgramsPage() {
   const programsRequestRef = useRef<AbortController | null>(null);
   const programsRequestSequence = useRef(0);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useDebouncedValue(searchQuery);
+  const searchPending = searchQuery !== debouncedSearchQuery;
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newProgram, setNewProgram] = useState<{
     name: string;
@@ -344,6 +347,7 @@ export default function ProgramsPage() {
     setCurrentFolderID(folder.id);
     setFolderPath(prev => [...prev, folder]);
     setSearchQuery('');
+    setDebouncedSearchQuery('');
   };
 
   const navigateToBreadcrumb = (index: number) => {
@@ -355,6 +359,7 @@ export default function ProgramsPage() {
       setFolderPath(prev => prev.slice(0, index + 1));
     }
     setSearchQuery('');
+    setDebouncedSearchQuery('');
   };
 
   // Folder CRUD
@@ -490,8 +495,8 @@ export default function ProgramsPage() {
     const inFolder = currentFolderID
       ? p.folder_id === currentFolderID
       : !p.folder_id;
-    const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (p.description || '').toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = p.name.toLowerCase().includes(debouncedSearchQuery.toLowerCase()) ||
+      (p.description || '').toLowerCase().includes(debouncedSearchQuery.toLowerCase());
     return inFolder && matchesSearch;
   });
 
@@ -866,9 +871,14 @@ export default function ProgramsPage() {
             type="text"
             placeholder="Buscar programas..."
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 bg-white text-sm transition-all"
+            onChange={(e) => {
+              const next = e.target.value;
+              setSearchQuery(next);
+              if (!next) setDebouncedSearchQuery('');
+            }}
+            className="w-full pl-10 pr-10 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 bg-white text-sm transition-all"
           />
+          {searchPending && <Loader2 aria-label="Buscando programas" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
         </div>
 
         {/* View mode toggle */}
@@ -962,14 +972,14 @@ export default function ProgramsPage() {
             <GraduationCap className="w-10 h-10 text-emerald-400" />
           </div>
           <h3 className="text-lg font-semibold text-slate-800 mb-2">
-            {searchQuery ? 'Sin resultados' : folderPath.length > 0 ? 'Carpeta vacía' : 'Crea tu primer grupo de clases'}
+            {debouncedSearchQuery ? 'Sin resultados' : folderPath.length > 0 ? 'Carpeta vacía' : 'Crea tu primer grupo de clases'}
           </h3>
           <p className="text-slate-500 mb-6 max-w-md mx-auto">
-            {searchQuery
+            {debouncedSearchQuery
               ? 'No se encontraron programas activos con esa búsqueda.'
               : 'Organiza grupos, asigna planes de clases y controla la asistencia de sus participantes.'}
           </p>
-          {!searchQuery && !mobileWorkspace && (
+          {!debouncedSearchQuery && !mobileWorkspace && (
             <button
               onClick={() => setIsCreateModalOpen(true)}
               className="px-5 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium"

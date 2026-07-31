@@ -101,6 +101,7 @@ export interface Task {
 export type TaskDueFilter = '' | 'overdue' | 'today' | 'this_week' | 'no_date'
 
 export interface TaskFilters {
+  include_closed: boolean
   status_ids: string[]
   assigned_to_ids: string[]
   collaborator_ids: string[]
@@ -207,6 +208,9 @@ export interface TaskList {
   created_at: string
   updated_at: string
   task_count: number
+  open_task_count: number
+  completed_task_count: number
+  cancelled_task_count: number
 }
 
 export interface TaskTrashPolicy {
@@ -245,6 +249,9 @@ export interface TaskFolder {
   created_at: string
   updated_at: string
   task_count: number
+  open_task_count: number
+  completed_task_count: number
+  cancelled_task_count: number
   lists: TaskList[]
 }
 

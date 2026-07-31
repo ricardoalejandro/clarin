@@ -11,6 +11,7 @@ import {
 import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { apiDelete, apiGet, apiPost, logoutFromBrowser, tryRefreshToken } from '@/lib/api'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
   finalizeAdminUserAccountMutation,
   type AdminApiResult,
@@ -394,6 +395,8 @@ export default function AdminPage() {
   })
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search, SEARCH_DEBOUNCE_MS)
+  const searchPending = search !== debouncedSearch
   const [filterAccountId, setFilterAccountId] = useState('')
   const [newMcpName, setNewMcpName] = useState('')
   const [newMcpRedirectUri, setNewMcpRedirectUri] = useState('')
@@ -1322,14 +1325,14 @@ export default function AdminPage() {
   }
 
   const filteredAccounts = accounts.filter(a =>
-    a.name.toLowerCase().includes(search.toLowerCase()) ||
-    a.plan.toLowerCase().includes(search.toLowerCase())
+    a.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    a.plan.toLowerCase().includes(debouncedSearch.toLowerCase())
   )
 
   const filteredUsers = users.filter(u =>
-    u.username.toLowerCase().includes(search.toLowerCase()) ||
-    u.email.toLowerCase().includes(search.toLowerCase()) ||
-    (u.display_name || '').toLowerCase().includes(search.toLowerCase())
+    u.username.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    u.email.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    (u.display_name || '').toLowerCase().includes(debouncedSearch.toLowerCase())
   )
   const erosEnabledUsers = users.filter(u => Boolean(u.eros_enabled)).length
   const selectedErosModelPreset = EROS_MODEL_OPTIONS.some(option => option.value === erosForm.codex_model)
@@ -1351,21 +1354,21 @@ export default function AdminPage() {
       : 'bg-amber-100 text-amber-700'
 
   const filteredRoles = roles.filter(r =>
-    r.name.toLowerCase().includes(search.toLowerCase()) ||
-    r.description.toLowerCase().includes(search.toLowerCase())
+    r.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    r.description.toLowerCase().includes(debouncedSearch.toLowerCase())
   )
 
   const filteredIntegrations = integrations.filter(i =>
-    i.name.toLowerCase().includes(search.toLowerCase()) ||
-    i.provider.toLowerCase().includes(search.toLowerCase()) ||
-    (i.subdomain || '').toLowerCase().includes(search.toLowerCase())
+    i.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    i.provider.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    (i.subdomain || '').toLowerCase().includes(debouncedSearch.toLowerCase())
   )
 
   const filteredMCPClients = mcpClients.filter(c =>
-    c.name.toLowerCase().includes(search.toLowerCase()) ||
-    c.status.toLowerCase().includes(search.toLowerCase()) ||
-    c.token_prefix.toLowerCase().includes(search.toLowerCase()) ||
-    (c.allowed_accounts || []).some(a => a.account_name.toLowerCase().includes(search.toLowerCase()))
+    c.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    c.status.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    c.token_prefix.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+    (c.allowed_accounts || []).some(a => a.account_name.toLowerCase().includes(debouncedSearch.toLowerCase()))
   )
 
   const activeAccounts = accounts.filter(a => a.is_active)
@@ -1894,7 +1897,7 @@ export default function AdminPage() {
       {/* Tabs */}
       <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit mb-4">
         <button
-          onClick={() => { setTab('accounts'); setSearch('') }}
+          onClick={() => { setTab('accounts'); setSearch(''); setDebouncedSearch('') }}
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
             tab === 'accounts' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
           }`}
@@ -1903,7 +1906,7 @@ export default function AdminPage() {
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{accounts.length}</span>
         </button>
         <button
-          onClick={() => { setTab('users'); setSearch('') }}
+          onClick={() => { setTab('users'); setSearch(''); setDebouncedSearch('') }}
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
             tab === 'users' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
           }`}
@@ -1912,7 +1915,7 @@ export default function AdminPage() {
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{users.length}</span>
         </button>
         <button
-          onClick={() => { setTab('roles'); setSearch('') }}
+          onClick={() => { setTab('roles'); setSearch(''); setDebouncedSearch('') }}
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
             tab === 'roles' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
           }`}
@@ -1921,7 +1924,7 @@ export default function AdminPage() {
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{roles.length}</span>
         </button>
         <button
-          onClick={() => { setTab('eros'); setSearch(''); setFilterAccountId('') }}
+          onClick={() => { setTab('eros'); setSearch(''); setDebouncedSearch(''); setFilterAccountId('') }}
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
             tab === 'eros' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
           }`}
@@ -1930,7 +1933,7 @@ export default function AdminPage() {
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{erosEnabledUsers}</span>
         </button>
         <button
-          onClick={() => { setTab('mcp'); setSearch('') }}
+          onClick={() => { setTab('mcp'); setSearch(''); setDebouncedSearch('') }}
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
             tab === 'mcp' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
           }`}
@@ -1940,7 +1943,7 @@ export default function AdminPage() {
         </button>
         {KOMMO_ADMIN_UI_ENABLED && (
           <button
-            onClick={() => { setTab('integrations'); setSearch('') }}
+            onClick={() => { setTab('integrations'); setSearch(''); setDebouncedSearch('') }}
             className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
               tab === 'integrations' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
             }`}
@@ -1960,10 +1963,16 @@ export default function AdminPage() {
             placeholder={tab === 'accounts' ? 'Buscar cuentas...' : tab === 'users' ? 'Buscar usuarios...' : tab === 'roles' ? 'Buscar roles...' : tab === 'eros' ? 'Buscar usuarios con Eros...' : tab === 'mcp' ? 'Buscar conexiones MCP...' : 'Buscar...'}
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            className="w-full pl-10 pr-16 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent"
           />
+          {searchPending && (
+            <Loader2
+              className="absolute right-9 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500"
+              aria-label="Actualizando resultados"
+            />
+          )}
           {search && (
-            <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2">
+            <button onClick={() => { setSearch(''); setDebouncedSearch('') }} className="absolute right-3 top-1/2 -translate-y-1/2">
               <X className="w-4 h-4 text-gray-400" />
             </button>
           )}

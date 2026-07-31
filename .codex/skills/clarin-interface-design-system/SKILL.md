@@ -35,8 +35,10 @@ Design Clarin as a coherent operational product. Treat visual quality and functi
 ### 3. Apply The Right Interaction Primitive
 
 - Use accessible, viewport-aware portaled comboboxes when choices need search, grouping, icons, colors, descriptions, breadcrumbs, or semantic context. A native select is acceptable only for a short, unambiguous list that needs none of these.
+- Every user-typed search waits exactly `500 ms` before changing local results or issuing a remote request. Render the text immediately, expose a quiet pending state, keep clear/select actions immediate, abort older remote requests, and discard stale completions even when abort arrives late.
 - Use the shared professional date interaction when date work needs calendar, time, all-day, timezone, quick values, removal, linked ranges, or localized display. Do not scatter unrelated native date controls through one workflow.
 - Use a simple modal for short blocking decisions. Use a work window for long-lived creation or editing that benefits from drag, resize, docking, maximize/restore, remembered geometry, or continued access to the workspace.
+- Treat large filter builders, configuration inspectors, and other multi-step tools as work windows too when their content benefits from draft/apply, resizing, docking, or maximization. A filter option must not silently commit while the user is still composing a set.
 - Portal menus, pickers, tooltips, confirmations, and drag overlays whenever an overflow ancestor could clip them. Use one monotonic layer contract rather than arbitrary z-index values.
 - Separate click, selection, completion, resize, pan, and drag ownership. Give each pointer region and cursor one stable meaning.
 - Keep primary controls visible; reveal secondary controls progressively through hover, focus, selection mode, contextual menus, or explicit expansion without hiding keyboard and touch access.
@@ -48,6 +50,9 @@ Design Clarin as a coherent operational product. Treat visual quality and functi
 - Animate state changes with purpose and without layout oscillation. Prefer opacity, transform, and controlled grid/height transitions; respect reduced motion.
 - Keep one vertical scroll owner per panel unless a bounded child list genuinely needs its own. Make scrollbars quiet, theme-aware, and visible when overflow makes them useful.
 - Avoid repeated information. Context already communicated by a column, group, breadcrumb, or selected scope should not dominate every row or card.
+- Update badges, totals, grouping counts, and other derived inventory in the same interaction that changes their source. Apply a deterministic optimistic reducer, then reconcile a canonical server snapshot; never require F5 and never ignore a canonical snapshot merely because its `operation_id` is local.
+- Scope every file viewer, preview, conversion poll, and long async surface to an explicit session identity. Abort work and destroy workers/documents/render tasks/object URLs when the source, owner, or surface changes so stale content cannot reappear in a different record.
+- Accept identity colors only through a validated professional color control: curated choices plus deliberate custom input, normalized `#RRGGBB`, contrast preview on light/dark/tinted surfaces, and no alpha, gradients, arbitrary CSS, or uploaded SVG color payloads.
 
 ### 5. Verify Before Completion
 

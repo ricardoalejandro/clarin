@@ -29,6 +29,7 @@ import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/
 import { subscribeWebSocket } from '@/lib/api'
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import { useKanbanPan } from '@/lib/useKanbanPan'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 
 const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
@@ -590,7 +591,7 @@ export default function EventDetailPage() {
   // UI state
   const [viewMode, setViewMode] = useState<'kanban' | 'list' | 'logbook'>('kanban')
   const [searchQuery, setSearchQuery] = useState('')
-  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(searchQuery)
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
   const [filterStageIds, setFilterStageIds] = useState<Set<string>>(new Set())
   const [filterTagNames, setFilterTagNames] = useState<Set<string>>(new Set())
@@ -599,6 +600,7 @@ export default function EventDetailPage() {
   const [filterHasPhone, setFilterHasPhone] = useState(false)
   // Formula filter
   const [tagSearchQuery, setTagSearchQuery] = useState('')
+  const [debouncedTagSearchQuery, setDebouncedTagSearchQuery] = useDebouncedValue(tagSearchQuery)
   const [pFormulaType, setPFormulaType] = useState<'simple' | 'advanced'>('simple')
   const [pFormulaText, setPFormulaText] = useState('')
   const [pFormulaIsValid, setPFormulaIsValid] = useState(true)
@@ -708,6 +710,23 @@ export default function EventDetailPage() {
   const [loadingListObs, setLoadingListObs] = useState<Set<string>>(new Set())
   const [listHistoryParticipant, setListHistoryParticipant] = useState<Participant | null>(null)
 
+  const updateParticipantSearch = useCallback((value: string) => {
+    participantAbortRef.current?.abort()
+    participantAbortRef.current = null
+    listAbortRef.current?.abort()
+    listAbortRef.current = null
+    stageAbortRefs.current.forEach(controller => controller.abort())
+    stageAbortRefs.current.clear()
+    participantRequestRef.current += 1
+    listRequestRef.current += 1
+    participantGenerationRef.current += 1
+    setLoading(false)
+    setLoadingMoreStages(new Set())
+    setListLoading(false)
+    setSearchQuery(value)
+    if (!value) setDebouncedSearch('')
+  }, [setDebouncedSearch])
+
   // ── Logbook (Bitácora) state ──
   interface Logbook {
     id: string; event_id: string; account_id: string; date: string; title: string
@@ -813,6 +832,7 @@ export default function EventDetailPage() {
   }, [eventId])
 
   const fetchParticipantsPaginated = useCallback(async () => {
+    if (searchQuery !== debouncedSearch) return
     participantAbortRef.current?.abort()
     stageAbortRefs.current.forEach(controller => controller.abort())
     stageAbortRefs.current.clear()
@@ -860,9 +880,10 @@ export default function EventDetailPage() {
         setLoading(false)
       }
     }
-  }, [eventId, debouncedSearch, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [eventId, searchQuery, debouncedSearch, filterTagNames, excludeFilterTagNames, tagFilterMode, filterStageIds, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const loadMoreForStage = useCallback(async (stageId: string) => {
+    if (searchQuery !== debouncedSearch) return
     if (stageAbortRefs.current.has(stageId)) return
     const abortController = new AbortController()
     stageAbortRefs.current.set(stageId, abortController)
@@ -923,9 +944,10 @@ export default function EventDetailPage() {
         setLoadingMoreStages(prev => { const next = new Set(prev); next.delete(stageId); return next })
       }
     }
-  }, [stageData, unassignedData, eventId, debouncedSearch, filterTagNames, excludeFilterTagNames, tagFilterMode, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [stageData, unassignedData, eventId, searchQuery, debouncedSearch, filterTagNames, excludeFilterTagNames, tagFilterMode, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const fetchListParticipants = useCallback(async (reset: boolean = false) => {
+    if (searchQuery !== debouncedSearch) return
     if (!reset && listAbortRef.current) return
     listAbortRef.current?.abort()
     const abortController = new AbortController()
@@ -983,7 +1005,7 @@ export default function EventDetailPage() {
         setListLoading(false)
       }
     }
-  }, [eventId, debouncedSearch, filterStageIds, filterTagNames, excludeFilterTagNames, tagFilterMode, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
+  }, [eventId, searchQuery, debouncedSearch, filterStageIds, filterTagNames, excludeFilterTagNames, tagFilterMode, filterHasPhone, appliedFormulaType, appliedFormulaText, filterDateField, filterDatePreset, filterDateFrom, filterDateTo])
 
   const fetchBatchObservations = useCallback(async (participantIds: string[]) => {
     const uncached = participantIds.filter(id => !listObservations.has(id) && !loadingListObs.has(id))
@@ -2240,12 +2262,6 @@ export default function EventDetailPage() {
     if (viewMode === 'logbook' && event) fetchLogbooks()
   }, [viewMode, fetchLogbooks, event])
 
-  // Debounce search
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(searchQuery), 500)
-    return () => clearTimeout(t)
-  }, [searchQuery])
-
   // WebSocket — debounce reconciliation events to avoid refresh storms from background sync
   const participantDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -2484,6 +2500,8 @@ export default function EventDetailPage() {
   }, [viewMode, listHasMore, listLoading, fetchListParticipants])
 
   const activeFilterCount = filterStageIds.size + filterTagNames.size + excludeFilterTagNames.size + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + (filterHasPhone ? 1 : 0) + (debouncedSearch ? 1 : 0)
+  const searchPending = searchQuery !== debouncedSearch
+  const tagSearchPending = tagSearchQuery !== debouncedTagSearchQuery
   const displayStages = pipelineStages.length > 0 ? pipelineStages : stageData.map(s => ({ id: s.id, pipeline_id: s.pipeline_id, name: s.name, color: s.color, position: s.position }))
   const allUniqueTags = allTags
 
@@ -2586,13 +2604,27 @@ export default function EventDetailPage() {
           <>
             {/* Search + Filter dropdown container */}
             <div className={`${isCompactLayout ? 'order-last basis-full max-w-none' : 'flex-1 max-w-sm'} relative min-w-[14rem]`}>
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 z-10" />
+              {searchPending
+                ? <Loader2 className="absolute left-2.5 top-1/2 z-10 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-hidden="true" />
+                : <Search className="absolute left-2.5 top-1/2 z-10 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />}
               <input
                 value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
+                onChange={e => updateParticipantSearch(e.target.value)}
                 placeholder="Buscar participante..."
-                className={`w-full pl-8 pr-12 py-1.5 bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-slate-800 placeholder:text-slate-400 ${isCompactLayout ? 'min-h-11 text-base' : 'text-sm'} ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
+                aria-busy={searchPending}
+                className={`w-full rounded-lg border bg-white py-1.5 pl-8 pr-24 text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500 ${isCompactLayout ? 'min-h-11 text-base' : 'text-sm'} ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => updateParticipantSearch('')}
+                  className={`absolute top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${isCompactLayout ? 'right-11 h-11 w-11' : 'right-9 h-8 w-8'}`}
+                  aria-label="Limpiar búsqueda de participantes"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              )}
+              {searchPending && <span className="sr-only" role="status">Buscando participantes…</span>}
               <button
                 onClick={() => setShowFilterDropdown(!showFilterDropdown)}
                 className={`absolute top-1/2 -translate-y-1/2 flex items-center justify-center rounded-md transition ${isCompactLayout ? 'right-0 min-h-11 min-w-11' : 'right-2 p-1'} ${activeFilterCount > 0 ? 'bg-green-100 text-green-700' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100'}`}
@@ -2619,7 +2651,7 @@ export default function EventDetailPage() {
                     <div className="flex items-center gap-2">
                       {activeFilterCount > 0 && (
                         <button
-                          onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setFilterHasPhone(false); setPFormulaType('simple'); setPFormulaText(''); setPFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setTagSearchQuery('') }}
+                          onClick={() => { setFilterStageIds(new Set()); setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setFilterHasPhone(false); setPFormulaType('simple'); setPFormulaText(''); setPFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setTagSearchQuery(''); setDebouncedTagSearchQuery('') }}
                           className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                         >
                           Limpiar todo
@@ -2847,17 +2879,31 @@ export default function EventDetailPage() {
                         {pFormulaType === 'simple' ? (
                           <div className={`${isCompactLayout ? 'overflow-visible' : 'flex-1 overflow-y-auto'} p-3 space-y-2`}>
                             <div className="relative">
-                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                              {tagSearchPending
+                                ? <Loader2 className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-hidden="true" />
+                                : <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />}
                               <input
                                 type="text"
                                 placeholder="Buscar etiqueta..."
                                 value={tagSearchQuery}
                                 onChange={(e) => setTagSearchQuery(e.target.value)}
-                                className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none transition placeholder:text-slate-400"
+                                aria-busy={tagSearchPending}
+                                className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-9 text-xs outline-none transition placeholder:text-slate-400 focus:border-transparent focus:ring-2 focus:ring-emerald-500"
                               />
+                              {tagSearchQuery && (
+                                <button
+                                  type="button"
+                                  onClick={() => { setTagSearchQuery(''); setDebouncedTagSearchQuery('') }}
+                                  className="absolute right-1 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                                  aria-label="Limpiar búsqueda de etiquetas"
+                                >
+                                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                                </button>
+                              )}
+                              {tagSearchPending && <span className="sr-only" role="status">Actualizando etiquetas…</span>}
                             </div>
                             <div className="flex flex-wrap gap-1.5">
-                              {allUniqueTags.filter(t => t.name.toLowerCase().includes(tagSearchQuery.toLowerCase())).map(tag => {
+                              {allUniqueTags.filter(t => t.name.toLowerCase().includes(debouncedTagSearchQuery.toLowerCase())).map(tag => {
                                 const isInclude = filterTagNames.has(tag.name)
                                 const isExclude = excludeFilterTagNames.has(tag.name)
                                 return (

@@ -89,7 +89,7 @@ func (r *TaskWorkRepository) TaskBelongsToAccount(ctx context.Context, accountID
 func (r *TaskWorkRepository) EnsureDefaultList(ctx context.Context, accountID, userID uuid.UUID) (*uuid.UUID, error) {
 	if _, err := r.db.Exec(ctx, `
 		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,is_default,name,description,color,icon,sort_order,created_by)
-		SELECT $1,w.id,TRUE,TRUE,'Bandeja general','Tareas sin una lista específica','#10b981','inbox',0,$2
+		SELECT $1,w.id,TRUE,TRUE,'Bandeja general','Tareas sin una lista específica','#10B981','inbox',0,$2
 		FROM task_workflows w
 		WHERE w.account_id=$1 AND w.is_default
 		ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING
@@ -104,15 +104,15 @@ func (r *TaskWorkRepository) EnsureDefaultList(ctx context.Context, accountID, u
 }
 
 func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUID) ([]*domain.TaskFolder, []*domain.TaskList, error) {
-	rows, err := r.db.Query(ctx, `
+	return listTaskFolders(ctx, r.db, accountID)
+}
+
+func listTaskFolders(ctx context.Context, querier taskListQuerier, accountID uuid.UUID) ([]*domain.TaskFolder, []*domain.TaskList, error) {
+	rows, err := querier.Query(ctx, `
 		SELECT f.id,f.account_id,f.workflow_id,f.name,f.description,f.color,f.icon,f.sort_order,f.created_by,
-			f.archived_at,f.created_at,f.updated_at,
-			COUNT(t.id) FILTER (WHERE t.deleted_at IS NULL)
+			f.archived_at,f.created_at,f.updated_at
 		FROM task_folders f
-		LEFT JOIN task_lists l ON l.account_id=f.account_id AND l.folder_id=f.id AND l.archived_at IS NULL
-		LEFT JOIN tasks t ON t.account_id=f.account_id AND t.list_id=l.id AND t.parent_task_id IS NULL
 		WHERE f.account_id=$1 AND f.archived_at IS NULL
-		GROUP BY f.id
 		ORDER BY f.sort_order,f.created_at
 	`, accountID)
 	if err != nil {
@@ -125,7 +125,7 @@ func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUI
 		folder := &domain.TaskFolder{}
 		if err := rows.Scan(&folder.ID, &folder.AccountID, &folder.WorkflowID, &folder.Name, &folder.Description,
 			&folder.Color, &folder.Icon, &folder.SortOrder, &folder.CreatedBy, &folder.ArchivedAt, &folder.CreatedAt,
-			&folder.UpdatedAt, &folder.TaskCount); err != nil {
+			&folder.UpdatedAt); err != nil {
 			return nil, nil, err
 		}
 		folder.Lists = []*domain.TaskList{}
@@ -136,7 +136,7 @@ func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUI
 		return nil, nil, err
 	}
 
-	lists, err := (&TaskRepository{db: r.db}).GetListsByAccount(ctx, accountID)
+	lists, err := getTaskListsByAccount(ctx, querier, accountID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -148,9 +148,126 @@ func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUI
 		}
 		if folder := byID[*list.FolderID]; folder != nil {
 			folder.Lists = append(folder.Lists, list)
+			addTaskListCountsToFolder(folder, list)
 		}
 	}
 	return folders, root, nil
+}
+
+func addTaskListCountsToFolder(folder *domain.TaskFolder, list *domain.TaskList) {
+	if folder == nil || list == nil {
+		return
+	}
+	folder.TaskCount += list.TaskCount
+	folder.OpenTaskCount += list.OpenTaskCount
+	folder.CompletedTaskCount += list.CompletedTaskCount
+	folder.CancelledTaskCount += list.CancelledTaskCount
+}
+
+// HierarchyCounts returns a canonical count snapshot for every active list and
+// folder in one account. It deliberately builds from the same hierarchy query
+// used by the navigation so the mutation response and a later reload agree.
+func (r *TaskWorkRepository) HierarchyCounts(ctx context.Context, accountID uuid.UUID) (*domain.TaskHierarchyCounts, error) {
+	conn, err := r.db.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	locked := false
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if locked {
+			if _, unlockErr := conn.Exec(cleanupCtx, `SELECT pg_advisory_unlock(hashtextextended('clarin:task-hierarchy-counts:' || $1::text,0))`, accountID); unlockErr != nil {
+				// A pooled connection must never be returned while it still owns a
+				// session advisory lock. Remove and close it on cleanup failure.
+				raw := conn.Hijack()
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = raw.Close(closeCtx)
+				closeCancel()
+				return
+			}
+		}
+		conn.Release()
+	}()
+
+	// Acquire the account-scoped lock before opening REPEATABLE READ. Taking an
+	// xact lock as the first statement inside that transaction would fix the
+	// snapshot before a possible wait, allowing an older snapshot to receive a
+	// newer revision. The dedicated session lock orders both snapshots and the
+	// transaction IDs assigned below across backend instances.
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended('clarin:task-hierarchy-counts:' || $1::text,0))`, accountID); err != nil {
+		return nil, err
+	}
+	locked = true
+
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	folders, rootLists, err := listTaskFolders(ctx, tx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := buildTaskHierarchyCounts(folders, rootLists)
+	if err := tx.QueryRow(ctx, `SELECT txid_current()::bigint,clock_timestamp()`).Scan(&snapshot.Revision, &snapshot.CapturedAt); err != nil {
+		return nil, err
+	}
+	snapshot.CapturedAt = snapshot.CapturedAt.UTC()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+func buildTaskHierarchyCounts(folders []*domain.TaskFolder, rootLists []*domain.TaskList) *domain.TaskHierarchyCounts {
+	snapshot := &domain.TaskHierarchyCounts{
+		Lists:   make([]domain.TaskListCountSnapshot, 0, len(rootLists)),
+		Folders: make([]domain.TaskFolderCountSnapshot, 0, len(folders)),
+	}
+	appendList := func(list *domain.TaskList) {
+		if list == nil {
+			return
+		}
+		snapshot.Lists = append(snapshot.Lists, domain.TaskListCountSnapshot{
+			ID: list.ID, TaskCount: list.TaskCount, OpenTaskCount: list.OpenTaskCount,
+			CompletedTaskCount: list.CompletedTaskCount, CancelledTaskCount: list.CancelledTaskCount,
+		})
+		snapshot.TaskCount += list.TaskCount
+		snapshot.OpenTaskCount += list.OpenTaskCount
+		snapshot.CompletedTaskCount += list.CompletedTaskCount
+		snapshot.CancelledTaskCount += list.CancelledTaskCount
+	}
+	for _, list := range rootLists {
+		appendList(list)
+	}
+	for _, folder := range folders {
+		if folder == nil {
+			continue
+		}
+		// Derive folder values from canonical list values instead of trusting a
+		// second aggregate. This keeps child tasks excluded at every hierarchy
+		// level and prevents list/folder snapshots from diverging.
+		folderCounts := domain.TaskFolderCountSnapshot{ID: folder.ID}
+		for _, list := range folder.Lists {
+			if list == nil {
+				continue
+			}
+			folderCounts.TaskCount += list.TaskCount
+			folderCounts.OpenTaskCount += list.OpenTaskCount
+			folderCounts.CompletedTaskCount += list.CompletedTaskCount
+			folderCounts.CancelledTaskCount += list.CancelledTaskCount
+		}
+		snapshot.Folders = append(snapshot.Folders, domain.TaskFolderCountSnapshot{
+			ID: folderCounts.ID, TaskCount: folderCounts.TaskCount, OpenTaskCount: folderCounts.OpenTaskCount,
+			CompletedTaskCount: folderCounts.CompletedTaskCount, CancelledTaskCount: folderCounts.CancelledTaskCount,
+		})
+		for _, list := range folder.Lists {
+			appendList(list)
+		}
+	}
+	return snapshot
 }
 
 func (r *TaskWorkRepository) CreateFolder(ctx context.Context, folder *domain.TaskFolder) error {
@@ -173,7 +290,7 @@ func (r *TaskWorkRepository) CreateFolder(ctx context.Context, folder *domain.Ta
 		}
 	}
 	if folder.Color == "" {
-		folder.Color = "#10b981"
+		folder.Color = "#10B981"
 	}
 	if folder.Icon == "" {
 		folder.Icon = "folder"

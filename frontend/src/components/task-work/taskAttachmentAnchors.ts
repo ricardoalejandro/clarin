@@ -9,3 +9,15 @@ export function textAttachmentAnchor(text: string, offset: number, quote: string
   const safeOffset = Math.max(0, Math.min(text.length, offset))
   return { kind: 'text', line: text.slice(0, safeOffset).split('\n').length, offset: safeOffset, quote: quote.slice(0, 500) }
 }
+
+export function emptyAttachmentAnchor(kind?: string): TaskAttachmentAnchor {
+  if (kind === 'pdf' || kind === 'word_pdf') return { kind: 'pdf' }
+  if (kind === 'text') return { kind: 'text' }
+  return { kind: 'image' }
+}
+
+export function hasUsableAttachmentAnchor(anchor: TaskAttachmentAnchor) {
+  if (anchor.kind === 'image') return Number.isFinite(anchor.x) && Number.isFinite(anchor.y)
+  if (anchor.kind === 'pdf') return Number.isFinite(anchor.page) && Number.isFinite(anchor.x) && Number.isFinite(anchor.y)
+  return Number.isFinite(anchor.line) && Number.isFinite(anchor.offset) && Boolean(anchor.quote?.trim())
+}

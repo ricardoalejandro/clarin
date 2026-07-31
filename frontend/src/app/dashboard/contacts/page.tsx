@@ -9,7 +9,7 @@ import {
   ChevronDown, CheckSquare, Square, XCircle, AlertCircle, MoreVertical, MoreHorizontal,
   Users, Merge, Eye, X, Smartphone, MessageSquare, Send,
   Clock, Plus, FileText, Maximize2, CalendarDays, Upload, Calendar, User, Save, Edit2, Filter, Radio,
-  UserPlus, ClipboardPaste, Hash, Code, Download, CheckCircle2, ExternalLink, ArrowUpDown, ChevronUp, Cloud, Settings
+  UserPlus, ClipboardPaste, Hash, Code, Download, CheckCircle2, ExternalLink, ArrowUpDown, ChevronUp, Cloud, Settings, Loader2
 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
@@ -25,6 +25,7 @@ import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { subscribeWebSocket } from '@/lib/api'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import type { Lead } from '@/types/contact'
 import type { Chat } from '@/types/chat'
@@ -322,6 +323,7 @@ export default function ContactsPage() {
   const [contactsError, setContactsError] = useState('')
   const [total, setTotal] = useState(0)
   const [searchTerm, setSearchTerm] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [filterDevice, setFilterDevice] = useState('')
   const [allTags, setAllTags] = useState<StructuredTag[]>([])
 
@@ -331,6 +333,7 @@ export default function ContactsPage() {
   const [excludeFilterTagNames, setExcludeFilterTagNames] = useState<Set<string>>(new Set())
   const [tagFilterMode, setTagFilterMode] = useState<'OR' | 'AND'>('OR')
   const [tagSearchTerm, setTagSearchTerm] = useState('')
+  const [debouncedTagSearchTerm, setDebouncedTagSearchTerm] = useDebouncedValue(tagSearchTerm)
   const [leadFormulaType, setLeadFormulaType] = useState<'simple' | 'advanced'>('simple')
   const [leadFormulaText, setLeadFormulaText] = useState('')
   const [leadFormulaIsValid, setLeadFormulaIsValid] = useState(true)
@@ -347,6 +350,7 @@ export default function ContactsPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const offsetRef = useRef(0)
   const contactsRequestRef = useRef(0)
+  const contactsAbortRef = useRef<AbortController | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // Selection
@@ -558,6 +562,10 @@ export default function ContactsPage() {
 
   const fetchContacts = useCallback(async (reset: boolean = true) => {
     if (!token) return
+    if (reset && searchTerm !== debouncedSearch) return
+    contactsAbortRef.current?.abort()
+    const controller = new AbortController()
+    contactsAbortRef.current = controller
     const offset = reset ? 0 : offsetRef.current
     if (reset) {
       setLoading(true)
@@ -568,7 +576,7 @@ export default function ContactsPage() {
     if (reset) setContactsError('')
     try {
       const params = new URLSearchParams()
-      if (searchTerm) params.set('search', searchTerm)
+      if (debouncedSearch) params.set('search', debouncedSearch)
       if (filterDevice) params.set('device_id', filterDevice)
 
       // Advanced filter: formula or simple tag filter
@@ -606,9 +614,10 @@ export default function ContactsPage() {
 
       const res = await fetch(`/api/contacts?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
       })
       const data = await res.json().catch(() => ({}))
-      if (requestId !== contactsRequestRef.current) return
+      if (requestId !== contactsRequestRef.current || controller.signal.aborted) return
       if (!res.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los contactos')
       if (data.success) {
         const newContacts: Contact[] = data.contacts || []
@@ -630,7 +639,7 @@ export default function ContactsPage() {
         setContactsError('')
       }
     } catch (err) {
-      if (requestId !== contactsRequestRef.current) return
+      if (requestId !== contactsRequestRef.current || controller.signal.aborted) return
       console.error('Failed to fetch contacts:', err)
       setContactsError(err instanceof Error ? err.message : 'No se pudieron cargar los contactos')
     } finally {
@@ -640,7 +649,7 @@ export default function ContactsPage() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, searchTerm, filterDevice, appliedFormulaType, appliedFormulaText, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder, cfVisibleIds, cfFilters])
+  }, [token, searchTerm, debouncedSearch, filterDevice, appliedFormulaType, appliedFormulaText, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder, cfVisibleIds, cfFilters])
 
   const loadMoreContacts = useCallback(() => {
     if (loadingMore || !hasMore) return
@@ -785,11 +794,23 @@ export default function ContactsPage() {
   }, [fetchContacts, token])
 
   // Debounced fetch: resets scroll to top on filter/search change
-  const [debouncedSearch, setDebouncedSearch] = useState('')
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(searchTerm), 500)
+    const timer = setTimeout(() => setDebouncedSearch(searchTerm), SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [searchTerm])
+
+  useEffect(() => () => contactsAbortRef.current?.abort(), [])
+
+  const searchPending = searchTerm.trim() !== debouncedSearch
+
+  const updateSearchTerm = (value: string) => {
+    contactsAbortRef.current?.abort()
+    contactsRequestRef.current += 1
+    setLoading(false)
+    setLoadingMore(false)
+    setSearchTerm(value)
+    if (!value) setDebouncedSearch('')
+  }
 
   // Debounce tag filter changes to prevent flickering
   const [debouncedTagNames, setDebouncedTagNames] = useState<Set<string>>(new Set())
@@ -800,7 +821,7 @@ export default function ContactsPage() {
       setDebouncedTagNames(filterTagNames)
       setDebouncedExcludeTagNames(excludeFilterTagNames)
       setDebouncedTagMode(tagFilterMode)
-    }, 500)
+    }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
   }, [filterTagNames, excludeFilterTagNames, tagFilterMode])
 
@@ -1188,8 +1209,9 @@ export default function ContactsPage() {
 
   // Filtered tags for tag browser
   const filteredTags = allTags.filter(t =>
-    !tagSearchTerm.trim() || t.name.toLowerCase().includes(tagSearchTerm.trim().toLowerCase())
+    !debouncedTagSearchTerm.trim() || t.name.toLowerCase().includes(debouncedTagSearchTerm.trim().toLowerCase())
   )
+  const tagSearchPending = tagSearchTerm !== debouncedTagSearchTerm
 
   // Fetch leads for a contact
   const fetchContactLeads = async (contact: Contact) => {
@@ -1407,13 +1429,16 @@ export default function ContactsPage() {
           <input
             type="text"
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => updateSearchTerm(e.target.value)}
             onFocus={() => {
               if (!isCompactWorkspace) setShowFilterDropdown(true)
             }}
             placeholder="Buscar por nombre, teléfono, email..."
-            className={`${isCompactWorkspace ? 'h-11 rounded-xl pr-12' : 'rounded-lg py-1.5 pr-3'} w-full border bg-white pl-8 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500 ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
+            aria-busy={searchPending || loading}
+            className={`${isCompactWorkspace ? 'h-11 rounded-xl pr-24' : 'rounded-lg py-1.5 pr-16'} w-full border bg-white pl-8 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500 ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
           />
+          {searchPending && <Loader2 aria-label="Esperando para buscar contactos" className={`absolute top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500 ${isCompactWorkspace ? 'right-20' : 'right-10'}`} />}
+          {searchTerm && <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de contactos" className={`absolute top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 ${isCompactWorkspace ? 'right-11' : 'right-1'}`}><X className="h-4 w-4" /></button>}
           {activeFilterCount > 0 && !showFilterDropdown && !isCompactWorkspace && (
             <span className="absolute right-2.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full bg-emerald-600 text-[10px] font-bold text-white">{activeFilterCount}</span>
           )}
@@ -1710,14 +1735,28 @@ export default function ContactsPage() {
                           </p>
                         </div>
                         <div className="relative">
-                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                          {tagSearchPending
+                            ? <Loader2 className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-hidden="true" />
+                            : <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />}
                           <input
                             type="text"
                             value={tagSearchTerm}
                             onChange={(e) => setTagSearchTerm(e.target.value)}
                             placeholder="Buscar etiquetas..."
-                            className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 transition-all"
+                            aria-busy={tagSearchPending}
+                            className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-9 text-xs text-slate-800 placeholder:text-slate-400 transition-all focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/30"
                           />
+                          {tagSearchTerm && (
+                            <button
+                              type="button"
+                              onClick={() => { setTagSearchTerm(''); setDebouncedTagSearchTerm('') }}
+                              className="absolute right-1 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                              aria-label="Limpiar búsqueda de etiquetas"
+                            >
+                              <X className="h-3.5 w-3.5" aria-hidden="true" />
+                            </button>
+                          )}
+                          {tagSearchPending && <span className="sr-only" role="status">Actualizando etiquetas…</span>}
                         </div>
                         <div className="space-y-0.5 max-h-48 overflow-y-auto">
                           {filteredTags.map(tag => {
@@ -1753,10 +1792,10 @@ export default function ContactsPage() {
                               </div>
                             )
                           })}
-                          {filteredTags.length === 0 && tagSearchTerm.trim() && (
+                          {filteredTags.length === 0 && debouncedTagSearchTerm.trim() && !tagSearchPending && (
                             <div className="text-center py-4">
                               <Search className="w-4 h-4 text-slate-300 mx-auto mb-1" />
-                              <p className="text-[10px] text-slate-400">Sin resultados para &quot;{tagSearchTerm}&quot;</p>
+                              <p className="text-[10px] text-slate-400">Sin resultados para &quot;{debouncedTagSearchTerm}&quot;</p>
                             </div>
                           )}
                         </div>

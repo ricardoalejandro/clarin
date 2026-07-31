@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Plus, Search, Sparkles, Trash2, ExternalLink, MoreVertical, Eye, EyeOff, Copy } from 'lucide-react';
+import { Plus, Search, Sparkles, Trash2, ExternalLink, MoreVertical, Eye, EyeOff, Copy, Loader2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Dynamic, DEFAULT_CONFIG } from '@/types/dynamic';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue';
 
 const TYPE_LABELS: Record<string, string> = {
   scratch_card: 'Raspa y Descubre',
@@ -25,6 +26,8 @@ export default function DynamicsPage() {
   const [dynamics, setDynamics] = useState<Dynamic[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useDebouncedValue(searchQuery, SEARCH_DEBOUNCE_MS);
+  const searchPending = searchQuery !== debouncedSearchQuery;
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newDynamic, setNewDynamic] = useState({ name: '', type: 'scratch_card' });
   const [creating, setCreating] = useState(false);
@@ -104,7 +107,7 @@ export default function DynamicsPage() {
   };
 
   const filtered = dynamics.filter(d =>
-    !searchQuery || d.name.toLowerCase().includes(searchQuery.toLowerCase())
+    !debouncedSearchQuery || d.name.toLowerCase().includes(debouncedSearchQuery.toLowerCase())
   );
 
   return (
@@ -137,9 +140,16 @@ export default function DynamicsPage() {
             type="text"
             placeholder="Buscar dinámicas..."
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-400"
+            onChange={(e) => {
+              const next = e.target.value;
+              setSearchQuery(next);
+              if (!next) setDebouncedSearchQuery('');
+            }}
+            className="w-full pl-10 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-400"
           />
+          {searchPending && (
+            <Loader2 className="absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" aria-label="Actualizando resultados" />
+          )}
         </div>
       </div>
 
@@ -153,10 +163,10 @@ export default function DynamicsPage() {
           <div className="flex flex-col items-center justify-center py-20 text-slate-400">
             <Sparkles className="w-12 h-12 mb-3 opacity-30" />
             <p className="font-medium text-slate-500">
-              {searchQuery ? 'No se encontraron dinámicas' : 'Aún no hay dinámicas'}
+              {debouncedSearchQuery ? 'No se encontraron dinámicas' : 'Aún no hay dinámicas'}
             </p>
             <p className="text-sm mt-1">
-              {searchQuery ? 'Intenta con otro término' : 'Crea tu primera dinámica interactiva'}
+              {debouncedSearchQuery ? 'Intenta con otro término' : 'Crea tu primera dinámica interactiva'}
             </p>
           </div>
         ) : (

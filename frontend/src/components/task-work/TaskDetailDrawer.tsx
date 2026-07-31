@@ -30,6 +30,7 @@ import {
   X,
 } from 'lucide-react'
 import { apiDelete, apiGet, apiPost, apiPut, apiUpload, subscribeWebSocket } from '@/lib/api'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import {
   Task,
   TaskActivity,
@@ -59,6 +60,7 @@ import {
   taskDescriptionEditorRemainsOpen,
   taskWindowVisualState,
 } from './taskInteractionVisuals'
+import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 
 interface Props {
   taskId: string | null
@@ -71,8 +73,8 @@ interface Props {
   onEdit: (task: Task) => void
   onOpenTask: (taskId: string) => void
   onCreateSubtask: (task: Task) => void
-  onChanged: (task?: Task) => void
-  onDeleted: (taskId: string, version?: number) => boolean
+  onChanged: (task?: Task, operationID?: string, hierarchyCounts?: TaskHierarchyCounts) => void
+  onDeleted: (taskId: string, version?: number, operationID?: string, hierarchyCounts?: TaskHierarchyCounts) => boolean
 }
 
 type DetailTab = 'details' | 'activity'
@@ -165,6 +167,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
   const [dependencyTaskId, setDependencyTaskId] = useState('')
   const [dependencySearch, setDependencySearch] = useState('')
+  const [dependencySettledSearch, setDependencySettledSearch] = useState('')
   const [dependencyResults, setDependencyResults] = useState<Task[]>([])
   const [dependencySearching, setDependencySearching] = useState(false)
   const [dependencyPickerOpen, setDependencyPickerOpen] = useState(false)
@@ -179,6 +182,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const taskRef = useRef<Task | null>(null)
   const loadSequenceRef = useRef(0)
   const dependencySearchSequenceRef = useRef(0)
+  const dependencySearchAbortRef = useRef<AbortController | null>(null)
   const taskWriteQueueRef = useRef<Promise<void>>(Promise.resolve())
   const preservedDraftKeysRef = useRef(new Set<string>())
   const draftBodiesRef = useRef<Record<string, Record<string, unknown>>>({})
@@ -411,6 +415,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     prependScrollHeightRef.current = null
     setActivity([])
     setAttachments([])
+    setPreviewAttachment(null)
     setDependencies([])
     setTab('details')
     setFeedFilter('all')
@@ -421,7 +426,10 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     setCommentAttachmentIds([])
     setEditingCommentId('')
     setSubtaskTitle('')
+    dependencySearchAbortRef.current?.abort()
+    dependencySearchSequenceRef.current += 1
     setDependencySearch('')
+    setDependencySettledSearch('')
     setDependencyTaskId('')
     setNewFeedItems(false)
     feedNearBottomRef.current = true
@@ -443,7 +451,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   useEffect(() => subscribeWebSocket(raw => {
     const envelope = raw as {
       event?: string
-      data?: { action?: string; task_id?: string; version?: number; related_task_ids?: string[]; task?: Task; subtask?: Task; comment_id?: string; comment?: TaskComment; attachment_id?: string }
+      data?: { action?: string; task_id?: string; version?: number; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts; related_task_ids?: string[]; task?: Task; subtask?: Task; comment_id?: string; comment?: TaskComment; attachment_id?: string }
     }
     if (envelope.event !== 'task_update' && envelope.event !== 'task_overdue') return
     const message = envelope.data || {}
@@ -453,7 +461,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     const parentTaskId = message.task?.parent_task_id || message.subtask?.parent_task_id
     const currentParentId = taskRef.current?.parent_task_id
     if (message.action === 'deleted' && (message.task_id === currentTaskId || message.task_id === currentParentId)) {
-      if (onDeleted(message.task_id || currentTaskId, message.task?.version || message.version)) onCloseRef.current()
+      if (onDeleted(message.task_id || currentTaskId, message.task?.version || message.version, message.operation_id, message.hierarchy_counts)) onCloseRef.current()
       return
     }
     if (message.action && taskStructureActions.has(message.action)) {
@@ -494,7 +502,10 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       } else void refreshComments()
     } else if (message.action?.startsWith('comment_')) void refreshComments()
     else if (message.action?.includes('attachment')) {
-      if (message.action === 'attachment_deleted' && message.attachment_id) removeAttachmentReferences(message.attachment_id)
+      if (message.action === 'attachment_deleted' && message.attachment_id) {
+        removeAttachmentReferences(message.attachment_id)
+        setPreviewAttachment(current => current?.id === message.attachment_id ? null : current)
+      }
       void refreshAttachments()
     }
     else if (message.action?.includes('dependency')) void refreshDependencies()
@@ -505,7 +516,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   useEffect(() => {
     if (!taskOpen) return
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || document.querySelector('[data-task-editor-modal],[data-task-structure-modal],[data-task-property-picker-portal],[data-task-destructive-dialog]')) return
+      if (event.key !== 'Escape' || document.querySelector('[data-task-editor-modal],[data-task-structure-modal],[data-task-property-picker-portal],[data-task-destructive-dialog],[data-task-attachment-viewer]')) return
       event.preventDefault()
       onCloseRef.current()
     }
@@ -537,21 +548,38 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
   useEffect(() => {
     const query = dependencySearch.trim()
+    if (dependencyTaskId) {
+      setDependencySearching(false)
+      return
+    }
     if (query.length < 2) {
+      setDependencySettledSearch(query)
       setDependencyResults([])
       setDependencySearching(false)
       return
     }
+    const timer = window.setTimeout(() => setDependencySettledSearch(query), SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [dependencySearch, dependencyTaskId])
+
+  useEffect(() => {
+    const query = dependencySettledSearch.trim()
+    dependencySearchAbortRef.current?.abort()
     const sequence = ++dependencySearchSequenceRef.current
-    const timer = window.setTimeout(async () => {
-      setDependencySearching(true)
-      const response = await apiGet<{ tasks: Task[] }>(`/api/tasks?search=${encodeURIComponent(query)}&include_subtasks=false`)
-      if (sequence !== dependencySearchSequenceRef.current || taskIdRef.current !== taskId) return
+    if (dependencyTaskId || query.length < 2) {
+      setDependencySearching(false)
+      return
+    }
+    const controller = new AbortController()
+    dependencySearchAbortRef.current = controller
+    setDependencySearching(true)
+    void apiGet<{ tasks: Task[] }>(`/api/tasks?search=${encodeURIComponent(query)}&include_subtasks=false`, { signal: controller.signal }).then(response => {
+      if (controller.signal.aborted || sequence !== dependencySearchSequenceRef.current || taskIdRef.current !== taskId) return
       setDependencyResults((response.data?.tasks || []).filter(item => item.id !== taskId && !item.parent_task_id))
       setDependencySearching(false)
-    }, 250)
-    return () => window.clearTimeout(timer)
-  }, [dependencySearch, taskId])
+    })
+    return () => controller.abort()
+  }, [dependencySettledSearch, dependencyTaskId, taskId])
 
   const list = lists.find(item => item.id === task?.list_id)
   const workflow = workflows.find(item => item.id === list?.workflow_id) || workflows.find(item => item.is_default) || workflows[0]
@@ -561,6 +589,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
   const localDependencyCandidates = useMemo(() => allTasks.filter(item => item.id !== taskId && !item.parent_task_id).slice(0, 8), [allTasks, taskId])
   const dependencyCandidates = dependencySearch.trim().length >= 2 ? dependencyResults : localDependencyCandidates
+  const dependencySearchPending = !dependencyTaskId && dependencySearch.trim().length >= 2 && dependencySearch.trim() !== dependencySettledSearch
   const selectedDependency = [...dependencyResults, ...allTasks].find(item => item.id === dependencyTaskId)
 
   const updateTask = useCallback((key: string, body: Record<string, unknown>): Promise<boolean> => {
@@ -572,7 +601,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       const current = taskRef.current
       if (!current || current.id !== requestedTaskId || taskIdRef.current !== requestedTaskId) return false
       const operationID = crypto.randomUUID()
-      const result = await apiPut<{ task: Task; operation_id?: string }>(`/api/tasks/${requestedTaskId}`, { ...body, version: current.version, operation_id: operationID })
+      const result = await apiPut<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>(`/api/tasks/${requestedTaskId}`, { ...body, version: current.version, operation_id: operationID })
       if (taskIdRef.current !== requestedTaskId) return false
       if (!result.success || !result.data?.task) {
         if (result.status === 409) await refreshTask()
@@ -582,7 +611,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       clearFailure()
       preservedDraftKeysRef.current.delete(key)
       applyTask(result.data.task)
-      onChanged(result.data.task)
+      onChanged(result.data.task, result.data.operation_id || operationID, result.data.hierarchy_counts)
       return true
     }
     const queued = taskWriteQueueRef.current.then(execute, execute)
@@ -846,8 +875,11 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     const result = await apiPost<{ dependency: TaskDependency }>(`/api/tasks/${currentTask.id}/dependencies`, { predecessor_task_id: dependencyTaskId, lag_minutes: 0 })
     if (taskIdRef.current === currentTask.id && result.success) {
       await refreshDependencies()
+      dependencySearchAbortRef.current?.abort()
+      dependencySearchSequenceRef.current += 1
       setDependencyTaskId('')
       setDependencySearch('')
+      setDependencySettledSearch('')
       setDependencyPickerOpen(false)
       onChanged()
       window.setTimeout(() => { void refreshActivity() }, 120)
@@ -874,6 +906,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     const result = await apiDelete(`/api/tasks/${currentTask.id}/attachments/${item.id}`)
     if (result.success) {
       setAttachments(current => current.filter(file => file.id !== item.id))
+      setPreviewAttachment(current => current?.id === item.id ? null : current)
       removeAttachmentReferences(item.id)
     }
     else showFailure(result.error || 'No se pudo eliminar el archivo')
@@ -885,11 +918,12 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     if (!currentTask) return
     setArchiveError('')
     beginPending('archive')
-    const result = await apiDelete<{ task: Task; version: number }>(`/api/tasks/${currentTask.id}`, { version: currentTask.version, operation_id: crypto.randomUUID() })
+    const operationID = crypto.randomUUID()
+    const result = await apiDelete<{ task: Task; version: number; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>(`/api/tasks/${currentTask.id}`, { version: currentTask.version, operation_id: operationID })
     if (result.success) {
       const archivedVersion = result.data?.task?.version || result.data?.version
       setArchiveConfirmOpen(false)
-      if (onDeleted(currentTask.id, archivedVersion)) onClose()
+      if (onDeleted(currentTask.id, archivedVersion, result.data?.operation_id || operationID, result.data?.hierarchy_counts)) onClose()
       else await refreshTask()
     } else setArchiveError(result.error || 'No se pudo mover la tarea a Papelera. Reintenta.')
     endPending('archive')
@@ -1022,9 +1056,9 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     <section>
       <h3 className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-800"><Link2 className="h-4 w-4 text-emerald-600" /> Dependencias <span className="font-normal text-slate-400">{dependencies.length}</span></h3>
       <div className="space-y-2">{dependencies.map(dep => { const incoming = dep.successor_task_id === task.id; const linkedTaskId = incoming ? dep.predecessor_task_id : dep.successor_task_id; return <div key={dep.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"><span className="shrink-0 rounded-lg bg-white px-2 py-1 text-[10px] font-semibold text-slate-500">{incoming ? 'Bloqueada por' : 'Bloquea a'}</span><button onClick={() => onOpenTask(linkedTaskId)} className="min-w-0 flex-1 truncate text-left text-xs font-semibold text-slate-700 hover:text-emerald-700 hover:underline">{incoming ? dep.predecessor_title : dep.successor_title}</button><button aria-label="Eliminar dependencia" disabled={isPending(`dependency-delete:${dep.id}`)} onClick={() => { void removeDependency(dep) }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-3.5 w-3.5" /></button></div> })}
-        <div className="relative"><div className="flex gap-2"><div className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={dependencySearch} onFocus={() => setDependencyPickerOpen(true)} onChange={event => { setDependencySearch(event.target.value); setDependencyTaskId(''); setDependencyPickerOpen(true) }} placeholder="Buscar tarea predecesora…" className={`${inputClass} pl-9 pr-9`} />{dependencySearching && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div><button onClick={() => { void addDependency() }} disabled={!dependencyTaskId || isPending('dependency-create')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('dependency-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>
+        <div className="relative"><div className="flex gap-2"><div className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={dependencySearch} onFocus={() => setDependencyPickerOpen(true)} onChange={event => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencySearching(false); setDependencySearch(event.target.value); if (!event.target.value.trim()) setDependencySettledSearch(''); setDependencyTaskId(''); setDependencyPickerOpen(true) }} placeholder="Buscar tarea predecesora…" className={`${inputClass} pl-9 pr-9`} />{(dependencySearchPending || dependencySearching) && <Loader2 aria-label={dependencySearchPending ? 'Esperando para buscar' : 'Buscando dependencias'} className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div><button onClick={() => { void addDependency() }} disabled={!dependencyTaskId || isPending('dependency-create')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('dependency-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>
           {selectedDependency && <p className="mt-1.5 truncate text-[10px] font-medium text-emerald-700">Seleccionada: {selectedDependency.title}</p>}
-          {dependencyPickerOpen && !dependencyTaskId && <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">{dependencyCandidates.map(candidate => <button key={candidate.id} onClick={() => { setDependencyTaskId(candidate.id); setDependencySearch(candidate.title); setDependencyPickerOpen(false) }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-emerald-50"><span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-700">{candidate.title}</span><span className="shrink-0 text-[10px] text-slate-400">{candidate.list_name || 'Bandeja'}</span></button>)}{!dependencyCandidates.length && !dependencySearching && <p className="px-3 py-5 text-center text-xs text-slate-400">No encontramos tareas disponibles.</p>}</div>}
+          {dependencyPickerOpen && !dependencyTaskId && <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">{dependencyCandidates.map(candidate => <button key={candidate.id} onClick={() => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencyTaskId(candidate.id); setDependencySearch(candidate.title); setDependencySettledSearch(candidate.title.trim()); setDependencySearching(false); setDependencyPickerOpen(false) }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-emerald-50"><span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-700">{candidate.title}</span><span className="shrink-0 text-[10px] text-slate-400">{candidate.list_name || 'Bandeja'}</span></button>)}{!dependencyCandidates.length && !dependencySearching && !dependencySearchPending && <p className="px-3 py-5 text-center text-xs text-slate-400">No encontramos tareas disponibles.</p>}</div>}
         </div>
       </div>
     </section>
@@ -1068,7 +1102,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
         </> : <div className="flex flex-1 flex-col items-center justify-center px-6 text-center"><AlertCircle className="h-8 w-8 text-rose-300" /><p className="mt-3 text-sm font-semibold text-slate-700">No pudimos abrir esta tarea.</p><button onClick={() => { void load() }} className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Reintentar</button></div>}
       </aside>
       <TaskDestructiveConfirmDialog open={archiveConfirmOpen} title="Mover tarea a Papelera" description={`${task?.subtask_count ? `También se moverán ${task.subtask_count} subtarea${task.subtask_count === 1 ? '' : 's'}. ` : ''}La tarea podrá restaurarse durante el plazo configurado. Completar una tarea nunca la envía aquí.`} actionLabel="Mover a Papelera" busy={isPending('archive')} error={archiveError} onClose={() => { if (!isPending('archive')) { setArchiveConfirmOpen(false); setArchiveError('') } }} onConfirm={() => { void removeTask() }} />
-      {previewAttachment && task && <TaskAttachmentViewer taskId={task.id} attachment={previewAttachment} users={users} onClose={() => setPreviewAttachment(null)} />}
+      {previewAttachment && task && task.id === taskId && previewAttachment.task_id === taskId && <TaskAttachmentViewer key={`${task.id}:${previewAttachment.id}`} taskId={task.id} attachment={previewAttachment} users={users} onClose={() => setPreviewAttachment(null)} />}
     </div>,
     document.body,
   )

@@ -26,6 +26,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 
 interface Device {
   id: string
@@ -215,6 +216,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
   const [selectedDevice, setSelectedDevice] = useState('')
   const [mode, setMode] = useState<RecipientMode>('search')
   const [searchTerm, setSearchTerm] = useState('')
+  const [settledSearchTerm, setSettledSearchTerm] = useState('')
   const [contacts, setContacts] = useState<Contact[]>([])
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null)
   const [searchLoading, setSearchLoading] = useState(false)
@@ -279,6 +281,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
       setSelectedDevice(firstDevice)
       setMode('search')
       setSearchTerm('')
+      setSettledSearchTerm('')
       setContacts([])
       setSelectedContact(null)
       setSearchLoading(false)
@@ -462,14 +465,27 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
       setSearchError('')
       setSearchTotal(0)
       setSearchHasMore(false)
+      setSettledSearchTerm(query)
       return
     }
-    const timer = window.setTimeout(() => searchContacts(query, 0, false), 300)
+    const timer = window.setTimeout(() => setSettledSearchTerm(query), SEARCH_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [isOpen, mode, searchContacts, searchTerm, selectedContact])
+  }, [isOpen, mode, searchTerm, selectedContact])
+
+  useEffect(() => {
+    if (!isOpen || mode !== 'search' || selectedContact || settledSearchTerm.length < 2) return
+    void searchContacts(settledSearchTerm, 0, false)
+  }, [isOpen, mode, searchContacts, selectedContact, settledSearchTerm])
+
+  const searchPending = isOpen && mode === 'search' && !selectedContact && searchTerm.trim().length >= 2 && searchTerm.trim() !== settledSearchTerm
 
   const handleSearchChange = (value: string) => {
+    searchAbortRef.current?.abort()
+    searchRequestRef.current += 1
+    setSearchLoading(false)
+    setSearchLoadingMore(false)
     setSearchTerm(value)
+    if (!value) setSettledSearchTerm('')
     setSelectedContact(null)
     setContacts([])
     invalidateValidation()
@@ -482,6 +498,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
     setSearchLoadingMore(false)
     setSelectedContact(contact)
     setSearchTerm(getContactDisplayName(contact))
+    setSettledSearchTerm(getContactDisplayName(contact))
     setContacts([])
     setSearchError('')
     invalidateValidation()
@@ -496,6 +513,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
     setMode(nextMode)
     setSelectedContact(null)
     setSearchTerm('')
+    setSettledSearchTerm('')
     setContacts([])
     setSearchError('')
     setSearchTotal(0)
@@ -1015,13 +1033,15 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
                         value={searchTerm}
                         onChange={event => handleSearchChange(event.target.value)}
                         placeholder="Nombre, teléfono, correo u organización…"
-                        className="min-h-11 w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-10 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                        aria-busy={searchPending || searchLoading}
+                        className="min-h-11 w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-16 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                         role="combobox"
                         aria-autocomplete="list"
                         aria-controls="new-chat-contact-results"
                         aria-expanded={searchTerm.trim().length >= 2 && !selectedContact}
                       />
-                      {searchLoading && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}
+                      {(searchPending || searchLoading) && <Loader2 aria-label={searchPending ? 'Esperando para buscar contactos' : 'Buscando contactos'} className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}
+                      {searchTerm && !selectedContact && <button type="button" onClick={() => handleSearchChange('')} aria-label="Limpiar búsqueda de contactos" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
                     </div>
 
                     {selectedContact ? (

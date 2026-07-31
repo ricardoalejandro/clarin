@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { X, UserPlus, Phone, Tag, Loader2, Plus } from 'lucide-react'
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 interface StructuredTag {
   id: string
@@ -33,6 +34,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
   const [allTags, setAllTags] = useState<StructuredTag[]>([])
   const [selectedTagIds, setSelectedTagIds] = useState<string[]>([])
   const [tagInput, setTagInput] = useState('')
+  const [debouncedTagInput, setDebouncedTagInput] = useDebouncedValue(tagInput, SEARCH_DEBOUNCE_MS)
   const [loadingTags, setLoadingTags] = useState(false)
 
   useEffect(() => {
@@ -75,6 +77,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
       }
     }
     setTagInput('')
+    setDebouncedTagInput('')
   }
 
   const removeTag = (id: string) => {
@@ -123,6 +126,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
       setForm({ phone: '', name: '', last_name: '', email: '', company: '', dni: '', birth_date: '', notes: '' })
       setSelectedTagIds([])
       setTagInput('')
+      setDebouncedTagInput('')
       onSuccess()
       onClose()
     } catch {
@@ -137,8 +141,9 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
   const selectedTags = allTags.filter(t => selectedTagIds.includes(t.id))
   const unselectedTags = allTags.filter(t => !selectedTagIds.includes(t.id))
   const filteredUnselected = unselectedTags.filter(t =>
-    !tagInput.trim() || t.name.toLowerCase().includes(tagInput.trim().toLowerCase())
+    !debouncedTagInput.trim() || t.name.toLowerCase().includes(debouncedTagInput.trim().toLowerCase())
   )
+  const tagSearchPending = tagInput !== debouncedTagInput
 
   const inputCls = "w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-900 text-sm placeholder-slate-400 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/25 transition-all"
 
@@ -253,16 +258,23 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
                     type="text"
                     placeholder={loadingTags ? 'Cargando etiquetas...' : 'Buscar o crear etiqueta...'}
                     value={tagInput}
-                    onChange={e => setTagInput(e.target.value)}
+                    onChange={e => {
+                      const next = e.target.value
+                      setTagInput(next)
+                      if (!next) setDebouncedTagInput('')
+                    }}
                     onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomTag() } }}
                     disabled={loadingTags}
-                    className={`${inputCls} disabled:opacity-50`}
+                    className={`${inputCls} pr-16 disabled:opacity-50`}
                   />
-                  {tagInput.trim() && (
-                    <button onClick={addCustomTag} className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-md bg-emerald-600 hover:bg-emerald-500 text-white transition-colors" title="Añadir etiqueta">
-                      <Plus className="w-3.5 h-3.5" />
-                    </button>
-                  )}
+                  <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
+                    {tagSearchPending && <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" aria-label="Buscando etiquetas" />}
+                    {tagInput.trim() && (
+                      <button onClick={addCustomTag} className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-600 text-white transition-colors hover:bg-emerald-500" title="Añadir etiqueta">
+                        <Plus className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {!loadingTags && filteredUnselected.length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">

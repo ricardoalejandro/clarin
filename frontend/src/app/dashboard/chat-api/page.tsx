@@ -7,6 +7,8 @@ import {
   MessageCircle, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, X,
 } from 'lucide-react'
 import { apiGet, apiPost, subscribeWebSocket } from '@/lib/api'
+import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
+import { SearchRequestLifecycle } from '@/lib/searchRequestLifecycle'
 import type { Chat, Message } from '@/types/chat'
 import { formatPhone, getChatDisplayName } from '@/utils/chat'
 
@@ -160,6 +162,7 @@ export default function ChatAPIPage() {
   const [newOptInNote, setNewOptInNote] = useState('')
   const [startingConversation, setStartingConversation] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const chatSearchLifecycleRef = useRef(new SearchRequestLifecycle())
   const selectedChatIDRef = useRef<string | null>(null)
   const autoOpenedRef = useRef(false)
   const sendingRef = useRef(false)
@@ -168,9 +171,20 @@ export default function ChatAPIPage() {
   selectedChatIDRef.current = selectedChat?.id || null
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250)
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
   }, [search])
+
+  useEffect(() => () => chatSearchLifecycleRef.current.invalidate(), [])
+
+  const searchPending = search.trim() !== debouncedSearch
+
+  const updateSearch = (value: string) => {
+    chatSearchLifecycleRef.current.invalidate()
+    setLoading(false)
+    setSearch(value)
+    if (!value) setDebouncedSearch('')
+  }
 
   const loadChannelsAndTemplates = useCallback(async () => {
     const [channelsResponse, templatesResponse] = await Promise.all([
@@ -189,9 +203,11 @@ export default function ChatAPIPage() {
 
   const loadChats = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
+    const lease = silent ? null : chatSearchLifecycleRef.current.begin()
     const params = new URLSearchParams({ limit: '100' })
     if (debouncedSearch) params.set('search', debouncedSearch)
-    const response = await apiGet<ChatsResponse>(`/api/chat-api/chats?${params.toString()}`)
+    const response = await apiGet<ChatsResponse>(`/api/chat-api/chats?${params.toString()}`, lease ? { signal: lease.signal } : undefined)
+    if (lease && !chatSearchLifecycleRef.current.isCurrent(lease)) return
     if (response.success) {
       const nextChats = response.data?.chats || []
       setChats(current => nextChats.map(chat => {
@@ -203,7 +219,7 @@ export default function ChatAPIPage() {
     } else if (!silent) {
       setFeedback(response.error || 'No se pudieron cargar los chats oficiales')
     }
-    if (!silent) setLoading(false)
+    if (!silent && lease && chatSearchLifecycleRef.current.finish(lease)) setLoading(false)
   }, [debouncedSearch])
 
   useEffect(() => {
@@ -373,7 +389,7 @@ export default function ChatAPIPage() {
             <div><div className="flex items-center gap-2"><CloudCog className="h-5 w-5 text-sky-600" /><h1 className="text-base font-bold text-slate-900">Chat API</h1></div><p className="mt-0.5 text-xs text-slate-500">WhatsApp oficial · directo con Meta</p></div>
             <button type="button" onClick={() => setShowNewConversation(true)} disabled={!channels.some(channel => channel.api_sending_enabled && channel.api_templates_enabled) || templates.length === 0} className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Nueva conversación con plantilla"><Plus className="h-4 w-4" /></button>
           </div>
-          <div className="relative mt-3"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Buscar conversación" className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-9 text-sm text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20" />{search && <button type="button" onClick={() => setSearch('')} className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-200"><X className="h-3.5 w-3.5" /></button>}</div>
+          <div className="relative mt-3"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={search} onChange={event => updateSearch(event.target.value)} placeholder="Buscar conversación" aria-busy={searchPending || loading} className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-16 text-sm text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20" />{searchPending && <Loader2 aria-label="Esperando para buscar conversaciones" className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}{search && <button type="button" onClick={() => updateSearch('')} className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-200" aria-label="Limpiar búsqueda de conversaciones"><X className="h-3.5 w-3.5" /></button>}</div>
         </div>
 
         {channels.length === 0 && !loading ? (

@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { X, Plus, Check } from 'lucide-react'
+import { X, Plus, Loader2 } from 'lucide-react'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
 interface Tag {
   id: string
@@ -34,6 +35,8 @@ export type { Tag as TagItem }
 export default function TagInput({ entityType, entityId, assignedTags, onTagsChange, className = '', onBeforeAssign, onBeforeRemove, localMode }: TagInputProps) {
   const [allTags, setAllTags] = useState<Tag[]>([])
   const [inputValue, setInputValue] = useState('')
+  const [debouncedInputValue, setDebouncedInputValue] = useDebouncedValue(inputValue)
+  const searchPending = inputValue !== debouncedInputValue
   const [isOpen, setIsOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newTagColor, setNewTagColor] = useState(PRESET_COLORS[6])
@@ -64,22 +67,24 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setIsOpen(false)
         setInputValue('')
+        setDebouncedInputValue('')
         setCreating(false)
       }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
+  }, [setDebouncedInputValue])
 
   const assignedIds = new Set(assignedTags.map(t => t.id))
 
   const filteredTags = allTags.filter(t =>
+    !searchPending &&
     !assignedIds.has(t.id) &&
-    t.name.toLowerCase().includes(inputValue.toLowerCase())
+    t.name.toLowerCase().includes(debouncedInputValue.toLowerCase())
   )
 
-  const exactMatch = allTags.find(t => t.name.toLowerCase() === inputValue.trim().toLowerCase())
-  const showCreateOption = inputValue.trim() && !exactMatch
+  const exactMatch = allTags.find(t => t.name.toLowerCase() === debouncedInputValue.trim().toLowerCase())
+  const showCreateOption = !searchPending && Boolean(debouncedInputValue.trim()) && !exactMatch
 
   const handleAssign = async (tag: Tag) => {
     if (onBeforeAssign) {
@@ -89,6 +94,7 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
     if (localMode) {
       onTagsChange?.([...assignedTags, tag])
       setInputValue('')
+      setDebouncedInputValue('')
       return
     }
     const token = localStorage.getItem('token')
@@ -114,6 +120,7 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
       console.error('Failed to assign tag:', err)
     }
     setInputValue('')
+    setDebouncedInputValue('')
   }
 
   const handleRemove = async (tag: Tag) => {
@@ -173,6 +180,7 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
     } finally {
       setCreating(false)
       setInputValue('')
+      setDebouncedInputValue('')
       setNewTagColor(PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)])
     }
   }
@@ -188,6 +196,7 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
     } else if (e.key === 'Escape') {
       setIsOpen(false)
       setInputValue('')
+      setDebouncedInputValue('')
     } else if (e.key === 'Backspace' && !inputValue && assignedTags.length > 0) {
       handleRemove(assignedTags[assignedTags.length - 1])
     }
@@ -226,7 +235,9 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
           type="text"
           value={inputValue}
           onChange={(e) => {
-            setInputValue(e.target.value)
+            const next = e.target.value
+            setInputValue(next)
+            if (!next) setDebouncedInputValue('')
             setIsOpen(true)
           }}
           onFocus={() => setIsOpen(true)}
@@ -237,9 +248,10 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
       </div>
 
       {/* Dropdown */}
-      {isOpen && (filteredTags.length > 0 || showCreateOption) && (
+      {isOpen && (searchPending || filteredTags.length > 0 || showCreateOption) && (
         <div className="absolute z-50 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
-          {filteredTags.map(tag => (
+          {searchPending && <div role="status" className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-gray-500"><Loader2 className="h-4 w-4 animate-spin text-emerald-500" />Buscando etiquetas…</div>}
+          {!searchPending && filteredTags.map(tag => (
             <button
               key={tag.id}
               onClick={() => handleAssign(tag)}
@@ -252,7 +264,7 @@ export default function TagInput({ entityType, entityId, assignedTags, onTagsCha
               {tag.name}
             </button>
           ))}
-          {showCreateOption && (
+          {!searchPending && showCreateOption && (
             <div className="border-t border-gray-100">
               <button
                 onClick={handleCreate}
