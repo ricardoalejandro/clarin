@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Activity,
@@ -9,8 +9,10 @@ import {
   Check,
   ChevronRight,
   Download,
+  Expand,
   File,
   Flag,
+  GripHorizontal,
   Link2,
   Loader2,
   Maximize2,
@@ -45,6 +47,16 @@ import TaskUserCombobox from './TaskUserCombobox'
 import useTaskDetailWindow, { type TaskDetailResizeEdge } from './useTaskDetailWindow'
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 import { TaskListPicker } from './TaskSelectPicker'
+import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
+import {
+  TASK_DESCRIPTION_DEFAULT_HEIGHT,
+  TASK_DESCRIPTION_MAX_HEIGHT,
+  TASK_DESCRIPTION_MIN_HEIGHT,
+  clampTaskDescriptionHeight,
+  taskDescriptionHeightFromKey,
+  taskDescriptionEditorRemainsOpen,
+  taskWindowVisualState,
+} from './taskInteractionVisuals'
 
 interface Props {
   taskId: string | null
@@ -97,6 +109,7 @@ const resizeHandles: Record<TaskDetailResizeEdge, string> = {
   sw: 'bottom-0 left-0 h-3 w-3 cursor-sw-resize',
 }
 const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 disabled:bg-slate-50 disabled:opacity-60'
+const descriptionHeightStorageKey = 'clarin:tasks:description-height:v1'
 
 function localDateTime(value?: string) {
   if (!value) return ''
@@ -130,6 +143,8 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
   const [titleDraft, setTitleDraft] = useState('')
   const [descriptionDraft, setDescriptionDraft] = useState('')
+  const [descriptionHeight, setDescriptionHeight] = useState(TASK_DESCRIPTION_DEFAULT_HEIGHT)
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false)
   const [startDraft, setStartDraft] = useState('')
   const [dueDraft, setDueDraft] = useState('')
   const [progressDraft, setProgressDraft] = useState(0)
@@ -176,11 +191,24 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const editingDescriptionRef = useRef(false)
   const editingDatesRef = useRef(false)
   const editingProgressRef = useRef(false)
+  const descriptionHeightRef = useRef(TASK_DESCRIPTION_DEFAULT_HEIGHT)
   const updateTaskRef = useRef<(key: string, body: Record<string, unknown>) => Promise<boolean>>(async () => false)
   const detailWindow = useTaskDetailWindow()
+  const windowVisual = taskWindowVisualState(detailWindow.effectiveMode, detailWindow.isMobile)
   const taskOpen = Boolean(taskId)
   onCloseRef.current = onClose
   commentsRef.current = comments
+  descriptionHeightRef.current = descriptionHeight
+
+  useEffect(() => {
+    const stored = Number(localStorage.getItem(descriptionHeightStorageKey))
+    if (!Number.isFinite(stored) || stored <= 0) return
+    const next = clampTaskDescriptionHeight(stored)
+    descriptionHeightRef.current = next
+    setDescriptionHeight(next)
+  }, [])
+
+  useEffect(() => { setDescriptionExpanded(false) }, [taskId])
 
   draftBodiesRef.current = {
     title: { title: titleDraft.trim() },
@@ -572,7 +600,51 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   }
   const saveDescription = async () => {
     editingDescriptionRef.current = false
-    if (task && descriptionDraft !== (task.description || '')) await updateTask('description', { description: descriptionDraft })
+    if (task && descriptionDraft !== (task.description || '')) return updateTask('description', { description: descriptionDraft })
+    return true
+  }
+  const persistDescriptionHeight = useCallback((height: number) => {
+    const panelMaximum = panelRef.current ? Math.max(TASK_DESCRIPTION_MIN_HEIGHT, panelRef.current.clientHeight - 220) : TASK_DESCRIPTION_MAX_HEIGHT
+    const next = clampTaskDescriptionHeight(height, panelMaximum)
+    descriptionHeightRef.current = next
+    setDescriptionHeight(next)
+    localStorage.setItem(descriptionHeightStorageKey, String(next))
+    return next
+  }, [])
+  const beginDescriptionResize = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    const startY = event.clientY
+    const startHeight = descriptionHeightRef.current
+    const move = (pointer: PointerEvent) => {
+      pointer.preventDefault()
+      const panelMaximum = panelRef.current ? Math.max(TASK_DESCRIPTION_MIN_HEIGHT, panelRef.current.clientHeight - 220) : TASK_DESCRIPTION_MAX_HEIGHT
+      const next = clampTaskDescriptionHeight(startHeight + pointer.clientY - startY, panelMaximum)
+      descriptionHeightRef.current = next
+      setDescriptionHeight(next)
+    }
+    const end = () => {
+      localStorage.setItem(descriptionHeightStorageKey, String(descriptionHeightRef.current))
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+    }
+    window.addEventListener('pointermove', move, { passive: false })
+    window.addEventListener('pointerup', end, { once: true })
+    window.addEventListener('pointercancel', end, { once: true })
+  }, [])
+  const closeExpandedDescription = async () => {
+    const saved = await saveDescription()
+    if (!saved && task) {
+      const retryBody = { description: descriptionDraft }
+      failureRetryRef.current = () => {
+        void updateTask('description', retryBody).then(retrySaved => {
+          if (retrySaved) setDescriptionExpanded(false)
+        })
+      }
+    }
+    setDescriptionExpanded(taskDescriptionEditorRemainsOpen(saved))
   }
   const saveDates = async () => {
     editingDatesRef.current = false
@@ -900,8 +972,11 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
   const detailsPane = task && <div className="mx-auto w-full max-w-4xl space-y-7 pb-8">
     <section>
-      <div className="mb-2 flex items-center justify-between gap-3"><h3 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Descripción</h3>{isPending('description') && <span className="flex items-center gap-1 text-[10px] font-medium text-emerald-600"><Loader2 className="h-3 w-3 animate-spin" /> Guardando</span>}</div>
-      <textarea value={descriptionDraft} onFocus={() => { editingDescriptionRef.current = true }} onChange={event => setDescriptionDraft(event.target.value)} onBlur={() => { void saveDescription() }} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} rows={4} placeholder="Añade contexto, criterios de éxito o instrucciones…" className="min-h-28 w-full resize-y rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-700 outline-none transition focus:border-emerald-300 focus:bg-white focus:ring-4 focus:ring-emerald-50" />
+      <div className="mb-2 flex items-center justify-between gap-3"><h3 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Descripción</h3><div className="flex items-center gap-2">{isPending('description') && <span className="flex items-center gap-1 text-[10px] font-medium text-emerald-600"><Loader2 className="h-3 w-3 animate-spin" /> Guardando</span>}<button type="button" onClick={() => { editingDescriptionRef.current = true; setDescriptionExpanded(true) }} className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-[11px] font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-emerald-700" aria-label="Expandir descripción"><Expand className="h-3.5 w-3.5" />Expandir</button></div></div>
+      <div className="relative">
+        <textarea data-task-description value={descriptionDraft} onFocus={() => { editingDescriptionRef.current = true }} onChange={event => setDescriptionDraft(event.target.value)} onBlur={() => { void saveDescription() }} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} placeholder="Añade contexto, criterios de éxito o instrucciones…" style={{ height: descriptionHeight }} className="w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 pb-7 text-sm leading-6 text-slate-700 outline-none transition focus:border-emerald-300 focus:bg-white focus:ring-4 focus:ring-emerald-50" />
+        <div role="slider" tabIndex={0} aria-label="Ajustar altura de la descripción" aria-orientation="vertical" aria-valuemin={TASK_DESCRIPTION_MIN_HEIGHT} aria-valuemax={TASK_DESCRIPTION_MAX_HEIGHT} aria-valuenow={descriptionHeight} title="Arrastra para cambiar la altura. Usa ↑ y ↓ con el teclado." onPointerDown={beginDescriptionResize} onDoubleClick={() => persistDescriptionHeight(TASK_DESCRIPTION_DEFAULT_HEIGHT)} onKeyDown={event => { const next = taskDescriptionHeightFromKey(descriptionHeightRef.current, event.key, panelRef.current ? panelRef.current.clientHeight - 220 : TASK_DESCRIPTION_MAX_HEIGHT); if (next === null) return; event.preventDefault(); persistDescriptionHeight(next) }} className="absolute bottom-1.5 right-2 flex h-6 w-9 cursor-ns-resize items-center justify-center rounded-lg border border-slate-200 bg-white/95 text-slate-400 shadow-sm outline-none transition hover:border-emerald-300 hover:text-emerald-600 focus-visible:ring-2 focus-visible:ring-emerald-400"><GripHorizontal className="h-4 w-4" /></div>
+      </div>
     </section>
 
     <section>
@@ -947,8 +1022,8 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
   if (!taskId || typeof document === 'undefined') return null
   return createPortal(
-    <div className={`fixed inset-0 z-[70] ${detailWindow.isModal ? 'bg-slate-950/30 backdrop-blur-[1px]' : 'pointer-events-none'}`} onMouseDown={event => { if (detailWindow.isModal && event.target === event.currentTarget) onClose() }}>
-      <aside ref={panelRef} tabIndex={-1} role="dialog" aria-modal={detailWindow.isModal} aria-label="Detalle de tarea" style={detailWindow.panelStyle} className={`pointer-events-auto absolute flex flex-col overflow-hidden bg-white shadow-2xl outline-none ${detailWindow.effectiveMode === 'docked' ? 'border-l border-slate-200' : detailWindow.isMobile ? '' : 'rounded-2xl border border-slate-200'}`}>
+    <div data-task-detail-window data-window-mode={detailWindow.effectiveMode} data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : detailWindow.effectiveMode} style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }} className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`} onMouseDown={event => { if (windowVisual.blocksWorkspace && event.target === event.currentTarget) onClose() }}>
+      <aside ref={panelRef} tabIndex={-1} role="dialog" aria-modal={windowVisual.blocksWorkspace} aria-label="Detalle de tarea" style={detailWindow.panelStyle} className={`pointer-events-auto absolute flex flex-col overflow-hidden bg-white shadow-[0_32px_90px_rgba(15,23,42,0.32)] ring-1 ring-slate-900/10 outline-none ${detailWindow.effectiveMode === 'docked' ? 'border-l border-slate-200' : detailWindow.isMobile ? '' : 'rounded-2xl border border-white/80'}`}>
         {detailWindow.effectiveMode === 'floating' && (Object.entries(resizeHandles) as [TaskDetailResizeEdge, string][]).map(([edge, classes]) => <div key={edge} className={`absolute z-30 ${classes}`} onPointerDown={event => detailWindow.beginResize(edge, event)} />)}
         {loading && !task ? <div className="flex flex-1 flex-col items-center justify-center"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" /><p className="mt-3 text-sm text-slate-400">Abriendo tarea…</p></div> : task ? <>
           <header onPointerDown={detailWindow.beginDrag} onDoubleClick={event => { if (!(event.target as HTMLElement).closest('button,a,input,textarea,select,[data-no-window-drag]')) detailWindow.toggleMaximized() }} className={`shrink-0 select-none border-b border-slate-200 bg-white px-4 py-3 sm:px-6 sm:py-4 ${detailWindow.effectiveMode === 'floating' ? 'cursor-move' : ''}`}>
@@ -968,7 +1043,16 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
             {!isWide && <nav data-no-window-drag className="mt-3 flex rounded-xl bg-slate-100 p-1">{([['details', 'Detalles'], ['activity', `Actividad${comments.length ? ` · ${comments.length}${commentsHasMore ? '+' : ''}` : ''}`]] as [DetailTab, string][]).map(([key, label]) => <button key={key} onClick={() => setTab(key)} className={`min-h-9 flex-1 rounded-lg px-3 text-xs font-semibold transition ${tab === key ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{label}</button>)}</nav>}
           </header>
 
-          {failure && <div className="mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 sm:mx-6"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}<button aria-label="Cerrar aviso" onClick={clearFailure} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-rose-100"><X className="h-3.5 w-3.5" /></button></div>}
+          {descriptionExpanded && <section data-task-description-expanded className="absolute inset-0 z-40 flex flex-col bg-white" aria-label="Editor ampliado de descripción">
+            <header className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-6"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Detalle de tarea</p><h2 className="mt-1 text-lg font-black text-slate-900">Descripción</h2></div><button type="button" disabled={isPending('description')} onClick={() => { void closeExpandedDescription() }} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-50">{isPending('description') && <Loader2 className="h-4 w-4 animate-spin" />}Listo</button></header>
+            <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-6">
+              {failure && <div role="alert" className="mb-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button type="button" onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}</div>}
+              <textarea autoFocus value={descriptionDraft} onFocus={() => { editingDescriptionRef.current = true }} onChange={event => setDescriptionDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); void closeExpandedDescription() } else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void closeExpandedDescription() } }} placeholder="Añade contexto, criterios de éxito o instrucciones…" className="min-h-0 flex-1 resize-none rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm leading-7 text-slate-700 outline-none transition focus:border-emerald-300 focus:bg-white focus:ring-4 focus:ring-emerald-50" />
+              <p className="mt-3 text-center text-[10px] text-slate-400">Ctrl/⌘ + Enter para guardar · Escape para guardar y volver</p>
+            </div>
+          </section>}
+
+          {failure && !descriptionExpanded && <div className="mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 sm:mx-6"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}<button aria-label="Cerrar aviso" onClick={clearFailure} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-rose-100"><X className="h-3.5 w-3.5" /></button></div>}
 
           {isWide ? <div className="flex min-h-0 flex-1"><main className="min-w-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6 lg:px-8">{detailsPane}</main><section className="flex w-[390px] min-h-0 shrink-0 flex-col border-l border-slate-200">{activityPane}</section></div> : tab === 'details' ? <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6">{detailsPane}</main> : activityPane}
         </> : <div className="flex flex-1 flex-col items-center justify-center px-6 text-center"><AlertCircle className="h-8 w-8 text-rose-300" /><p className="mt-3 text-sm font-semibold text-slate-700">No pudimos abrir esta tarea.</p><button onClick={() => { void load() }} className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Reintentar</button></div>}

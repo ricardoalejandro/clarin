@@ -43,6 +43,7 @@ Implement Clarin Work as one complete collaboration surface. Keep hierarchy, sta
 - Keep one responsible owner and optional collaborators unless the product contract is intentionally migrated end to end.
 - Keep comments, mentions, attachments, activity, dependencies, and subtasks available from the task detail without losing the task context.
 - Measure the task surface itself for responsive layout. Keep docked/floating workspaces interactive and reserve modal blocking for maximized/mobile modes.
+- Keep task windows legible through the shared contrast contract, and portal workspace menus outside clipping containers but below task windows. Long descriptions need a visible pointer/keyboard resize handle plus an expanded editor that shares the canonical draft and never hides a save error.
 
 ### 4. Reconcile Safely In Realtime
 

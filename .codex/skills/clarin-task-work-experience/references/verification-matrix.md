@@ -31,6 +31,7 @@
 
 ## Board
 
+- Fill a column with cards, open its action menu and assert the menu is portaled above the board, inside every viewport edge and below task windows. Verify flip, scroll/resize repositioning, Arrow/Home/End/Enter/Escape, outside close and trigger-focus restoration.
 - Test mouse drag, touch long-press, normal touch scroll, keyboard pickup/drop, Escape, and drop outside.
 - Drag across off-screen columns and long columns; verify horizontal and vertical auto-scroll.
 - Move before the first card, between cards, to the end, and into an empty/collapsed column.
@@ -62,7 +63,8 @@
 
 ## Task Detail
 
-- Verify docked, floating, resized, maximized, mobile, Escape, focus restoration, and board interaction behind non-modal modes.
+- Verify docked, floating, resized, maximized, mobile, Escape, focus restoration, and board interaction behind non-modal modes. Assert the canonical 8%/1 px, 18%/2 px and 45%/3 px veil/blur values and modal blocking only for maximized/mobile.
+- Resize Description with pointer and keyboard to both clamps, persist and reload its preferred height, double-click reset, then use the expanded editor through Listo, Ctrl/Command+Enter and Escape. A failed write must keep the shared draft open with visible retry.
 - Apply the same matrix to creation. Verify double-click maximize, geometry persistence/clamping, clean Escape, dirty-draft confirmation, cancelled discard preservation, searchable grouped list selection, and portaled controls at every viewport edge.
 - Open list, responsible, status and priority pickers from calendar/detail/list at narrow and wide widths; assert each menu is above its owner, at least 280 px when possible, keyboard-safe, unclipped, and restores focus. Floating dimming remains non-blocking while maximized/mobile modes remain modal.
 - Edit every supported inline property and recover from version conflict without losing drafts.
@@ -73,6 +75,7 @@
 - Merge activity/comments without duplicates and preserve scroll/composer during realtime events.
 - Edit remotely a comment from an already-loaded older page and confirm its body updates without changing local edit/delete permissions.
 - Open attachments and related dependency tasks; verify empty, loading, error, and retry states.
+- Collapse and expand Lista groups while measuring the 200 ms grid/opacity transition, `aria-expanded`, hidden-region inertness and reduced-motion fallback. Collapse the main sidebar and verify the brand is absent, one centered expansion control remains, and expansion restores the full header.
 
 ## Baseline And Production
 

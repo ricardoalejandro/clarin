@@ -1,4 +1,5 @@
 export const TASK_OVERLAY_LAYERS = {
+  workspacePopover: 100,
   window: 120,
   dialog: 145,
   confirmation: 170,

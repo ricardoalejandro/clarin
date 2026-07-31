@@ -21,6 +21,7 @@ import { TaskStatusPicker } from './TaskPropertyPicker'
 import { TaskListPicker, TaskSelectPicker } from './TaskSelectPicker'
 import useTaskWindow, { type TaskWindowResizeEdge } from './useTaskWindow'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
+import { taskWindowVisualState } from './taskInteractionVisuals'
 
 export interface TaskAccountUser {
   id: string
@@ -235,8 +236,9 @@ export default function TaskEditorModal({ open, task, defaultListId, defaultStat
   ]
   const reminderOptions = REMINDER_OPTIONS.map(option => ({ value: String(option.value), label: option.label, description: option.value ? 'Antes de la entrega' : 'Sin aviso previo', leading: <CalendarRange className="h-4 w-4" /> }))
   const resizeEdges: TaskWindowResizeEdge[] = ['n', 'e', 's', 'w', 'ne', 'nw', 'se', 'sw']
+  const windowVisual = taskWindowVisualState(taskWindow.effectiveMode, taskWindow.isMobile)
   return createPortal(
-    <div data-task-editor-modal data-window-mode={taskWindow.effectiveMode} data-backdrop-mode={taskWindow.isModal ? 'modal' : taskWindow.effectiveMode === 'docked' ? 'docked' : 'floating'} style={{ zIndex: TASK_OVERLAY_LAYERS.window }} className={`fixed inset-0 transition-colors duration-200 ${taskWindow.isModal ? 'bg-slate-950/45 backdrop-blur-sm' : taskWindow.effectiveMode === 'docked' ? 'pointer-events-none bg-slate-950/[0.06]' : 'pointer-events-none bg-slate-950/[0.12]'}`} onMouseDown={event => event.target === event.currentTarget && taskWindow.isModal && requestClose()}>
+    <div data-task-editor-modal data-window-mode={taskWindow.effectiveMode} data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : taskWindow.effectiveMode} style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }} className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`} onMouseDown={event => event.target === event.currentTarget && windowVisual.blocksWorkspace && requestClose()}>
       <div ref={dialogRef} data-window-mode={taskWindow.effectiveMode} tabIndex={-1} role="dialog" aria-modal={taskWindow.isModal} aria-labelledby="task-editor-title" aria-busy={saving} style={taskWindow.panelStyle} className={`pointer-events-auto fixed flex flex-col overflow-hidden border border-white/80 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.24)] ring-1 ring-slate-900/5 outline-none ${taskWindow.effectiveMode === 'maximized' || taskWindow.isMobile ? 'rounded-none sm:rounded-2xl' : taskWindow.effectiveMode === 'docked' ? 'rounded-l-3xl' : 'rounded-3xl'}`}>
         <div onPointerDown={taskWindow.beginDrag} onDoubleClick={taskWindow.toggleMaximized} className={`flex select-none items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-7 ${taskWindow.effectiveMode === 'floating' ? 'cursor-move' : ''}`}>
           <div>

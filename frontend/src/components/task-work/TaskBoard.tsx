@@ -73,6 +73,7 @@ import {
   type TaskExternalDropTarget,
 } from './taskDropTargets'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
+import { taskWorkspaceMenuPosition } from './taskInteractionVisuals'
 
 export interface TaskInlineDraft {
   title: string
@@ -594,7 +595,53 @@ function BoardColumn({
   const droppableData = useMemo(() => ({ type: 'column', columnId: status.id }), [status.id])
   const { setNodeRef, isOver } = useDroppable({ id: `column:${status.id}`, data: droppableData, disabled: !canReceive })
   const [menuOpen, setMenuOpen] = useState(false)
+  const [menuPosition, setMenuPosition] = useState({ left: 0, top: 0 })
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const statusColor = status.color || '#64748b'
+
+  const closeMenu = useCallback((restoreFocus = true) => {
+    setMenuOpen(false)
+    if (restoreFocus) window.requestAnimationFrame(() => menuButtonRef.current?.focus({ preventScroll: true }))
+  }, [])
+  const positionMenu = useCallback(() => {
+    const anchor = menuButtonRef.current?.getBoundingClientRect()
+    if (!anchor) return
+    const menu = menuRef.current?.getBoundingClientRect()
+    setMenuPosition(taskWorkspaceMenuPosition(
+      { left: anchor.left, top: anchor.top, width: anchor.width, height: anchor.height },
+      { width: menu?.width || 192, height: menu?.height || 96 },
+      { width: window.innerWidth, height: window.innerHeight },
+    ))
+  }, [])
+  useEffect(() => {
+    if (!menuOpen) return
+    const frame = window.requestAnimationFrame(() => {
+      positionMenu()
+      menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true })
+    })
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (menuRef.current?.contains(target) || menuButtonRef.current?.contains(target)) return
+      closeMenu(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeMenu()
+    }
+    window.addEventListener('resize', positionMenu, { passive: true })
+    window.addEventListener('scroll', positionMenu, true)
+    document.addEventListener('pointerdown', outside)
+    document.addEventListener('keydown', escape)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.removeEventListener('resize', positionMenu)
+      window.removeEventListener('scroll', positionMenu, true)
+      document.removeEventListener('pointerdown', outside)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [closeMenu, menuOpen, positionMenu])
 
   if (!expanded) return <section ref={setNodeRef} data-task-column-id={status.id} data-task-column-collapsed="true" className={`flex h-full w-12 shrink-0 flex-col items-center overflow-hidden rounded-2xl border bg-white shadow-sm transition ${isOver && canReceive ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-slate-200'}`}>
     <button type="button" onClick={onCollapse} className="flex h-full w-full flex-col items-center gap-3 py-3 text-slate-500 hover:bg-slate-50" title={`Expandir ${status.name}`}>
@@ -612,13 +659,14 @@ function BoardColumn({
       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold tabular-nums text-slate-500">{taskIds.length}</span>
       <div className="ml-auto flex items-center gap-0.5">
         <button type="button" onClick={() => onCreateFull(resolvedCreateStatus(status, defaultList, allStatuses)?.id)} title="Crear tarea con todos los campos" className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"><Plus className="h-3.5 w-3.5" /></button>
-        <button type="button" onClick={() => setMenuOpen(value => !value)} aria-expanded={menuOpen} aria-haspopup="menu" title="Opciones de columna" className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><MoreHorizontal className="h-4 w-4" /></button>
+        <button ref={menuButtonRef} type="button" onClick={() => setMenuOpen(value => !value)} aria-expanded={menuOpen} aria-haspopup="menu" aria-controls={`task-column-menu-${status.id}`} title="Opciones de columna" className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><MoreHorizontal className="h-4 w-4" /></button>
       </div>
-      {menuOpen && <><button type="button" aria-label="Cerrar menú" onClick={() => setMenuOpen(false)} className="fixed inset-0 z-20 cursor-default" /><div role="menu" className="absolute right-2 top-10 z-30 w-48 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
-        <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onCollapse() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-600 hover:bg-slate-50"><ChevronLeft className="h-3.5 w-3.5" />Contraer columna</button>
-        {!isSyntheticStatus(status) && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onConfigureStatuses() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-600 hover:bg-slate-50"><Pencil className="h-3.5 w-3.5" />Modificar estados</button>}
-      </div></>}
     </header>
+
+    {menuOpen && typeof document !== 'undefined' && createPortal(<div ref={menuRef} id={`task-column-menu-${status.id}`} data-task-column-menu role="menu" aria-label={`Opciones de ${status.name}`} style={{ position: 'fixed', left: menuPosition.left, top: menuPosition.top, zIndex: TASK_OVERLAY_LAYERS.workspacePopover }} onKeyDown={event => { const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')); const current = items.indexOf(document.activeElement as HTMLElement); if (event.key === 'ArrowDown') { event.preventDefault(); items[(current + 1 + items.length) % items.length]?.focus() } else if (event.key === 'ArrowUp') { event.preventDefault(); items[(current - 1 + items.length) % items.length]?.focus() } else if (event.key === 'Home') { event.preventDefault(); items[0]?.focus() } else if (event.key === 'End') { event.preventDefault(); items.at(-1)?.focus() } }} className="w-48 rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 outline-none">
+      <button type="button" role="menuitem" onClick={() => { closeMenu(false); onCollapse() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-600 outline-none hover:bg-slate-50 focus:bg-emerald-50 focus:text-emerald-800"><ChevronLeft className="h-3.5 w-3.5" />Contraer columna</button>
+      {!isSyntheticStatus(status) && <button type="button" role="menuitem" onClick={() => { closeMenu(false); onConfigureStatuses() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-600 outline-none hover:bg-slate-50 focus:bg-emerald-50 focus:text-emerald-800"><Pencil className="h-3.5 w-3.5" />Modificar estados</button>}
+    </div>, document.body)}
 
     <div className="kanban-col-scroll min-h-0 overflow-y-auto overscroll-contain p-2">
       <SortableContext items={taskIds} strategy={verticalListSortingStrategy} id={`sortable:${status.id}`}>

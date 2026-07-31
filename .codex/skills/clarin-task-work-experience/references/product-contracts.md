@@ -70,6 +70,7 @@ Read the sections relevant to the requested task change before editing.
 - Keep status columns compact, colored from the real status, collapsible, and droppable. Collapsed columns must remain understandable and expand on intentional drag hover.
 - Ctrl+drag and middle-button drag pan the wide board horizontally with open/closed-hand cursor feedback. These gestures suppress card click and task drag while preserving normal wheel, touch, keyboard, and sortable behavior.
 - The full-height column remains a drop target, but its tinted visual surface grows only with real content up to the available height. Empty columns stay compact, and “Agregar tarea” follows the last card rather than floating above it.
+- Column and workspace action menus that can cross a board overflow boundary render through the shared `workspacePopover` portal layer. They flip/clamp to the viewport, reposition on scroll or resize, support full keyboard navigation and restore focus, while remaining below task windows and their child pickers.
 
 ## Task Cards And Creation
 
@@ -83,7 +84,7 @@ Read the sections relevant to the requested task change before editing.
 - Full task creation uses the same window behavior as detail: floating and docked desktop modes leave the workspace interactive, maximized and mobile modes are modal, and the remembered geometry is clamped to the measured viewport. Support header drag, edge/corner resize, right docking, maximize/restore, and double-click maximize.
 - Escape closes an untouched creation form immediately. Once the user changes any field, Escape/close must offer “continue editing” or explicit discard and preserve the complete draft when discard is cancelled.
 - List, folder, workflow, recurrence, reminder, category, color, and icon choices use accessible viewport-aware portaled pickers. The task-list picker is searchable and grouped by default list, independent lists, and folders with a real breadcrumb.
-- Task dialogs, confirmations, picker backdrops, picker menus, drag overlays and notifications use one monotonic layer contract. A child picker must always render above its owning dialog, restore focus, reposition on scroll/resize and stay within the viewport.
+- Task dialogs, workspace popovers, confirmations, picker backdrops, picker menus, drag overlays and notifications use one monotonic layer contract. A child picker must always render above its owning dialog, restore focus, reposition on scroll/resize and stay within the viewport.
 
 ## Filters And Saved Views
 
@@ -104,7 +105,8 @@ Read the sections relevant to the requested task change before editing.
 - Use one canonical child-task API; do not expose the legacy `subtasks` checklist as a second editable surface.
 - Child create/update/archive/restore must invalidate top-level task caches and publish a canonical parent/subtask reconciliation event so counts and progress cannot remain stale.
 - Wide task surfaces show main work plus an activity/conversation rail. Narrow docked/mobile surfaces may use Details and Activity views.
-- Docked/floating modes must leave the workspace usable; maximized/mobile modes may use modal focus and dimming.
+- Docked/floating modes must leave the workspace usable. Use the shared visual contract: floating uses an 18% veil and 2 px blur, docked uses 8% and 1 px, while maximized/mobile uses 45%, 3 px and modal blocking.
+- A long description exposes a visible resize handle for pointer and keyboard, clamps and remembers its preferred height, and can open a wide editor that shares the exact same draft. Listo, Ctrl/Command+Enter and Escape attempt the same save; a failure keeps the editor open with actionable retry.
 - Inline property writes use task versions and preserve local drafts across conflict recovery.
 
 ## Workspace Density
@@ -115,6 +117,8 @@ Read the sections relevant to the requested task change before editing.
 - Base responsive decisions on the measured workspace container after dashboard navigation and Eros chrome, not on browser width alone.
 - In Lista, size the status control from the measured view width: show full semantics when comfortable, a compact trigger at medium width, and a separate property row when narrow. The portaled menu remains at least 280 px when the viewport permits it; tooltips appear only for actually truncated text.
 - The hierarchy navigation is independently scrollable with a quiet theme-aware scrollbar and edge shadows only when overflow exists. Folder accordions allow multiple open folders and remember expansion locally while always auto-opening the active list's parent.
+- Lista status groups remain mounted while collapsed, animate grid height, opacity and chevron for 200 ms, remove hidden controls from keyboard focus, and switch immediately under reduced-motion preferences.
+- When the main dashboard sidebar is collapsed, hide the brand artwork completely and expose one centered, labelled expansion control with a portaled tooltip; expanded and mobile-open modes restore the full brand and collapse control.
 
 ## Activity, Comments, And Realtime
 

@@ -52,6 +52,7 @@ async function installWorkspaceMock(page: Page) {
   const bulkMoves: Array<Record<string, unknown>> = []
   const taskQueries: Array<{ search: string; at: number }> = []
   const trashWrites: Array<{ path: string; method: string; body: Record<string, unknown> }> = []
+  let failNextDescriptionWrite = false
 
   await page.routeWebSocket('**/ws**', socket => { workspaceSocket = socket; socket.onMessage(() => undefined) })
   await page.route('**/api/**', async route => {
@@ -150,6 +151,11 @@ async function installWorkspaceMock(page: Page) {
     }
     if (path === `/api/tasks/${task.id}` && request.method() === 'PUT') {
       taskWrites.push(body)
+      if (failNextDescriptionWrite && Object.prototype.hasOwnProperty.call(body, 'description')) {
+        failNextDescriptionWrite = false
+        await json(route, { error: 'No pudimos guardar la descripción.' }, 500)
+        return
+      }
       const status = statuses.find(item => item.id === body.status_id)
       task = { ...task, ...body, version: task.version + 1, ...(status ? { status_id: status.id, status_detail: status } : {}) }
       await json(route, { task })
@@ -190,7 +196,7 @@ async function installWorkspaceMock(page: Page) {
     localStorage.setItem('tasks:detail-mode', 'maximized')
   })
 
-  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, bulkMoves, trashWrites, taskQueries }
+  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, bulkMoves, trashWrites, taskQueries, failNextDescriptionWrite: () => { failNextDescriptionWrite = true } }
 }
 
 async function drag(page: Page, source: Locator, target: Locator) {
@@ -496,6 +502,126 @@ test.describe('Clarin Work workspace refinement', () => {
     expect(mock.collaboratorWrites[0].user_ids).toEqual([])
     await expect(detail.getByRole('button', { name: 'Quitar a Administrador' })).toHaveCount(0)
     await expect(detail.getByRole('button', { name: 'Añadir colaborador' })).toBeVisible()
+  })
+
+  test('separates the task detail visually and provides an accessible expanded description editor', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1395, height: 818 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByText('Preparar propuesta profesional', { exact: true }).click()
+    const detail = page.getByRole('dialog', { name: 'Detalle de tarea' })
+    const backdrop = page.locator('[data-task-detail-window]')
+    await detail.getByTitle('Ventana flotante').click()
+    await expect(backdrop).toHaveAttribute('data-backdrop-mode', 'floating')
+    await expect(backdrop).toHaveCSS('background-color', 'rgba(2, 6, 23, 0.18)')
+    await expect(backdrop).toHaveCSS('backdrop-filter', 'blur(2px)')
+    await expect(detail).not.toHaveCSS('box-shadow', 'none')
+
+    await page.getByText('Bandeja general', { exact: true }).click({ position: { x: 18, y: 12 } })
+    await expect(detail).toBeVisible()
+    await detail.getByTitle('Acoplar a la derecha').click()
+    await expect(backdrop).toHaveCSS('background-color', 'rgba(2, 6, 23, 0.08)')
+    await detail.getByTitle('Ventana flotante').click()
+
+    const description = detail.locator('[data-task-description]')
+    const grip = detail.getByRole('slider', { name: 'Ajustar altura de la descripción' })
+    const beforeHeight = (await description.boundingBox())!.height
+    await grip.focus()
+    await page.keyboard.press('ArrowDown')
+    await expect.poll(async () => (await description.boundingBox())!.height).toBeGreaterThan(beforeHeight)
+    await expect(grip).toHaveAttribute('aria-valuenow', String(beforeHeight + 24))
+    const gripBox = await grip.boundingBox()
+    const keyboardHeight = (await description.boundingBox())!.height
+    await page.mouse.move(gripBox!.x + gripBox!.width / 2, gripBox!.y + gripBox!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(gripBox!.x + gripBox!.width / 2, gripBox!.y + gripBox!.height / 2 + 48, { steps: 6 })
+    await page.mouse.up()
+    await expect.poll(async () => (await description.boundingBox())!.height).toBeGreaterThan(keyboardHeight + 30)
+
+    await detail.getByRole('button', { name: 'Expandir descripción' }).click()
+    const expanded = detail.locator('[data-task-description-expanded]')
+    const expandedInput = expanded.getByRole('textbox')
+    await expect(expanded).toBeVisible()
+    await expandedInput.fill('Una descripción extensa que debe conservarse en ambos modos.')
+    await expanded.getByRole('button', { name: 'Listo' }).click()
+    await expect.poll(() => mock.taskWrites.filter(write => write.description === 'Una descripción extensa que debe conservarse en ambos modos.').length).toBe(1)
+    await expect(expanded).toHaveCount(0)
+    await expect(description).toHaveValue('Una descripción extensa que debe conservarse en ambos modos.')
+
+    await detail.getByRole('button', { name: 'Expandir descripción' }).click()
+    mock.failNextDescriptionWrite()
+    await expanded.getByRole('textbox').fill('Borrador que sobrevive a un error temporal.')
+    await expanded.getByRole('button', { name: 'Listo' }).click()
+    await expect(expanded).toBeVisible()
+    await expect(expanded.getByRole('alert')).toContainText('No pudimos guardar la descripción.')
+    await expanded.getByRole('button', { name: 'Reintentar' }).click()
+    await expect(expanded).toHaveCount(0)
+    await expect(description).toHaveValue('Borrador que sobrevive a un error temporal.')
+
+    await detail.getByTitle('Maximizar').click()
+    await expect(backdrop).toHaveAttribute('data-backdrop-mode', 'modal')
+    await expect(backdrop).toHaveCSS('background-color', 'rgba(2, 6, 23, 0.45)')
+    await expect(detail).toHaveAttribute('aria-modal', 'true')
+    await page.setViewportSize({ width: 375, height: 720 })
+    await expect(backdrop).toHaveCSS('backdrop-filter', 'blur(3px)')
+    const mobileBox = await detail.boundingBox()
+    expect(mobileBox!.width).toBeLessThanOrEqual(375)
+  })
+
+  test('portals the column menu above cards and restores focus with Escape', async ({ page }) => {
+    await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1155, height: 818 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByRole('button', { name: 'Tablero' }).click()
+    const trigger = page.locator('section[data-task-column-id="status-todo"]').getByTitle('Opciones de columna')
+    await trigger.click()
+    const menu = page.locator('[data-task-column-menu]')
+    await expect(menu).toBeVisible()
+    const box = await menu.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.x).toBeGreaterThanOrEqual(8)
+    expect(box!.y).toBeGreaterThanOrEqual(8)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(1147)
+    expect(box!.y + box!.height).toBeLessThanOrEqual(810)
+    expect(await menu.evaluate(element => Number(getComputedStyle(element).zIndex))).toBeGreaterThan(50)
+    expect(await page.evaluate(({ x, y }) => Boolean(document.elementFromPoint(x, y)?.closest('[data-task-column-menu]')), { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 })).toBe(true)
+    await page.keyboard.press('Escape')
+    await expect(menu).toHaveCount(0)
+    await expect(trigger).toBeFocused()
+  })
+
+  test('animates list groups accessibly and simplifies the collapsed dashboard header', async ({ page }) => {
+    await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1395, height: 818 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const sectionButton = page.getByRole('button', { name: /Por hacer 1/i })
+    const region = page.locator('[role="region"][aria-label="Tareas en Por hacer"]')
+    await expect(sectionButton).toHaveAttribute('aria-expanded', 'true')
+    await sectionButton.click()
+    await expect(sectionButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(region).toHaveAttribute('aria-hidden', 'true')
+    await expect(region).toHaveAttribute('inert', '')
+    await expect(region).toHaveCSS('transition-duration', '0.2s')
+    await page.waitForTimeout(240)
+    await expect(region).not.toBeVisible()
+    await sectionButton.click()
+    await expect(region).toBeVisible()
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await sectionButton.click()
+    await expect(region).toHaveCSS('transition-property', 'none')
+    await sectionButton.click()
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+
+    await page.getByRole('button', { name: 'Colapsar menú' }).click()
+    const sidebarHeader = page.locator('[data-dashboard-sidebar-header]')
+    await expect(sidebarHeader).toHaveAttribute('data-collapsed', 'true')
+    await expect(page.locator('[data-dashboard-brand-mark]')).toHaveCount(0)
+    const expand = page.getByRole('button', { name: 'Expandir menú' })
+    await expand.hover()
+    await expect(page.getByRole('tooltip', { name: 'Expandir menú' })).toBeVisible()
+    await expand.click()
+    await expect(page.locator('[data-dashboard-brand-mark]')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Colapsar menú' })).toBeVisible()
   })
 
   test('creates in a movable, resizable and dockable window and protects its draft', async ({ page }) => {

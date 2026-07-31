@@ -10,6 +10,7 @@ export default defineConfig({
     include: [
       'src/lib/useDebouncedValue.test.tsx',
       'src/lib/useKanbanPan.test.tsx',
+      'src/lib/dashboardSidebarState.test.ts',
       'src/components/task-work/**/*.test.{ts,tsx}',
     ],
     restoreMocks: true,

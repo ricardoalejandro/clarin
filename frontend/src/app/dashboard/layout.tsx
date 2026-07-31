@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
@@ -8,6 +9,7 @@ import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
 import { ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
 import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSession } from '@/lib/api'
+import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
 import {
   MessageSquare,
   Settings,
@@ -79,6 +81,16 @@ function subscriptionLabel(status?: string) {
     incomplete: 'Incompleta',
   }
   return labels[status || ''] || status || 'Sin suscripción'
+}
+
+function CollapsedSidebarExpandButton({ onExpand }: { onExpand: () => void }) {
+  const [tooltipOpen, setTooltipOpen] = useState(false)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const rect = buttonRef.current?.getBoundingClientRect()
+  return <>
+    <button ref={buttonRef} type="button" onClick={onExpand} onMouseEnter={() => setTooltipOpen(true)} onMouseLeave={() => setTooltipOpen(false)} onFocus={() => setTooltipOpen(true)} onBlur={() => setTooltipOpen(false)} aria-label="Expandir menú" aria-expanded="false" aria-describedby={tooltipOpen ? 'dashboard-sidebar-expand-tooltip' : undefined} className="hidden h-10 w-10 items-center justify-center rounded-xl border border-slate-700/70 bg-slate-900/25 text-slate-300 shadow-sm outline-none transition hover:border-slate-600 hover:bg-slate-700/70 hover:text-white focus-visible:ring-2 focus-visible:ring-emerald-400 lg:flex"><PanelLeftOpen className="h-[18px] w-[18px]" /></button>
+    {tooltipOpen && rect && typeof document !== 'undefined' && createPortal(<div id="dashboard-sidebar-expand-tooltip" role="tooltip" style={{ left: rect.right + 10, top: rect.top + rect.height / 2, transform: 'translateY(-50%)' }} className="pointer-events-none fixed z-[230] whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xl">Expandir menú</div>, document.body)}
+  </>
 }
 
 export default function DashboardLayout({
@@ -443,6 +455,7 @@ export default function DashboardLayout({
 
   // When mobile overlay is open, always show expanded (not collapsed)
   const isCollapsed = sidebarCollapsed && !sidebarOpen
+  const sidebarHeader = dashboardSidebarHeaderState(sidebarCollapsed, sidebarOpen)
 
   if (loading) {
     return (
@@ -521,30 +534,16 @@ export default function DashboardLayout({
         flex flex-col shadow-xl shadow-slate-900/20
         pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] lg:pt-0 lg:pb-0
       `}>
-        {/* Logo */}
-        <div className={`h-14 flex items-center justify-between ${isCollapsed ? 'px-3' : 'px-4'} border-b border-slate-700/50 shrink-0`}>
-          <Link href="/dashboard" className="flex items-center gap-2.5 overflow-hidden group">
-            <div className="w-8 h-8 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-lg flex items-center justify-center shrink-0 shadow-lg shadow-emerald-500/25 group-hover:shadow-emerald-500/40 transition-all duration-200">
+        {/* Brand and desktop collapse control */}
+        <div data-dashboard-sidebar-header data-collapsed={sidebarHeader.compact ? 'true' : 'false'} className={`h-14 flex items-center ${sidebarHeader.compact ? 'justify-center px-2' : 'justify-between px-4'} border-b border-slate-700/50 shrink-0`}>
+          {sidebarHeader.showBrand && <Link href="/dashboard" aria-label="Ir al inicio de Clarin" className="flex items-center gap-2.5 overflow-hidden group">
+            <div data-dashboard-brand-mark className="w-8 h-8 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-lg flex items-center justify-center shrink-0 shadow-lg shadow-emerald-500/25 group-hover:shadow-emerald-500/40 transition-all duration-200">
               <MessageSquare className="w-[18px] h-[18px] text-white" />
             </div>
-            {!isCollapsed && <span className="font-bold text-lg text-white whitespace-nowrap tracking-tight">Clarin</span>}
-          </Link>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="lg:hidden flex h-11 w-11 items-center justify-center hover:bg-slate-700 rounded-lg transition-colors"
-            aria-label="Cerrar menú"
-          >
-            <X className="w-5 h-5 text-slate-400" />
-          </button>
-          <div className="flex items-center gap-0.5">
-            <button
-              onClick={toggleSidebarCollapsed}
-              className="hidden lg:flex p-1.5 hover:bg-slate-700/60 rounded-lg text-slate-500 hover:text-slate-300 transition-all duration-200"
-              title={sidebarCollapsed ? 'Expandir menú' : 'Colapsar menú'}
-            >
-              {sidebarCollapsed ? <PanelLeftOpen className="w-[18px] h-[18px]" /> : <PanelLeftClose className="w-[18px] h-[18px]" />}
-            </button>
-          </div>
+            <span className="font-bold text-lg text-white whitespace-nowrap tracking-tight">Clarin</span>
+          </Link>}
+          {sidebarHeader.showExpandControl && <CollapsedSidebarExpandButton onExpand={toggleSidebarCollapsed} />}
+          {sidebarHeader.showCollapseControl && <><button onClick={() => setSidebarOpen(false)} className="lg:hidden flex h-11 w-11 items-center justify-center hover:bg-slate-700 rounded-lg transition-colors" aria-label="Cerrar menú"><X className="w-5 h-5 text-slate-400" /></button><button onClick={toggleSidebarCollapsed} className="hidden rounded-lg p-1.5 text-slate-500 transition-all duration-200 hover:bg-slate-700/60 hover:text-slate-300 lg:flex" title="Colapsar menú" aria-label="Colapsar menú" aria-expanded="true"><PanelLeftClose className="h-[18px] w-[18px]" /></button></>}
         </div>
 
         {/* Navigation */}

@@ -1,5 +1,11 @@
 # Changelog — Clarin CRM
 
+## 2026-07-31
+
+### Build 1 — Detalle legible, descripción amplia y menús correctos
+- 💄 Clarin Work unifica contraste de ventanas, descripción ampliable, menús portalizados, transiciones accesibles y cabecera contraída sin cambios de API ni persistencia.
+- ✅ La entrega frontend incluye pruebas unitarias cercanas a sus helpers estables y regresión Playwright enfocada.
+
 ## 2026-07-30
 
 ### Build 7 — Destinos laterales claros, selección mínima y capas coherentes
