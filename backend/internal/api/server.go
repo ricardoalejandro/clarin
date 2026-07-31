@@ -16536,18 +16536,8 @@ func (s *Server) handleGetMyAccounts(c *fiber.Ctx) error {
 
 // --- Admin User-Account Assignment Handlers ---
 
-func (s *Server) handleAdminGetUserAccounts(c *fiber.Ctx) error {
-	userID, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid user ID"})
-	}
-
-	userAccounts, err := s.services.Auth.GetUserAccounts(c.Context(), userID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	accountsList := make([]fiber.Map, 0)
+func adminUserAccountList(userAccounts []*domain.UserAccount) []fiber.Map {
+	accountsList := make([]fiber.Map, 0, len(userAccounts))
 	for _, ua := range userAccounts {
 		accountsList = append(accountsList, fiber.Map{
 			"id":           ua.ID,
@@ -16559,6 +16549,35 @@ func (s *Server) handleAdminGetUserAccounts(c *fiber.Ctx) error {
 			"permissions":  ua.Permissions,
 			"is_default":   ua.IsDefault,
 		})
+	}
+	return accountsList
+}
+
+func adminSessionRefreshRequired(actorID, targetUserID uuid.UUID) bool {
+	return actorID != uuid.Nil && actorID == targetUserID
+}
+
+func adminRemovingOwnActiveAccount(actorID, targetUserID, activeAccountID, removedAccountID uuid.UUID) bool {
+	return adminSessionRefreshRequired(actorID, targetUserID) && activeAccountID == removedAccountID
+}
+
+func (s *Server) adminUserAccountsResponse(ctx context.Context, userID uuid.UUID) ([]fiber.Map, error) {
+	userAccounts, err := s.services.Auth.GetUserAccounts(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return adminUserAccountList(userAccounts), nil
+}
+
+func (s *Server) handleAdminGetUserAccounts(c *fiber.Ctx) error {
+	userID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid user ID"})
+	}
+
+	accountsList, err := s.adminUserAccountsResponse(c.Context(), userID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	return c.JSON(fiber.Map{"success": true, "accounts": accountsList})
@@ -16588,6 +16607,19 @@ func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
 	if req.Role == "" {
 		req.Role = domain.RoleAgent
 	}
+	var previousRole string
+	var previousRoleID *uuid.UUID
+	previousExists := true
+	if err := s.repos.DB().QueryRow(c.Context(), `
+		SELECT role, role_id
+		FROM user_accounts
+		WHERE user_id = $1 AND account_id = $2
+	`, userID, accountID).Scan(&previousRole, &previousRoleID); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		previousExists = false
+	}
 	exists, err := s.repos.UserAccount.Exists(c.Context(), userID, accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -16616,9 +16648,31 @@ func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
 	if err := s.services.Account.AssignUserAccount(c.Context(), ua); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	accountsList, err := s.adminUserAccountsResponse(c.Context(), userID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error(), "persisted": true})
+	}
+	actorID, _ := c.Locals("user_id").(uuid.UUID)
+	metadata := map[string]interface{}{
+		"changed_by":    actorID.String(),
+		"previous_role": previousRole,
+		"new_role":      ua.Role,
+		"created":       !previousExists,
+	}
+	if previousRoleID != nil {
+		metadata["previous_role_id"] = previousRoleID.String()
+	}
+	if ua.RoleID != nil {
+		metadata["new_role_id"] = ua.RoleID.String()
+	}
+	s.recordSecurityEventWithRefs(c.Context(), "admin_user_account_assigned", "", c, &accountID, &userID, metadata)
 	s.services.Auth.InvalidateUserSessions(userID)
 
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{
+		"success":                  true,
+		"accounts":                 accountsList,
+		"session_refresh_required": adminSessionRefreshRequired(actorID, userID),
+	})
 }
 
 func (s *Server) handleAdminRemoveUserAccount(c *fiber.Ctx) error {
@@ -16631,13 +16685,50 @@ func (s *Server) handleAdminRemoveUserAccount(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
 	}
+	claims, _ := c.Locals("claims").(*service.JWTClaims)
+	actorID, _ := c.Locals("user_id").(uuid.UUID)
+	if claims != nil && adminRemovingOwnActiveAccount(actorID, userID, claims.AccountID, accountID) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success": false,
+			"code":    "active_account_assignment",
+			"error":   "Cambia a otra cuenta antes de retirar tu cuenta activa",
+		})
+	}
+	var previousRole string
+	var previousRoleID *uuid.UUID
+	if err := s.repos.DB().QueryRow(c.Context(), `
+		SELECT role, role_id
+		FROM user_accounts
+		WHERE user_id = $1 AND account_id = $2
+	`, userID, accountID).Scan(&previousRole, &previousRoleID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "La cuenta ya no está asignada al usuario"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 
 	if err := s.services.Account.RemoveUserAccount(c.Context(), userID, accountID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	accountsList, err := s.adminUserAccountsResponse(c.Context(), userID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error(), "persisted": true})
+	}
+	metadata := map[string]interface{}{
+		"changed_by":    actorID.String(),
+		"previous_role": previousRole,
+	}
+	if previousRoleID != nil {
+		metadata["previous_role_id"] = previousRoleID.String()
+	}
+	s.recordSecurityEventWithRefs(c.Context(), "admin_user_account_removed", "", c, &accountID, &userID, metadata)
 	s.services.Auth.InvalidateUserSessions(userID)
 
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{
+		"success":                  true,
+		"accounts":                 accountsList,
+		"session_refresh_required": adminSessionRefreshRequired(actorID, userID),
+	})
 }
 
 // --- Quick Reply Handlers ---

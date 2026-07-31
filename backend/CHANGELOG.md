@@ -2,6 +2,12 @@
 
 ## 2026-07-31
 
+### Build 2 — Administración de cuentas sin invalidar la experiencia
+- 🐛 Asignar o cambiar una cuenta del propio superadministrador conserva la invalidación segura, renueva la sesión transparentemente y evita el falso `401` posterior al guardado.
+- ✨ Las asignaciones existentes permiten editar su rol entre Agente, Admin, Super Admin o un rol personalizado sin quitar y volver a agregar la cuenta.
+- 🔒 El backend devuelve la colección canónica, audita rol anterior y nuevo, e impide retirar la cuenta activa de la propia sesión.
+- ✅ Pruebas unitarias cubren renovación propia, cambios a otros usuarios, cuenta activa, colección vacía y fallo de renovación después de un cambio persistido.
+
 ### Build 1 — Detalle legible, descripción amplia y menús correctos
 - 💄 Detalle y creación comparten un contraste medido: flotante 18%, acoplado 8% y maximizado/móvil 45%, con blur, borde y sombra sin bloquear indebidamente el workspace.
 - ✨ La descripción incorpora tirador visible, resize por puntero o teclado, altura recordada y un editor ampliado que conserva el mismo borrador y permanece abierto ante errores.

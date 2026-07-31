@@ -34,6 +34,7 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(false)
   const [turnstileSiteKey, setTurnstileSiteKey] = useState('')
   const [turnstileRequired, setTurnstileRequired] = useState(false)
@@ -42,6 +43,13 @@ export default function LoginScreen() {
   const [turnstileToken, setTurnstileToken] = useState('')
   const turnstileRef = useRef<HTMLDivElement | null>(null)
   const widgetIdRef = useRef<TurnstileWidgetID | null>(null)
+
+  useEffect(() => {
+    const sessionNotice = sessionStorage.getItem('clarin:login_notice')
+    if (!sessionNotice) return
+    sessionStorage.removeItem('clarin:login_notice')
+    setNotice(sessionNotice)
+  }, [])
 
   const renderTurnstile = useCallback(() => {
     const turnstile = window.turnstile
@@ -159,6 +167,11 @@ export default function LoginScreen() {
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+          {notice && (
+            <div role="status" className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              {notice}
+            </div>
+          )}
           {error && (
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm mb-5">
               {error}

@@ -97,7 +97,10 @@ export default defineConfig({
   ],
 
   webServer: startLocalFrontend ? {
-    command: 'npm --prefix frontend run start -- -p 3011',
+    // The frontend uses Next.js standalone output, which cannot be served by
+    // `next start`. Browser tests use the development server after the
+    // production build has already been verified separately.
+    command: 'npm --prefix frontend run dev -- -p 3011',
     url: 'http://127.0.0.1:3011/login',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

@@ -10,6 +10,13 @@ import {
 } from 'lucide-react'
 import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
+import { apiDelete, apiGet, apiPost, logoutFromBrowser, tryRefreshToken } from '@/lib/api'
+import {
+  finalizeAdminUserAccountMutation,
+  type AdminApiResult,
+  type AdminUserAccountAssignment as UserAccountAssignment,
+  type AdminUserAccountsResponse,
+} from '@/lib/adminUserAccountAssignments'
 
 interface Account {
   id: string
@@ -56,17 +63,6 @@ interface User {
   account_name: string
   accounts?: UserAccountAssignment[]
   created_at: string
-}
-
-interface UserAccountAssignment {
-  account_id: string
-  account_name: string
-  account_slug: string
-  role: string
-  role_id?: string
-  role_name?: string
-  permissions?: string[]
-  is_default: boolean
 }
 
 interface Role {
@@ -436,6 +432,13 @@ export default function AdminPage() {
   const [assignAccountId, setAssignAccountId] = useState('')
   const [assignRole, setAssignRole] = useState('agent')
   const [assignRoleId, setAssignRoleId] = useState('')
+  const [assignLoading, setAssignLoading] = useState(false)
+  const [assignMutationAccountId, setAssignMutationAccountId] = useState('')
+  const [assignError, setAssignError] = useState('')
+  const [assignNotice, setAssignNotice] = useState('')
+  const [editingAssignmentAccountId, setEditingAssignmentAccountId] = useState('')
+  const [editingAssignmentRole, setEditingAssignmentRole] = useState('agent')
+  const [editingAssignmentRoleId, setEditingAssignmentRoleId] = useState('')
 
   // Roles
   const [roles, setRoles] = useState<Role[]>([])
@@ -902,7 +905,10 @@ export default function AdminPage() {
       if (showPurgeModal) { setShowPurgeModal(false); return }
       if (showIntegrationModal) { setShowIntegrationModal(false); return }
       if (showRoleModal) { setShowRoleModal(false); return }
-      if (showAssignModal) { setShowAssignModal(false); return }
+      if (showAssignModal) {
+        if (!assignMutationAccountId) setShowAssignModal(false)
+        return
+      }
       if (showUserModal) {
         if (!userSubmitting) {
           setShowUserModal(false)
@@ -914,7 +920,7 @@ export default function AdminPage() {
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showErosOpenAIModal, showIntegrationMonitor, showPasswordModal, showPurgeModal, showIntegrationModal, showRoleModal, showAssignModal, showUserModal, showAccountModal, userSubmitting])
+  }, [showErosOpenAIModal, showIntegrationMonitor, showPasswordModal, showPurgeModal, showIntegrationModal, showRoleModal, showAssignModal, showUserModal, showAccountModal, userSubmitting, assignMutationAccountId])
 
   // Account CRUD
 	  function openCreateAccount() {
@@ -1222,50 +1228,97 @@ export default function AdminPage() {
     setAssignAccountId('')
     setAssignRole('agent')
     setAssignRoleId('')
+    setAssignError('')
+    setAssignNotice('')
+    setEditingAssignmentAccountId('')
     setShowAssignModal(true)
     await fetchUserAssignments(u.id)
   }
 
   async function fetchUserAssignments(userId: string) {
-    try {
-      const res = await fetch(`/api/admin/users/${userId}/accounts`, { headers })
-      const data = await res.json()
-      if (data.success) setUserAssignments(data.accounts || [])
-    } catch (e) {
-      console.error('Failed to fetch user accounts:', e)
+    setAssignLoading(true)
+    setAssignError('')
+    const result = await apiGet<AdminUserAccountsResponse>(`/api/admin/users/${userId}/accounts`)
+    if (result.success && result.data?.success) {
+      setUserAssignments(result.data.accounts ?? [])
+    } else {
+      setAssignError(result.error || result.data?.error || 'No pudimos cargar las cuentas asignadas.')
     }
+    setAssignLoading(false)
+  }
+
+  function reconcileUserAssignments(userId: string, assignments: UserAccountAssignment[]) {
+    setUserAssignments(assignments)
+    setUsers(current => current.map(user => user.id === userId
+      ? {
+          ...user,
+          accounts: assignments,
+          account_name: assignments.map(item => `${item.account_name} · ${roleDisplay(item.role, item.role_id || undefined, item.role_name)}`).join(', '),
+        }
+      : user))
+  }
+
+  async function completeAssignmentMutation(result: AdminApiResult, successMessage: string) {
+    const outcome = await finalizeAdminUserAccountMutation(result, tryRefreshToken)
+    if (outcome.persisted) reconcileUserAssignments(assignUserId, outcome.accounts)
+    if (!outcome.success) {
+      setAssignError(outcome.error || 'No pudimos actualizar la asignación.')
+      if (outcome.code === 'session_refresh_failed') {
+        sessionStorage.setItem('clarin:login_notice', outcome.error || 'El cambio se guardó, pero debes volver a iniciar sesión.')
+        window.setTimeout(() => { void logoutFromBrowser('expired') }, 1200)
+      }
+      return false
+    }
+    setAssignNotice(successMessage)
+    return true
+  }
+
+  function beginEditAssignment(assignment: UserAccountAssignment) {
+    setAssignError('')
+    setAssignNotice('')
+    setEditingAssignmentAccountId(assignment.account_id)
+    setEditingAssignmentRole(assignment.role || 'agent')
+    setEditingAssignmentRoleId(assignment.role_id || '')
+  }
+
+  async function saveAssignmentRole(accountId: string) {
+    if (assignMutationAccountId) return
+    setAssignMutationAccountId(accountId)
+    setAssignError('')
+    setAssignNotice('')
+    const body: Record<string, unknown> = { account_id: accountId, role: editingAssignmentRole }
+    if (editingAssignmentRole === 'agent' && editingAssignmentRoleId) body.role_id = editingAssignmentRoleId
+    const result = await apiPost<AdminUserAccountsResponse>(`/api/admin/users/${assignUserId}/accounts`, body)
+    const saved = await completeAssignmentMutation(result, 'Rol actualizado correctamente.')
+    if (saved) setEditingAssignmentAccountId('')
+    setAssignMutationAccountId('')
   }
 
   async function assignAccount() {
-    if (!assignAccountId) return
+    if (!assignAccountId || assignMutationAccountId) return
+    setAssignMutationAccountId(assignAccountId)
+    setAssignError('')
+    setAssignNotice('')
     const body: Record<string, unknown> = { account_id: assignAccountId, role: assignRole }
-    if (assignRoleId) body.role_id = assignRoleId
-    const res = await fetch(`/api/admin/users/${assignUserId}/accounts`, {
-      method: 'POST', headers,
-      body: JSON.stringify(body)
-    })
-    const data = await res.json()
-    if (data.success) {
+    if (assignRole === 'agent' && assignRoleId) body.role_id = assignRoleId
+    const result = await apiPost<AdminUserAccountsResponse>(`/api/admin/users/${assignUserId}/accounts`, body)
+    const saved = await completeAssignmentMutation(result, 'Cuenta asignada correctamente.')
+    if (saved) {
       setAssignAccountId('')
       setAssignRole('agent')
       setAssignRoleId('')
-      await fetchUserAssignments(assignUserId)
-    } else {
-      alert(data.error || 'Error al asignar')
     }
+    setAssignMutationAccountId('')
   }
 
   async function removeAssignment(accountId: string) {
-    if (!confirm('¿Quitar esta cuenta del usuario?')) return
-    const res = await fetch(`/api/admin/users/${assignUserId}/accounts/${accountId}`, {
-      method: 'DELETE', headers
-    })
-    const data = await res.json()
-    if (data.success) {
-      await fetchUserAssignments(assignUserId)
-    } else {
-      alert(data.error || 'Error al quitar')
-    }
+    if (assignMutationAccountId || !confirm('¿Quitar esta cuenta del usuario?')) return
+    setAssignMutationAccountId(accountId)
+    setAssignError('')
+    setAssignNotice('')
+    const result = await apiDelete<AdminUserAccountsResponse>(`/api/admin/users/${assignUserId}/accounts/${accountId}`)
+    await completeAssignmentMutation(result, 'Cuenta retirada correctamente.')
+    setAssignMutationAccountId('')
   }
 
   const filteredAccounts = accounts.filter(a =>
@@ -2172,7 +2225,7 @@ export default function AdminPage() {
                         <span key={ua.account_id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700" title={ua.account_name}>
                           {ua.account_name}
                           <span className="text-slate-400">·</span>
-                          {roleDisplay(ua.role, ua.role_id, ua.role_name)}
+                          {roleDisplay(ua.role, ua.role_id || undefined, ua.role_name)}
                         </span>
                       )) : (
                         <span>{u.account_name}</span>
@@ -3472,36 +3525,74 @@ export default function AdminPage() {
               <p className="text-sm text-gray-500 mt-1">Gestiona las cuentas asignadas a este usuario</p>
             </div>
             <div className="p-6 space-y-4">
+              {assignError && (
+                <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700">
+                  {assignError}
+                </div>
+              )}
+              {assignNotice && !assignError && (
+                <div role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-sm text-emerald-700">
+                  {assignNotice}
+                </div>
+              )}
               {/* Current assignments */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Cuentas asignadas</label>
-                {userAssignments.length === 0 ? (
+                {assignLoading ? (
+                  <div className="flex items-center gap-2 py-3 text-sm text-gray-500"><Loader2 className="h-4 w-4 animate-spin" /> Cargando cuentas...</div>
+                ) : userAssignments.length === 0 ? (
                   <p className="text-sm text-gray-400 py-2">Sin cuentas asignadas</p>
                 ) : (
                   <div className="space-y-2">
-                    {userAssignments.map(ua => (
-                      <div key={ua.account_id} className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <Building2 className="w-4 h-4 text-gray-400 shrink-0" />
-                          <span className="text-sm font-medium text-gray-900">{ua.account_name}</span>
-                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${roleColors[ua.role] || 'bg-gray-100 text-gray-700'}`}>
-                            {roleDisplay(ua.role, ua.role_id, ua.role_name)}
-                          </span>
-                          {ua.is_default && (
-                            <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
-                              Principal
-                            </span>
-                          )}
+                    {userAssignments.map(ua => {
+                      const editing = editingAssignmentAccountId === ua.account_id
+                      const busy = assignMutationAccountId === ua.account_id
+                      return (
+                        <div key={ua.account_id} className="rounded-lg bg-gray-50 px-3 py-2.5">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex min-w-0 items-center gap-2 flex-wrap">
+                              <Building2 className="w-4 h-4 text-gray-400 shrink-0" />
+                              <span className="truncate text-sm font-medium text-gray-900">{ua.account_name}</span>
+                              {!editing && <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${roleColors[ua.role] || 'bg-gray-100 text-gray-700'}`}>
+                                {roleDisplay(ua.role, ua.role_id || undefined, ua.role_name)}
+                              </span>}
+                              {ua.is_default && <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">Principal</span>}
+                            </div>
+                            {!editing && <div className="flex shrink-0 items-center gap-1">
+                              <button type="button" onClick={() => beginEditAssignment(ua)} disabled={Boolean(assignMutationAccountId)} className="flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-white hover:text-emerald-700 disabled:opacity-40" title={`Cambiar rol en ${ua.account_name}`} aria-label={`Cambiar rol en ${ua.account_name}`}>
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                              <button type="button" onClick={() => removeAssignment(ua.account_id)} disabled={Boolean(assignMutationAccountId)} className="flex h-8 w-8 items-center justify-center rounded-md text-gray-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40" title={`Quitar ${ua.account_name}`} aria-label={`Quitar ${ua.account_name}`}>
+                                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                              </button>
+                            </div>}
+                          </div>
+                          {editing && <div className="mt-3 rounded-lg border border-gray-200 bg-white p-3">
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <label className="text-xs font-medium text-gray-600">Rol
+                                <select value={editingAssignmentRole} onChange={event => { setEditingAssignmentRole(event.target.value); if (event.target.value !== 'agent') setEditingAssignmentRoleId('') }} disabled={busy} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20">
+                                  <option value="agent">Agente</option>
+                                  <option value="admin">Admin</option>
+                                  <option value="super_admin">Super Admin</option>
+                                </select>
+                              </label>
+                              {editingAssignmentRole === 'agent' && <label className="text-xs font-medium text-gray-600">Rol de permisos
+                                <select value={editingAssignmentRoleId} onChange={event => setEditingAssignmentRoleId(event.target.value)} disabled={busy} className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20">
+                                  <option value="">Sin rol de permisos</option>
+                                  {roles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}
+                                </select>
+                              </label>}
+                            </div>
+                            <div className="mt-3 flex justify-end gap-2">
+                              <button type="button" onClick={() => setEditingAssignmentAccountId('')} disabled={busy} className="rounded-lg px-3 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 disabled:opacity-40">Cancelar</button>
+                              <button type="button" onClick={() => saveAssignmentRole(ua.account_id)} disabled={busy} className="inline-flex min-w-20 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">
+                                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Guardar
+                              </button>
+                            </div>
+                          </div>}
                         </div>
-                        <button
-                          onClick={() => removeAssignment(ua.account_id)}
-                          className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"
-                          title="Quitar cuenta"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 )}
               </div>
@@ -3543,10 +3634,11 @@ export default function AdminPage() {
                   )}
                   <button
                     onClick={assignAccount}
-                    disabled={!assignAccountId}
-                    className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    disabled={!assignAccountId || Boolean(assignMutationAccountId)}
+                    className="inline-flex min-h-10 min-w-10 items-center justify-center px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    aria-label="Asignar cuenta"
                   >
-                    <Plus className="w-4 h-4" />
+                    {assignMutationAccountId === assignAccountId ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="w-4 h-4" />}
                   </button>
                 </div>
                 {assignRole === 'agent' && assignRoleId && (
@@ -3557,7 +3649,7 @@ export default function AdminPage() {
               </div>
             </div>
             <div className="p-6 border-t border-gray-200 flex justify-end">
-              <button onClick={() => setShowAssignModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
+              <button onClick={() => setShowAssignModal(false)} disabled={Boolean(assignMutationAccountId)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg disabled:opacity-40">
                 Cerrar
               </button>
             </div>

@@ -11,6 +11,7 @@ export default defineConfig({
       'src/lib/useDebouncedValue.test.tsx',
       'src/lib/useKanbanPan.test.tsx',
       'src/lib/dashboardSidebarState.test.ts',
+      'src/lib/adminUserAccountAssignments.test.ts',
       'src/components/task-work/**/*.test.{ts,tsx}',
     ],
     restoreMocks: true,

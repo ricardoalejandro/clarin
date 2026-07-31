@@ -295,7 +295,7 @@ export async function api<T>(
         await logoutFromBrowser('expired')
         return { success: false, error: 'Sesión expirada', status: res.status }
       }
-      return { success: false, error: data?.error || `Error ${res.status}`, status: res.status }
+      return { success: false, data: data as T, error: data?.error || `Error ${res.status}`, status: res.status }
     }
 
     if (!skipAuth) markAuthActivity()
