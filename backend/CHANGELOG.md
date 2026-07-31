@@ -3,8 +3,11 @@
 ## 2026-07-31
 
 ### Build 1 — Detalle legible, descripción amplia y menús correctos
-- 💄 Clarin Work unifica contraste de ventanas, descripción ampliable, menús portalizados, transiciones accesibles y cabecera contraída sin cambios de API ni persistencia.
-- ✅ La entrega frontend incluye pruebas unitarias cercanas a sus helpers estables y regresión Playwright enfocada.
+- 💄 Detalle y creación comparten un contraste medido: flotante 18%, acoplado 8% y maximizado/móvil 45%, con blur, borde y sombra sin bloquear indebidamente el workspace.
+- ✨ La descripción incorpora tirador visible, resize por puntero o teclado, altura recordada y un editor ampliado que conserva el mismo borrador y permanece abierto ante errores.
+- 🐛 El menú de columna se renderiza en un portal, se ajusta al viewport y queda por encima de tarjetas y contenedores con `overflow`.
+- 💄 Los grupos de Lista se contraen con una transición accesible de 200 ms y el sidebar contraído oculta el logotipo para mostrar un único control centrado.
+- ✅ Helpers y pruebas unitarias cubren contraste/bloqueo, resize, editor, posicionamiento/flip, acordeones y cabecera contraída; Playwright verifica los flujos visuales completos.
 
 ## 2026-07-30
 
