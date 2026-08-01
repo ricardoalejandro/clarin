@@ -14,6 +14,9 @@ import (
 )
 
 var ErrTaskAttachmentPreviewRetryInvalid = errors.New("task attachment preview cannot be retried")
+var ErrTaskAttachmentCommentInvalid = errors.New("task attachment comment is invalid")
+var ErrTaskAttachmentCommentRootRequired = errors.New("only attachment comment roots can be resolved")
+var ErrTaskAttachmentCommentThreadClosed = errors.New("attachment comment thread is resolved")
 
 type taskAttachmentPreviewScanner interface {
 	Scan(dest ...any) error
@@ -155,7 +158,24 @@ func (r *TaskWorkRepository) RetryAttachmentPreview(ctx context.Context, account
 }
 
 func (r *TaskWorkRepository) ListAttachmentComments(ctx context.Context, accountID, taskID, attachmentID uuid.UUID) ([]*domain.TaskAttachmentComment, error) {
-	rows, err := r.db.Query(ctx, `SELECT c.id,c.account_id,c.task_id,c.attachment_id,c.parent_id,c.author_id,COALESCE(u.display_name,u.username,''),c.body,c.anchor,c.resolved_at,c.resolved_by,c.version,c.created_at,c.updated_at FROM task_attachment_comments c JOIN users u ON u.id=c.author_id WHERE c.account_id=$1 AND c.task_id=$2 AND c.attachment_id=$3 AND c.deleted_at IS NULL ORDER BY c.created_at,c.id`, accountID, taskID, attachmentID)
+	rows, err := r.db.Query(ctx, `SELECT c.id,c.account_id,c.task_id,c.attachment_id,c.parent_id,c.author_id,
+		COALESCE(author.display_name,author.username,''),CASE WHEN c.deleted_at IS NULL THEN c.body ELSE '' END,
+		c.anchor,c.resolved_at,c.resolved_by,COALESCE(resolver.display_name,resolver.username,''),c.edited_at,
+		(c.deleted_at IS NOT NULL),c.version,c.created_at,c.updated_at
+		FROM task_attachment_comments c
+		JOIN users author ON author.id=c.author_id
+		LEFT JOIN users resolver ON resolver.id=c.resolved_by
+		WHERE c.account_id=$1 AND c.task_id=$2 AND c.attachment_id=$3 AND (
+			c.deleted_at IS NULL OR (
+				c.parent_id IS NULL AND EXISTS(
+					SELECT 1 FROM task_attachment_comments reply
+					WHERE reply.account_id=c.account_id AND reply.task_id=c.task_id
+						AND reply.attachment_id=c.attachment_id AND reply.parent_id=c.id
+						AND reply.deleted_at IS NULL
+				)
+			)
+		)
+		ORDER BY c.created_at,c.id`, accountID, taskID, attachmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +183,7 @@ func (r *TaskWorkRepository) ListAttachmentComments(ctx context.Context, account
 	items := []*domain.TaskAttachmentComment{}
 	for rows.Next() {
 		item := &domain.TaskAttachmentComment{Mentions: []*domain.TaskCommentMention{}}
-		if err := rows.Scan(&item.ID, &item.AccountID, &item.TaskID, &item.AttachmentID, &item.ParentID, &item.AuthorID, &item.AuthorName, &item.Body, &item.Anchor, &item.ResolvedAt, &item.ResolvedBy, &item.Version, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.AccountID, &item.TaskID, &item.AttachmentID, &item.ParentID, &item.AuthorID, &item.AuthorName, &item.Body, &item.Anchor, &item.ResolvedAt, &item.ResolvedBy, &item.ResolvedByName, &item.EditedAt, &item.Deleted, &item.Version, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -172,6 +192,9 @@ func (r *TaskWorkRepository) ListAttachmentComments(ctx context.Context, account
 		return nil, err
 	}
 	for _, item := range items {
+		if item.Deleted {
+			continue
+		}
 		mentionRows, queryErr := r.db.Query(ctx, `SELECT m.user_id,COALESCE(u.display_name,u.username,''),u.username FROM task_attachment_comment_mentions m JOIN users u ON u.id=m.user_id WHERE m.account_id=$1 AND m.comment_id=$2 ORDER BY u.username`, accountID, item.ID)
 		if queryErr != nil {
 			return nil, queryErr
@@ -203,12 +226,22 @@ func (r *TaskWorkRepository) CreateAttachmentComment(ctx context.Context, item *
 	}
 	defer tx.Rollback(ctx)
 	if item.ParentID != nil {
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_attachment_comments WHERE account_id=$1 AND task_id=$2 AND attachment_id=$3 AND id=$4 AND deleted_at IS NULL)`, item.AccountID, item.TaskID, item.AttachmentID, *item.ParentID).Scan(&exists); err != nil || !exists {
-			if err != nil {
-				return err
-			}
+		var parentID *uuid.UUID
+		var resolvedAt, deletedAt *time.Time
+		err := tx.QueryRow(ctx, `SELECT parent_id,resolved_at,deleted_at FROM task_attachment_comments
+			WHERE account_id=$1::uuid AND task_id=$2::uuid AND attachment_id=$3::uuid AND id=$4::uuid
+			FOR UPDATE`, item.AccountID, item.TaskID, item.AttachmentID, *item.ParentID).Scan(&parentID, &resolvedAt, &deletedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if parentID != nil {
+			return ErrTaskAttachmentCommentRootRequired
+		}
+		if resolvedAt != nil || deletedAt != nil {
+			return ErrTaskAttachmentCommentThreadClosed
 		}
 	}
 	command, err := tx.Exec(ctx, `INSERT INTO task_attachment_comments(id,account_id,task_id,attachment_id,parent_id,author_id,body,anchor,version,created_at,updated_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8::jsonb,1,$9,$9 WHERE EXISTS(SELECT 1 FROM task_attachments WHERE account_id=$2 AND task_id=$3 AND id=$4)`, item.ID, item.AccountID, item.TaskID, item.AttachmentID, item.ParentID, item.AuthorID, strings.TrimSpace(item.Body), item.Anchor, item.CreatedAt)
@@ -226,10 +259,193 @@ func (r *TaskWorkRepository) CreateAttachmentComment(ctx context.Context, item *
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) SetAttachmentCommentResolved(ctx context.Context, accountID, taskID, attachmentID, commentID, actorID uuid.UUID, resolved bool, expectedVersion int64) error {
-	command, err := r.db.Exec(ctx, `UPDATE task_attachment_comments SET resolved_at=CASE WHEN $6 THEN NOW() ELSE NULL END,resolved_by=CASE WHEN $6 THEN $5 ELSE NULL END,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND task_id=$2 AND attachment_id=$3 AND id=$4 AND version=$7 AND deleted_at IS NULL`, accountID, taskID, attachmentID, commentID, actorID, resolved, expectedVersion)
-	if err == nil && command.RowsAffected() == 0 {
+type lockedAttachmentComment struct {
+	authorID uuid.UUID
+	parentID *uuid.UUID
+	resolved bool
+	deleted  bool
+	version  int64
+}
+
+func lockAttachmentComment(ctx context.Context, tx pgx.Tx, accountID, taskID, attachmentID, commentID uuid.UUID) (*lockedAttachmentComment, error) {
+	item := &lockedAttachmentComment{}
+	var resolvedAt, deletedAt *time.Time
+	err := tx.QueryRow(ctx, `SELECT author_id,parent_id,resolved_at,deleted_at,version
+		FROM task_attachment_comments
+		WHERE account_id=$1::uuid AND task_id=$2::uuid AND attachment_id=$3::uuid AND id=$4::uuid
+		FOR UPDATE`, accountID, taskID, attachmentID, commentID).
+		Scan(&item.authorID, &item.parentID, &resolvedAt, &deletedAt, &item.version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTaskWorkNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	item.resolved = resolvedAt != nil
+	item.deleted = deletedAt != nil
+	return item, nil
+}
+
+func ensureAttachmentThreadOpen(ctx context.Context, tx pgx.Tx, accountID, taskID, attachmentID uuid.UUID, item *lockedAttachmentComment) error {
+	if item.deleted {
+		return ErrTaskWorkNotFound
+	}
+	if item.parentID == nil {
+		if item.resolved {
+			return ErrTaskAttachmentCommentThreadClosed
+		}
+		return nil
+	}
+	var resolvedAt, deletedAt *time.Time
+	err := tx.QueryRow(ctx, `SELECT resolved_at,deleted_at FROM task_attachment_comments
+		WHERE account_id=$1::uuid AND task_id=$2::uuid AND attachment_id=$3::uuid AND id=$4::uuid AND parent_id IS NULL
+		FOR UPDATE`, accountID, taskID, attachmentID, *item.parentID).Scan(&resolvedAt, &deletedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTaskWorkNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if resolvedAt != nil {
+		return ErrTaskAttachmentCommentThreadClosed
+	}
+	// A deleted root remains as a traceable tombstone while replies exist.
+	// Existing replies keep their own author/admin edit and delete lifecycle,
+	// but CreateAttachmentComment still prevents adding new replies to it.
+	return nil
+}
+
+func insertAttachmentCommentActivity(ctx context.Context, tx pgx.Tx, accountID, taskID, actorID uuid.UUID, action string, metadata map[string]any) error {
+	payload, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO task_activity(account_id,task_id,actor_id,action,metadata)
+		VALUES($1::uuid,$2::uuid,$3::uuid,$4::text,$5::jsonb)`, accountID, taskID, actorID, action, payload)
+	return err
+}
+
+func (r *TaskWorkRepository) SetAttachmentCommentResolved(ctx context.Context, accountID, taskID, attachmentID, commentID, actorID uuid.UUID, resolved bool, expectedVersion int64, operationID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	item, err := lockAttachmentComment(ctx, tx, accountID, taskID, attachmentID, commentID)
+	if err != nil {
+		return err
+	}
+	if item.deleted {
+		return ErrTaskWorkNotFound
+	}
+	if item.parentID != nil {
+		return ErrTaskAttachmentCommentRootRequired
+	}
+	if item.version != expectedVersion {
 		return ErrTaskVersionConflict
 	}
-	return err
+	_, err = tx.Exec(ctx, `UPDATE task_attachment_comments SET
+		resolved_at=CASE WHEN $6::boolean THEN NOW() ELSE NULL END,
+		resolved_by=CASE WHEN $6::boolean THEN $5::uuid ELSE NULL::uuid END,
+		updated_at=NOW(),version=version+1
+		WHERE account_id=$1::uuid AND task_id=$2::uuid AND attachment_id=$3::uuid AND id=$4::uuid`, accountID, taskID, attachmentID, commentID, actorID, resolved)
+	if err != nil {
+		return err
+	}
+	action := "attachment_comment_reopened"
+	if resolved {
+		action = "attachment_comment_resolved"
+	}
+	if err := insertAttachmentCommentActivity(ctx, tx, accountID, taskID, actorID, action, map[string]any{"attachment_id": attachmentID, "comment_id": commentID, "operation_id": operationID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *TaskWorkRepository) UpdateAttachmentComment(ctx context.Context, accountID, taskID, attachmentID, commentID, actorID uuid.UUID, admin bool, body string, mentions []uuid.UUID, expectedVersion int64, operationID uuid.UUID) error {
+	body = strings.TrimSpace(body)
+	if body == "" || len(body) > 10000 {
+		return ErrTaskAttachmentCommentInvalid
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	item, err := lockAttachmentComment(ctx, tx, accountID, taskID, attachmentID, commentID)
+	if err != nil {
+		return err
+	}
+	if item.version != expectedVersion {
+		return ErrTaskVersionConflict
+	}
+	if item.authorID != actorID && !admin {
+		return ErrTaskWorkNotFound
+	}
+	if err := ensureAttachmentThreadOpen(ctx, tx, accountID, taskID, attachmentID, item); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE task_attachment_comments SET body=$5::text,edited_at=NOW(),updated_at=NOW(),version=version+1
+		WHERE account_id=$1::uuid AND task_id=$2::uuid AND attachment_id=$3::uuid AND id=$4::uuid`, accountID, taskID, attachmentID, commentID, body); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM task_attachment_comment_mentions WHERE account_id=$1::uuid AND comment_id=$2::uuid`, accountID, commentID); err != nil {
+		return err
+	}
+	seen := map[uuid.UUID]struct{}{}
+	for _, userID := range mentions {
+		if userID == actorID {
+			continue
+		}
+		if _, exists := seen[userID]; exists {
+			continue
+		}
+		seen[userID] = struct{}{}
+		command, err := tx.Exec(ctx, `INSERT INTO task_attachment_comment_mentions(comment_id,account_id,user_id)
+			SELECT $1::uuid,$2::uuid,$3::uuid WHERE EXISTS(
+				SELECT 1 FROM user_accounts WHERE account_id=$2::uuid AND user_id=$3::uuid
+			)`, commentID, accountID, userID)
+		if err != nil || command.RowsAffected() != 1 {
+			if err != nil {
+				return err
+			}
+			return ErrTaskAttachmentCommentInvalid
+		}
+	}
+	if err := insertAttachmentCommentActivity(ctx, tx, accountID, taskID, actorID, "attachment_comment_updated", map[string]any{"attachment_id": attachmentID, "comment_id": commentID, "operation_id": operationID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *TaskWorkRepository) DeleteAttachmentComment(ctx context.Context, accountID, taskID, attachmentID, commentID, actorID uuid.UUID, admin bool, expectedVersion int64, operationID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	item, err := lockAttachmentComment(ctx, tx, accountID, taskID, attachmentID, commentID)
+	if err != nil {
+		return err
+	}
+	if item.version != expectedVersion {
+		return ErrTaskVersionConflict
+	}
+	if item.authorID != actorID && !admin {
+		return ErrTaskWorkNotFound
+	}
+	if err := ensureAttachmentThreadOpen(ctx, tx, accountID, taskID, attachmentID, item); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE task_attachment_comments SET deleted_at=NOW(),updated_at=NOW(),version=version+1
+		WHERE account_id=$1::uuid AND task_id=$2::uuid AND attachment_id=$3::uuid AND id=$4::uuid`, accountID, taskID, attachmentID, commentID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM task_attachment_comment_mentions WHERE account_id=$1::uuid AND comment_id=$2::uuid`, accountID, commentID); err != nil {
+		return err
+	}
+	if err := insertAttachmentCommentActivity(ctx, tx, accountID, taskID, actorID, "attachment_comment_deleted", map[string]any{"attachment_id": attachmentID, "comment_id": commentID, "parent_id": item.parentID, "operation_id": operationID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

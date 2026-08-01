@@ -341,10 +341,14 @@ export interface TaskAttachmentComment {
   anchor: TaskAttachmentAnchor
   resolved_at?: string
   resolved_by?: string
+  resolved_by_name?: string
+  edited_at?: string
+  deleted?: boolean
   version: number
   created_at: string
   updated_at: string
   can_edit?: boolean
+  can_delete?: boolean
   can_resolve?: boolean
   mentions: TaskCommentMention[]
 }

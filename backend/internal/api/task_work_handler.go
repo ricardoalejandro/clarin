@@ -68,6 +68,12 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La selección contiene tareas que no se pueden modificar juntas", "code": "invalid_bulk_update"})
 	case errors.Is(err, repository.ErrTaskAttachmentPreviewRetryInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Solo se puede reintentar una conversión de Word fallida", "code": "attachment_preview_retry_invalid"})
+	case errors.Is(err, repository.ErrTaskAttachmentCommentInvalid):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "El comentario o sus menciones no son válidos", "code": "attachment_comment_invalid"})
+	case errors.Is(err, repository.ErrTaskAttachmentCommentRootRequired):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Solo el comentario principal puede resolverse", "code": "attachment_comment_root_required"})
+	case errors.Is(err, repository.ErrTaskAttachmentCommentThreadClosed):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Reabre el hilo antes de modificarlo o responder", "code": "attachment_comment_thread_resolved"})
 	case errors.Is(err, repository.ErrDefaultTaskList):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La Bandeja general debe permanecer como lista raíz predeterminada", "code": "default_list_invariant"})
 	case errors.Is(err, repository.ErrTaskTrashConfirmation):

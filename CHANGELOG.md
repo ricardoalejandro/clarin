@@ -1,5 +1,14 @@
 # Changelog — Clarin CRM
 
+## 2026-08-01
+
+### Build 1 — Comentarios anclados confiables y completos
+- 🐛 Resolver y reabrir comentarios de adjuntos tipa explícitamente UUID, booleanos y versiones en PostgreSQL, eliminando el error `500` sin perder hilos existentes.
+- ✨ Los hilos resueltos se agrupan en una sección plegable, permanecen de solo lectura y pueden reabrirse para continuar la conversación.
+- ✏️ Autor y administradores pueden editar o eliminar comentarios; una raíz con respuestas conserva ancla y trazabilidad como “Comentario eliminado”.
+- 🔄 Resolver, reabrir, editar y eliminar registran actividad transaccional y se sincronizan mediante un único evento WebSocket sin cerrar ni recargar el visor.
+- ✅ Estados pendientes por hilo evitan doble clic; los conflictos `409` recargan la colección canónica sin perder el texto editado y el cambio de archivo limpia operaciones residuales.
+
 ## 2026-07-31
 
 ### Build 4 — Clarin Work estable, enfocado y sin estados residuales

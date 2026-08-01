@@ -127,6 +127,64 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT task_trash_retention_days FROM accounts WHERE id=$1`, accountA).Scan(&retentionDays); err != nil || retentionDays == nil || *retentionDays != 30 {
 		t.Fatalf("task trash retention default=%v err=%v, want 30", retentionDays, err)
 	}
+
+	// Exercise the real PostgreSQL parameter inference used by anchored comment
+	// resolution. This specifically guards the UUID-in-CASE regression that Go
+	// compilation and mocked repositories cannot detect.
+	assetID, attachmentID, rootCommentID, replyCommentID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	if _, err := db.Exec(ctx, `INSERT INTO media_assets(id,account_id,content_hash,object_key,filename)
+		VALUES($1,$2,$3,$4,'proof.pdf')`, assetID, accountA, "proof-"+assetID.String(), accountA.String()+"/proof.pdf"); err != nil {
+		t.Fatalf("insert attachment media asset: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO task_attachments(id,account_id,task_id,media_asset_id,uploaded_by)
+		VALUES($1,$2,$3,$4,$5)`, attachmentID, accountA, taskID, assetID, userA); err != nil {
+		t.Fatalf("insert task attachment: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO task_attachment_comments(id,account_id,task_id,attachment_id,author_id,body,anchor)
+		VALUES($1,$2,$3,$4,$5,'Raíz','{"kind":"pdf","page":1}'),
+		($6,$2,$3,$4,$5,'Respuesta','{"kind":"pdf","page":1}')`, rootCommentID, accountA, taskID, attachmentID, userA, replyCommentID); err != nil {
+		t.Fatalf("insert attachment comments: %v", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE task_attachment_comments SET parent_id=$1 WHERE id=$2`, rootCommentID, replyCommentID); err != nil {
+		t.Fatalf("link attachment reply: %v", err)
+	}
+	taskWork := repository.NewRepositories(db).TaskWork
+	if err := taskWork.SetAttachmentCommentResolved(ctx, accountA, taskID, attachmentID, rootCommentID, userA, true, 1, uuid.New()); err != nil {
+		t.Fatalf("resolve anchored comment with UUID actor: %v", err)
+	}
+	if err := taskWork.SetAttachmentCommentResolved(ctx, accountA, taskID, attachmentID, rootCommentID, userA, false, 2, uuid.New()); err != nil {
+		t.Fatalf("reopen anchored comment: %v", err)
+	}
+	if err := taskWork.SetAttachmentCommentResolved(ctx, accountA, taskID, attachmentID, replyCommentID, userA, true, 1, uuid.New()); !errors.Is(err, repository.ErrTaskAttachmentCommentRootRequired) {
+		t.Fatalf("reply resolution error=%v, want root-required", err)
+	}
+	if err := taskWork.UpdateAttachmentComment(ctx, accountA, taskID, attachmentID, rootCommentID, userA, false, "Raíz editada", nil, 3, uuid.New()); err != nil {
+		t.Fatalf("edit anchored root: %v", err)
+	}
+	if err := taskWork.DeleteAttachmentComment(ctx, accountA, taskID, attachmentID, rootCommentID, userA, false, 4, uuid.New()); err != nil {
+		t.Fatalf("soft-delete anchored root with replies: %v", err)
+	}
+	comments, err := taskWork.ListAttachmentComments(ctx, accountA, taskID, attachmentID)
+	if err != nil {
+		t.Fatalf("list anchored comments after root deletion: %v", err)
+	}
+	var deletedRoot *domain.TaskAttachmentComment
+	for _, comment := range comments {
+		if comment.ID == rootCommentID {
+			deletedRoot = comment
+			break
+		}
+	}
+	if len(comments) != 2 || deletedRoot == nil || !deletedRoot.Deleted || deletedRoot.Body != "" || deletedRoot.EditedAt == nil {
+		t.Fatalf("deleted root was not returned as a safe tombstone: %#v", comments)
+	}
+	if err := taskWork.DeleteAttachmentComment(ctx, accountA, taskID, attachmentID, replyCommentID, userA, false, 1, uuid.New()); err != nil {
+		t.Fatalf("delete reply retained under tombstone: %v", err)
+	}
+	comments, err = taskWork.ListAttachmentComments(ctx, accountA, taskID, attachmentID)
+	if err != nil || len(comments) != 0 {
+		t.Fatalf("root tombstone remained after its final reply disappeared: comments=%#v err=%v", comments, err)
+	}
 	if _, err := db.Exec(ctx, `UPDATE accounts SET task_trash_retention_days=6 WHERE id=$1`, accountA); err == nil {
 		t.Fatal("task trash retention accepted value below 7")
 	}

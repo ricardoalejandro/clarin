@@ -55,6 +55,7 @@ async function installWorkspaceMock(page: Page) {
   const taskQueries: Array<{ search: string; at: number }> = []
   const trashWrites: Array<{ path: string; method: string; body: Record<string, unknown> }> = []
   const attachmentCommentWrites: Array<Record<string, unknown>> = []
+  const attachmentCommentMutations: Array<{ method: string; body: Record<string, unknown> }> = []
   const textAttachment = {
     id: 'attachment-text', account_id: 'account-work', task_id: 'task-refinement', media_asset_id: 'asset-text',
     filename: 'notas-operativas.txt', content_type: 'text/plain', media_type: 'document', size_bytes: 76,
@@ -206,6 +207,15 @@ async function installWorkspaceMock(page: Page) {
       attachmentComments = [...attachmentComments, comment]
       await json(route, { comment }, 201); return
     }
+    const attachmentCommentResolveMatch = path.match(new RegExp(`^/api/tasks/${task.id}/attachments/${textAttachment.id}/comments/([^/]+)/resolve$`))
+    if (attachmentCommentResolveMatch && request.method() === 'PUT') {
+      attachmentCommentMutations.push({ method: request.method(), body })
+      const commentID = attachmentCommentResolveMatch[1]
+      attachmentComments = attachmentComments.map(comment => comment.id === commentID
+        ? { ...comment, version: Number(comment.version) + 1, resolved_at: body.resolved ? now : undefined, resolved_by_name: body.resolved ? 'Ricardo Rojas' : undefined, can_edit: !body.resolved, can_delete: !body.resolved, can_resolve: true }
+        : comment)
+      await json(route, { comment: attachmentComments.find(comment => comment.id === commentID), operation_id: body.operation_id }); return
+    }
     if (path === '/api/media/file/account-work/notas-operativas.txt') {
       await route.fulfill({ status: 200, contentType: 'text/plain; charset=utf-8', body: 'Primera línea de contexto.\nSegunda línea para comentarios anclados.\n' }); return
     }
@@ -223,7 +233,7 @@ async function installWorkspaceMock(page: Page) {
     localStorage.setItem('tasks:detail-mode', 'maximized')
   })
 
-  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, bulkMoves, trashWrites, taskQueries, attachmentCommentWrites, failNextDescriptionWrite: () => { failNextDescriptionWrite = true } }
+  return { structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, bulkMoves, trashWrites, taskQueries, attachmentCommentWrites, attachmentCommentMutations, failNextDescriptionWrite: () => { failNextDescriptionWrite = true } }
 }
 
 async function drag(page: Page, source: Locator, target: Locator) {
@@ -617,6 +627,43 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect.poll(() => mock.attachmentCommentWrites.length).toBe(1)
     expect(mock.attachmentCommentWrites[0]).toMatchObject({ body: 'Este fragmento necesita validación.', anchor: { kind: 'text', offset: 0 } })
     await expect(viewer.getByText('Este fragmento necesita validación.')).toBeVisible()
+  })
+
+  test('resolves and reopens an anchored thread without closing or reloading the attachment viewer', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 818 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByText('Preparar propuesta profesional', { exact: true }).click()
+    const detail = page.getByRole('dialog', { name: 'Detalle de tarea' })
+    await detail.getByText('notas-operativas.txt', { exact: true }).click()
+    const viewer = page.getByRole('dialog', { name: 'Vista previa de notas-operativas.txt' })
+    const documentText = viewer.locator('pre')
+    await expect(documentText).toBeVisible()
+    await documentText.evaluate(element => {
+      const node = element.firstChild
+      if (!node) return
+      const range = document.createRange()
+      range.setStart(node, 0)
+      range.setEnd(node, Math.min(12, node.textContent?.length || 0))
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    })
+    await viewer.getByPlaceholder('Comenta sobre este punto…').fill('Hilo verificable')
+    await viewer.getByRole('button', { name: 'Publicar comentario' }).click()
+    await expect(viewer.getByText('Hilo verificable')).toBeVisible()
+
+    await viewer.getByRole('button', { name: 'Resolver comentario' }).click()
+    await expect.poll(() => mock.attachmentCommentMutations.length).toBe(1)
+    await expect(viewer.getByRole('button', { name: /Resueltos\s+1/ })).toBeVisible()
+    await viewer.getByRole('button', { name: /Resueltos\s+1/ }).click()
+    await expect(viewer.getByText('Hilo verificable')).toBeVisible()
+    await expect(viewer.getByRole('button', { name: 'Responder' })).toHaveCount(0)
+    await viewer.getByRole('button', { name: 'Reabrir comentario' }).click()
+    await expect.poll(() => mock.attachmentCommentMutations.length).toBe(2)
+    await expect(viewer.getByRole('button', { name: 'Resolver comentario' })).toBeVisible()
+    await expect(viewer.locator('pre')).toContainText('Primera línea de contexto.')
   })
 
   test('separates the task detail visually and provides an accessible expanded description editor', async ({ page }) => {

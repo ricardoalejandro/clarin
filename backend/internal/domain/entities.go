@@ -1618,23 +1618,27 @@ type TaskAttachmentPreview struct {
 }
 
 type TaskAttachmentComment struct {
-	ID           uuid.UUID             `json:"id"`
-	AccountID    uuid.UUID             `json:"account_id"`
-	TaskID       uuid.UUID             `json:"task_id"`
-	AttachmentID uuid.UUID             `json:"attachment_id"`
-	ParentID     *uuid.UUID            `json:"parent_id,omitempty"`
-	AuthorID     uuid.UUID             `json:"author_id"`
-	AuthorName   string                `json:"author_name"`
-	Body         string                `json:"body"`
-	Anchor       json.RawMessage       `json:"anchor"`
-	ResolvedAt   *time.Time            `json:"resolved_at,omitempty"`
-	ResolvedBy   *uuid.UUID            `json:"resolved_by,omitempty"`
-	Version      int64                 `json:"version"`
-	CreatedAt    time.Time             `json:"created_at"`
-	UpdatedAt    time.Time             `json:"updated_at"`
-	CanEdit      bool                  `json:"can_edit"`
-	CanResolve   bool                  `json:"can_resolve"`
-	Mentions     []*TaskCommentMention `json:"mentions"`
+	ID             uuid.UUID             `json:"id"`
+	AccountID      uuid.UUID             `json:"account_id"`
+	TaskID         uuid.UUID             `json:"task_id"`
+	AttachmentID   uuid.UUID             `json:"attachment_id"`
+	ParentID       *uuid.UUID            `json:"parent_id,omitempty"`
+	AuthorID       uuid.UUID             `json:"author_id"`
+	AuthorName     string                `json:"author_name"`
+	Body           string                `json:"body"`
+	Anchor         json.RawMessage       `json:"anchor"`
+	ResolvedAt     *time.Time            `json:"resolved_at,omitempty"`
+	ResolvedBy     *uuid.UUID            `json:"resolved_by,omitempty"`
+	ResolvedByName string                `json:"resolved_by_name,omitempty"`
+	EditedAt       *time.Time            `json:"edited_at,omitempty"`
+	Deleted        bool                  `json:"deleted"`
+	Version        int64                 `json:"version"`
+	CreatedAt      time.Time             `json:"created_at"`
+	UpdatedAt      time.Time             `json:"updated_at"`
+	CanEdit        bool                  `json:"can_edit"`
+	CanDelete      bool                  `json:"can_delete"`
+	CanResolve     bool                  `json:"can_resolve"`
+	Mentions       []*TaskCommentMention `json:"mentions"`
 }
 
 // TaskReminder represents a scheduled reminder for a task

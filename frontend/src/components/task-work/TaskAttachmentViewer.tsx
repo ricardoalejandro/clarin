@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, Download, Loader2, Maximize2, MessageSquare, RotateCcw, Send, X, ZoomIn, ZoomOut } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Download, Loader2, Maximize2, MessageSquare, MoreHorizontal, Pencil, RotateCcw, Send, Trash2, X, ZoomIn, ZoomOut } from 'lucide-react'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
-import { apiBlob, apiGet, apiPost, apiPut } from '@/lib/api'
+import { apiBlob, apiDelete, apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
 import type { TaskAttachment, TaskAttachmentAnchor, TaskAttachmentComment, TaskAttachmentPreview } from '@/types/task'
 import type { TaskAccountUser } from './TaskEditorModal'
 import TaskUserCombobox from './TaskUserCombobox'
@@ -44,6 +44,8 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
   const dialogRef = useRef<HTMLElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const resourcesRef = useRef<ViewerResources>({})
+  const commentRefreshControllerRef = useRef<AbortController | null>(null)
+  const localCommentOperationsRef = useRef(new Set<string>())
   const sessionRef = useRef(0)
   const identityRef = useRef(`${taskId}:${attachment.id}`)
   const [reloadKey, setReloadKey] = useState(0)
@@ -67,6 +69,14 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
   const [retrying, setRetrying] = useState(false)
   const [error, setError] = useState('')
   const [commentError, setCommentError] = useState('')
+  const [commentErrors, setCommentErrors] = useState<Record<string, string>>({})
+  const [pendingComments, setPendingComments] = useState<Record<string, 'resolve' | 'edit' | 'delete'>>({})
+  const [resolvedOpen, setResolvedOpen] = useState(false)
+  const [commentMenuID, setCommentMenuID] = useState<string>()
+  const [editingID, setEditingID] = useState<string>()
+  const [editBody, setEditBody] = useState('')
+  const [editMentionIDs, setEditMentionIDs] = useState<string[]>([])
+  const [deleteTargetID, setDeleteTargetID] = useState<string>()
 
   const clearLoadTimers = useCallback(() => {
     const resources = resourcesRef.current
@@ -77,6 +87,9 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
   }, [])
 
   const disposeResources = useCallback(() => {
+    commentRefreshControllerRef.current?.abort()
+    commentRefreshControllerRef.current = null
+    localCommentOperationsRef.current.clear()
     const resources = resourcesRef.current
     resources.controller?.abort()
     if (resources.slowTimer) window.clearTimeout(resources.slowTimer)
@@ -93,6 +106,21 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
       canvas.height = 0
     }
   }, [])
+
+  const refreshAttachmentComments = useCallback(async () => {
+    const identity = `${taskId}:${attachment.id}`
+    commentRefreshControllerRef.current?.abort()
+    const controller = new AbortController()
+    commentRefreshControllerRef.current = controller
+    const result = await apiGet<{ comments: TaskAttachmentComment[] }>(`/api/tasks/${taskId}/attachments/${attachment.id}/comments`, { signal: controller.signal })
+    if (controller.signal.aborted || identityRef.current !== identity) return
+    if (result.success) {
+      setComments(result.data?.comments || [])
+      setCommentError('')
+    } else if (result.error !== 'Solicitud cancelada') {
+      setCommentError(result.error || 'No se pudieron actualizar los comentarios.')
+    }
+  }, [attachment.id, taskId])
 
   const closeViewer = useCallback(() => {
     sessionRef.current++
@@ -251,6 +279,14 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
       setPhase('metadata')
       setError('')
       setCommentError('')
+      setCommentErrors({})
+      setPendingComments({})
+      setResolvedOpen(false)
+      setCommentMenuID(undefined)
+      setEditingID(undefined)
+      setEditBody('')
+      setEditMentionIDs([])
+      setDeleteTargetID(undefined)
       startLoadDeadline()
       const commentsRequest = apiGet<{ comments: TaskAttachmentComment[] }>(`/api/tasks/${taskId}/attachments/${attachment.id}/comments`, { signal: controller.signal })
       void commentsRequest.then(commentsResult => {
@@ -272,6 +308,18 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
       disposeResources()
     }
   }, [attachment.id, clearLoadTimers, disposeResources, reloadKey, taskId])
+
+  useEffect(() => subscribeWebSocket(raw => {
+    const envelope = raw as {
+      event?: string
+      data?: { action?: string; task_id?: string; attachment_id?: string; operation_id?: string }
+    }
+    if (envelope.event !== 'task_update') return
+    const message = envelope.data || {}
+    if (!message.action?.startsWith('attachment_comment_') || message.task_id !== taskId || message.attachment_id !== attachment.id) return
+    if (message.operation_id && localCommentOperationsRef.current.has(message.operation_id)) return
+    void refreshAttachmentComments()
+  }), [attachment.id, refreshAttachmentComments, taskId])
 
   useEffect(() => {
     if (!pdf || !canvasRef.current) return
@@ -373,6 +421,18 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
       event.preventDefault()
       event.stopPropagation()
       event.stopImmediatePropagation()
+      if (commentMenuID) {
+        setCommentMenuID(undefined)
+        return
+      }
+      if (deleteTargetID) {
+        setDeleteTargetID(undefined)
+        return
+      }
+      if (editingID) {
+        cancelEdit()
+        return
+      }
       if (mobileCommentsOpen) {
         setMobileCommentsOpen(false)
         return
@@ -381,7 +441,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
     }
     window.addEventListener('keydown', close, true)
     return () => window.removeEventListener('keydown', close, true)
-  }, [closeViewer, mobileCommentsOpen])
+  }, [closeViewer, commentMenuID, deleteTargetID, editingID, mobileCommentsOpen])
 
   const placeAnchor = (event: React.MouseEvent<HTMLElement>) => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -407,7 +467,12 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
   }
   const send = async () => {
     if (!body.trim()) return
-    const commentAnchor = replyTo ? comments.find(comment => comment.id === replyTo)?.anchor : anchor
+    const replyRoot = replyTo ? comments.find(comment => comment.id === replyTo) : undefined
+    if (replyRoot?.resolved_at) {
+      setCommentError('Reabre el hilo antes de responder.')
+      return
+    }
+    const commentAnchor = replyRoot?.anchor || anchor
     if (!commentAnchor || !hasUsableAttachmentAnchor(commentAnchor)) {
       setCommentError('Selecciona primero un punto del documento para anclar el comentario.')
       return
@@ -422,23 +487,249 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
     setComments(current => [...current, result.data!.comment])
     setBody(''); setMentionIDs([]); setReplyTo(undefined)
   }
-  const resolve = async (comment: TaskAttachmentComment) => {
-    const identity = identityRef.current
-    setCommentError('')
-    const result = await apiPut<{ comment: TaskAttachmentComment }>(`/api/tasks/${taskId}/attachments/${attachment.id}/comments/${comment.id}/resolve`, { resolved: !comment.resolved_at, version: comment.version })
-    if (identityRef.current !== identity) return
-    if (result.success && result.data?.comment) setComments(current => current.map(item => item.id === comment.id ? result.data!.comment : item))
-    else setCommentError(result.error || 'No se pudo actualizar el comentario.')
+
+  const setCommentPending = (id: string, value?: 'resolve' | 'edit' | 'delete') => {
+    setPendingComments(current => {
+      const next = { ...current }
+      if (value) next[id] = value
+      else delete next[id]
+      return next
+    })
   }
+
+  const setInlineCommentError = (id: string, value?: string) => {
+    setCommentErrors(current => {
+      const next = { ...current }
+      if (value) next[id] = value
+      else delete next[id]
+      return next
+    })
+  }
+
+  const finishLocalCommentOperation = (operationID: string) => {
+    window.setTimeout(() => localCommentOperationsRef.current.delete(operationID), 1500)
+  }
+
+  const reconcileCommentConflict = async (commentID: string) => {
+    await refreshAttachmentComments()
+    setInlineCommentError(commentID, 'Este hilo cambió en otra sesión. Actualizamos su versión; revisa el contenido y reintenta.')
+  }
+
+  const resolve = async (comment: TaskAttachmentComment) => {
+    if (pendingComments[comment.id]) return
+    const identity = identityRef.current
+    const operationID = crypto.randomUUID()
+    localCommentOperationsRef.current.add(operationID)
+    setCommentPending(comment.id, 'resolve')
+    setInlineCommentError(comment.id)
+    const result = await apiPut<{ comment: TaskAttachmentComment; operation_id: string }>(`/api/tasks/${taskId}/attachments/${attachment.id}/comments/${comment.id}/resolve`, { resolved: !comment.resolved_at, version: comment.version, operation_id: operationID })
+    finishLocalCommentOperation(operationID)
+    if (identityRef.current !== identity) return
+    setCommentPending(comment.id)
+    if (result.success && result.data?.comment) {
+      setComments(current => current.map(item => item.id === comment.id ? result.data!.comment : item))
+      if (!comment.resolved_at && replyTo === comment.id) setReplyTo(undefined)
+      return
+    }
+    if (result.status === 409) {
+      await reconcileCommentConflict(comment.id)
+      return
+    }
+    setInlineCommentError(comment.id, result.error || 'No se pudo actualizar el comentario.')
+  }
+
+  const beginEdit = (comment: TaskAttachmentComment) => {
+    setEditingID(comment.id)
+    setEditBody(comment.body)
+    setEditMentionIDs(comment.mentions.map(mention => mention.user_id))
+    setCommentMenuID(undefined)
+    setDeleteTargetID(undefined)
+    setInlineCommentError(comment.id)
+  }
+
+  const cancelEdit = () => {
+    setEditingID(undefined)
+    setEditBody('')
+    setEditMentionIDs([])
+  }
+
+  const saveEdit = async (comment: TaskAttachmentComment) => {
+    if (!editBody.trim() || pendingComments[comment.id]) return
+    const identity = identityRef.current
+    const operationID = crypto.randomUUID()
+    localCommentOperationsRef.current.add(operationID)
+    setCommentPending(comment.id, 'edit')
+    setInlineCommentError(comment.id)
+    const result = await apiPut<{ comment: TaskAttachmentComment; operation_id: string }>(`/api/tasks/${taskId}/attachments/${attachment.id}/comments/${comment.id}`, {
+      body: editBody.trim(),
+      mentioned_user_ids: editMentionIDs,
+      version: comment.version,
+      operation_id: operationID,
+    })
+    finishLocalCommentOperation(operationID)
+    if (identityRef.current !== identity) return
+    setCommentPending(comment.id)
+    if (result.success && result.data?.comment) {
+      setComments(current => current.map(item => item.id === comment.id ? result.data!.comment : item))
+      cancelEdit()
+      return
+    }
+    if (result.status === 409) {
+      await reconcileCommentConflict(comment.id)
+      return
+    }
+    setInlineCommentError(comment.id, result.error || 'No se pudo editar el comentario.')
+  }
+
+  const removeComment = async (comment: TaskAttachmentComment) => {
+    if (pendingComments[comment.id]) return
+    const identity = identityRef.current
+    const operationID = crypto.randomUUID()
+    localCommentOperationsRef.current.add(operationID)
+    setCommentPending(comment.id, 'delete')
+    setInlineCommentError(comment.id)
+    const result = await apiDelete<{ comment?: TaskAttachmentComment; deleted_comment_id: string; operation_id: string }>(`/api/tasks/${taskId}/attachments/${attachment.id}/comments/${comment.id}`, { version: comment.version, operation_id: operationID })
+    finishLocalCommentOperation(operationID)
+    if (identityRef.current !== identity) return
+    setCommentPending(comment.id)
+    if (result.success) {
+      setComments(current => result.data?.comment
+        ? current.map(item => item.id === comment.id ? result.data!.comment! : item)
+        : current.filter(item => item.id !== comment.id))
+      if (replyTo === comment.id) setReplyTo(undefined)
+      if (editingID === comment.id) cancelEdit()
+      setDeleteTargetID(undefined)
+      return
+    }
+    if (result.status === 409) {
+      await reconcileCommentConflict(comment.id)
+      return
+    }
+    setInlineCommentError(comment.id, result.error || 'No se pudo eliminar el comentario.')
+  }
+
   const roots = comments.filter(comment => !comment.parent_id)
+  const activeRoots = roots.filter(comment => !comment.resolved_at)
+  const resolvedRoots = roots.filter(comment => Boolean(comment.resolved_at))
   const pendingCommentAnchor = replyTo ? comments.find(comment => comment.id === replyTo)?.anchor : anchor
   const canPublishComment = Boolean(body.trim() && pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor))
   const canPreview = preview?.status === 'ready' && ['image', 'pdf', 'word_pdf', 'text'].includes(preview.kind)
   const download = <a href={attachment.url} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold text-white hover:bg-white/10"><Download className="h-4 w-4" />Descargar original</a>
 
+  const commentMentionLabel = (comment: TaskAttachmentComment, userID: string) => {
+    const existing = comment.mentions.find(mention => mention.user_id === userID)
+    const user = users.find(candidate => candidate.id === userID)
+    return existing?.display_name || existing?.username || user?.display_name || user?.username || 'Usuario'
+  }
+
+  const renderCommentActions = (comment: TaskAttachmentComment) => {
+    if (!comment.can_edit && !comment.can_delete) return null
+    return <div className="relative">
+      <button
+        type="button"
+        aria-label={`Acciones de comentario de ${comment.author_name}`}
+        aria-expanded={commentMenuID === comment.id}
+        onClick={() => setCommentMenuID(current => current === comment.id ? undefined : comment.id)}
+        className="rounded-lg p-1.5 text-slate-400 transition hover:bg-white hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-300"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {commentMenuID === comment.id && <div role="menu" className="absolute right-0 top-9 z-20 w-36 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
+        {comment.can_edit && <button type="button" role="menuitem" onClick={() => beginEdit(comment)} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50"><Pencil className="h-3.5 w-3.5" />Editar</button>}
+        {comment.can_delete && <button type="button" role="menuitem" onClick={() => { setDeleteTargetID(comment.id); setCommentMenuID(undefined); cancelEdit() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold text-rose-600 hover:bg-rose-50"><Trash2 className="h-3.5 w-3.5" />Eliminar</button>}
+      </div>}
+    </div>
+  }
+
+  const renderCommentBody = (comment: TaskAttachmentComment) => {
+    if (comment.deleted) return <p className="mt-2 text-xs italic leading-5 text-slate-400">Comentario eliminado</p>
+    if (editingID !== comment.id) return <>
+      <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-600">{comment.body}</p>
+      {comment.edited_at && <span className="mt-1 inline-block text-[9px] font-semibold uppercase tracking-wide text-slate-400">Editado</span>}
+    </>
+    return <div className="mt-2 rounded-xl border border-emerald-200 bg-white p-2 shadow-sm">
+      <textarea
+        aria-label="Editar comentario anclado"
+        value={editBody}
+        onChange={event => setEditBody(event.target.value)}
+        className="min-h-20 w-full resize-y rounded-lg border border-slate-200 p-2 text-xs leading-5 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
+      />
+      {editMentionIDs.length > 0 && <div className="mt-2 flex flex-wrap gap-1">
+        {editMentionIDs.map(userID => <button key={userID} type="button" onClick={() => setEditMentionIDs(current => current.filter(id => id !== userID))} className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-bold text-emerald-700">@{commentMentionLabel(comment, userID)}<X className="h-3 w-3" /></button>)}
+      </div>}
+      <div className="mt-2"><TaskUserCombobox users={users} value="" excludeIds={editMentionIDs} onChange={id => setEditMentionIDs(current => [...current, id])} placeholder="Añadir mención…" className="!min-h-9 !py-1" /></div>
+      <div className="mt-2 flex justify-end gap-2">
+        <button type="button" disabled={Boolean(pendingComments[comment.id])} onClick={cancelEdit} className="rounded-lg px-3 py-2 text-[10px] font-bold text-slate-500 hover:bg-slate-100">Cancelar</button>
+        <button type="button" disabled={!editBody.trim() || Boolean(pendingComments[comment.id])} onClick={() => void saveEdit(comment)} className="inline-flex min-w-20 items-center justify-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-[10px] font-black text-white disabled:opacity-40">{pendingComments[comment.id] === 'edit' && <Loader2 className="h-3 w-3 animate-spin" />}Guardar</button>
+      </div>
+    </div>
+  }
+
+  const renderDeleteConfirmation = (comment: TaskAttachmentComment) => {
+    if (deleteTargetID !== comment.id) return null
+    const hasReplies = comments.some(reply => reply.parent_id === comment.id)
+    return <div role="alertdialog" aria-label="Confirmar eliminación de comentario" className="mt-2 rounded-xl border border-rose-200 bg-rose-50 p-2.5">
+      <p className="text-[10px] font-bold leading-4 text-rose-800">{hasReplies && !comment.parent_id ? 'El texto se reemplazará por “Comentario eliminado” y las respuestas permanecerán.' : 'Este comentario dejará de mostrarse.'}</p>
+      <div className="mt-2 flex justify-end gap-2">
+        <button type="button" disabled={Boolean(pendingComments[comment.id])} onClick={() => setDeleteTargetID(undefined)} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-slate-600 hover:bg-white">Cancelar</button>
+        <button type="button" disabled={Boolean(pendingComments[comment.id])} onClick={() => void removeComment(comment)} className="inline-flex min-w-20 items-center justify-center gap-1 rounded-lg bg-rose-600 px-2.5 py-2 text-[10px] font-black text-white disabled:opacity-40">{pendingComments[comment.id] === 'delete' && <Loader2 className="h-3 w-3 animate-spin" />}Eliminar</button>
+      </div>
+    </div>
+  }
+
+  const renderReply = (reply: TaskAttachmentComment) => <div key={reply.id} className="mt-2 border-l-2 border-emerald-200 pl-2 text-[11px] text-slate-600">
+    <div className="flex items-center gap-1">
+      <strong className="min-w-0 flex-1 truncate">{reply.author_name}</strong>
+      {reply.edited_at && !reply.deleted && <span className="text-[8px] uppercase tracking-wide text-slate-400">Editado</span>}
+      {renderCommentActions(reply)}
+    </div>
+    {renderCommentBody(reply)}
+    {renderDeleteConfirmation(reply)}
+    {commentErrors[reply.id] && <p role="alert" className="mt-2 text-[10px] font-semibold leading-4 text-rose-600">{commentErrors[reply.id]}</p>}
+  </div>
+
+  const renderThread = (comment: TaskAttachmentComment) => <article key={comment.id} className={`mb-2 rounded-2xl border p-3 transition ${comment.resolved_at ? 'border-slate-200 bg-slate-50' : 'border-emerald-100 bg-emerald-50/40'}`}>
+    <div className="flex items-center gap-2">
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white text-[9px] font-black text-slate-500 shadow-sm">{comment.author_name.slice(0, 2).toUpperCase()}</span>
+      <span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">{comment.author_name}</span>
+      {comment.can_resolve && <button type="button" disabled={Boolean(pendingComments[comment.id])} onClick={() => void resolve(comment)} aria-label={comment.resolved_at ? 'Reabrir comentario' : 'Resolver comentario'} title={comment.resolved_at ? 'Reabrir' : 'Resolver'} className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white hover:text-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-300 disabled:opacity-50">{pendingComments[comment.id] === 'resolve' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}</button>}
+      {renderCommentActions(comment)}
+    </div>
+    {renderCommentBody(comment)}
+    {!comment.resolved_at && !comment.deleted && editingID !== comment.id && <button type="button" onClick={() => { setReplyTo(comment.id); setCommentError('') }} className="mt-2 text-[10px] font-bold text-emerald-700 hover:text-emerald-900">Responder</button>}
+    {comment.resolved_at && <p className="mt-2 text-[9px] font-semibold text-slate-400">Resuelto{comment.resolved_by_name ? ` por ${comment.resolved_by_name}` : ''}. Reabre el hilo para responder o modificarlo.</p>}
+    {comments.filter(reply => reply.parent_id === comment.id).map(renderReply)}
+    {renderDeleteConfirmation(comment)}
+    {commentErrors[comment.id] && <p role="alert" className="mt-2 text-[10px] font-semibold leading-4 text-rose-600">{commentErrors[comment.id]}</p>}
+  </article>
+
+  const renderCommentsPanel = () => <>
+    <header className="flex items-start gap-3 border-b border-slate-200 px-4 py-4">
+      <div className="min-w-0 flex-1"><h2 className="flex items-center gap-2 text-sm font-black text-slate-800"><MessageSquare className="h-4 w-4 text-emerald-600" />Comentarios anclados</h2><p className="mt-1 text-[10px] leading-4 text-slate-400">Selecciona un punto del archivo antes de publicar.</p></div>
+      <button type="button" onClick={() => setMobileCommentsOpen(false)} aria-label="Cerrar panel de comentarios" className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 md:hidden"><X className="h-4 w-4" /></button>
+    </header>
+    <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      {activeRoots.map(renderThread)}
+      {!activeRoots.length && !resolvedRoots.length && <div className="py-14 text-center text-xs text-slate-400">Todavía no hay comentarios sobre este archivo.</div>}
+      {resolvedRoots.length > 0 && <section className="mt-3 border-t border-slate-200 pt-3">
+        <button type="button" aria-expanded={resolvedOpen} onClick={() => setResolvedOpen(value => !value)} className="flex min-h-10 w-full items-center gap-2 rounded-xl px-2 text-left text-xs font-bold text-slate-600 hover:bg-slate-50">
+          <ChevronDown className={`h-4 w-4 transition-transform ${resolvedOpen ? '' : '-rotate-90'}`} />Resueltos <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] text-slate-500">{resolvedRoots.length}</span>
+        </button>
+        {resolvedOpen && <div className="mt-2">{resolvedRoots.map(renderThread)}</div>}
+      </section>}
+    </div>
+    <div className="border-t border-slate-200 p-3">
+      {replyTo && <button type="button" onClick={() => setReplyTo(undefined)} className="mb-2 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700">Respondiendo · cancelar</button>}
+      <textarea value={body} onChange={event => setBody(event.target.value)} placeholder="Comenta sobre este punto…" className="min-h-20 w-full resize-none rounded-xl border border-slate-200 p-3 text-xs outline-none focus:border-emerald-300 focus:ring-4 focus:ring-emerald-50" />
+      <p className={`mt-1 text-[10px] ${pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor) ? 'text-emerald-600' : 'text-amber-600'}`}>{pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor) ? 'Ancla lista para comentar.' : 'Selecciona un punto, página o fragmento de texto.'}</p>
+      <div className="mt-2 flex gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" excludeIds={mentionIDs} onChange={id => setMentionIDs(current => [...current, id])} placeholder="Mencionar…" className="!min-h-9 !py-1" /></div><button type="button" aria-label="Publicar comentario" disabled={!canPublishComment || saving} onClick={() => void send()} className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white disabled:opacity-40">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>
+      {commentError && <p role="alert" className="mt-2 text-[10px] font-semibold text-rose-600">{commentError}</p>}
+    </div>
+  </>
+
   return createPortal(<div data-task-attachment-viewer className="fixed inset-0 flex items-center justify-center bg-slate-950/70 p-2 backdrop-blur-[3px] sm:p-5" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }} role="presentation">
     <section ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={`Vista previa de ${attachment.filename}`} className={`${fullscreen ? 'h-full w-full' : 'h-[92vh] w-full max-w-7xl'} relative flex overflow-hidden rounded-3xl border border-white/10 bg-slate-950 shadow-2xl shadow-black/50 outline-none`}>
-      {mobileCommentsOpen && <><button type="button" aria-label="Cerrar comentarios anclados" onClick={() => setMobileCommentsOpen(false)} className="absolute inset-0 z-30 bg-slate-950/65 backdrop-blur-sm md:hidden" /><aside data-task-attachment-mobile-comments className="absolute inset-y-0 right-0 z-40 flex w-[min(92vw,380px)] flex-col bg-white shadow-2xl md:hidden"><header className="flex items-start gap-3 border-b border-slate-200 px-4 py-4"><div className="min-w-0 flex-1"><h2 className="flex items-center gap-2 text-sm font-black text-slate-800"><MessageSquare className="h-4 w-4 text-emerald-600" />Comentarios anclados</h2><p className="mt-1 text-[10px] leading-4 text-slate-400">Selecciona un punto del archivo antes de publicar.</p></div><button type="button" onClick={() => setMobileCommentsOpen(false)} aria-label="Cerrar panel de comentarios" className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></header><div className="min-h-0 flex-1 overflow-y-auto p-3">{roots.map(comment => <div key={comment.id} className={`mb-2 rounded-2xl border p-3 ${comment.resolved_at ? 'border-slate-200 bg-slate-50 opacity-70' : 'border-emerald-100 bg-emerald-50/40'}`}><div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-[9px] font-black text-slate-500">{comment.author_name.slice(0,2).toUpperCase()}</span><span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">{comment.author_name}</span>{comment.can_resolve && <button type="button" onClick={() => void resolve(comment)} aria-label={comment.resolved_at ? 'Reabrir comentario' : 'Resolver comentario'} className="rounded-lg p-1.5 text-slate-400 hover:bg-white hover:text-emerald-600"><CheckCircle2 className="h-4 w-4" /></button>}</div><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-600">{comment.body}</p><button type="button" onClick={() => setReplyTo(comment.id)} className="mt-2 text-[10px] font-bold text-emerald-700">Responder</button>{comments.filter(reply => reply.parent_id === comment.id).map(reply => <div key={reply.id} className="mt-2 border-l-2 border-emerald-200 pl-2 text-[11px] text-slate-600"><strong>{reply.author_name}</strong><p>{reply.body}</p></div>)}</div>)}{!roots.length && <div className="py-14 text-center text-xs text-slate-400">Todavía no hay comentarios sobre este archivo.</div>}</div><div className="border-t border-slate-200 p-3">{replyTo && <button type="button" onClick={() => setReplyTo(undefined)} className="mb-2 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700">Respondiendo · cancelar</button>}<textarea value={body} onChange={event => setBody(event.target.value)} placeholder="Comenta sobre este punto…" className="min-h-20 w-full resize-none rounded-xl border border-slate-200 p-3 text-xs outline-none focus:border-emerald-300 focus:ring-4 focus:ring-emerald-50" /><p className={`mt-1 text-[10px] ${pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor) ? 'text-emerald-600' : 'text-amber-600'}`}>{pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor) ? 'Ancla lista para comentar.' : 'Selecciona un punto, página o fragmento de texto.'}</p><div className="mt-2 flex gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" excludeIds={mentionIDs} onChange={id => setMentionIDs(current => [...current, id])} placeholder="Mencionar…" className="!min-h-9 !py-1" /></div><button type="button" aria-label="Publicar comentario" disabled={!canPublishComment || saving} onClick={() => void send()} className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white disabled:opacity-40">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>{commentError && <p role="alert" className="mt-2 text-[10px] font-semibold text-rose-600">{commentError}</p>}</div></aside></>}
+      {mobileCommentsOpen && <><button type="button" aria-label="Cerrar comentarios anclados" onClick={() => setMobileCommentsOpen(false)} className="absolute inset-0 z-30 bg-slate-950/65 backdrop-blur-sm md:hidden" /><aside data-task-attachment-mobile-comments className="absolute inset-y-0 right-0 z-40 flex w-[min(92vw,380px)] flex-col bg-white shadow-2xl md:hidden">{renderCommentsPanel()}</aside></>}
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex min-h-14 items-center gap-2 border-b border-white/10 px-3 text-white sm:gap-3 sm:px-4"><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold">{attachment.filename}</p><p className="text-[10px] text-slate-400">{preview?.kind === 'word_pdf' ? 'Documento convertido de forma segura a PDF' : preview?.kind?.toUpperCase() || 'Preparando'}</p></div>{canPreview && <><button onClick={() => setZoom(value => Math.max(.5, value - .2))} className="hidden rounded-xl p-2 hover:bg-white/10 sm:block" aria-label="Alejar"><ZoomOut className="h-4 w-4" /></button><span className="hidden w-12 text-center text-[10px] font-bold text-slate-300 sm:block">{Math.round(zoom * 100)}%</span><button onClick={() => setZoom(value => Math.min(4, value + .2))} className="hidden rounded-xl p-2 hover:bg-white/10 sm:block" aria-label="Acercar"><ZoomIn className="h-4 w-4" /></button></>}<button type="button" onClick={() => setMobileCommentsOpen(true)} aria-label="Abrir comentarios anclados" aria-expanded={mobileCommentsOpen} className="relative rounded-xl p-2 hover:bg-white/10 md:hidden"><MessageSquare className="h-4 w-4" />{comments.length > 0 && <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[8px] font-black text-slate-950">{comments.length}</span>}</button><a href={attachment.url} target="_blank" rel="noreferrer" className="rounded-xl p-2 hover:bg-white/10" aria-label="Descargar"><Download className="h-4 w-4" /></a><button onClick={() => setFullscreen(value => !value)} className="hidden rounded-xl p-2 hover:bg-white/10 sm:block" aria-label={fullscreen ? 'Restaurar tamaño' : 'Pantalla completa'}><Maximize2 className="h-4 w-4" /></button><button onClick={closeViewer} className="rounded-xl p-2 hover:bg-white/10" aria-label="Cerrar"><X className="h-5 w-5" /></button></header>
         <div className="relative min-h-0 flex-1 overflow-auto bg-slate-900 p-5">
@@ -453,7 +744,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
         </div>
         {pdf && phase !== 'error' && <footer className="flex h-12 items-center justify-center gap-3 border-t border-white/10 text-white"><button type="button" aria-label="Página anterior" disabled={page <= 1} onClick={() => setPage(value => value - 1)} className="rounded-lg p-2 disabled:opacity-30"><ChevronLeft className="h-4 w-4" /></button><span className="text-xs font-bold">Página {page} de {preview?.page_count || pdf.numPages}</span><button type="button" aria-label="Página siguiente" disabled={page >= (preview?.page_count || pdf.numPages)} onClick={() => setPage(value => value + 1)} className="rounded-lg p-2 disabled:opacity-30"><ChevronRight className="h-4 w-4" /></button></footer>}
       </div>
-      <aside className="flex w-[340px] shrink-0 flex-col border-l border-slate-200 bg-white max-lg:w-[300px] max-md:hidden"><header className="border-b border-slate-200 px-4 py-4"><h2 className="flex items-center gap-2 text-sm font-black text-slate-800"><MessageSquare className="h-4 w-4 text-emerald-600" />Comentarios anclados</h2><p className="mt-1 text-[10px] text-slate-400">Haz clic en el documento para fijar el comentario.</p></header><div className="min-h-0 flex-1 overflow-y-auto p-3">{roots.map(comment => <div key={comment.id} className={`mb-2 rounded-2xl border p-3 ${comment.resolved_at ? 'border-slate-200 bg-slate-50 opacity-70' : 'border-emerald-100 bg-emerald-50/40'}`}><div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-[9px] font-black text-slate-500">{comment.author_name.slice(0,2).toUpperCase()}</span><span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">{comment.author_name}</span>{comment.can_resolve && <button onClick={() => void resolve(comment)} title={comment.resolved_at ? 'Reabrir' : 'Resolver'} className="rounded-lg p-1.5 text-slate-400 hover:bg-white hover:text-emerald-600"><CheckCircle2 className="h-4 w-4" /></button>}</div><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-slate-600">{comment.body}</p><button onClick={() => setReplyTo(comment.id)} className="mt-2 text-[10px] font-bold text-emerald-700">Responder</button>{comments.filter(reply => reply.parent_id === comment.id).map(reply => <div key={reply.id} className="mt-2 border-l-2 border-emerald-200 pl-2 text-[11px] text-slate-600"><strong>{reply.author_name}</strong><p>{reply.body}</p></div>)}</div>)}{!roots.length && <div className="py-14 text-center text-xs text-slate-400">Todavía no hay comentarios sobre este archivo.</div>}</div><div className="border-t border-slate-200 p-3">{replyTo && <button onClick={() => setReplyTo(undefined)} className="mb-2 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700">Respondiendo · cancelar</button>}<textarea value={body} onChange={event => setBody(event.target.value)} placeholder="Comenta sobre este punto…" className="min-h-20 w-full resize-none rounded-xl border border-slate-200 p-3 text-xs outline-none focus:border-emerald-300 focus:ring-4 focus:ring-emerald-50" /><p className={`mt-1 text-[10px] ${pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor) ? 'text-emerald-600' : 'text-amber-600'}`}>{pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor) ? 'Ancla lista para comentar.' : 'Selecciona un punto, página o fragmento de texto.'}</p><div className="mt-2 flex gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" excludeIds={mentionIDs} onChange={id => setMentionIDs(current => [...current, id])} placeholder="Mencionar…" className="!min-h-9 !py-1" /></div><button type="button" aria-label="Publicar comentario" disabled={!canPublishComment || saving} onClick={() => void send()} className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white disabled:opacity-40">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>{commentError && <p role="alert" className="mt-2 text-[10px] font-semibold text-rose-600">{commentError}</p>}</div></aside>
+      <aside className="flex w-[340px] shrink-0 flex-col border-l border-slate-200 bg-white max-lg:w-[300px] max-md:hidden">{renderCommentsPanel()}</aside>
     </section>
   </div>, document.body)
 }

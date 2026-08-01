@@ -7,7 +7,7 @@
 - Progress: manual/automatic round trip, mode switching preserves manual value, child completion updates the derived count, zero-child open/done rules and proof that `deleted_at` remains null.
 - Gantt: every fixed scale, flexible 8/120 clamps, virtual ranges, start/end/move validation, optional dependency-chain scheduling and complete `409`/error rollback.
 - Preview: classify image/PDF/TXT/Word/unsupported, generate Word on demand in the isolated worker, retry idempotently, inventory derivative objects and deny cross-account attachment/comment/mention access.
-- Anchors: normalized/clamped image coordinates, PDF page/point/quote, TXT line/offset/context, replies, mentions, resolve/reopen and separate-but-visible task activity.
+- Anchors: normalized/clamped image coordinates, PDF page/point/quote, TXT line/offset/context, replies and mentions. Resolve/reopen only roots with an explicitly typed PostgreSQL UUID actor; resolved threads are read-only, edit/delete enforce author/admin plus version, a root with replies becomes a tombstone, and each mutation commits exactly one activity/event before realtime reconciliation without document reload.
 - Browser: group and drag individual/stacked rows; stage move and protected bulk Trash; operate professional dates; zoom/resize Gantt; open and comment each supported preview; verify the filter veil, keyboard/focus order and absence of React errors.
 
 ## Bulk movement and calendar creation
@@ -90,6 +90,7 @@
 - Edit remotely a comment from an already-loaded older page and confirm its body updates without changing local edit/delete permissions.
 - Open attachments and related dependency tasks; verify empty, loading, error, and retry states.
 - Open a PDF, close during download/render and immediately open another task. Assert local worker configuration, abort/cancel/destroy/revoke cleanup, no previous canvas/comment residue, slow notice at 8 seconds, recoverable error at 30 seconds, and top-layer Escape semantics. Word polling exists only while open and failed conversion retries only by explicit idempotent action.
+- Resolve and reopen an anchored root, edit root/reply, delete a reply and delete a root with replies. Verify per-thread pending prevents double submission, `409` reloads canonical comments while preserving the edit draft, Resueltos is collapsible/read-only, two sessions reconcile without F5, and closing/switching the viewer cancels residual comment operations without reloading PDF state.
 - Collapse and expand Lista groups while measuring the 200 ms grid/opacity transition, `aria-expanded`, hidden-region inertness and reduced-motion fallback. Collapse the main sidebar and verify the brand is absent, one centered expansion control remains, and expansion restores the full header.
 
 ## Baseline And Production

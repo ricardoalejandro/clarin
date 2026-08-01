@@ -330,6 +330,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			UNIQUE(account_id,task_id,attachment_id,id),
 			FOREIGN KEY(account_id,task_id,attachment_id) REFERENCES task_attachments(account_id,task_id,id) ON DELETE CASCADE
 		)`,
+		`ALTER TABLE task_attachment_comments ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`,
 		`CREATE INDEX IF NOT EXISTS idx_task_attachment_comments_feed ON task_attachment_comments(account_id,task_id,attachment_id,created_at,id) WHERE deleted_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS task_attachment_comment_mentions (
 			comment_id UUID NOT NULL REFERENCES task_attachment_comments(id) ON DELETE CASCADE,

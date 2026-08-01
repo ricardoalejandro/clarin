@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apiBlob, apiGet, apiPost } from '@/lib/api'
+import { apiBlob, apiDelete, apiGet, apiPost, apiPut } from '@/lib/api'
 import type { TaskAttachment, TaskAttachmentComment, TaskAttachmentPreview } from '@/types/task'
 import TaskAttachmentViewer from './TaskAttachmentViewer'
 
@@ -9,6 +9,8 @@ vi.mock('@/lib/api', () => ({
   apiGet: vi.fn(),
   apiPost: vi.fn(),
   apiPut: vi.fn(),
+  apiDelete: vi.fn(),
+  subscribeWebSocket: vi.fn(() => () => undefined),
 }))
 
 vi.mock('./TaskUserCombobox', () => ({
@@ -24,6 +26,8 @@ vi.mock('./taskPdfRuntime', () => ({
 const mockedApiGet = vi.mocked(apiGet)
 const mockedApiBlob = vi.mocked(apiBlob)
 const mockedApiPost = vi.mocked(apiPost)
+const mockedApiPut = vi.mocked(apiPut)
+const mockedApiDelete = vi.mocked(apiDelete)
 
 function attachment(id: string): TaskAttachment {
   return {
@@ -69,6 +73,9 @@ function anchoredComment(attachmentId: string): TaskAttachmentComment {
     version: 1,
     created_at: '2026-07-31T00:00:00Z',
     updated_at: '2026-07-31T00:00:00Z',
+    can_edit: true,
+    can_delete: true,
+    can_resolve: true,
     mentions: [],
   }
 }
@@ -319,5 +326,75 @@ describe('TaskAttachmentViewer session lifecycle', () => {
     fireEvent.change(mobileComposer, { target: { value: 'Comentario sin punto' } })
     expect(within(drawer).getByRole('button', { name: 'Publicar comentario' })).toBeDisabled()
     expect(mockedApiPost).not.toHaveBeenCalled()
+  })
+
+  it('resolves a root once, moves it into the collapsed resolved section and reopens it', async () => {
+    const original = anchoredComment('resolve')
+    const resolved = { ...original, version: 2, resolved_at: '2026-08-01T01:00:00Z', resolved_by_name: 'Ricardo', can_edit: false, can_delete: false }
+    mockedApiGet.mockImplementation(endpoint => endpoint.endsWith('/preview')
+      ? Promise.resolve({ success: true, data: { preview: preview('resolve', 'unsupported', 'unsupported') } })
+      : Promise.resolve({ success: true, data: { comments: [original] } }))
+    mockedApiPut
+      .mockResolvedValueOnce({ success: true, data: { comment: resolved, operation_id: 'operation-resolve' } })
+      .mockResolvedValueOnce({ success: true, data: { comment: { ...original, version: 3 }, operation_id: 'operation-reopen' } })
+
+    render(<TaskAttachmentViewer taskId="task-resolve" attachment={attachment('resolve')} users={[]} onClose={vi.fn()} />)
+    await screen.findByText('Punto importante')
+    const resolveButton = screen.getByRole('button', { name: 'Resolver comentario' })
+    fireEvent.click(resolveButton)
+    fireEvent.click(resolveButton)
+
+    await waitFor(() => expect(mockedApiPut).toHaveBeenCalledTimes(1))
+    const resolvedToggle = await screen.findByRole('button', { name: /Resueltos\s+1/ })
+    expect(screen.queryByText('Punto importante')).not.toBeInTheDocument()
+    fireEvent.click(resolvedToggle)
+    expect(await screen.findByText('Punto importante')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Responder' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reabrir comentario' }))
+    await waitFor(() => expect(mockedApiPut).toHaveBeenCalledTimes(2))
+    expect(await screen.findByRole('button', { name: 'Resolver comentario' })).toBeEnabled()
+  })
+
+  it('preserves an edit draft and refreshes canonical comments after a version conflict', async () => {
+    const original = anchoredComment('conflict')
+    let commentReads = 0
+    mockedApiGet.mockImplementation(endpoint => {
+      if (endpoint.endsWith('/preview')) return Promise.resolve({ success: true, data: { preview: preview('conflict', 'unsupported', 'unsupported') } })
+      commentReads++
+      return Promise.resolve({ success: true, data: { comments: [{ ...original, version: commentReads > 1 ? 2 : 1 }] } })
+    })
+    mockedApiPut.mockResolvedValue({ success: false, status: 409, error: 'Conflicto de versión' })
+
+    render(<TaskAttachmentViewer taskId="task-conflict" attachment={attachment('conflict')} users={[]} onClose={vi.fn()} />)
+    await screen.findByText('Punto importante')
+    fireEvent.click(screen.getByRole('button', { name: 'Acciones de comentario de Ricardo' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Editar' }))
+    const editor = screen.getByRole('textbox', { name: 'Editar comentario anclado' })
+    fireEvent.change(editor, { target: { value: 'Borrador que debe permanecer' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar' }))
+
+    await screen.findByText('Este hilo cambió en otra sesión. Actualizamos su versión; revisa el contenido y reintenta.')
+    expect(screen.getByRole('textbox', { name: 'Editar comentario anclado' })).toHaveValue('Borrador que debe permanecer')
+    expect(commentReads).toBe(2)
+  })
+
+  it('replaces a deleted root with a tombstone when the server preserves its replies', async () => {
+    const original = anchoredComment('delete')
+    const tombstone = { ...original, body: '', deleted: true, version: 2, can_edit: false, can_delete: false }
+    mockedApiGet.mockImplementation(endpoint => endpoint.endsWith('/preview')
+      ? Promise.resolve({ success: true, data: { preview: preview('delete', 'unsupported', 'unsupported') } })
+      : Promise.resolve({ success: true, data: { comments: [original] } }))
+    mockedApiDelete.mockResolvedValue({ success: true, data: { comment: tombstone, deleted_comment_id: original.id, operation_id: 'operation-delete' } })
+
+    render(<TaskAttachmentViewer taskId="task-delete" attachment={attachment('delete')} users={[]} onClose={vi.fn()} />)
+    await screen.findByText('Punto importante')
+    fireEvent.click(screen.getByRole('button', { name: 'Acciones de comentario de Ricardo' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Eliminar' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Eliminar' }))
+
+    expect(await screen.findByText('Comentario eliminado')).toBeInTheDocument()
+    expect(screen.queryByText('Punto importante')).not.toBeInTheDocument()
+    expect(mockedApiDelete).toHaveBeenCalledTimes(1)
   })
 })

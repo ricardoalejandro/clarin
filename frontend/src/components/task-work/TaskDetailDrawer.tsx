@@ -99,6 +99,10 @@ const activityLabels: Record<string, string> = {
   attachment_added: 'adjuntó un archivo',
   attachment_deleted: 'quitó un archivo',
   attachment_comment_added: 'comentó sobre un adjunto',
+  attachment_comment_resolved: 'resolvió un comentario de adjunto',
+  attachment_comment_reopened: 'reabrió un comentario de adjunto',
+  attachment_comment_updated: 'editó un comentario de adjunto',
+  attachment_comment_deleted: 'eliminó un comentario de adjunto',
   dependency_added: 'añadió una dependencia',
   dependency_deleted: 'quitó una dependencia',
 }
