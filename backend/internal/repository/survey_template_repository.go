@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -14,13 +16,22 @@ import (
 )
 
 var (
-	ErrSurveyTemplateNotFound      = errors.New("survey template not found")
-	ErrSurveyInstanceNotFound      = errors.New("survey instance not found")
-	ErrSurveyRecipientInvalid      = errors.New("survey recipient is invalid")
-	ErrSurveyProgramUnavailable    = errors.New("survey program is unavailable")
-	ErrSurveyProgramNoParticipants = errors.New("survey program has no active participants")
-	ErrSurveyTemplateEmpty         = errors.New("survey template has no active questions")
+	ErrSurveyTemplateNotFound        = errors.New("survey template not found")
+	ErrSurveyInstanceNotFound        = errors.New("survey instance not found")
+	ErrSurveyRecipientInvalid        = errors.New("survey recipient is invalid")
+	ErrSurveyProgramUnavailable      = errors.New("survey program is unavailable")
+	ErrSurveyProgramNoParticipants   = errors.New("survey program has no active participants")
+	ErrSurveyTemplateEmpty           = errors.New("survey template has no active questions")
+	ErrSurveyMeasurementIncompatible = errors.New("las aplicaciones seleccionadas no tienen una medición compatible")
 )
+
+type SurveyInstanceNameConflictError struct {
+	SuggestedName string
+}
+
+func (e *SurveyInstanceNameConflictError) Error() string {
+	return "ya existe una aplicación de esta plantilla con ese nombre"
+}
 
 type SurveyTemplateRepository struct {
 	db *pgxpool.Pool
@@ -33,7 +44,7 @@ func NewSurveyTemplateRepository(db *pgxpool.Pool) *SurveyTemplateRepository {
 const surveyTemplateSelect = `
 	SELECT st.id,st.account_id,st.name,st.description,st.status,
 		st.welcome_title,st.welcome_description,st.thank_you_title,st.thank_you_message,
-		st.thank_you_redirect_url,st.branding,st.revision,st.system_key,st.legacy_survey_id,
+		st.thank_you_redirect_url,st.branding,st.measurement_config,st.revision,st.system_key,st.legacy_survey_id,
 		st.created_by,st.created_at,st.updated_at,
 		(SELECT COUNT(*) FROM survey_template_questions q WHERE q.account_id=st.account_id AND q.template_id=st.id AND q.is_active),
 		(SELECT COUNT(*) FROM surveys s WHERE s.account_id=st.account_id AND s.template_id=st.id),
@@ -47,11 +58,11 @@ type surveyTemplateScanner interface {
 
 func scanSurveyTemplate(row surveyTemplateScanner) (*domain.SurveyTemplate, error) {
 	t := &domain.SurveyTemplate{}
-	var branding []byte
+	var branding, measurement []byte
 	if err := row.Scan(
 		&t.ID, &t.AccountID, &t.Name, &t.Description, &t.Status,
 		&t.WelcomeTitle, &t.WelcomeDescription, &t.ThankYouTitle, &t.ThankYouMessage,
-		&t.ThankYouRedirectURL, &branding, &t.Revision, &t.SystemKey, &t.LegacySurveyID,
+		&t.ThankYouRedirectURL, &branding, &measurement, &t.Revision, &t.SystemKey, &t.LegacySurveyID,
 		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.QuestionCount, &t.InstanceCount, &t.ResponseCount,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -61,6 +72,12 @@ func scanSurveyTemplate(row surveyTemplateScanner) (*domain.SurveyTemplate, erro
 	}
 	if err := json.Unmarshal(branding, &t.Branding); err != nil {
 		return nil, fmt.Errorf("decode survey template branding: %w", err)
+	}
+	if err := json.Unmarshal(measurement, &t.MeasurementConfig); err != nil {
+		return nil, fmt.Errorf("decode survey template measurement config: %w", err)
+	}
+	if t.MeasurementConfig.Dimensions == nil {
+		t.MeasurementConfig.Dimensions = []domain.SurveyMeasurementDimension{}
 	}
 	return t, nil
 }
@@ -91,6 +108,95 @@ func (r *SurveyTemplateRepository) Get(ctx context.Context, accountID, templateI
 	return scanSurveyTemplate(r.db.QueryRow(ctx, surveyTemplateSelect+` WHERE st.account_id=$1 AND st.id=$2`, accountID, templateID))
 }
 
+type surveyInstanceNameQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func surveyInstanceNameKeys(ctx context.Context, queryer surveyInstanceNameQueryer, accountID, templateID uuid.UUID) (map[string]struct{}, error) {
+	rows, err := queryer.Query(ctx, `
+		SELECT name FROM surveys
+		WHERE account_id=$1 AND template_id=$2
+	`, accountID, templateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	used := make(map[string]struct{})
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		used[domain.SurveyInstanceNameKey(name)] = struct{}{}
+	}
+	return used, rows.Err()
+}
+
+func trimSurveyInstanceNameForSuffix(base, suffix string) string {
+	baseRunes := []rune(domain.CleanSurveyInstanceName(base))
+	available := 180 - len([]rune(suffix))
+	if available < 1 {
+		available = 1
+	}
+	if len(baseRunes) > available {
+		baseRunes = baseRunes[:available]
+	}
+	return strings.TrimSpace(string(baseRunes)) + suffix
+}
+
+func nextSurveyInstanceName(base string, used map[string]struct{}) string {
+	base = trimSurveyInstanceNameForSuffix(base, "")
+	if base == "" {
+		base = "Aplicación de encuesta"
+	}
+	if _, exists := used[domain.SurveyInstanceNameKey(base)]; !exists {
+		return base
+	}
+	for ordinal := 2; ordinal < 10000; ordinal++ {
+		suffix := fmt.Sprintf(" · %d", ordinal)
+		candidate := trimSurveyInstanceNameForSuffix(base, suffix)
+		if _, exists := used[domain.SurveyInstanceNameKey(candidate)]; !exists {
+			return candidate
+		}
+	}
+	return trimSurveyInstanceNameForSuffix(base, " · "+uuid.NewString()[:6])
+}
+
+func (r *SurveyTemplateRepository) SuggestInstanceName(ctx context.Context, accountID, templateID uuid.UUID, programID *uuid.UUID, requested string) (*domain.SurveyInstanceNameSuggestion, error) {
+	var templateName string
+	if err := r.db.QueryRow(ctx, `SELECT name FROM survey_templates WHERE account_id=$1 AND id=$2`, accountID, templateID).Scan(&templateName); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSurveyTemplateNotFound
+		}
+		return nil, err
+	}
+	base := templateName
+	if programID != nil {
+		var programName string
+		if err := r.db.QueryRow(ctx, `SELECT name FROM programs WHERE account_id=$1 AND id=$2 AND type='course' AND status='active'`, accountID, *programID).Scan(&programName); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrSurveyProgramUnavailable
+			}
+			return nil, err
+		}
+		base += " · " + programName
+	}
+	used, err := surveyInstanceNameKeys(ctx, r.db, accountID, templateID)
+	if err != nil {
+		return nil, err
+	}
+	cleanRequested := domain.CleanSurveyInstanceName(requested)
+	if cleanRequested == "" {
+		return &domain.SurveyInstanceNameSuggestion{Available: true, SuggestedName: nextSurveyInstanceName(base, used)}, nil
+	}
+	_, exists := used[domain.SurveyInstanceNameKey(cleanRequested)]
+	available := !exists && len([]rune(cleanRequested)) <= 180
+	if available {
+		return &domain.SurveyInstanceNameSuggestion{Available: true, SuggestedName: cleanRequested}, nil
+	}
+	return &domain.SurveyInstanceNameSuggestion{Available: false, SuggestedName: nextSurveyInstanceName(cleanRequested, used)}, nil
+}
+
 func (r *SurveyTemplateRepository) Create(ctx context.Context, template *domain.SurveyTemplate) error {
 	branding, err := json.Marshal(template.Branding)
 	if err != nil {
@@ -99,15 +205,19 @@ func (r *SurveyTemplateRepository) Create(ctx context.Context, template *domain.
 	if template.Status == "" {
 		template.Status = "active"
 	}
+	measurement, err := json.Marshal(template.MeasurementConfig)
+	if err != nil {
+		return err
+	}
 	return r.db.QueryRow(ctx, `
 		INSERT INTO survey_templates (
 			account_id,name,description,status,welcome_title,welcome_description,
-			thank_you_title,thank_you_message,thank_you_redirect_url,branding,created_by
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			thank_you_title,thank_you_message,thank_you_redirect_url,branding,measurement_config,created_by
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		RETURNING id,revision,created_at,updated_at
 	`, template.AccountID, template.Name, template.Description, template.Status,
 		template.WelcomeTitle, template.WelcomeDescription, template.ThankYouTitle,
-		template.ThankYouMessage, template.ThankYouRedirectURL, branding, template.CreatedBy,
+		template.ThankYouMessage, template.ThankYouRedirectURL, branding, measurement, template.CreatedBy,
 	).Scan(&template.ID, &template.Revision, &template.CreatedAt, &template.UpdatedAt)
 }
 
@@ -116,15 +226,19 @@ func (r *SurveyTemplateRepository) Update(ctx context.Context, template *domain.
 	if err != nil {
 		return err
 	}
+	measurement, err := json.Marshal(template.MeasurementConfig)
+	if err != nil {
+		return err
+	}
 	tag, err := r.db.Exec(ctx, `
 		UPDATE survey_templates SET
 			name=$3,description=$4,status=$5,welcome_title=$6,welcome_description=$7,
 			thank_you_title=$8,thank_you_message=$9,thank_you_redirect_url=$10,
-			branding=$11,revision=revision+1,updated_at=NOW()
+			branding=$11,measurement_config=$12,revision=revision+1,updated_at=NOW()
 		WHERE account_id=$1 AND id=$2
 	`, template.AccountID, template.ID, template.Name, template.Description, template.Status,
 		template.WelcomeTitle, template.WelcomeDescription, template.ThankYouTitle,
-		template.ThankYouMessage, template.ThankYouRedirectURL, branding)
+		template.ThankYouMessage, template.ThankYouRedirectURL, branding, measurement)
 	if err != nil {
 		return err
 	}
@@ -132,6 +246,296 @@ func (r *SurveyTemplateRepository) Update(ctx context.Context, template *domain.
 		return ErrSurveyTemplateNotFound
 	}
 	return nil
+}
+
+// UpdateDesign atomically persists the branding definition and its account-scoped
+// media references. Removed assets remain inventoried so immutable applications
+// and the storage cleanup workflow can continue to reference them safely.
+func (r *SurveyTemplateRepository) UpdateDesign(ctx context.Context, accountID, templateID uuid.UUID, branding domain.SurveyBranding, logoAssetID, backgroundAssetID *uuid.UUID) (*domain.SurveyTemplate, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM survey_templates WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, templateID).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSurveyTemplateNotFound
+		}
+		return nil, err
+	}
+	if status == "archived" {
+		return nil, errors.New("una plantilla archivada no se puede editar")
+	}
+	refs := map[string]*uuid.UUID{"logo": logoAssetID, "background": backgroundAssetID}
+	for slot, assetID := range refs {
+		if assetID == nil {
+			continue
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM media_assets WHERE account_id=$1 AND id=$2 AND status='active' AND deleted_at IS NULL)`, accountID, *assetID).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, fmt.Errorf("el recurso de %s no pertenece a la cuenta", slot)
+		}
+	}
+	encoded, err := json.Marshal(branding)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE survey_templates SET branding=$3,revision=revision+1,updated_at=NOW() WHERE account_id=$1 AND id=$2`, accountID, templateID, encoded); err != nil {
+		return nil, err
+	}
+	for slot, assetID := range refs {
+		if assetID == nil {
+			if _, err := tx.Exec(ctx, `DELETE FROM survey_branding_asset_refs WHERE account_id=$1 AND template_id=$2 AND slot=$3`, accountID, templateID, slot); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO survey_branding_asset_refs (account_id,template_id,slot,media_asset_id)
+			VALUES ($1,$2,$3,$4)
+			ON CONFLICT (account_id,template_id,slot) WHERE template_id IS NOT NULL
+			DO UPDATE SET media_asset_id=EXCLUDED.media_asset_id,updated_at=NOW()
+		`, accountID, templateID, slot, *assetID); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE storage_objects so SET status='active',next_delete_at=NULL,delete_error='',deleted_at=NULL,updated_at=NOW()
+		FROM media_assets ma
+		WHERE ma.account_id=$1 AND ma.id=ANY($2::uuid[]) AND so.account_id=ma.account_id AND so.object_key=ma.object_key
+	`, accountID, nonNilUUIDs(logoAssetID, backgroundAssetID)); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return r.Get(ctx, accountID, templateID)
+}
+
+func nonNilUUIDs(values ...*uuid.UUID) []uuid.UUID {
+	result := make([]uuid.UUID, 0, len(values))
+	for _, value := range values {
+		if value != nil {
+			result = append(result, *value)
+		}
+	}
+	return result
+}
+
+// Duplicate creates an independent, editable template definition. Applications,
+// public slugs, recipients and responses intentionally remain attached only to
+// the source template.
+func (r *SurveyTemplateRepository) Duplicate(ctx context.Context, accountID, sourceID uuid.UUID, name string, createdBy *uuid.UUID) (*domain.SurveyTemplate, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	copyTemplate := &domain.SurveyTemplate{AccountID: accountID, Name: name, Status: "active", CreatedBy: createdBy}
+	var branding, measurement []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT description,welcome_title,welcome_description,thank_you_title,
+			thank_you_message,thank_you_redirect_url,branding,measurement_config
+		FROM survey_templates
+		WHERE account_id=$1 AND id=$2
+		FOR SHARE
+	`, accountID, sourceID).Scan(
+		&copyTemplate.Description, &copyTemplate.WelcomeTitle, &copyTemplate.WelcomeDescription,
+		&copyTemplate.ThankYouTitle, &copyTemplate.ThankYouMessage,
+		&copyTemplate.ThankYouRedirectURL, &branding, &measurement,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSurveyTemplateNotFound
+		}
+		return nil, err
+	}
+	if err := json.Unmarshal(branding, &copyTemplate.Branding); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(measurement, &copyTemplate.MeasurementConfig); err != nil {
+		return nil, err
+	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO survey_templates (
+			account_id,name,description,status,welcome_title,welcome_description,
+			thank_you_title,thank_you_message,thank_you_redirect_url,branding,
+			measurement_config,revision,system_key,legacy_survey_id,created_by
+		) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,1,NULL,NULL,$11)
+		RETURNING id,revision,created_at,updated_at
+	`, accountID, copyTemplate.Name, copyTemplate.Description, copyTemplate.WelcomeTitle,
+		copyTemplate.WelcomeDescription, copyTemplate.ThankYouTitle, copyTemplate.ThankYouMessage,
+		copyTemplate.ThankYouRedirectURL, branding, measurement, createdBy,
+	).Scan(&copyTemplate.ID, &copyTemplate.Revision, &copyTemplate.CreatedAt, &copyTemplate.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO survey_branding_asset_refs (account_id,template_id,slot,media_asset_id)
+		SELECT account_id,$3,slot,media_asset_id
+		FROM survey_branding_asset_refs
+		WHERE account_id=$1 AND template_id=$2
+		ON CONFLICT (account_id,template_id,slot) WHERE template_id IS NOT NULL
+		DO UPDATE SET media_asset_id=EXCLUDED.media_asset_id,updated_at=NOW()
+	`, accountID, sourceID, copyTemplate.ID); err != nil {
+		return nil, err
+	}
+
+	type questionCopy struct {
+		sourceID                  uuid.UUID
+		targetID                  uuid.UUID
+		order                     int
+		qtype, title, description string
+		required                  bool
+		config, rules             []byte
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id,order_index,type,title,description,required,config,logic_rules
+		FROM survey_template_questions
+		WHERE account_id=$1 AND template_id=$2 AND is_active
+		ORDER BY order_index,id
+	`, accountID, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	questions := make([]questionCopy, 0)
+	idMap := make(map[uuid.UUID]uuid.UUID)
+	for rows.Next() {
+		question := questionCopy{targetID: uuid.New()}
+		if err := rows.Scan(&question.sourceID, &question.order, &question.qtype, &question.title,
+			&question.description, &question.required, &question.config, &question.rules); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		idMap[question.sourceID] = question.targetID
+		questions = append(questions, question)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for _, question := range questions {
+		var rules []domain.SurveyLogicRule
+		if err := json.Unmarshal(question.rules, &rules); err != nil {
+			return nil, err
+		}
+		for index := range rules {
+			target, exists := idMap[rules[index].JumpTo]
+			if !exists {
+				return nil, errors.New("survey template logic points outside the copied definition")
+			}
+			rules[index].JumpTo = target
+		}
+		rulesJSON, err := json.Marshal(rules)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO survey_template_questions (
+				id,account_id,template_id,order_index,type,title,description,required,
+				config,logic_rules,is_active
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE)
+		`, question.targetID, accountID, copyTemplate.ID, question.order, question.qtype,
+			question.title, question.description, question.required, question.config, rulesJSON); err != nil {
+			return nil, err
+		}
+	}
+	copyTemplate.QuestionCount = len(questions)
+	copyTemplate.MeasurementConfig.Dimensions = append([]domain.SurveyMeasurementDimension(nil), copyTemplate.MeasurementConfig.Dimensions...)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return copyTemplate, nil
+}
+
+// UpdateMeasurement applies the complete measurement draft in one revision and
+// clears stale assignments omitted by the client.
+func (r *SurveyTemplateRepository) UpdateMeasurement(ctx context.Context, accountID, templateID uuid.UUID, config domain.SurveyMeasurementConfig, assignments map[uuid.UUID]*domain.SurveyQuestionMeasurement) (int, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	var revision int
+	if err := tx.QueryRow(ctx, `SELECT revision FROM survey_templates WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, templateID).Scan(&revision); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrSurveyTemplateNotFound
+		}
+		return 0, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id,config FROM survey_template_questions
+		WHERE account_id=$1 AND template_id=$2 AND is_active
+		ORDER BY order_index,id
+	`, accountID, templateID)
+	if err != nil {
+		return 0, err
+	}
+	found := make(map[uuid.UUID]struct{})
+	type pendingConfig struct {
+		id    uuid.UUID
+		value []byte
+	}
+	pending := make([]pendingConfig, 0)
+	for rows.Next() {
+		var questionID uuid.UUID
+		var raw []byte
+		if err := rows.Scan(&questionID, &raw); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		var questionConfig domain.SurveyQuestionConfig
+		if err := json.Unmarshal(raw, &questionConfig); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		questionConfig.Measurement = assignments[questionID]
+		encoded, err := json.Marshal(questionConfig)
+		if err != nil {
+			rows.Close()
+			return 0, err
+		}
+		pending = append(pending, pendingConfig{id: questionID, value: encoded})
+		found[questionID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	for questionID := range assignments {
+		if _, exists := found[questionID]; !exists {
+			return 0, errors.New("measurement references a question outside the template")
+		}
+	}
+	for _, update := range pending {
+		if _, err := tx.Exec(ctx, `
+			UPDATE survey_template_questions SET config=$4,updated_at=NOW()
+			WHERE account_id=$1 AND template_id=$2 AND id=$3 AND is_active
+		`, accountID, templateID, update.id, update.value); err != nil {
+			return 0, err
+		}
+	}
+	encodedConfig, err := json.Marshal(config)
+	if err != nil {
+		return 0, err
+	}
+	revision++
+	if _, err := tx.Exec(ctx, `
+		UPDATE survey_templates
+		SET measurement_config=$3,revision=$4,updated_at=NOW()
+		WHERE account_id=$1 AND id=$2
+	`, accountID, templateID, encodedConfig, revision); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return revision, nil
 }
 
 func (r *SurveyTemplateRepository) ListQuestions(ctx context.Context, accountID, templateID uuid.UUID) ([]*domain.SurveyTemplateQuestion, error) {
@@ -273,7 +677,7 @@ func (r *SurveyTemplateRepository) CreateInstance(ctx context.Context, input dom
 	err = tx.QueryRow(ctx, `
 		SELECT id,account_id,name,description,status,welcome_title,welcome_description,
 			thank_you_title,thank_you_message,thank_you_redirect_url,branding,revision
-		FROM survey_templates WHERE account_id=$1 AND id=$2 FOR SHARE
+		FROM survey_templates WHERE account_id=$1 AND id=$2 FOR UPDATE
 	`, input.AccountID, input.TemplateID).Scan(
 		&template.ID, &template.AccountID, &template.Name, &template.Description, &template.Status,
 		&template.WelcomeTitle, &template.WelcomeDescription, &template.ThankYouTitle,
@@ -317,9 +721,22 @@ func (r *SurveyTemplateRepository) CreateInstance(ctx context.Context, input dom
 			return nil, ErrSurveyProgramNoParticipants
 		}
 	}
-	name := strings.TrimSpace(input.Name)
+	name := domain.CleanSurveyInstanceName(input.Name)
 	if name == "" {
 		name = template.Name
+		if input.ProgramID != nil {
+			name += " · " + originLabel
+		}
+	}
+	if len([]rune(name)) > 180 {
+		return nil, errors.New("el nombre de la aplicación es demasiado largo")
+	}
+	usedNames, err := surveyInstanceNameKeys(ctx, tx, input.AccountID, input.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	if _, duplicate := usedNames[domain.SurveyInstanceNameKey(name)]; duplicate {
+		return nil, &SurveyInstanceNameConflictError{SuggestedName: nextSurveyInstanceName(name, usedNames)}
 	}
 	status := input.Status
 	if status == "" {
@@ -334,25 +751,43 @@ func (r *SurveyTemplateRepository) CreateInstance(ctx context.Context, input dom
 		}
 	}
 	instance := &domain.SurveyInstanceSummary{}
+	measurement, err := json.Marshal(input.MeasurementConfig)
+	if err != nil {
+		return nil, err
+	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO surveys (
 			account_id,name,description,slug,status,welcome_title,welcome_description,
-			thank_you_title,thank_you_message,thank_you_redirect_url,branding,created_by,
+			thank_you_title,thank_you_message,thank_you_redirect_url,branding,
+			measurement_config,measurement_signature,created_by,
 			is_template,template_id,template_revision,origin_type,program_id,origin_label,
 			audience_mode,opens_at,closes_at,legacy_instance
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,FALSE,$13,$14,$15,$16,$17,$18,$19,$20,FALSE)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,FALSE,$15,$16,$17,$18,$19,$20,$21,$22,FALSE)
 		RETURNING id,account_id,template_id,template_revision,program_id,origin_type,origin_label,
-			name,slug,status,audience_mode,opens_at,closes_at,legacy_instance,created_at,updated_at
+			name,slug,status,audience_mode,opens_at,closes_at,legacy_instance,
+			measurement_signature,analytics_tracking_started_at,created_at,updated_at
 	`, input.AccountID, name, template.Description, input.Slug, status,
 		template.WelcomeTitle, template.WelcomeDescription, template.ThankYouTitle,
-		template.ThankYouMessage, template.ThankYouRedirectURL, branding, input.CreatedBy,
+		template.ThankYouMessage, template.ThankYouRedirectURL, branding, measurement,
+		input.MeasurementSignature, input.CreatedBy,
 		template.ID, template.Revision, originType, input.ProgramID, originLabel,
 		audienceMode, input.OpensAt, input.ClosesAt,
 	).Scan(&instance.ID, &instance.AccountID, &instance.TemplateID, &instance.TemplateRevision,
 		&instance.ProgramID, &instance.OriginType, &instance.OriginLabel, &instance.Name,
 		&instance.Slug, &instance.Status, &instance.AudienceMode, &instance.OpensAt,
-		&instance.ClosesAt, &instance.LegacyInstance, &instance.CreatedAt, &instance.UpdatedAt)
+		&instance.ClosesAt, &instance.LegacyInstance, &instance.MeasurementSignature,
+		&instance.AnalyticsTrackingStartedAt, &instance.CreatedAt, &instance.UpdatedAt)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO survey_branding_asset_refs (account_id,survey_id,slot,media_asset_id)
+		SELECT account_id,$3,slot,media_asset_id
+		FROM survey_branding_asset_refs
+		WHERE account_id=$1 AND template_id=$2
+		ON CONFLICT (account_id,survey_id,slot) WHERE survey_id IS NOT NULL
+		DO UPDATE SET media_asset_id=EXCLUDED.media_asset_id,updated_at=NOW()
+	`, input.AccountID, template.ID, instance.ID); err != nil {
 		return nil, err
 	}
 
@@ -442,7 +877,7 @@ func (r *SurveyTemplateRepository) CreateInstance(ctx context.Context, input dom
 const surveyInstanceSummarySelect = `
 	SELECT s.id,s.account_id,s.template_id,s.template_revision,s.program_id,s.origin_type,
 		s.origin_label,s.name,s.slug,s.status,s.audience_mode,s.opens_at,s.closes_at,
-		s.legacy_instance,
+		s.legacy_instance,s.measurement_signature,s.analytics_tracking_started_at,
 		(SELECT COUNT(*) FROM survey_questions q WHERE q.survey_id=s.id),
 		(SELECT COUNT(*) FROM survey_instance_recipients r
 		 WHERE r.account_id=s.account_id AND r.survey_id=s.id AND r.merged_into_recipient_id IS NULL),
@@ -454,7 +889,8 @@ func scanSurveyInstance(row surveyTemplateScanner) (*domain.SurveyInstanceSummar
 	i := &domain.SurveyInstanceSummary{}
 	if err := row.Scan(&i.ID, &i.AccountID, &i.TemplateID, &i.TemplateRevision, &i.ProgramID,
 		&i.OriginType, &i.OriginLabel, &i.Name, &i.Slug, &i.Status, &i.AudienceMode,
-		&i.OpensAt, &i.ClosesAt, &i.LegacyInstance, &i.QuestionCount, &i.RecipientCount,
+		&i.OpensAt, &i.ClosesAt, &i.LegacyInstance, &i.MeasurementSignature,
+		&i.AnalyticsTrackingStartedAt, &i.QuestionCount, &i.RecipientCount,
 		&i.ResponseCount, &i.CreatedAt, &i.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrSurveyInstanceNotFound
@@ -597,4 +1033,200 @@ func (r *SurveyTemplateRepository) ListProgramRecipients(ctx context.Context, ac
 		result = append(result, recipient)
 	}
 	return result, total, rows.Err()
+}
+
+func (r *SurveyTemplateRepository) GetProgramMeasurementSeries(ctx context.Context, accountID, programID, templateID uuid.UUID, requestedSignature string, baselineID, followupID *uuid.UUID) (*domain.SurveyMeasurementSeries, error) {
+	type application struct {
+		id              uuid.UUID
+		name, signature string
+		createdAt       time.Time
+		config          domain.SurveyMeasurementConfig
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT id,name,measurement_signature,measurement_config,created_at
+		FROM surveys
+		WHERE account_id=$1 AND program_id=$2 AND template_id=$3
+		  AND measurement_signature<>''
+		ORDER BY created_at,id
+	`, accountID, programID, templateID)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]application, 0)
+	for rows.Next() {
+		var item application
+		var raw []byte
+		if err := rows.Scan(&item.id, &item.name, &item.signature, &raw, &item.createdAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &item.config); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		all = append(all, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if requestedSignature == "" && len(all) > 0 {
+		requestedSignature = all[len(all)-1].signature
+	}
+	selected := make([]application, 0)
+	for _, item := range all {
+		if item.signature == requestedSignature {
+			selected = append(selected, item)
+		}
+	}
+	series := &domain.SurveyMeasurementSeries{
+		TemplateID: templateID, ProgramID: programID, Signature: requestedSignature,
+		ExcludedApplications: len(all) - len(selected), Applications: []domain.SurveyMeasurementApplicationPoint{},
+		Participants: []domain.SurveyParticipantMeasurementPoint{}, PairedChanges: []domain.SurveyPairedMeasurementChange{},
+	}
+	if len(selected) == 0 {
+		return series, nil
+	}
+	surveyIDs := make([]uuid.UUID, len(selected))
+	for index := range selected {
+		surveyIDs[index] = selected[index].id
+	}
+	questionRows, err := r.db.Query(ctx, `
+		SELECT question.id,question.survey_id,question.order_index,question.type,
+			question.title,question.description,question.required,question.config,
+			question.logic_rules,question.created_at,question.updated_at
+		FROM survey_questions question
+		JOIN surveys survey ON survey.id=question.survey_id
+		WHERE survey.account_id=$1 AND question.survey_id=ANY($2::uuid[])
+		ORDER BY question.survey_id,question.order_index,question.id
+	`, accountID, surveyIDs)
+	if err != nil {
+		return nil, err
+	}
+	questionsBySurvey := make(map[uuid.UUID][]*domain.SurveyQuestion)
+	for questionRows.Next() {
+		question := &domain.SurveyQuestion{}
+		var configJSON, rulesJSON []byte
+		if err := questionRows.Scan(&question.ID, &question.SurveyID, &question.OrderIndex,
+			&question.Type, &question.Title, &question.Description, &question.Required,
+			&configJSON, &rulesJSON, &question.CreatedAt, &question.UpdatedAt); err != nil {
+			questionRows.Close()
+			return nil, err
+		}
+		if err := json.Unmarshal(configJSON, &question.Config); err != nil {
+			questionRows.Close()
+			return nil, err
+		}
+		if err := json.Unmarshal(rulesJSON, &question.LogicRules); err != nil {
+			questionRows.Close()
+			return nil, err
+		}
+		questionsBySurvey[question.SurveyID] = append(questionsBySurvey[question.SurveyID], question)
+	}
+	if err := questionRows.Err(); err != nil {
+		questionRows.Close()
+		return nil, err
+	}
+	questionRows.Close()
+	answerRepository := &SurveyRepository{db: r.db}
+	allAnswers, err := answerRepository.measurementAnswers(ctx, accountID, surveyIDs)
+	if err != nil {
+		return nil, err
+	}
+	scoresBySurvey := make(map[uuid.UUID]map[uuid.UUID]map[string]float64)
+	answerSetBySurvey := make(map[uuid.UUID]map[uuid.UUID]surveyMeasurementAnswerSet)
+	for responseID, answerSet := range allAnswers {
+		if answerSetBySurvey[answerSet.SurveyID] == nil {
+			answerSetBySurvey[answerSet.SurveyID] = make(map[uuid.UUID]surveyMeasurementAnswerSet)
+		}
+		answerSetBySurvey[answerSet.SurveyID][responseID] = answerSet
+	}
+	for _, item := range selected {
+		scores, stats := calculateMeasurementScores(item.config, questionsBySurvey[item.id], answerSetBySurvey[item.id])
+		scoresBySurvey[item.id] = scores
+		series.Applications = append(series.Applications, domain.SurveyMeasurementApplicationPoint{
+			SurveyID: item.id, Name: item.name, CreatedAt: item.createdAt,
+			ResponseCount: len(answerSetBySurvey[item.id]), Dimensions: stats,
+		})
+		for responseID, responseScores := range scores {
+			answerSet := answerSetBySurvey[item.id][responseID]
+			if answerSet.ProgramParticipantID == nil {
+				continue
+			}
+			series.Participants = append(series.Participants, domain.SurveyParticipantMeasurementPoint{
+				ProgramParticipantID: *answerSet.ProgramParticipantID, ContactName: answerSet.ContactName,
+				SurveyID: item.id, SurveyName: item.name, CreatedAt: item.createdAt, Scores: responseScores,
+			})
+		}
+	}
+	sort.Slice(series.Participants, func(i, j int) bool {
+		if series.Participants[i].ContactName == series.Participants[j].ContactName {
+			return series.Participants[i].CreatedAt.Before(series.Participants[j].CreatedAt)
+		}
+		return series.Participants[i].ContactName < series.Participants[j].ContactName
+	})
+	baseline, followup := selected[0].id, selected[len(selected)-1].id
+	if baselineID != nil {
+		baseline = *baselineID
+	}
+	if followupID != nil {
+		followup = *followupID
+	}
+	validSurvey := func(id uuid.UUID) bool {
+		for _, item := range selected {
+			if item.id == id {
+				return true
+			}
+		}
+		return false
+	}
+	if !validSurvey(baseline) || !validSurvey(followup) {
+		return nil, ErrSurveyMeasurementIncompatible
+	}
+	if baseline == followup {
+		return series, nil
+	}
+	type paired struct{ baseline, followup *float64 }
+	pairedByDimension := make(map[string]map[uuid.UUID]*paired)
+	for _, point := range series.Participants {
+		if point.SurveyID != baseline && point.SurveyID != followup {
+			continue
+		}
+		for key, score := range point.Scores {
+			if pairedByDimension[key] == nil {
+				pairedByDimension[key] = make(map[uuid.UUID]*paired)
+			}
+			if pairedByDimension[key][point.ProgramParticipantID] == nil {
+				pairedByDimension[key][point.ProgramParticipantID] = &paired{}
+			}
+			value := score
+			if point.SurveyID == baseline {
+				pairedByDimension[key][point.ProgramParticipantID].baseline = &value
+			}
+			if point.SurveyID == followup {
+				pairedByDimension[key][point.ProgramParticipantID].followup = &value
+			}
+		}
+	}
+	for _, dimension := range selected[0].config.Dimensions {
+		var baselineSum, followupSum float64
+		count := 0
+		for _, pair := range pairedByDimension[dimension.Key] {
+			if pair.baseline == nil || pair.followup == nil {
+				continue
+			}
+			baselineSum += *pair.baseline
+			followupSum += *pair.followup
+			count++
+		}
+		change := domain.SurveyPairedMeasurementChange{DimensionKey: dimension.Key, SampleSize: count}
+		if count > 0 {
+			baselineAverage, followupAverage := baselineSum/float64(count), followupSum/float64(count)
+			delta := followupAverage - baselineAverage
+			change.Baseline, change.Followup, change.Delta = &baselineAverage, &followupAverage, &delta
+		}
+		series.PairedChanges = append(series.PairedChanges, change)
+	}
+	return series, nil
 }

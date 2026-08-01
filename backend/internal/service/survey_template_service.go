@@ -2,10 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/mail"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +54,9 @@ func validateSurveyTemplate(template *domain.SurveyTemplate) error {
 		return err
 	}
 	template.ThankYouRedirectURL = redirectURL
+	if err := NormalizeSurveyBranding(&template.Branding); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -65,6 +72,233 @@ func (s *SurveyTemplateService) Update(ctx context.Context, template *domain.Sur
 		return err
 	}
 	return s.repos.SurveyTemplate.Update(ctx, template)
+}
+
+func (s *SurveyTemplateService) Duplicate(ctx context.Context, accountID, sourceID uuid.UUID, name string, createdBy *uuid.UUID) (*domain.SurveyTemplate, error) {
+	copyTemplate := &domain.SurveyTemplate{Name: name, Status: "active"}
+	if err := validateSurveyTemplate(copyTemplate); err != nil {
+		return nil, err
+	}
+	return s.repos.SurveyTemplate.Duplicate(ctx, accountID, sourceID, copyTemplate.Name, createdBy)
+}
+
+func (s *SurveyTemplateService) SuggestInstanceName(ctx context.Context, accountID, templateID uuid.UUID, programID *uuid.UUID, requested string) (*domain.SurveyInstanceNameSuggestion, error) {
+	return s.repos.SurveyTemplate.SuggestInstanceName(ctx, accountID, templateID, programID, requested)
+}
+
+func (s *SurveyTemplateService) UpdateDesign(ctx context.Context, accountID, templateID uuid.UUID, branding domain.SurveyBranding, logoAssetID, backgroundAssetID *uuid.UUID) (*domain.SurveyTemplate, error) {
+	if err := NormalizeSurveyBranding(&branding); err != nil {
+		return nil, err
+	}
+	branding.LogoMediaAssetID = logoAssetID
+	branding.BgImageMediaAssetID = backgroundAssetID
+	return s.repos.SurveyTemplate.UpdateDesign(ctx, accountID, templateID, branding, logoAssetID, backgroundAssetID)
+}
+
+var measurementKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+var surveyHexColorPattern = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
+
+var surveyBrandingFonts = map[string]struct{}{
+	"Inter": {}, "Poppins": {}, "DM Sans": {}, "Space Grotesk": {}, "Montserrat": {},
+	"Roboto": {}, "Open Sans": {}, "Lato": {}, "Nunito": {}, "Playfair Display": {},
+}
+
+func normalizeSurveyBrandingURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || strings.HasPrefix(value, "/api/media/file/") {
+		return value, nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil {
+		return "", errors.New("la URL de imagen es inválida; usa una dirección absoluta http o https")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", errors.New("la URL de imagen es inválida; usa una dirección absoluta http o https")
+	}
+	parsed.Scheme = scheme
+	return parsed.String(), nil
+}
+
+// NormalizeSurveyBranding is shared by JSON compatibility updates and the
+// multipart design endpoint. Uploaded asset ownership is validated separately
+// inside the account-scoped repository transaction.
+func NormalizeSurveyBranding(branding *domain.SurveyBranding) error {
+	for _, color := range []*string{&branding.AccentColor, &branding.BgColor, &branding.TextColor} {
+		value := strings.TrimSpace(*color)
+		if value == "" {
+			continue
+		}
+		if !surveyHexColorPattern.MatchString(value) {
+			return errors.New("los colores del diseño deben usar el formato #RRGGBB")
+		}
+		*color = strings.ToUpper(value)
+	}
+	if branding.FontFamily != "" {
+		if _, allowed := surveyBrandingFonts[branding.FontFamily]; !allowed {
+			return errors.New("la tipografía seleccionada no es válida")
+		}
+	}
+	if branding.TitleSize != "" && branding.TitleSize != "sm" && branding.TitleSize != "md" && branding.TitleSize != "lg" && branding.TitleSize != "xl" {
+		return errors.New("el tamaño de título no es válido")
+	}
+	if branding.ButtonStyle != "" && branding.ButtonStyle != "rounded" && branding.ButtonStyle != "pill" && branding.ButtonStyle != "square" {
+		return errors.New("el estilo de botón no es válido")
+	}
+	if branding.QuestionAlign != "" && branding.QuestionAlign != "left" && branding.QuestionAlign != "center" {
+		return errors.New("la alineación del diseño no es válida")
+	}
+	if branding.LogoSize != "" && branding.LogoSize != "sm" && branding.LogoSize != "md" && branding.LogoSize != "lg" {
+		return errors.New("el tamaño de logo no es válido")
+	}
+	if branding.BgPosition != "" && branding.BgPosition != "top" && branding.BgPosition != "center" && branding.BgPosition != "bottom" {
+		return errors.New("la posición de fondo no es válida")
+	}
+	if branding.BgOverlay != "" {
+		overlay, err := strconv.ParseFloat(branding.BgOverlay, 64)
+		if err != nil || math.IsNaN(overlay) || overlay < 0 || overlay > 0.8 {
+			return errors.New("la opacidad de fondo debe estar entre 0 y 0.8")
+		}
+		branding.BgOverlay = strconv.FormatFloat(overlay, 'f', 1, 64)
+	}
+	var err error
+	branding.LogoURL, err = normalizeSurveyBrandingURL(branding.LogoURL)
+	if err != nil {
+		return err
+	}
+	branding.BgImageURL, err = normalizeSurveyBrandingURL(branding.BgImageURL)
+	return err
+}
+
+func validateMeasurementMutation(questions []*domain.SurveyTemplateQuestion, mutation *domain.SurveyMeasurementMutation) (map[uuid.UUID]*domain.SurveyQuestionMeasurement, error) {
+	dimensionKeys := make(map[string]struct{}, len(mutation.Dimensions))
+	for index := range mutation.Dimensions {
+		dimension := &mutation.Dimensions[index]
+		dimension.Key = strings.ToLower(strings.TrimSpace(dimension.Key))
+		dimension.Name = strings.TrimSpace(dimension.Name)
+		dimension.Description = strings.TrimSpace(dimension.Description)
+		if !measurementKeyPattern.MatchString(dimension.Key) {
+			return nil, fmt.Errorf("la dimensión %d necesita una clave válida", index+1)
+		}
+		if dimension.Name == "" || len([]rune(dimension.Name)) > 120 {
+			return nil, fmt.Errorf("la dimensión %d necesita un nombre válido", index+1)
+		}
+		if _, duplicate := dimensionKeys[dimension.Key]; duplicate {
+			return nil, errors.New("hay dimensiones con claves duplicadas")
+		}
+		dimensionKeys[dimension.Key] = struct{}{}
+		if dimension.MinimumAnsweredRatio == 0 {
+			dimension.MinimumAnsweredRatio = 1
+		}
+		if dimension.MinimumAnsweredRatio <= 0 || dimension.MinimumAnsweredRatio > 1 || math.IsNaN(dimension.MinimumAnsweredRatio) {
+			return nil, fmt.Errorf("la dimensión %s tiene un mínimo respondido inválido", dimension.Name)
+		}
+	}
+	questionByID := make(map[uuid.UUID]*domain.SurveyTemplateQuestion, len(questions))
+	for _, question := range questions {
+		questionByID[question.ID] = question
+	}
+	assignments := make(map[uuid.UUID]*domain.SurveyQuestionMeasurement, len(mutation.Questions))
+	for _, input := range mutation.Questions {
+		if input.Measurement == nil {
+			continue
+		}
+		question, exists := questionByID[input.QuestionID]
+		if !exists {
+			return nil, errors.New("la medición contiene una pregunta ajena a la plantilla")
+		}
+		if _, duplicate := assignments[input.QuestionID]; duplicate {
+			return nil, errors.New("la medición contiene preguntas duplicadas")
+		}
+		measurement := *input.Measurement
+		measurement.DimensionKey = strings.ToLower(strings.TrimSpace(measurement.DimensionKey))
+		if _, exists := dimensionKeys[measurement.DimensionKey]; !exists {
+			return nil, fmt.Errorf("la pregunta %q referencia una dimensión inexistente", question.Title)
+		}
+		if measurement.Weight == 0 {
+			measurement.Weight = 1
+		}
+		if measurement.Weight <= 0 || measurement.Weight > 100 || math.IsNaN(measurement.Weight) || math.IsInf(measurement.Weight, 0) {
+			return nil, fmt.Errorf("la pregunta %q tiene un peso inválido", question.Title)
+		}
+		switch question.Type {
+		case "rating", "likert":
+			measurement.OptionScores = nil
+		case "single_choice":
+			if len(measurement.OptionScores) != len(question.Config.Options) {
+				return nil, fmt.Errorf("la pregunta %q necesita un puntaje para cada opción", question.Title)
+			}
+			for _, option := range question.Config.Options {
+				score, exists := measurement.OptionScores[option]
+				if !exists || math.IsNaN(score) || math.IsInf(score, 0) {
+					return nil, fmt.Errorf("la opción %q de %q necesita un puntaje válido", option, question.Title)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("la pregunta %q no admite medición en esta versión", question.Title)
+		}
+		assignments[input.QuestionID] = &measurement
+	}
+	if len(assignments) > 0 && len(dimensionKeys) == 0 {
+		return nil, errors.New("agrega al menos una dimensión para configurar puntajes")
+	}
+	return assignments, nil
+}
+
+func (s *SurveyTemplateService) UpdateMeasurement(ctx context.Context, accountID, templateID uuid.UUID, mutation domain.SurveyMeasurementMutation) (*domain.SurveyTemplate, []*domain.SurveyTemplateQuestion, error) {
+	questions, err := s.Questions(ctx, accountID, templateID)
+	if err != nil {
+		return nil, nil, err
+	}
+	assignments, err := validateMeasurementMutation(questions, &mutation)
+	if err != nil {
+		return nil, nil, err
+	}
+	config := domain.SurveyMeasurementConfig{Dimensions: mutation.Dimensions}
+	if _, err := s.repos.SurveyTemplate.UpdateMeasurement(ctx, accountID, templateID, config, assignments); err != nil {
+		return nil, nil, err
+	}
+	template, err := s.Get(ctx, accountID, templateID)
+	if err != nil {
+		return nil, nil, err
+	}
+	questions, err = s.Questions(ctx, accountID, templateID)
+	return template, questions, err
+}
+
+func surveyMeasurementSignature(config domain.SurveyMeasurementConfig, questions []*domain.SurveyTemplateQuestion) (string, error) {
+	if len(config.Dimensions) == 0 {
+		return "", nil
+	}
+	type signatureQuestion struct {
+		ID          uuid.UUID                         `json:"id"`
+		Type        string                            `json:"type"`
+		Title       string                            `json:"title"`
+		Options     []string                          `json:"options,omitempty"`
+		MaxRating   int                               `json:"max_rating,omitempty"`
+		LikertScale int                               `json:"likert_scale,omitempty"`
+		Measurement *domain.SurveyQuestionMeasurement `json:"measurement,omitempty"`
+	}
+	payload := struct {
+		Config    domain.SurveyMeasurementConfig `json:"config"`
+		Questions []signatureQuestion            `json:"questions"`
+	}{Config: config, Questions: make([]signatureQuestion, 0)}
+	for _, question := range questions {
+		if question.Config.Measurement == nil {
+			continue
+		}
+		payload.Questions = append(payload.Questions, signatureQuestion{
+			ID: question.ID, Type: question.Type, Title: question.Title,
+			Options: question.Config.Options, MaxRating: question.Config.MaxRating,
+			LikertScale: question.Config.LikertScale, Measurement: question.Config.Measurement,
+		})
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", hash[:]), nil
 }
 
 func validSurveyQuestionType(questionType string) bool {
@@ -168,7 +402,35 @@ func (s *SurveyTemplateService) ReplaceQuestions(ctx context.Context, accountID,
 	if err := validateTemplateQuestions(questions); err != nil {
 		return nil, 0, err
 	}
+	template, err := s.Get(ctx, accountID, templateID)
+	if err != nil {
+		return nil, 0, err
+	}
+	measurementMutation := domain.SurveyMeasurementMutation{Dimensions: template.MeasurementConfig.Dimensions}
+	for index := range questions {
+		if questions[index].Config.Measurement != nil {
+			measurementMutation.Questions = append(measurementMutation.Questions, domain.SurveyMeasurementQuestionInput{
+				QuestionID:  questions[index].ID,
+				Measurement: questions[index].Config.Measurement,
+			})
+		}
+	}
+	assignments, err := validateMeasurementMutation(questionPointers(questions), &measurementMutation)
+	if err != nil {
+		return nil, 0, fmt.Errorf("actualiza la configuración de medición antes de guardar las preguntas: %w", err)
+	}
+	for index := range questions {
+		questions[index].Config.Measurement = assignments[questions[index].ID]
+	}
 	return s.repos.SurveyTemplate.ReplaceQuestions(ctx, accountID, templateID, questions)
+}
+
+func questionPointers(questions []domain.SurveyTemplateQuestion) []*domain.SurveyTemplateQuestion {
+	result := make([]*domain.SurveyTemplateQuestion, len(questions))
+	for index := range questions {
+		result[index] = &questions[index]
+	}
+	return result
 }
 
 func (s *SurveyTemplateService) CreateInstance(ctx context.Context, input domain.CreateSurveyInstanceInput) (*domain.SurveyInstanceSummary, error) {
@@ -192,7 +454,12 @@ func (s *SurveyTemplateService) CreateInstance(ctx context.Context, input domain
 	if err := validateForwardSurveyLogic(questionIDs, rules); err != nil {
 		return nil, fmt.Errorf("la plantilla contiene lógica condicional inválida: %w", err)
 	}
-	input.Name = strings.TrimSpace(input.Name)
+	input.MeasurementConfig = template.MeasurementConfig
+	input.MeasurementSignature, err = surveyMeasurementSignature(template.MeasurementConfig, snapshotQuestions)
+	if err != nil {
+		return nil, err
+	}
+	input.Name = domain.CleanSurveyInstanceName(input.Name)
 	if len([]rune(input.Name)) > 180 {
 		return nil, errors.New("el nombre de la aplicación es demasiado largo")
 	}
@@ -275,6 +542,17 @@ func (s *SurveyTemplateService) ListProgramRecipients(ctx context.Context, accou
 		return nil, 0, repository.ErrSurveyInstanceNotFound
 	}
 	return s.repos.SurveyTemplate.ListProgramRecipients(ctx, accountID, programID, surveyID, search, limit, offset)
+}
+
+func (s *SurveyTemplateService) ProgramMeasurementSeries(ctx context.Context, accountID, programID, templateID uuid.UUID, signature string, baselineID, followupID *uuid.UUID) (*domain.SurveyMeasurementSeries, error) {
+	program, err := s.repos.Program.GetByID(ctx, accountID, programID)
+	if err != nil || program == nil {
+		return nil, repository.ErrSurveyInstanceNotFound
+	}
+	if _, err := s.repos.SurveyTemplate.Get(ctx, accountID, templateID); err != nil {
+		return nil, err
+	}
+	return s.repos.SurveyTemplate.GetProgramMeasurementSeries(ctx, accountID, programID, templateID, signature, baselineID, followupID)
 }
 
 func (s *SurveyTemplateService) ResolveRecipient(ctx context.Context, surveyID uuid.UUID, rawToken string, markOpened bool) (*domain.SurveyInstanceRecipient, error) {

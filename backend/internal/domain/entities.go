@@ -2675,45 +2675,73 @@ type AutomationStats struct {
 
 // SurveyBranding holds visual customization for the public form
 type SurveyBranding struct {
-	LogoURL       string `json:"logo_url,omitempty"`
-	BgColor       string `json:"bg_color,omitempty"`
-	AccentColor   string `json:"accent_color,omitempty"`
-	BgImageURL    string `json:"bg_image_url,omitempty"`
-	FontFamily    string `json:"font_family,omitempty"`    // Inter, Poppins, Playfair Display, etc.
-	TitleSize     string `json:"title_size,omitempty"`     // sm, md, lg, xl
-	TextColor     string `json:"text_color,omitempty"`     // custom text color for titles
-	ButtonStyle   string `json:"button_style,omitempty"`   // rounded, pill, square
-	BgOverlay     string `json:"bg_overlay,omitempty"`     // overlay opacity: 0, 0.2, 0.4, 0.6
-	QuestionAlign string `json:"question_align,omitempty"` // left, center
+	LogoURL             string     `json:"logo_url,omitempty"`
+	LogoMediaAssetID    *uuid.UUID `json:"logo_media_asset_id,omitempty"`
+	LogoSize            string     `json:"logo_size,omitempty"` // sm, md, lg
+	BgColor             string     `json:"bg_color,omitempty"`
+	AccentColor         string     `json:"accent_color,omitempty"`
+	BgImageURL          string     `json:"bg_image_url,omitempty"`
+	BgImageMediaAssetID *uuid.UUID `json:"bg_image_media_asset_id,omitempty"`
+	BgPosition          string     `json:"bg_position,omitempty"`    // top, center, bottom
+	FontFamily          string     `json:"font_family,omitempty"`    // Inter, Poppins, Playfair Display, etc.
+	TitleSize           string     `json:"title_size,omitempty"`     // sm, md, lg, xl
+	TextColor           string     `json:"text_color,omitempty"`     // custom text color for titles
+	ButtonStyle         string     `json:"button_style,omitempty"`   // rounded, pill, square
+	BgOverlay           string     `json:"bg_overlay,omitempty"`     // overlay opacity: 0..0.8
+	QuestionAlign       string     `json:"question_align,omitempty"` // left, center
+}
+
+// SurveyMeasurementConfig defines the explicit, reusable dimensions that an
+// application snapshots from its template. Empty configuration means that the
+// survey remains descriptive and must not receive inferred scores.
+type SurveyMeasurementConfig struct {
+	Dimensions []SurveyMeasurementDimension `json:"dimensions"`
+}
+
+type SurveyMeasurementDimension struct {
+	Key                  string  `json:"key"`
+	Name                 string  `json:"name"`
+	Description          string  `json:"description,omitempty"`
+	MinimumAnsweredRatio float64 `json:"minimum_answered_ratio"`
+}
+
+type SurveyQuestionMeasurement struct {
+	DimensionKey string             `json:"dimension_key"`
+	Weight       float64            `json:"weight"`
+	Reverse      bool               `json:"reverse,omitempty"`
+	OptionScores map[string]float64 `json:"option_scores,omitempty"`
 }
 
 // Survey represents a form/survey that can be shared via a public link
 type Survey struct {
-	ID                  uuid.UUID      `json:"id"`
-	AccountID           uuid.UUID      `json:"account_id"`
-	Name                string         `json:"name"`
-	Description         string         `json:"description"`
-	Slug                string         `json:"slug"`
-	Status              string         `json:"status"` // draft, active, closed
-	WelcomeTitle        string         `json:"welcome_title"`
-	WelcomeDescription  string         `json:"welcome_description"`
-	ThankYouTitle       string         `json:"thank_you_title"`
-	ThankYouMessage     string         `json:"thank_you_message"`
-	ThankYouRedirectURL string         `json:"thank_you_redirect_url"`
-	Branding            SurveyBranding `json:"branding"`
-	IsTemplate          bool           `json:"is_template"`
-	TemplateID          *uuid.UUID     `json:"template_id,omitempty"`
-	TemplateRevision    int            `json:"template_revision"`
-	OriginType          string         `json:"origin_type,omitempty"`
-	ProgramID           *uuid.UUID     `json:"program_id,omitempty"`
-	OriginLabel         string         `json:"origin_label,omitempty"`
-	AudienceMode        string         `json:"audience_mode,omitempty"`
-	OpensAt             *time.Time     `json:"opens_at,omitempty"`
-	ClosesAt            *time.Time     `json:"closes_at,omitempty"`
-	LegacyInstance      bool           `json:"legacy_instance"`
-	CreatedBy           *uuid.UUID     `json:"created_by,omitempty"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
+	ID                         uuid.UUID               `json:"id"`
+	AccountID                  uuid.UUID               `json:"account_id"`
+	Name                       string                  `json:"name"`
+	Description                string                  `json:"description"`
+	Slug                       string                  `json:"slug"`
+	Status                     string                  `json:"status"` // draft, active, closed
+	WelcomeTitle               string                  `json:"welcome_title"`
+	WelcomeDescription         string                  `json:"welcome_description"`
+	ThankYouTitle              string                  `json:"thank_you_title"`
+	ThankYouMessage            string                  `json:"thank_you_message"`
+	ThankYouRedirectURL        string                  `json:"thank_you_redirect_url"`
+	Branding                   SurveyBranding          `json:"branding"`
+	MeasurementConfig          SurveyMeasurementConfig `json:"measurement_config"`
+	MeasurementSignature       string                  `json:"measurement_signature,omitempty"`
+	AnalyticsTrackingStartedAt time.Time               `json:"analytics_tracking_started_at"`
+	IsTemplate                 bool                    `json:"is_template"`
+	TemplateID                 *uuid.UUID              `json:"template_id,omitempty"`
+	TemplateRevision           int                     `json:"template_revision"`
+	OriginType                 string                  `json:"origin_type,omitempty"`
+	ProgramID                  *uuid.UUID              `json:"program_id,omitempty"`
+	OriginLabel                string                  `json:"origin_label,omitempty"`
+	AudienceMode               string                  `json:"audience_mode,omitempty"`
+	OpensAt                    *time.Time              `json:"opens_at,omitempty"`
+	ClosesAt                   *time.Time              `json:"closes_at,omitempty"`
+	LegacyInstance             bool                    `json:"legacy_instance"`
+	CreatedBy                  *uuid.UUID              `json:"created_by,omitempty"`
+	CreatedAt                  time.Time               `json:"created_at"`
+	UpdatedAt                  time.Time               `json:"updated_at"`
 	// Populated on demand
 	QuestionCount int `json:"question_count,omitempty"`
 	ResponseCount int `json:"response_count,omitempty"`
@@ -2721,14 +2749,15 @@ type Survey struct {
 
 // SurveyQuestionConfig holds type-specific configuration for a question
 type SurveyQuestionConfig struct {
-	Options      []string `json:"options,omitempty"`       // single_choice, multiple_choice
-	MaxRating    int      `json:"max_rating,omitempty"`    // rating (default 5)
-	LikertScale  int      `json:"likert_scale,omitempty"`  // likert scale points (default 5)
-	LikertMin    string   `json:"likert_min,omitempty"`    // likert min label
-	LikertMax    string   `json:"likert_max,omitempty"`    // likert max label
-	AllowedTypes []string `json:"allowed_types,omitempty"` // file_upload mime types
-	MaxSizeMB    int      `json:"max_size_mb,omitempty"`   // file_upload max size
-	Placeholder  string   `json:"placeholder,omitempty"`   // text input placeholder
+	Options      []string                   `json:"options,omitempty"`       // single_choice, multiple_choice
+	MaxRating    int                        `json:"max_rating,omitempty"`    // rating (default 5)
+	LikertScale  int                        `json:"likert_scale,omitempty"`  // likert scale points (default 5)
+	LikertMin    string                     `json:"likert_min,omitempty"`    // likert min label
+	LikertMax    string                     `json:"likert_max,omitempty"`    // likert max label
+	AllowedTypes []string                   `json:"allowed_types,omitempty"` // file_upload mime types
+	MaxSizeMB    int                        `json:"max_size_mb,omitempty"`   // file_upload max size
+	Placeholder  string                     `json:"placeholder,omitempty"`   // text input placeholder
+	Measurement  *SurveyQuestionMeasurement `json:"measurement,omitempty"`
 }
 
 // SurveyLogicRule defines a conditional jump based on an answer value
@@ -2797,10 +2826,49 @@ type SurveyAnswer struct {
 
 // SurveyAnalytics holds aggregated data for a survey's results
 type SurveyAnalytics struct {
-	TotalResponses   int                   `json:"total_responses"`
-	CompletionRate   float64               `json:"completion_rate"`
-	AvgCompletionSec float64               `json:"avg_completion_seconds"`
-	QuestionStats    []SurveyQuestionStats `json:"question_stats"`
+	TotalResponses   int                         `json:"total_responses"`
+	CompletionRate   *float64                    `json:"completion_rate"`
+	AvgCompletionSec *float64                    `json:"avg_completion_seconds"`
+	Funnel           SurveyFunnelAnalytics       `json:"funnel"`
+	Measurement      *SurveyMeasurementAnalytics `json:"measurement,omitempty"`
+	QuestionStats    []SurveyQuestionStats       `json:"question_stats"`
+}
+
+type SurveyFunnelAnalytics struct {
+	TrackingStartedAt       time.Time                    `json:"tracking_started_at"`
+	RecipientCount          *int                         `json:"recipient_count,omitempty"`
+	OpenedCount             int                          `json:"opened_count"`
+	StartedCount            int                          `json:"started_count"`
+	CompletedCount          int                          `json:"completed_count"`
+	AbandonedCount          int                          `json:"abandoned_count"`
+	OpenToStartRate         *float64                     `json:"open_to_start_rate,omitempty"`
+	StartToCompleteRate     *float64                     `json:"start_to_complete_rate,omitempty"`
+	RecipientCompletionRate *float64                     `json:"recipient_completion_rate,omitempty"`
+	MedianCompletionSec     *float64                     `json:"median_completion_seconds,omitempty"`
+	QuestionDropoff         []SurveyQuestionDropoffStats `json:"question_dropoff"`
+}
+
+type SurveyQuestionDropoffStats struct {
+	QuestionID    uuid.UUID `json:"question_id"`
+	Title         string    `json:"title"`
+	ReachedCount  int       `json:"reached_count"`
+	AnsweredCount int       `json:"answered_count"`
+	DropoffCount  int       `json:"dropoff_count"`
+}
+
+type SurveyMeasurementAnalytics struct {
+	Signature  string                            `json:"signature"`
+	Dimensions []SurveyMeasurementDimensionStats `json:"dimensions"`
+}
+
+type SurveyMeasurementDimensionStats struct {
+	Key          string         `json:"key"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description,omitempty"`
+	SampleSize   int            `json:"sample_size"`
+	Average      *float64       `json:"average,omitempty"`
+	Median       *float64       `json:"median,omitempty"`
+	Distribution map[string]int `json:"distribution"`
 }
 
 // SurveyQuestionStats holds per-question aggregated stats

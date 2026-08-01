@@ -447,7 +447,8 @@ func (s *Server) handleSubmitSurveyResponse(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 	}
 
-	if req.RespondentToken == "" {
+	req.RespondentToken = strings.TrimSpace(req.RespondentToken)
+	if _, tokenErr := uuid.Parse(req.RespondentToken); tokenErr != nil {
 		req.RespondentToken = uuid.New().String()
 	}
 	if req.Source == "" {
@@ -497,6 +498,52 @@ func (s *Server) handleSubmitSurveyResponse(c *fiber.Ctx) error {
 		"success":     true,
 		"response_id": resp.ID,
 	})
+}
+
+func (s *Server) handleTrackSurveySession(c *fiber.Ctx) error {
+	slug := c.Params("slug")
+	survey, err := s.repos.Survey.GetBySlug(c.Context(), slug)
+	if err != nil || survey.Status != "active" {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Encuesta no encontrada o inactiva"})
+	}
+	now := time.Now()
+	if (survey.OpensAt != nil && now.Before(*survey.OpensAt)) || (survey.ClosesAt != nil && now.After(*survey.ClosesAt)) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Encuesta no encontrada o inactiva"})
+	}
+	var req struct {
+		RespondentToken string                    `json:"respondent_token"`
+		RecipientToken  string                    `json:"recipient_token"`
+		Source          string                    `json:"source"`
+		Phase           domain.SurveySessionPhase `json:"phase"`
+		QuestionID      *uuid.UUID                `json:"question_id"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Solicitud inválida"})
+	}
+	respondentToken, err := uuid.Parse(strings.TrimSpace(req.RespondentToken))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "La sesión de respuesta no es válida"})
+	}
+	var recipientID *uuid.UUID
+	recipientToken := strings.TrimSpace(req.RecipientToken)
+	if recipientToken != "" {
+		recipient, resolveErr := s.services.SurveyTemplate.ResolveRecipient(c.Context(), survey.ID, recipientToken, false)
+		if resolveErr != nil || recipient == nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "El destinatario de la encuesta no es válido"})
+		}
+		recipientID = &recipient.ID
+	} else if survey.AudienceMode == "program_participants" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Este enlace requiere un destinatario válido"})
+	}
+	event := domain.SurveySessionEvent{
+		SurveyID: survey.ID, AccountID: survey.AccountID, RecipientID: recipientID,
+		RespondentToken: respondentToken, Source: req.Source, Phase: req.Phase,
+		QuestionID: req.QuestionID,
+	}
+	if err := s.services.Survey.TrackSession(c.Context(), event); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true})
 }
 
 func (s *Server) handleUploadSurveyFile(c *fiber.Ctx) error {

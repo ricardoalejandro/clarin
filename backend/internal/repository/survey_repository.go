@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,11 +35,12 @@ func (r *SurveyRepository) Create(ctx context.Context, s *domain.Survey) error {
 
 func (r *SurveyRepository) GetByID(ctx context.Context, id, accountID uuid.UUID) (*domain.Survey, error) {
 	s := &domain.Survey{}
-	var brandingJSON []byte
+	var brandingJSON, measurementJSON []byte
 	err := r.db.QueryRow(ctx, `
 		SELECT s.id, s.account_id, s.name, s.description, s.slug, s.status,
 			s.welcome_title, s.welcome_description, s.thank_you_title, s.thank_you_message,
-			s.thank_you_redirect_url, s.branding, s.is_template, s.template_id, s.template_revision,
+			s.thank_you_redirect_url, s.branding, s.measurement_config,s.measurement_signature,
+			s.analytics_tracking_started_at,s.is_template, s.template_id, s.template_revision,
 			s.origin_type, s.program_id, s.origin_label, s.audience_mode, s.opens_at, s.closes_at,
 			s.legacy_instance, s.created_by, s.created_at, s.updated_at,
 			(SELECT COUNT(*) FROM survey_questions WHERE survey_id = s.id) AS question_count,
@@ -46,7 +50,8 @@ func (r *SurveyRepository) GetByID(ctx context.Context, id, accountID uuid.UUID)
 	`, id, accountID).Scan(
 		&s.ID, &s.AccountID, &s.Name, &s.Description, &s.Slug, &s.Status,
 		&s.WelcomeTitle, &s.WelcomeDescription, &s.ThankYouTitle, &s.ThankYouMessage,
-		&s.ThankYouRedirectURL, &brandingJSON, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
+		&s.ThankYouRedirectURL, &brandingJSON, &measurementJSON, &s.MeasurementSignature,
+		&s.AnalyticsTrackingStartedAt, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
 		&s.OriginType, &s.ProgramID, &s.OriginLabel, &s.AudienceMode, &s.OpensAt, &s.ClosesAt,
 		&s.LegacyInstance, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
 		&s.QuestionCount, &s.ResponseCount,
@@ -55,6 +60,7 @@ func (r *SurveyRepository) GetByID(ctx context.Context, id, accountID uuid.UUID)
 		return nil, err
 	}
 	_ = json.Unmarshal(brandingJSON, &s.Branding)
+	_ = json.Unmarshal(measurementJSON, &s.MeasurementConfig)
 	return s, nil
 }
 
@@ -62,7 +68,8 @@ func (r *SurveyRepository) List(ctx context.Context, accountID uuid.UUID) ([]*do
 	rows, err := r.db.Query(ctx, `
 		SELECT s.id, s.account_id, s.name, s.description, s.slug, s.status,
 			s.welcome_title, s.welcome_description, s.thank_you_title, s.thank_you_message,
-			s.thank_you_redirect_url, s.branding, s.is_template, s.template_id, s.template_revision,
+			s.thank_you_redirect_url, s.branding, s.measurement_config,s.measurement_signature,
+			s.analytics_tracking_started_at,s.is_template, s.template_id, s.template_revision,
 			s.origin_type, s.program_id, s.origin_label, s.audience_mode, s.opens_at, s.closes_at,
 			s.legacy_instance, s.created_by, s.created_at, s.updated_at,
 			(SELECT COUNT(*) FROM survey_questions WHERE survey_id = s.id) AS question_count,
@@ -79,11 +86,12 @@ func (r *SurveyRepository) List(ctx context.Context, accountID uuid.UUID) ([]*do
 	var surveys []*domain.Survey
 	for rows.Next() {
 		s := &domain.Survey{}
-		var brandingJSON []byte
+		var brandingJSON, measurementJSON []byte
 		if err := rows.Scan(
 			&s.ID, &s.AccountID, &s.Name, &s.Description, &s.Slug, &s.Status,
 			&s.WelcomeTitle, &s.WelcomeDescription, &s.ThankYouTitle, &s.ThankYouMessage,
-			&s.ThankYouRedirectURL, &brandingJSON, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
+			&s.ThankYouRedirectURL, &brandingJSON, &measurementJSON, &s.MeasurementSignature,
+			&s.AnalyticsTrackingStartedAt, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
 			&s.OriginType, &s.ProgramID, &s.OriginLabel, &s.AudienceMode, &s.OpensAt, &s.ClosesAt,
 			&s.LegacyInstance, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
 			&s.QuestionCount, &s.ResponseCount,
@@ -91,6 +99,7 @@ func (r *SurveyRepository) List(ctx context.Context, accountID uuid.UUID) ([]*do
 			return nil, err
 		}
 		_ = json.Unmarshal(brandingJSON, &s.Branding)
+		_ = json.Unmarshal(measurementJSON, &s.MeasurementConfig)
 		surveys = append(surveys, s)
 	}
 	return surveys, nil
@@ -170,18 +179,20 @@ func (r *SurveyRepository) SlugExists(ctx context.Context, slug string, excludeI
 
 func (r *SurveyRepository) GetBySlug(ctx context.Context, slug string) (*domain.Survey, error) {
 	s := &domain.Survey{}
-	var brandingJSON []byte
+	var brandingJSON, measurementJSON []byte
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, name, description, slug, status,
 			welcome_title, welcome_description, thank_you_title, thank_you_message,
-			thank_you_redirect_url, branding, is_template, template_id, template_revision,
+			thank_you_redirect_url, branding,measurement_config,measurement_signature,
+			analytics_tracking_started_at,is_template, template_id, template_revision,
 			origin_type, program_id, origin_label, audience_mode, opens_at, closes_at,
 			legacy_instance, created_by, created_at, updated_at
 		FROM surveys WHERE slug = $1
 	`, slug).Scan(
 		&s.ID, &s.AccountID, &s.Name, &s.Description, &s.Slug, &s.Status,
 		&s.WelcomeTitle, &s.WelcomeDescription, &s.ThankYouTitle, &s.ThankYouMessage,
-		&s.ThankYouRedirectURL, &brandingJSON, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
+		&s.ThankYouRedirectURL, &brandingJSON, &measurementJSON, &s.MeasurementSignature,
+		&s.AnalyticsTrackingStartedAt, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
 		&s.OriginType, &s.ProgramID, &s.OriginLabel, &s.AudienceMode, &s.OpensAt, &s.ClosesAt,
 		&s.LegacyInstance, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
 	)
@@ -189,6 +200,7 @@ func (r *SurveyRepository) GetBySlug(ctx context.Context, slug string) (*domain.
 		return nil, err
 	}
 	_ = json.Unmarshal(brandingJSON, &s.Branding)
+	_ = json.Unmarshal(measurementJSON, &s.MeasurementConfig)
 	return s, nil
 }
 
@@ -405,8 +417,169 @@ func (r *SurveyRepository) CreateResponse(ctx context.Context, resp *domain.Surv
 			return err
 		}
 	}
+	if err := r.completeSurveySession(ctx, tx, resp); err != nil {
+		return err
+	}
 
 	return tx.Commit(ctx)
+}
+
+func (r *SurveyRepository) TrackSession(ctx context.Context, event domain.SurveySessionEvent) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if event.QuestionID != nil {
+		var belongs bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM survey_questions WHERE survey_id=$1 AND id=$2)
+		`, event.SurveyID, *event.QuestionID).Scan(&belongs); err != nil {
+			return err
+		}
+		if !belongs {
+			return errors.New("survey session question does not belong to survey")
+		}
+	}
+	var sessionID uuid.UUID
+	if event.RecipientID != nil {
+		err = tx.QueryRow(ctx, `
+			SELECT id FROM survey_response_sessions
+			WHERE account_id=$1 AND survey_id=$2 AND recipient_id=$3
+			FOR UPDATE
+		`, event.AccountID, event.SurveyID, *event.RecipientID).Scan(&sessionID)
+	} else {
+		err = tx.QueryRow(ctx, `
+			SELECT id FROM survey_response_sessions
+			WHERE account_id=$1 AND survey_id=$2 AND respondent_token=$3
+			FOR UPDATE
+		`, event.AccountID, event.SurveyID, event.RespondentToken).Scan(&sessionID)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO survey_response_sessions (
+				account_id,survey_id,recipient_id,respondent_token,source
+			) VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT DO NOTHING
+			RETURNING id
+		`, event.AccountID, event.SurveyID, event.RecipientID, event.RespondentToken, event.Source).Scan(&sessionID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if event.RecipientID != nil {
+				err = tx.QueryRow(ctx, `
+					SELECT id FROM survey_response_sessions
+					WHERE account_id=$1 AND survey_id=$2 AND recipient_id=$3
+					FOR UPDATE
+				`, event.AccountID, event.SurveyID, *event.RecipientID).Scan(&sessionID)
+			} else {
+				err = tx.QueryRow(ctx, `
+					SELECT id FROM survey_response_sessions
+					WHERE account_id=$1 AND survey_id=$2 AND respondent_token=$3
+					FOR UPDATE
+				`, event.AccountID, event.SurveyID, event.RespondentToken).Scan(&sessionID)
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	setStarted := event.Phase == domain.SurveySessionStarted || event.Phase == domain.SurveySessionAnswered
+	if _, err := tx.Exec(ctx, `
+		UPDATE survey_response_sessions
+		SET source=CASE WHEN $4::text='' THEN source ELSE $4::text END,
+			started_at=CASE WHEN $5::boolean THEN COALESCE(started_at,NOW()) ELSE started_at END,
+			last_activity_at=NOW(),updated_at=NOW()
+		WHERE account_id=$1 AND survey_id=$2 AND id=$3
+	`, event.AccountID, event.SurveyID, sessionID, event.Source, setStarted); err != nil {
+		return err
+	}
+	if event.QuestionID != nil {
+		answered := event.Phase == domain.SurveySessionAnswered
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO survey_response_session_questions (
+				account_id,survey_id,session_id,question_id,answered_at
+			) VALUES ($1,$2,$3,$4,CASE WHEN $5::boolean THEN NOW() ELSE NULL END)
+			ON CONFLICT (session_id,question_id) DO UPDATE SET
+				answered_at=CASE WHEN $5::boolean THEN COALESCE(survey_response_session_questions.answered_at,NOW()) ELSE survey_response_session_questions.answered_at END,
+				updated_at=NOW()
+		`, event.AccountID, event.SurveyID, sessionID, *event.QuestionID, answered); err != nil {
+			return err
+		}
+	}
+	if event.RecipientID != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE survey_instance_recipients
+			SET status=CASE WHEN status='pending' THEN 'opened' ELSE status END,
+				opened_at=COALESCE(opened_at,NOW()),updated_at=NOW()
+			WHERE account_id=$1 AND survey_id=$2 AND id=$3
+		`, event.AccountID, event.SurveyID, *event.RecipientID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *SurveyRepository) completeSurveySession(ctx context.Context, tx pgx.Tx, resp *domain.SurveyResponse) error {
+	token, tokenErr := uuid.Parse(resp.RespondentToken)
+	var sessionID uuid.UUID
+	var err error
+	if resp.RecipientID != nil {
+		err = tx.QueryRow(ctx, `
+			SELECT id FROM survey_response_sessions
+			WHERE account_id=$1 AND survey_id=$2 AND recipient_id=$3
+			FOR UPDATE
+		`, resp.AccountID, resp.SurveyID, *resp.RecipientID).Scan(&sessionID)
+	} else if tokenErr == nil {
+		err = tx.QueryRow(ctx, `
+			SELECT id FROM survey_response_sessions
+			WHERE account_id=$1 AND survey_id=$2 AND respondent_token=$3
+			FOR UPDATE
+		`, resp.AccountID, resp.SurveyID, token).Scan(&sessionID)
+	} else {
+		return nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		if tokenErr != nil {
+			return nil
+		}
+		err = tx.QueryRow(ctx, `
+			INSERT INTO survey_response_sessions (
+				account_id,survey_id,recipient_id,respondent_token,source,opened_at,
+				started_at,completed_at,last_activity_at,response_id
+			) VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$7,$8)
+			ON CONFLICT DO NOTHING
+			RETURNING id
+		`, resp.AccountID, resp.SurveyID, resp.RecipientID, token, resp.Source,
+			resp.StartedAt, resp.CompletedAt, resp.ID).Scan(&sessionID)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if resp.RecipientID != nil {
+			err = tx.QueryRow(ctx, `
+				SELECT id FROM survey_response_sessions
+				WHERE account_id=$1 AND survey_id=$2 AND recipient_id=$3
+				FOR UPDATE
+			`, resp.AccountID, resp.SurveyID, *resp.RecipientID).Scan(&sessionID)
+		} else {
+			err = tx.QueryRow(ctx, `
+				SELECT id FROM survey_response_sessions
+				WHERE account_id=$1 AND survey_id=$2 AND respondent_token=$3
+				FOR UPDATE
+			`, resp.AccountID, resp.SurveyID, token).Scan(&sessionID)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE survey_response_sessions
+		SET started_at=COALESCE(started_at,$6),completed_at=COALESCE(completed_at,$4),response_id=$5,
+			last_activity_at=$4,updated_at=NOW()
+		WHERE account_id=$1 AND survey_id=$2 AND id=$3
+	`, resp.AccountID, resp.SurveyID, sessionID, resp.CompletedAt, resp.ID, resp.StartedAt)
+	return err
 }
 
 func (r *SurveyRepository) ListResponses(ctx context.Context, accountID, surveyID uuid.UUID, limit, offset int) ([]*domain.SurveyResponse, int, error) {
@@ -594,35 +767,60 @@ func (r *SurveyRepository) DeleteResponseScoped(ctx context.Context, accountID, 
 
 func (r *SurveyRepository) GetAnalytics(ctx context.Context, accountID, surveyID uuid.UUID) (*domain.SurveyAnalytics, error) {
 	analytics := &domain.SurveyAnalytics{}
-	var exists bool
+	var audienceMode, measurementSignature string
+	var trackingStartedAt time.Time
+	var measurementJSON []byte
 	if err := r.db.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM surveys WHERE account_id=$1 AND id=$2)
-	`, accountID, surveyID).Scan(&exists); err != nil {
+		SELECT audience_mode,analytics_tracking_started_at,measurement_config,measurement_signature
+		FROM surveys WHERE account_id=$1 AND id=$2
+	`, accountID, surveyID).Scan(&audienceMode, &trackingStartedAt, &measurementJSON, &measurementSignature); err != nil {
 		return nil, err
 	}
-	if !exists {
-		return nil, pgx.ErrNoRows
-	}
-
-	// Total responses + avg completion time
-	err := r.db.QueryRow(ctx, `
-		SELECT
-			COUNT(*) AS total,
-			COALESCE(AVG(EXTRACT(EPOCH FROM (completed_at - started_at))), 0) AS avg_seconds
-		FROM survey_responses
-		WHERE account_id = $1 AND survey_id = $2 AND completed_at IS NOT NULL
-	`, accountID, surveyID).Scan(&analytics.TotalResponses, &analytics.AvgCompletionSec)
-	if err != nil {
+	var measurementConfig domain.SurveyMeasurementConfig
+	if err := json.Unmarshal(measurementJSON, &measurementConfig); err != nil {
 		return nil, err
 	}
-
-	// Completion rate (completed / total started)
-	var totalStarted int
-	_ = r.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM survey_responses WHERE account_id=$1 AND survey_id=$2
-	`, accountID, surveyID).Scan(&totalStarted)
-	if totalStarted > 0 {
-		analytics.CompletionRate = float64(analytics.TotalResponses) / float64(totalStarted) * 100
+	analytics.Funnel.TrackingStartedAt = trackingStartedAt
+	analytics.Funnel.QuestionDropoff = []domain.SurveyQuestionDropoffStats{}
+	if err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM survey_responses
+		WHERE account_id=$1 AND survey_id=$2 AND completed_at IS NOT NULL
+	`, accountID, surveyID).Scan(&analytics.TotalResponses); err != nil {
+		return nil, err
+	}
+	var completedAfterStart int
+	if err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*),
+			COUNT(*) FILTER (WHERE started_at IS NOT NULL),
+			COUNT(*) FILTER (WHERE completed_at IS NOT NULL),
+			COUNT(*) FILTER (WHERE started_at IS NOT NULL AND completed_at IS NOT NULL),
+			COUNT(*) FILTER (WHERE started_at IS NOT NULL AND completed_at IS NULL AND last_activity_at < NOW()-INTERVAL '24 hours'),
+			AVG(EXTRACT(EPOCH FROM (completed_at-started_at))) FILTER (WHERE started_at IS NOT NULL AND completed_at IS NOT NULL),
+			PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (completed_at-started_at)))
+				FILTER (WHERE started_at IS NOT NULL AND completed_at IS NOT NULL)
+		FROM survey_response_sessions
+		WHERE account_id=$1 AND survey_id=$2 AND opened_at >= $3
+	`, accountID, surveyID, trackingStartedAt).Scan(
+		&analytics.Funnel.OpenedCount, &analytics.Funnel.StartedCount,
+		&analytics.Funnel.CompletedCount, &completedAfterStart, &analytics.Funnel.AbandonedCount,
+		&analytics.AvgCompletionSec, &analytics.Funnel.MedianCompletionSec,
+	); err != nil {
+		return nil, err
+	}
+	analytics.Funnel.OpenToStartRate = percentage(analytics.Funnel.StartedCount, analytics.Funnel.OpenedCount)
+	analytics.Funnel.StartToCompleteRate = percentage(completedAfterStart, analytics.Funnel.StartedCount)
+	analytics.CompletionRate = analytics.Funnel.StartToCompleteRate
+	if audienceMode == "program_participants" {
+		var recipientCount, completedRecipients int
+		if err := r.db.QueryRow(ctx, `
+			SELECT COUNT(*),COUNT(*) FILTER (WHERE completed_at IS NOT NULL)
+			FROM survey_instance_recipients
+			WHERE account_id=$1 AND survey_id=$2 AND merged_into_recipient_id IS NULL
+		`, accountID, surveyID).Scan(&recipientCount, &completedRecipients); err != nil {
+			return nil, err
+		}
+		analytics.Funnel.RecipientCount = &recipientCount
+		analytics.Funnel.RecipientCompletionRate = percentage(completedRecipients, recipientCount)
 	}
 
 	// Per-question stats
@@ -630,6 +828,47 @@ func (r *SurveyRepository) GetAnalytics(ctx context.Context, accountID, surveyID
 	if err != nil {
 		return nil, err
 	}
+
+	dropoffRows, err := r.db.Query(ctx, `
+		WITH tracked AS (
+			SELECT id,started_at,completed_at,last_activity_at
+			FROM survey_response_sessions
+			WHERE account_id=$1 AND survey_id=$2 AND opened_at >= $3
+		), last_abandoned AS (
+			SELECT DISTINCT ON (step.session_id) step.session_id,step.question_id
+			FROM survey_response_session_questions step
+			JOIN tracked session ON session.id=step.session_id
+			WHERE session.started_at IS NOT NULL AND session.completed_at IS NULL
+			  AND session.last_activity_at < NOW()-INTERVAL '24 hours'
+			ORDER BY step.session_id,step.reached_at DESC,step.question_id
+		)
+		SELECT question.id,question.title,
+			COUNT(step.session_id),COUNT(step.session_id) FILTER (WHERE step.answered_at IS NOT NULL),
+			COUNT(last_abandoned.session_id)
+		FROM survey_questions question
+		LEFT JOIN survey_response_session_questions step
+		  ON step.account_id=$1 AND step.survey_id=question.survey_id AND step.question_id=question.id
+		LEFT JOIN last_abandoned ON last_abandoned.session_id=step.session_id AND last_abandoned.question_id=step.question_id
+		WHERE question.survey_id=$2
+		GROUP BY question.id,question.title,question.order_index
+		ORDER BY question.order_index,question.id
+	`, accountID, surveyID, trackingStartedAt)
+	if err != nil {
+		return nil, err
+	}
+	for dropoffRows.Next() {
+		var stat domain.SurveyQuestionDropoffStats
+		if err := dropoffRows.Scan(&stat.QuestionID, &stat.Title, &stat.ReachedCount, &stat.AnsweredCount, &stat.DropoffCount); err != nil {
+			dropoffRows.Close()
+			return nil, err
+		}
+		analytics.Funnel.QuestionDropoff = append(analytics.Funnel.QuestionDropoff, stat)
+	}
+	if err := dropoffRows.Err(); err != nil {
+		dropoffRows.Close()
+		return nil, err
+	}
+	dropoffRows.Close()
 
 	for _, q := range questions {
 		stat := domain.SurveyQuestionStats{
@@ -717,8 +956,271 @@ func (r *SurveyRepository) GetAnalytics(ctx context.Context, accountID, surveyID
 	if analytics.QuestionStats == nil {
 		analytics.QuestionStats = []domain.SurveyQuestionStats{}
 	}
+	if measurementSignature != "" && len(measurementConfig.Dimensions) > 0 {
+		answersByResponse, err := r.measurementAnswers(ctx, accountID, []uuid.UUID{surveyID})
+		if err != nil {
+			return nil, err
+		}
+		_, stats := calculateMeasurementScores(measurementConfig, questions, answersByResponse)
+		analytics.Measurement = &domain.SurveyMeasurementAnalytics{Signature: measurementSignature, Dimensions: stats}
+	}
 
 	return analytics, nil
+}
+
+func percentage(numerator, denominator int) *float64 {
+	if denominator <= 0 {
+		return nil
+	}
+	value := float64(numerator) / float64(denominator) * 100
+	return &value
+}
+
+type surveyMeasurementAnswerSet struct {
+	SurveyID             uuid.UUID
+	ProgramParticipantID *uuid.UUID
+	ContactName          string
+	Values               map[uuid.UUID]string
+}
+
+func (r *SurveyRepository) measurementAnswers(ctx context.Context, accountID uuid.UUID, surveyIDs []uuid.UUID) (map[uuid.UUID]surveyMeasurementAnswerSet, error) {
+	result := make(map[uuid.UUID]surveyMeasurementAnswerSet)
+	rows, err := r.db.Query(ctx, `
+		SELECT response.id,response.survey_id,response.program_participant_id,
+			CASE WHEN participant.id IS NULL THEN '' ELSE
+				COALESCE(NULLIF(BTRIM(contact.custom_name),''),
+					NULLIF(BTRIM(CONCAT_WS(' ',contact.name,contact.last_name)),''),
+					NULLIF(BTRIM(contact.phone),''),'Contacto') END,
+			answer.question_id,answer.value
+		FROM survey_responses response
+		LEFT JOIN survey_answers answer
+		  ON answer.survey_id=response.survey_id AND answer.response_id=response.id
+		LEFT JOIN surveys survey ON survey.account_id=response.account_id AND survey.id=response.survey_id
+		LEFT JOIN program_participants participant
+		  ON participant.program_id=survey.program_id AND participant.id=response.program_participant_id
+		LEFT JOIN contacts contact
+		  ON contact.account_id=response.account_id AND contact.id=participant.contact_id
+		WHERE response.account_id=$1 AND response.survey_id=ANY($2::uuid[])
+		  AND response.completed_at IS NOT NULL
+		ORDER BY response.id,answer.created_at,answer.id
+	`, accountID, surveyIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var responseID, surveyID uuid.UUID
+		var participantID *uuid.UUID
+		var contactName string
+		var questionID *uuid.UUID
+		var value *string
+		if err := rows.Scan(&responseID, &surveyID, &participantID, &contactName, &questionID, &value); err != nil {
+			return nil, err
+		}
+		set, exists := result[responseID]
+		if !exists {
+			set = surveyMeasurementAnswerSet{SurveyID: surveyID, ProgramParticipantID: participantID, ContactName: contactName, Values: make(map[uuid.UUID]string)}
+		}
+		if questionID != nil && value != nil {
+			set.Values[*questionID] = *value
+		}
+		result[responseID] = set
+	}
+	return result, rows.Err()
+}
+
+func calculateMeasurementScores(config domain.SurveyMeasurementConfig, questions []*domain.SurveyQuestion, answers map[uuid.UUID]surveyMeasurementAnswerSet) (map[uuid.UUID]map[string]float64, []domain.SurveyMeasurementDimensionStats) {
+	orderedQuestions := append([]*domain.SurveyQuestion(nil), questions...)
+	sort.SliceStable(orderedQuestions, func(i, j int) bool {
+		return orderedQuestions[i].OrderIndex < orderedQuestions[j].OrderIndex
+	})
+	dimensions := make(map[string]domain.SurveyMeasurementDimension, len(config.Dimensions))
+	for _, dimension := range config.Dimensions {
+		dimensions[dimension.Key] = dimension
+	}
+	questionByDimension := make(map[string][]*domain.SurveyQuestion)
+	for _, question := range orderedQuestions {
+		if question.Config.Measurement != nil {
+			questionByDimension[question.Config.Measurement.DimensionKey] = append(questionByDimension[question.Config.Measurement.DimensionKey], question)
+		}
+	}
+	scores := make(map[uuid.UUID]map[string]float64, len(answers))
+	valuesByDimension := make(map[string][]float64, len(dimensions))
+	for responseID, answerSet := range answers {
+		reachableQuestions := reachableSurveyQuestionIDs(orderedQuestions, answerSet.Values)
+		for key, dimension := range dimensions {
+			var totalWeight, answeredWeight, weightedScore float64
+			for _, question := range questionByDimension[key] {
+				if _, reachable := reachableQuestions[question.ID]; !reachable {
+					continue
+				}
+				measurement := question.Config.Measurement
+				weight := measurement.Weight
+				if weight <= 0 {
+					weight = 1
+				}
+				totalWeight += weight
+				raw, exists := answerSet.Values[question.ID]
+				if !exists {
+					continue
+				}
+				normalized, valid := normalizedMeasurementAnswer(question, raw)
+				if !valid {
+					continue
+				}
+				answeredWeight += weight
+				weightedScore += normalized * weight
+			}
+			minimum := dimension.MinimumAnsweredRatio
+			if minimum <= 0 {
+				minimum = 1
+			}
+			if totalWeight == 0 || answeredWeight/totalWeight+1e-9 < minimum {
+				continue
+			}
+			if scores[responseID] == nil {
+				scores[responseID] = make(map[string]float64)
+			}
+			score := weightedScore / answeredWeight
+			scores[responseID][key] = score
+			valuesByDimension[key] = append(valuesByDimension[key], score)
+		}
+	}
+	stats := make([]domain.SurveyMeasurementDimensionStats, 0, len(config.Dimensions))
+	for _, dimension := range config.Dimensions {
+		values := valuesByDimension[dimension.Key]
+		stat := domain.SurveyMeasurementDimensionStats{
+			Key: dimension.Key, Name: dimension.Name, Description: dimension.Description,
+			SampleSize: len(values), Distribution: map[string]int{"0–20": 0, "21–40": 0, "41–60": 0, "61–80": 0, "81–100": 0},
+		}
+		if len(values) > 0 {
+			sort.Float64s(values)
+			var sum float64
+			for _, value := range values {
+				sum += value
+				stat.Distribution[measurementBucket(value)]++
+			}
+			average := sum / float64(len(values))
+			median := values[len(values)/2]
+			if len(values)%2 == 0 {
+				median = (values[len(values)/2-1] + values[len(values)/2]) / 2
+			}
+			stat.Average, stat.Median = &average, &median
+		}
+		stats = append(stats, stat)
+	}
+	return scores, stats
+}
+
+func reachableSurveyQuestionIDs(questions []*domain.SurveyQuestion, answers map[uuid.UUID]string) map[uuid.UUID]struct{} {
+	positions := make(map[uuid.UUID]int, len(questions))
+	for index, question := range questions {
+		positions[question.ID] = index
+	}
+	reachable := make(map[uuid.UUID]struct{}, len(questions))
+	for index := 0; index < len(questions); {
+		question := questions[index]
+		reachable[question.ID] = struct{}{}
+		nextIndex := index + 1
+		value := answers[question.ID]
+		for _, rule := range question.LogicRules {
+			if measurementLogicRuleMatches(rule, value) {
+				if target, exists := positions[rule.JumpTo]; exists && target > index {
+					nextIndex = target
+				}
+				break
+			}
+		}
+		index = nextIndex
+	}
+	return reachable
+}
+
+func measurementLogicRuleMatches(rule domain.SurveyLogicRule, value string) bool {
+	switch rule.Operator {
+	case "", "eq":
+		return value == rule.Value
+	case "neq":
+		return value != rule.Value
+	case "contains":
+		return strings.Contains(value, rule.Value)
+	case "gt", "lt":
+		actual, actualErr := strconv.ParseFloat(value, 64)
+		expected, expectedErr := strconv.ParseFloat(rule.Value, 64)
+		if actualErr != nil || expectedErr != nil {
+			return false
+		}
+		if rule.Operator == "gt" {
+			return actual > expected
+		}
+		return actual < expected
+	default:
+		return false
+	}
+}
+
+func normalizedMeasurementAnswer(question *domain.SurveyQuestion, raw string) (float64, bool) {
+	measurement := question.Config.Measurement
+	if measurement == nil {
+		return 0, false
+	}
+	var value, minimum, maximum float64
+	switch question.Type {
+	case "rating":
+		parsed, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return 0, false
+		}
+		value, minimum, maximum = parsed, 1, float64(question.Config.MaxRating)
+		if maximum < 2 {
+			maximum = 5
+		}
+	case "likert":
+		parsed, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return 0, false
+		}
+		value, minimum, maximum = parsed, 1, float64(question.Config.LikertScale)
+		if maximum < 2 {
+			maximum = 5
+		}
+	case "single_choice":
+		mapped, exists := measurement.OptionScores[raw]
+		if !exists || len(measurement.OptionScores) < 2 {
+			return 0, false
+		}
+		value = mapped
+		minimum, maximum = math.Inf(1), math.Inf(-1)
+		for _, optionScore := range measurement.OptionScores {
+			minimum = math.Min(minimum, optionScore)
+			maximum = math.Max(maximum, optionScore)
+		}
+	default:
+		return 0, false
+	}
+	if maximum <= minimum || value < minimum || value > maximum {
+		return 0, false
+	}
+	normalized := (value - minimum) / (maximum - minimum) * 100
+	if measurement.Reverse {
+		normalized = 100 - normalized
+	}
+	return normalized, true
+}
+
+func measurementBucket(value float64) string {
+	switch {
+	case value <= 20:
+		return "0–20"
+	case value <= 40:
+		return "21–40"
+	case value <= 60:
+		return "41–60"
+	case value <= 80:
+		return "61–80"
+	default:
+		return "81–100"
+	}
 }
 
 type surveyExportRecord struct {

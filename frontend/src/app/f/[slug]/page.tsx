@@ -6,12 +6,15 @@ import {
   ChevronDown, ChevronUp, Check, Star, Upload, Loader2,
   ArrowRight, AlertCircle
 } from 'lucide-react';
+import { buildSurveySessionEvent, surveySessionStorageKey, type SurveySessionPhase } from '@/lib/surveySession';
 
 interface SurveyBranding {
   logo_url?: string;
+  logo_size?: 'sm' | 'md' | 'lg';
   bg_color?: string;
   accent_color?: string;
   bg_image_url?: string;
+  bg_position?: 'top' | 'center' | 'bottom';
   font_family?: string;
   title_size?: string;
   text_color?: string;
@@ -74,6 +77,7 @@ export default function PublicFormPage() {
   const [submitted, setSubmitted] = useState(false);
   const [validationError, setValidationError] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [closeBlocked, setCloseBlocked] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const flowEpochRef = useRef(0);
@@ -81,7 +85,25 @@ export default function PublicFormPage() {
   const submitAbortRef = useRef<AbortController | null>(null);
   const startedAtRef = useRef('');
   const respondentTokenRef = useRef('');
-  const redirectTimeoutRef = useRef<number | null>(null);
+  const sessionStartedRef = useRef(false);
+  const telemetryControllersRef = useRef<Set<AbortController>>(new Set());
+
+  const trackSession = useCallback((phase: SurveySessionPhase, questionId?: string) => {
+    const respondentToken = respondentTokenRef.current;
+    if (!respondentToken) return;
+    const controller = new AbortController();
+    telemetryControllersRef.current.add(controller);
+    void fetch(`/api/public/surveys/${encodeURIComponent(slug)}/session`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+      body: JSON.stringify(buildSurveySessionEvent(respondentToken, recipientToken, phase, questionId)),
+    }).catch(() => undefined).finally(() => telemetryControllersRef.current.delete(controller));
+  }, [recipientToken, slug]);
+
+  const ensureSessionStarted = useCallback(() => {
+    if (sessionStartedRef.current) return;
+    sessionStartedRef.current = true;
+    trackSession('started');
+  }, [trackSession]);
 
   useEffect(() => {
     const epoch = flowEpochRef.current + 1;
@@ -90,10 +112,6 @@ export default function PublicFormPage() {
     submitAbortRef.current?.abort();
     submitAbortRef.current = null;
     submitInFlightRef.current = false;
-    if (redirectTimeoutRef.current !== null) {
-      window.clearTimeout(redirectTimeoutRef.current);
-      redirectTimeoutRef.current = null;
-    }
 
     setSurvey(null);
     setQuestions([]);
@@ -108,8 +126,19 @@ export default function PublicFormPage() {
     setSubmitted(false);
     setValidationError('');
     setUploading(false);
+    setCloseBlocked(false);
     startedAtRef.current = new Date().toISOString();
+    sessionStartedRef.current = false;
+    const storageKey = surveySessionStorageKey(slug, recipientToken);
     respondentTokenRef.current = crypto.randomUUID();
+    try {
+      const storedToken = window.sessionStorage.getItem(storageKey);
+      respondentTokenRef.current = storedToken || respondentTokenRef.current;
+      if (!storedToken) window.sessionStorage.setItem(storageKey, respondentTokenRef.current);
+    } catch {
+      // Storage can be unavailable in strict privacy contexts. Tracking remains
+      // best-effort and must never prevent the survey itself from loading.
+    }
 
     const loadSurvey = async () => {
       try {
@@ -125,6 +154,7 @@ export default function PublicFormPage() {
         setSurvey(data.survey);
         setQuestions(data.questions || []);
         setStep(data.survey.welcome_title || data.survey.welcome_description ? -1 : 0);
+        trackSession('opened');
       } catch (loadError) {
         if (controller.signal.aborted || flowEpochRef.current !== epoch) return;
         setError(loadError instanceof Error ? 'Error al cargar la encuesta.' : 'Error al cargar la encuesta.');
@@ -138,14 +168,16 @@ export default function PublicFormPage() {
       if (flowEpochRef.current === epoch) flowEpochRef.current += 1;
       controller.abort();
       submitAbortRef.current?.abort();
-      if (redirectTimeoutRef.current !== null) {
-        window.clearTimeout(redirectTimeoutRef.current);
-        redirectTimeoutRef.current = null;
-      }
+      telemetryControllersRef.current.forEach(activeController => activeController.abort());
+      telemetryControllersRef.current.clear();
     };
-  }, [slug, recipientToken]);
+  }, [slug, recipientToken, trackSession]);
 
   const currentQuestion = step >= 0 && step < questions.length ? questions[step] : null;
+
+  useEffect(() => {
+    if (currentQuestion) trackSession('reached', currentQuestion.id);
+  }, [currentQuestion, trackSession]);
 
   const evaluateLogic = useCallback((q: Question, value: string): number | null => {
     if (!q.logic_rules || q.logic_rules.length === 0) return null;
@@ -208,12 +240,6 @@ export default function PublicFormPage() {
 
       if (res.ok) {
         setSubmitted(true);
-        const redirectURL = safeSurveyRedirect(survey?.thank_you_redirect_url || '');
-        if (redirectURL) {
-          redirectTimeoutRef.current = window.setTimeout(() => {
-            if (flowEpochRef.current === epoch) window.location.assign(redirectURL);
-          }, 2000);
-        }
         return;
       }
       const payload = await res.json().catch(() => ({}));
@@ -235,6 +261,7 @@ export default function PublicFormPage() {
 
   const goNext = useCallback(async () => {
     if (submitInFlightRef.current || submitting || uploading) return;
+    ensureSessionStarted();
     setValidationError('');
 
     // Validate current question
@@ -254,6 +281,7 @@ export default function PublicFormPage() {
     }
 
     if (currentQuestion) {
+      if (answers[currentQuestion.id] || fileUploadIds[currentQuestion.id]) trackSession('answered', currentQuestion.id);
       // Check logic rules
       const jumpIdx = evaluateLogic(currentQuestion, answers[currentQuestion.id] || '');
       if (jumpIdx !== null) {
@@ -273,7 +301,7 @@ export default function PublicFormPage() {
     } else {
       await submitResponses();
     }
-  }, [step, currentQuestion, answers, fileUrls, questions, evaluateLogic, submitResponses, submitting, uploading]);
+  }, [step, currentQuestion, answers, fileUrls, fileUploadIds, questions, evaluateLogic, submitResponses, submitting, uploading, ensureSessionStarted, trackSession]);
 
   const goPrev = () => {
     if (submitInFlightRef.current || submitting || uploading) return;
@@ -284,6 +312,7 @@ export default function PublicFormPage() {
   };
 
   const handleFileUpload = async (questionId: string, file: File) => {
+    ensureSessionStarted();
 	const epoch = flowEpochRef.current;
     setUploading(true);
 	setValidationError('');
@@ -318,6 +347,8 @@ export default function PublicFormPage() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Enter' && !e.shiftKey) {
+        const target = e.target;
+        if (target instanceof HTMLTextAreaElement || target instanceof HTMLButtonElement || (target instanceof HTMLElement && target.isContentEditable)) return;
         e.preventDefault();
         goNext();
       }
@@ -336,11 +367,24 @@ export default function PublicFormPage() {
   const btnStyleMap: Record<string, string> = { rounded: 'rounded-lg', pill: 'rounded-full', square: 'rounded-none' };
   const btnClass = btnStyleMap[b.button_style || 'rounded'] || 'rounded-lg';
   const alignCenter = b.question_align === 'center';
+  const buttonForeground = (() => {
+    const luminance = (hex: string) => {
+      const channels = [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16) / 255).map(value => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+      return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+    };
+    if (!/^#[0-9A-Fa-f]{6}$/.test(accent)) return '#FFFFFF';
+    const backgroundLuminance = luminance(accent);
+    const whiteContrast = 1.05 / (backgroundLuminance + 0.05);
+    const darkLuminance = luminance('#0F172A');
+    const darkContrast = (Math.max(backgroundLuminance, darkLuminance) + 0.05) / (Math.min(backgroundLuminance, darkLuminance) + 0.05);
+    return whiteContrast >= darkContrast ? '#FFFFFF' : '#0F172A';
+  })();
+  const logoClass = b.logo_size === 'sm' ? 'h-8' : b.logo_size === 'lg' ? 'h-16' : 'h-12';
   const fontUrl = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(fontFamily)}:wght@400;500;600;700&display=swap`;
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: bgColor }}>
+      <div className="flex min-h-[100dvh] items-center justify-center" style={{ backgroundColor: bgColor }}>
         <link href={fontUrl} rel="stylesheet" />
         <Loader2 className="w-8 h-8 animate-spin" style={{ color: accent }} />
       </div>
@@ -349,7 +393,7 @@ export default function PublicFormPage() {
 
   if (error) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-8" style={{ backgroundColor: bgColor }}>
+      <div className="flex min-h-[100dvh] flex-col items-center justify-center p-8" style={{ backgroundColor: bgColor }}>
         <AlertCircle className="w-12 h-12 text-slate-400 mb-4" />
         <p className="text-lg text-slate-600">{error}</p>
       </div>
@@ -360,10 +404,22 @@ export default function PublicFormPage() {
 
   // Thank you screen
   if (submitted) {
+    const redirectURL = safeSurveyRedirect(survey.thank_you_redirect_url || '');
+    const finish = () => {
+      if (redirectURL) {
+        window.location.assign(redirectURL);
+        return;
+      }
+      setCloseBlocked(false);
+      window.close();
+      window.setTimeout(() => setCloseBlocked(true), 250);
+    };
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-8" style={{ backgroundColor: bgColor, fontFamily: `'${fontFamily}', sans-serif` }}>
+      <div className="relative flex min-h-[100dvh] flex-col items-center justify-center overflow-hidden px-6 py-[max(2rem,env(safe-area-inset-top))] pb-[max(2rem,env(safe-area-inset-bottom))]" style={{ backgroundColor: bgColor, color: textColor, fontFamily: `'${fontFamily}', sans-serif` }}>
         <link href={fontUrl} rel="stylesheet" />
-        <div className="w-16 h-16 rounded-full flex items-center justify-center mb-6" style={{ backgroundColor: accent + '20' }}>
+        {b.bg_image_url && <><div className="absolute inset-0 bg-cover" style={{ backgroundImage: `url(${b.bg_image_url})`, backgroundPosition: b.bg_position || 'center' }} /><div className="absolute inset-0 bg-black" style={{ opacity: Number(b.bg_overlay || 0) }} /></>}
+        <div className="survey-step-enter relative z-10 flex w-full max-w-lg flex-col items-center text-center motion-reduce:animate-none">
+        <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-full" style={{ backgroundColor: accent + '20' }}>
           <Check className="w-8 h-8" style={{ color: accent }} />
         </div>
         <h1 className="text-3xl font-bold mb-3 text-center" style={{ color: textColor, fontSize: titlePx }}>
@@ -372,9 +428,9 @@ export default function PublicFormPage() {
         <p className="text-lg text-center max-w-md" style={{ color: textColor, opacity: 0.6 }}>
           {survey.thank_you_message || 'Tus respuestas han sido registradas exitosamente.'}
         </p>
-        {survey.thank_you_redirect_url && (
-          <p className="text-sm mt-4" style={{ color: textColor, opacity: 0.4 }}>Redirigiendo...</p>
-        )}
+        <button type="button" onClick={finish} className={`mt-8 inline-flex min-h-12 items-center justify-center gap-2 px-7 font-semibold shadow-md transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 motion-reduce:transform-none motion-reduce:transition-none ${btnClass}`} style={{ backgroundColor: accent, color: buttonForeground, '--tw-ring-color': accent } as React.CSSProperties}>{redirectURL ? <>Continuar <ArrowRight className="h-4 w-4" /></> : 'Cerrar'}</button>
+        {closeBlocked && <p className="mt-4 max-w-sm text-sm leading-6 opacity-65" role="status">Tu respuesta ya fue enviada. El navegador no permitió cerrar esta pestaña; puedes cerrarla manualmente con tranquilidad.</p>}
+        </div>
       </div>
     );
   }
@@ -383,7 +439,7 @@ export default function PublicFormPage() {
   if (step === -1) {
     return (
       <div
-        className="min-h-screen flex flex-col items-center justify-center p-8 relative"
+        className="relative flex min-h-[100dvh] flex-col items-center justify-center overflow-hidden px-6 py-[max(2rem,env(safe-area-inset-top))] pb-[max(2rem,env(safe-area-inset-bottom))]"
         style={{
           backgroundColor: bgColor,
           fontFamily: `'${fontFamily}', sans-serif`,
@@ -392,13 +448,13 @@ export default function PublicFormPage() {
         <link href={fontUrl} rel="stylesheet" />
         {b.bg_image_url && (
           <>
-            <div className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url(${b.bg_image_url})` }} />
-            <div className="absolute inset-0" style={{ backgroundColor: `rgba(0,0,0,${b.bg_overlay || '0'})` }} />
+            <div className="absolute inset-0 bg-cover" style={{ backgroundImage: `url(${b.bg_image_url})`, backgroundPosition: b.bg_position || 'center' }} />
+            <div className="absolute inset-0 bg-black" style={{ opacity: Number(b.bg_overlay || 0) }} />
           </>
         )}
-        <div className={`relative max-w-lg ${alignCenter ? 'text-center' : 'text-left'}`}>
+        <div className={`survey-step-enter relative max-w-lg motion-reduce:animate-none ${alignCenter ? 'text-center' : 'text-left'}`}>
           {b.logo_url && (
-            <img src={b.logo_url} alt="" className={`h-12 mb-8 object-contain ${alignCenter ? 'mx-auto' : ''}`} />
+            <img src={b.logo_url} alt="" className={`${logoClass} mb-8 max-w-[70%] object-contain ${alignCenter ? 'mx-auto' : ''}`} />
           )}
           <h1 className="font-bold mb-4" style={{ color: textColor, fontSize: titlePx }}>
             {survey.welcome_title || survey.name}
@@ -409,8 +465,8 @@ export default function PublicFormPage() {
           <button
             onClick={goNext}
             disabled={submitting}
-            className={`inline-flex items-center gap-2 px-8 py-4 ${btnClass} text-white font-semibold text-lg shadow-lg hover:shadow-xl transition-all transform hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-60`}
-            style={{ backgroundColor: accent }}
+            className={`inline-flex min-h-12 items-center gap-2 px-8 py-3.5 ${btnClass} font-semibold text-lg shadow-md transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 motion-reduce:transform-none motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60`}
+            style={{ backgroundColor: accent, color: buttonForeground, '--tw-ring-color': accent } as React.CSSProperties}
           >
             Comenzar <ArrowRight className="w-5 h-5" />
           </button>
@@ -426,16 +482,16 @@ export default function PublicFormPage() {
   const progress = ((step + 1) / questions.length) * 100;
 
   return (
-    <div ref={containerRef} className="min-h-screen flex flex-col" style={{ backgroundColor: bgColor, fontFamily: `'${fontFamily}', sans-serif` }}>
+    <div ref={containerRef} className="flex min-h-[100dvh] flex-col overflow-hidden" style={{ backgroundColor: bgColor, color: textColor, fontFamily: `'${fontFamily}', sans-serif`, '--survey-accent': accent } as React.CSSProperties}>
       <link href={fontUrl} rel="stylesheet" />
       {/* Progress bar */}
       <div className="fixed top-0 left-0 right-0 h-1 bg-slate-100 z-50">
-        <div className="h-full transition-all duration-500" style={{ width: `${progress}%`, backgroundColor: accent }} />
+        <div className="h-full transition-[width] duration-[180ms] ease-out motion-reduce:transition-none" style={{ width: `${progress}%`, backgroundColor: accent }} />
       </div>
 
       {/* Question */}
-      <div className="flex-1 flex items-center justify-center p-8">
-        <div className={`w-full max-w-xl ${alignCenter ? 'text-center' : 'text-left'}`}>
+      <div className="flex min-h-[32rem] flex-1 items-center justify-center px-6 py-[max(4rem,env(safe-area-inset-top))] pb-[max(6rem,env(safe-area-inset-bottom))] sm:px-8">
+        <div key={currentQuestion.id} className={`survey-step-enter w-full max-w-xl motion-reduce:animate-none ${alignCenter ? 'text-center' : 'text-left'}`}>
           {/* Question number */}
           <div className={`flex items-center gap-2 mb-4 ${alignCenter ? 'justify-center' : ''}`}>
             <span className="text-sm font-medium" style={{ color: accent }}>{step + 1}</span>
@@ -456,7 +512,7 @@ export default function PublicFormPage() {
             <QuestionInput
               question={currentQuestion}
               value={answers[currentQuestion.id] || ''}
-              onChange={(val) => setAnswers(prev => ({ ...prev, [currentQuestion.id]: val }))}
+              onChange={(val) => { ensureSessionStarted(); setAnswers(prev => ({ ...prev, [currentQuestion.id]: val })); }}
               onFileUpload={(file) => handleFileUpload(currentQuestion.id, file)}
               fileUrl={fileUrls[currentQuestion.id]}
               uploading={uploading}
@@ -467,7 +523,7 @@ export default function PublicFormPage() {
 
           {/* Validation error */}
           {validationError && (
-            <p className="text-sm text-red-500 mb-4 flex items-center gap-1">
+            <p className="mb-4 flex items-center gap-1 text-sm text-red-500" role="alert">
               <AlertCircle className="w-4 h-4" /> {validationError}
             </p>
           )}
@@ -476,8 +532,8 @@ export default function PublicFormPage() {
           <button
             onClick={goNext}
             disabled={submitting || uploading}
-            className={`inline-flex items-center gap-2 px-6 py-3 ${btnClass} text-white font-medium shadow-md hover:shadow-lg transition-all disabled:cursor-not-allowed disabled:opacity-60`}
-            style={{ backgroundColor: accent }}
+            className={`inline-flex min-h-12 items-center gap-2 px-6 py-3 ${btnClass} font-medium shadow-md transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 motion-reduce:transform-none motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60`}
+            style={{ backgroundColor: accent, color: buttonForeground, '--tw-ring-color': accent } as React.CSSProperties}
           >
             {submitting ? (
               <><Loader2 className="w-4 h-4 animate-spin" /> Enviando...</>
@@ -495,7 +551,7 @@ export default function PublicFormPage() {
       </div>
 
       {/* Navigation */}
-      <div className="fixed bottom-4 right-4 flex flex-col gap-1">
+      <div className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-[max(1rem,env(safe-area-inset-right))] flex flex-col gap-1">
         <button aria-label="Pregunta anterior" onClick={goPrev} disabled={submitting || uploading || navigationHistory.length === 0} className="p-2 rounded-lg bg-white shadow border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-30">
           <ChevronUp className="w-4 h-4" />
         </button>
@@ -527,7 +583,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={config.placeholder || (question.type === 'email' ? 'nombre@ejemplo.com' : question.type === 'phone' ? '+51 999 999 999' : 'Escribe tu respuesta...')}
-          className="w-full border-b-2 border-slate-200 focus:border-emerald-500 bg-transparent text-xl py-3 focus:outline-none transition-colors"
+          className="survey-focus w-full border-b-2 border-slate-200 bg-transparent py-3 text-xl outline-none transition-colors duration-200 motion-reduce:transition-none"
           style={{ '--tw-ring-color': accent } as React.CSSProperties}
         />
       );
@@ -541,7 +597,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
           onChange={(e) => onChange(e.target.value)}
           placeholder={config.placeholder || 'Escribe tu respuesta...'}
           rows={4}
-          className="w-full border-b-2 border-slate-200 focus:border-emerald-500 bg-transparent text-lg py-3 focus:outline-none transition-colors resize-none"
+          className="survey-focus w-full resize-y border-b-2 border-slate-200 bg-transparent py-3 text-lg outline-none transition-colors duration-200 motion-reduce:transition-none"
         />
       );
 
@@ -657,7 +713,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
           disabled={disabled}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="w-full border-b-2 border-slate-200 focus:border-emerald-500 bg-transparent text-xl py-3 focus:outline-none transition-colors"
+          className="survey-focus w-full border-b-2 border-slate-200 bg-transparent py-3 text-xl outline-none transition-colors duration-200 motion-reduce:transition-none"
         />
       );
 
@@ -702,7 +758,7 @@ function QuestionInput({ question, value, onChange, onFileUpload, fileUrl, uploa
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder="Escribe tu respuesta..."
-          className="w-full border-b-2 border-slate-200 focus:border-emerald-500 bg-transparent text-xl py-3 focus:outline-none transition-colors"
+          className="survey-focus w-full border-b-2 border-slate-200 bg-transparent py-3 text-xl outline-none transition-colors duration-200 motion-reduce:transition-none"
         />
       );
   }

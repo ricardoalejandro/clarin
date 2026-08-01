@@ -4,8 +4,13 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { Survey, SurveyQuestion, SurveyQuestionConfig, SurveyLogicRule, SurveyAnalytics, SurveyResponse, SurveyBranding, QUESTION_TYPE_LABELS, QuestionType, FONT_OPTIONS, TITLE_SIZE_OPTIONS, BUTTON_STYLE_OPTIONS } from '@/types/survey';
-import type { SurveyInstanceSummary, SurveyTemplate, SurveyTemplateQuestion } from '@/types/survey-template';
+import { Survey, SurveyQuestion, SurveyQuestionConfig, SurveyLogicRule, SurveyAnalytics, SurveyResponse, SurveyBranding, SurveyMeasurementDimension, SurveyQuestionMeasurement, QUESTION_TYPE_LABELS, QuestionType, FONT_OPTIONS, TITLE_SIZE_OPTIONS, BUTTON_STYLE_OPTIONS } from '@/types/survey';
+import type { SurveyInstanceSummary, SurveyMeasurementSeries, SurveyTemplate, SurveyTemplateQuestion } from '@/types/survey-template';
+import DuplicateSurveyTemplateDialog from '@/components/surveys/DuplicateSurveyTemplateDialog';
+import SurveyInstanceNameField from '@/components/surveys/SurveyInstanceNameField';
+import ArchiveSurveyTemplateDialog from '@/components/surveys/ArchiveSurveyTemplateDialog';
+import SurveyDesignEditor, { type DesignMediaDraft } from '@/components/surveys/SurveyDesignEditor';
+import { formatSurveyDuration } from '@/lib/surveyAnalytics';
 import {
   ArrowLeft, Save, Plus, Trash2, GripVertical, Eye, Share2, BarChart3,
   Type, AlignLeft, CircleDot, CheckSquare, Star, SlidersHorizontal,
@@ -109,7 +114,7 @@ export default function SurveyDetailPage() {
 	return <SurveyBuilderPage requestedTab={requestedTab === 'analytics' || requestedTab === 'share' || requestedTab === 'design' || requestedTab === 'builder' ? requestedTab : undefined} />;
 }
 
-type TemplateTab = 'builder' | 'design' | 'instances';
+type TemplateTab = 'builder' | 'design' | 'measurement' | 'instances';
 
 function templateQuestionToEditor(question: SurveyTemplateQuestion): SurveyQuestion {
   return {
@@ -141,6 +146,7 @@ function templateAsSurvey(template: SurveyTemplate): Survey {
     thank_you_message: template.thank_you_message,
     thank_you_redirect_url: template.thank_you_redirect_url,
     branding: template.branding || {},
+    measurement_config: template.measurement_config || { dimensions: [] },
     is_template: true,
     created_by: template.created_by,
     created_at: template.created_at,
@@ -159,6 +165,8 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
   const [loadError, setLoadError] = useState('');
   const [saving, setSaving] = useState(false);
   const [selectedQ, setSelectedQ] = useState(0);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveError, setArchiveError] = useState('');
   const [hasChanges, setHasChanges] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -166,6 +174,8 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
   const [instancesLoading, setInstancesLoading] = useState(false);
   const [instancesLoaded, setInstancesLoaded] = useState(false);
   const [createInstanceOpen, setCreateInstanceOpen] = useState(false);
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [editorDraftDirty, setEditorDraftDirty] = useState(false);
 
   const loadTemplate = useCallback(async () => {
     setLoading(true);
@@ -185,6 +195,7 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
       setQuestions((questionsResponse.data || []).map(templateQuestionToEditor));
       setSelectedQ(0);
       setHasChanges(false);
+      setEditorDraftDirty(false);
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : 'No se pudo cargar la plantilla.');
     } finally {
@@ -193,6 +204,15 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
   }, [templateId]);
 
   useEffect(() => { void loadTemplate(); }, [loadTemplate]);
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!hasChanges && !editorDraftDirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [editorDraftDirty, hasChanges]);
 
   const loadInstances = useCallback(async () => {
     setInstancesLoading(true);
@@ -299,45 +319,81 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
     }
   };
 
+  const duplicateTemplate = async (name: string) => {
+    const response = await api<SurveyTemplate>(`/api/survey-templates/${templateId}/duplicate`, {
+      method: 'POST', body: JSON.stringify({ name }),
+    });
+    if (!response.success || !response.data) throw new Error(response.error || 'No se pudo duplicar la plantilla.');
+    setDuplicateOpen(false);
+    router.push(`/dashboard/surveys/${response.data.id}?mode=template`);
+  };
+
+  const saveDesign = async (branding: SurveyBranding, media: DesignMediaDraft) => {
+    setSaving(true); setMessage(null);
+    const formData = new FormData();
+    formData.set('branding', JSON.stringify(branding));
+    formData.set('logo_action', media.logoAction);
+    formData.set('background_action', media.backgroundAction);
+    if (media.logoFile) formData.set('logo', media.logoFile);
+    if (media.backgroundFile) formData.set('background', media.backgroundFile);
+    const response = await api<SurveyTemplate>(`/api/survey-templates/${templateId}/design`, { method: 'PUT', body: formData });
+    setSaving(false);
+    if (!response.success || !response.data) {
+      setMessage({ type: 'error', text: response.error || 'No se pudo guardar el diseño.' });
+      return false;
+    }
+    setTemplate(response.data);
+    setMessage({ type: 'success', text: 'Diseño de plantilla guardado. Solo afectará nuevas aplicaciones.' });
+    return true;
+  };
+
+  const confirmDiscardDraft = () => !hasChanges && !editorDraftDirty
+    ? true
+    : window.confirm('Hay cambios sin guardar. ¿Quieres salir y descartarlos?');
+
   if (loading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-emerald-600" /></div>;
   if (loadError || !template) return <div className="flex h-full items-center justify-center p-6"><div className="max-w-md rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center text-sm text-rose-700"><p>{loadError || 'Plantilla no encontrada.'}</p><button type="button" onClick={() => void loadTemplate()} className="mt-3 min-h-11 font-semibold underline">Reintentar</button></div></div>;
 
   const editorSurvey = templateAsSurvey(template);
   const templateTabs: [TemplateTab, React.ElementType, string][] = [
-    ['builder', PenLine, 'Preguntas'], ['design', Palette, 'Diseño'], ['instances', Layers3, 'Aplicaciones'],
+    ['builder', PenLine, 'Preguntas'], ['design', Palette, 'Diseño'], ['measurement', TrendingUp, 'Medición'], ['instances', Layers3, 'Aplicaciones'],
   ];
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-slate-50">
       <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-3 sm:px-4">
         <div className="flex items-center gap-2 sm:gap-3">
-          <button type="button" onClick={() => router.push('/dashboard/surveys')} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" aria-label="Volver a plantillas"><ArrowLeft className="h-5 w-5" /></button>
+          <button type="button" onClick={() => { if (confirmDiscardDraft()) router.push('/dashboard/surveys'); }} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100" aria-label="Volver a plantillas"><ArrowLeft className="h-5 w-5" /></button>
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2"><h1 className="truncate text-sm font-semibold text-slate-900 sm:text-base">{template.name}</h1><span className="hidden rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700 sm:inline">Plantilla v{template.revision}</span></div>
             <p className="truncate text-xs text-slate-500">No recibe respuestas directamente · {template.instance_count} aplicaciones</p>
           </div>
           <button type="button" onClick={() => setShowSettings(true)} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50" aria-label="Configurar plantilla"><Settings2 className="h-4 w-4" /></button>
+          <button type="button" onClick={() => { if (hasChanges || editorDraftDirty) setMessage({ type: 'error', text: 'Guarda los cambios pendientes antes de duplicar la plantilla.' }); else setDuplicateOpen(true); }} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50" aria-label="Duplicar plantilla"><Copy className="h-4 w-4" /></button>
           {activeTab === 'builder' && <button type="button" onClick={() => void saveQuestions()} disabled={saving || !hasChanges} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-3 text-sm font-semibold text-white disabled:opacity-50 sm:px-4">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}<span className="hidden sm:inline">Guardar</span></button>}
         </div>
         <nav className="mt-3 flex min-h-11 gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1" aria-label="Secciones de la plantilla">
-          {templateTabs.map(([tab, Icon, label]) => <button key={tab} type="button" onClick={() => setActiveTab(tab)} className={`inline-flex min-h-9 min-w-max flex-1 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors ${activeTab === tab ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Icon className="h-4 w-4" />{label}</button>)}
+          {templateTabs.map(([tab, Icon, label]) => <button key={tab} type="button" onClick={() => { if (tab === activeTab || confirmDiscardDraft()) { setEditorDraftDirty(false); setActiveTab(tab); } }} className={`inline-flex min-h-9 min-w-max flex-1 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors ${activeTab === tab ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Icon className="h-4 w-4" />{label}</button>)}
         </nav>
       </header>
 
       <main className="min-h-0 flex-1 overflow-hidden">
         {activeTab === 'builder' && <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />}
-        {activeTab === 'design' && <DesignTab survey={editorSurvey} onSave={branding => void updateTemplate({ branding }, 'Diseño de plantilla guardado.')} saving={saving} />}
+        {activeTab === 'design' && <SurveyDesignEditor survey={editorSurvey} onSave={saveDesign} onDirtyChange={setEditorDraftDirty} saving={saving} />}
+        {activeTab === 'measurement' && <MeasurementTab template={template} questions={questions} onDirtyChange={setEditorDraftDirty} onSaved={(savedTemplate, savedQuestions) => { setTemplate(savedTemplate); setQuestions(savedQuestions.map(templateQuestionToEditor)); setMessage({ type: 'success', text: 'Configuración de medición guardada. Solo afectará nuevas aplicaciones.' }); }} />}
         {activeTab === 'instances' && <TemplateInstancesTab template={template} instances={instances} loading={instancesLoading} onRefresh={() => void loadInstances()} onCreate={() => setCreateInstanceOpen(true)} />}
       </main>
 
       {message && <div className={`fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 z-[100] flex w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 items-center gap-2 rounded-xl px-4 py-3 text-sm font-medium text-white shadow-xl ${message.type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'}`} role="status">{message.type === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <XCircle className="h-4 w-4 shrink-0" />}<span className="min-w-0 flex-1">{message.text}</span><button type="button" onClick={() => setMessage(null)} className="min-h-8 min-w-8" aria-label="Cerrar mensaje">×</button></div>}
-      {showSettings && <TemplateSettingsDialog template={template} saving={saving} onClose={() => setShowSettings(false)} onSave={async changes => { const saved = await updateTemplate(changes, 'Configuración de plantilla guardada.'); if (saved) setShowSettings(false); }} />}
+      {showSettings && <TemplateSettingsDialog template={template} saving={saving} onClose={() => setShowSettings(false)} onArchive={() => { setArchiveError(''); setArchiveOpen(true); }} onRestore={async () => { const saved = await updateTemplate({ status: 'active' }, 'Plantilla restaurada.'); if (saved) setShowSettings(false); }} onSave={async changes => { const saved = await updateTemplate(changes, 'Configuración de plantilla guardada.'); if (saved) setShowSettings(false); }} />}
       {createInstanceOpen && <StandaloneApplicationDialog template={template} onClose={() => setCreateInstanceOpen(false)} onCreated={instance => { setInstances(current => [instance, ...current]); setInstancesLoaded(true); setTemplate(current => current ? { ...current, instance_count: current.instance_count + 1 } : current); setCreateInstanceOpen(false); setMessage({ type: 'success', text: 'Aplicación creada. Ya puedes compartir su enlace.' }); }} />}
+      {duplicateOpen && <DuplicateSurveyTemplateDialog sourceName={template.name} questionCount={template.question_count} measurementDimensionCount={template.measurement_config?.dimensions?.length || 0} onClose={() => setDuplicateOpen(false)} onDuplicate={duplicateTemplate} />}
+      {archiveOpen && <ArchiveSurveyTemplateDialog template={template} archiving={saving} error={archiveError} onClose={() => !saving && setArchiveOpen(false)} onConfirm={async () => { const saved = await updateTemplate({ status: 'archived' }, 'Plantilla archivada.'); if (saved) { setArchiveOpen(false); setShowSettings(false); } else setArchiveError('No se pudo archivar la plantilla.'); }} />}
     </div>
   );
 }
 
-function TemplateSettingsDialog({ template, saving, onClose, onSave }: { template: SurveyTemplate; saving: boolean; onClose: () => void; onSave: (changes: Partial<SurveyTemplate>) => Promise<void> }) {
+function TemplateSettingsDialog({ template, saving, onClose, onSave, onArchive, onRestore }: { template: SurveyTemplate; saving: boolean; onClose: () => void; onSave: (changes: Partial<SurveyTemplate>) => Promise<void>; onArchive: () => void; onRestore: () => Promise<void> }) {
   const [form, setForm] = useState({
     name: template.name, description: template.description, status: template.status,
     welcome_title: template.welcome_title, welcome_description: template.welcome_description,
@@ -351,8 +407,101 @@ function TemplateSettingsDialog({ template, saving, onClose, onSave }: { templat
     <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Mensaje de bienvenida</span><textarea value={form.welcome_description} onChange={event => setForm(current => ({ ...current, welcome_description: event.target.value }))} rows={2} className="w-full resize-none rounded-xl border border-slate-200 p-3 text-sm" /></label>
     <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Mensaje de agradecimiento</span><textarea value={form.thank_you_message} onChange={event => setForm(current => ({ ...current, thank_you_message: event.target.value }))} rows={2} className="w-full resize-none rounded-xl border border-slate-200 p-3 text-sm" /></label>
     <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Redirección al finalizar <span className="font-normal text-slate-400">(opcional)</span></span><input value={form.thank_you_redirect_url} onChange={event => setForm(current => ({ ...current, thank_you_redirect_url: event.target.value }))} placeholder="https://" className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label>
-    <label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Estado</span><select value={form.status} onChange={event => setForm(current => ({ ...current, status: event.target.value as SurveyTemplate['status'] }))} className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"><option value="active">Activa</option><option value="archived">Archivada</option></select></label>
-  </div><footer className="flex shrink-0 gap-3 border-t border-slate-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:rounded-b-2xl"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={() => void onSave(form)} disabled={saving || !form.name.trim()} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white disabled:opacity-50">{saving && <Loader2 className="h-4 w-4 animate-spin" />}Guardar</button></footer></div></div>;
+    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="text-xs leading-5 text-slate-500">Archivar conserva aplicaciones, enlaces y respuestas. Solo impide crear nuevas aplicaciones.</p><button type="button" onClick={() => template.status === 'archived' ? void onRestore() : onArchive()} disabled={saving} className={`mt-2 min-h-10 rounded-lg px-3 text-sm font-semibold ${template.status === 'archived' ? 'bg-white text-emerald-700 shadow-sm' : 'bg-white text-amber-700 shadow-sm'}`}>{template.status === 'archived' ? 'Restaurar plantilla' : 'Archivar plantilla'}</button></div>
+  </div><footer className="flex shrink-0 gap-3 border-t border-slate-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:rounded-b-2xl"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={() => void onSave({ ...form, status: template.status })} disabled={saving || !form.name.trim()} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white disabled:opacity-50">{saving && <Loader2 className="h-4 w-4 animate-spin" />}Guardar</button></footer></div></div>;
+}
+
+function MeasurementTab({ template, questions, onDirtyChange, onSaved }: {
+  template: SurveyTemplate;
+  questions: SurveyQuestion[];
+  onDirtyChange: (dirty: boolean) => void;
+  onSaved: (template: SurveyTemplate, questions: SurveyTemplateQuestion[]) => void;
+}) {
+  const [dimensions, setDimensions] = useState<SurveyMeasurementDimension[]>(() => template.measurement_config?.dimensions || []);
+  const [assignments, setAssignments] = useState<Record<string, SurveyQuestionMeasurement | undefined>>(() => Object.fromEntries(questions.map(question => [question.id, question.config.measurement])));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const measurableQuestions = questions.filter(question => question.type === 'rating' || question.type === 'likert' || question.type === 'single_choice');
+  const persistedMeasurement = JSON.stringify({
+    dimensions: template.measurement_config?.dimensions || [],
+    questions: questions.map(question => [question.id, question.config.measurement || null]),
+  });
+  const draftMeasurement = JSON.stringify({
+    dimensions,
+    questions: questions.map(question => [question.id, assignments[question.id] || null]),
+  });
+
+  useEffect(() => {
+    onDirtyChange(draftMeasurement !== persistedMeasurement);
+  }, [draftMeasurement, onDirtyChange, persistedMeasurement]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+
+  const addDimension = () => {
+    const used = new Set(dimensions.map(dimension => dimension.key));
+    let index = dimensions.length + 1;
+    while (used.has(`dimension_${index}`)) index += 1;
+    setDimensions(current => [...current, { key: `dimension_${index}`, name: `Dimensión ${index}`, description: '', minimum_answered_ratio: 1 }]);
+  };
+
+  const removeDimension = (index: number) => {
+    const removed = dimensions[index];
+    setDimensions(current => current.filter((_, currentIndex) => currentIndex !== index));
+    setAssignments(current => Object.fromEntries(Object.entries(current).map(([questionId, measurement]) => [questionId, measurement?.dimension_key === removed.key ? undefined : measurement])));
+  };
+
+  const renameDimension = (index: number, rawKey: string) => {
+    const previousKey = dimensions[index].key;
+    const nextKey = rawKey.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+    setDimensions(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, key: nextKey } : item));
+    if (previousKey !== nextKey) {
+      setAssignments(current => Object.fromEntries(Object.entries(current).map(([questionId, measurement]) => [
+        questionId,
+        measurement?.dimension_key === previousKey ? { ...measurement, dimension_key: nextKey } : measurement,
+      ])));
+    }
+  };
+
+  const defaultOptionScores = (question: SurveyQuestion): Record<string, number> | undefined => {
+    if (question.type !== 'single_choice') return undefined;
+    const options = question.config.options || [];
+    return Object.fromEntries(options.map((option, index) => [option, options.length <= 1 ? 0 : Math.round(index / (options.length - 1) * 100)]));
+  };
+
+  const assignDimension = (question: SurveyQuestion, dimensionKey: string) => {
+    setAssignments(current => ({
+      ...current,
+      [question.id]: dimensionKey ? {
+        dimension_key: dimensionKey,
+        weight: current[question.id]?.weight || 1,
+        reverse: current[question.id]?.reverse || false,
+        option_scores: current[question.id]?.option_scores || defaultOptionScores(question),
+      } : undefined,
+    }));
+  };
+
+  const save = async () => {
+    setSaving(true); setError('');
+    try {
+      const response = await api<{ template: SurveyTemplate; questions: SurveyTemplateQuestion[] }>(`/api/survey-templates/${template.id}/measurement`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          dimensions,
+          questions: Object.entries(assignments).filter(([, measurement]) => Boolean(measurement)).map(([question_id, measurement]) => ({ question_id, measurement })),
+        }),
+      });
+      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo guardar la medición.');
+      onSaved(response.data.template, response.data.questions || []);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'No se pudo guardar la medición.');
+    } finally { setSaving(false); }
+  };
+
+  return <div className="h-full overflow-y-auto p-4 sm:p-6"><div className="mx-auto max-w-5xl space-y-5">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><h2 className="text-lg font-semibold text-slate-900">Medición explícita</h2><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">Define qué mide cada pregunta. Las nuevas aplicaciones congelarán esta configuración y solo se compararán cuando su firma sea compatible.</p></div><div className="flex gap-2"><button type="button" onClick={addDimension} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50"><Plus className="h-4 w-4" />Dimensión</button><button type="button" onClick={() => void save()} disabled={saving} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-50">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}Guardar</button></div></div>
+    {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
+    {dimensions.length === 0 ? <div className="flex min-h-48 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-6 text-center"><TrendingUp className="h-9 w-9 text-slate-300" /><p className="mt-3 font-medium text-slate-700">Todavía no hay dimensiones</p><p className="mt-1 max-w-md text-sm text-slate-500">Las analíticas descriptivas seguirán funcionando. Agrega una dimensión solo cuando exista una interpretación definida.</p><button type="button" onClick={addDimension} className="mt-4 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white">Agregar dimensión</button></div> : <div className="space-y-3">{dimensions.map((dimension, index) => <article key={`${dimension.key}-${index}`} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="grid gap-3 md:grid-cols-[1fr_0.8fr_0.7fr_auto]"><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Nombre</span><input value={dimension.name} maxLength={120} onChange={event => setDimensions(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Clave estable</span><input value={dimension.key} maxLength={64} onChange={event => renameDimension(index, event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 font-mono text-sm" /></label><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Mínimo respondido</span><div className="relative"><input type="number" min={1} max={100} value={Math.round(dimension.minimum_answered_ratio * 100)} onChange={event => setDimensions(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, minimum_answered_ratio: Math.max(0.01, Math.min(1, Number(event.target.value) / 100)) } : item))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 pr-8 text-sm" /><span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">%</span></div></label><button type="button" onClick={() => removeDimension(index)} className="mt-5 inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-rose-500 hover:bg-rose-50" aria-label={`Eliminar ${dimension.name}`}><Trash2 className="h-4 w-4" /></button></div><label className="mt-3 block"><span className="mb-1 block text-xs font-medium text-slate-500">Descripción</span><input value={dimension.description || ''} onChange={event => setDimensions(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" placeholder="Qué representa este puntaje" /></label></article>)}</div>}
+    <section><div className="mb-3"><h3 className="font-semibold text-slate-900">Preguntas medibles</h3><p className="mt-1 text-sm text-slate-500">Rating, Likert y opción única. Las demás preguntas permanecen como resultados descriptivos.</p></div>{measurableQuestions.length === 0 ? <p className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">Agrega al menos una pregunta numérica o de opción única.</p> : <div className="space-y-3">{measurableQuestions.map((question, index) => { const measurement = assignments[question.id]; return <article key={question.id} className="rounded-2xl border border-slate-200 bg-white p-4"><div className="flex items-start gap-3"><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-xs font-bold text-slate-600">{index + 1}</span><div className="min-w-0 flex-1"><h4 className="text-sm font-medium text-slate-800">{question.title}</h4><p className="mt-0.5 text-xs text-slate-400">{QUESTION_TYPE_LABELS[question.type]}</p></div></div><div className="mt-4 grid gap-3 sm:grid-cols-3"><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Dimensión</span><select value={measurement?.dimension_key || ''} onChange={event => assignDimension(question, event.target.value)} disabled={dimensions.length === 0} className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-50"><option value="">No puntuar</option>{dimensions.map(dimension => <option key={dimension.key} value={dimension.key}>{dimension.name}</option>)}</select></label>{measurement && <><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Peso</span><input type="number" min={0.01} max={100} step={0.1} value={measurement.weight} onChange={event => setAssignments(current => ({ ...current, [question.id]: { ...measurement, weight: Number(event.target.value) } }))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="flex min-h-11 items-center gap-3 self-end rounded-xl border border-slate-200 px-3 text-sm text-slate-700"><input type="checkbox" checked={Boolean(measurement.reverse)} onChange={event => setAssignments(current => ({ ...current, [question.id]: { ...measurement, reverse: event.target.checked } }))} className="h-4 w-4 rounded border-slate-300 text-emerald-600" />Invertir sentido</label></>}</div>{measurement && question.type === 'single_choice' && <div className="mt-3 grid gap-2 sm:grid-cols-2">{(question.config.options || []).map(option => <label key={option} className="flex min-h-11 items-center gap-2 rounded-xl bg-slate-50 px-3"><span className="min-w-0 flex-1 truncate text-xs text-slate-600">{option}</span><input type="number" value={measurement.option_scores?.[option] ?? 0} onChange={event => setAssignments(current => ({ ...current, [question.id]: { ...measurement, option_scores: { ...(measurement.option_scores || {}), [option]: Number(event.target.value) } } }))} className="h-9 w-24 rounded-lg border border-slate-200 bg-white px-2 text-right text-sm" aria-label={`Puntaje de ${option}`} /></label>)}</div>}</article>; })}</div>}</section>
+  </div></div>;
 }
 
 function TemplateInstancesTab({ template, instances, loading, onRefresh, onCreate }: { template: SurveyTemplate; instances: SurveyInstanceSummary[]; loading: boolean; onRefresh: () => void; onCreate: () => void }) {
@@ -363,20 +512,25 @@ function TemplateInstancesTab({ template, instances, loading, onRefresh, onCreat
 }
 
 function StandaloneApplicationDialog({ template, onClose, onCreated }: { template: SurveyTemplate; onClose: () => void; onCreated: (instance: SurveyInstanceSummary) => void }) {
-  const [name, setName] = useState(template.name);
+  const [name, setName] = useState('');
+  const [nameAvailable, setNameAvailable] = useState<boolean | null>(null);
   const [opensAt, setOpensAt] = useState('');
   const [closesAt, setClosesAt] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  const [conflictSuggestion, setConflictSuggestion] = useState('');
   const create = async () => {
-    setCreating(true); setError('');
+    setCreating(true); setError(''); setConflictSuggestion('');
     try {
-      const response = await api<SurveyInstanceSummary>(`/api/survey-templates/${template.id}/instances`, { method: 'POST', body: JSON.stringify({ name: name.trim(), status: 'active', audience_mode: 'public', opens_at: opensAt ? new Date(opensAt).toISOString() : null, closes_at: closesAt ? new Date(closesAt).toISOString() : null }) });
-      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo crear la aplicación.');
+      const response = await api<SurveyInstanceSummary & { suggested_name?: string }>(`/api/survey-templates/${template.id}/instances`, { method: 'POST', body: JSON.stringify({ name: name.trim(), status: 'active', audience_mode: 'public', opens_at: opensAt ? new Date(opensAt).toISOString() : null, closes_at: closesAt ? new Date(closesAt).toISOString() : null }) });
+      if (!response.success || !response.data) {
+        if (response.status === 409 && response.data?.suggested_name) setConflictSuggestion(response.data.suggested_name);
+        throw new Error(response.error || 'No se pudo crear la aplicación.');
+      }
       onCreated(response.data);
     } catch (creationError) { setError(creationError instanceof Error ? creationError.message : 'No se pudo crear la aplicación.'); } finally { setCreating(false); }
   };
-  return <div className="fixed inset-0 z-[95] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="standalone-survey-title"><div className="w-full bg-white shadow-2xl sm:max-w-lg sm:rounded-2xl"><header className="flex items-center justify-between border-b border-slate-200 px-4 py-3.5"><div><h2 id="standalone-survey-title" className="font-semibold text-slate-900">Aplicación pública</h2><p className="text-xs text-slate-500">Creará una copia inmutable de la plantilla v{template.revision}.</p></div><button type="button" onClick={onClose} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-slate-500" aria-label="Cerrar"><XCircle className="h-5 w-5" /></button></header><div className="space-y-4 p-4 sm:p-5"><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre de esta aplicación</span><input autoFocus value={name} onChange={event => setName(event.target.value)} maxLength={180} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Apertura <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={opensAt} onChange={event => setOpensAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Cierre <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={closesAt} onChange={event => setClosesAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label></div>{error && <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}</div><footer className="flex gap-3 border-t border-slate-200 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={() => void create()} disabled={creating || !name.trim()} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white disabled:opacity-50">{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Layers3 className="h-4 w-4" />}Crear aplicación</button></footer></div></div>;
+  return <div className="fixed inset-0 z-[95] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="standalone-survey-title"><div className="w-full bg-white shadow-2xl sm:max-w-lg sm:rounded-2xl"><header className="flex items-center justify-between border-b border-slate-200 px-4 py-3.5"><div><h2 id="standalone-survey-title" className="font-semibold text-slate-900">Aplicación pública</h2><p className="text-xs text-slate-500">Creará una copia inmutable de la plantilla v{template.revision}.</p></div><button type="button" onClick={onClose} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-slate-500" aria-label="Cerrar"><XCircle className="h-5 w-5" /></button></header><div className="space-y-4 p-4 sm:p-5"><SurveyInstanceNameField templateId={template.id} value={name} onChange={setName} onAvailabilityChange={setNameAvailable} autoFocus /><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Apertura <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={opensAt} onChange={event => setOpensAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Cierre <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={closesAt} onChange={event => setClosesAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label></div>{error && <div className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700"><p>{error}</p>{conflictSuggestion && <button type="button" onClick={() => setName(conflictSuggestion)} className="mt-2 min-h-9 rounded-lg bg-white px-3 text-xs font-semibold shadow-sm">Usar “{conflictSuggestion}”</button>}</div>}</div><footer className="flex gap-3 border-t border-slate-200 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={() => void create()} disabled={creating || !name.trim() || nameAvailable === false} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white disabled:opacity-50">{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Layers3 className="h-4 w-4" />}Crear aplicación</button></footer></div></div>;
 }
 
 function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
@@ -640,7 +794,7 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
   };
 
   const handleSaveBranding = async (branding: SurveyBranding) => {
-    if (!survey) return;
+    if (!survey) return false;
     setSaveMessage(null);
     setSaving(true);
     try {
@@ -652,11 +806,14 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
         setSurvey(res.data);
         setSaveMessage({ type: 'success', text: 'Diseño guardado' });
         setTimeout(() => setSaveMessage(null), 3000);
+        return true;
       } else {
         setSaveMessage({ type: 'error', text: res.error || 'Error al guardar diseño' });
+        return false;
       }
     } catch {
       setSaveMessage({ type: 'error', text: 'Error de conexión' });
+      return false;
     } finally {
       setSaving(false);
     }
@@ -839,7 +996,7 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
         {effectiveActiveTab === 'builder' && (immutableInstance ? <PublishedQuestionsView survey={survey} questions={questions} /> : <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />)}
         {effectiveActiveTab === 'design' && <DesignTab survey={survey} onSave={(branding) => handleSaveBranding(branding)} saving={saving} />}
         {effectiveActiveTab === 'share' && <ShareTab survey={survey} publicUrl={publicUrl} slugInput={slugInput} setSlugInput={setSlugInput} slugAvailable={slugAvailable} checkSlug={checkSlug} handleStatusChange={handleStatusChange} handleSaveSurvey={handleSaveSurvey} saving={saving} />}
-        {effectiveActiveTab === 'analytics' && <AnalyticsTab analytics={analytics} responses={responses} responsesTotal={responsesTotal} programAudience={survey.audience_mode === 'program_participants'} loading={loadingAnalytics} selectedResponse={selectedResponse} setSelectedResponse={setSelectedResponse} handleViewResponse={handleViewResponse} handleExportCSV={handleExportCSV} questions={questions} responsePage={responsePage} handleResponsePageChange={handleResponsePageChange} />}
+        {effectiveActiveTab === 'analytics' && <AnalyticsTab survey={survey} analytics={analytics} responses={responses} responsesTotal={responsesTotal} programAudience={survey.audience_mode === 'program_participants'} loading={loadingAnalytics} selectedResponse={selectedResponse} setSelectedResponse={setSelectedResponse} handleViewResponse={handleViewResponse} handleExportCSV={handleExportCSV} questions={questions} responsePage={responsePage} handleResponsePageChange={handleResponsePageChange} />}
       </div>
 
       {/* Save message toast */}
@@ -1252,11 +1409,17 @@ const COLOR_PRESETS = [
   '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#ef4444', '#06b6d4',
 ];
 
-function DesignTab({ survey, onSave, saving }: {
-  survey: Survey; onSave: (branding: SurveyBranding) => void; saving: boolean;
+function DesignTab({ survey, onSave, onDirtyChange, saving }: {
+  survey: Survey;
+  onSave: (branding: SurveyBranding) => Promise<boolean>;
+  onDirtyChange?: (dirty: boolean) => void;
+  saving: boolean;
 }) {
   const [branding, setBranding] = useState<SurveyBranding>(survey.branding || {});
   const [dirty, setDirty] = useState(false);
+
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const update = (key: keyof SurveyBranding, value: string) => {
     setBranding(prev => ({ ...prev, [key]: value }));
@@ -1285,7 +1448,7 @@ function DesignTab({ survey, onSave, saving }: {
           <div className="flex items-center justify-between">
             <h3 className="font-bold text-slate-900">Diseño</h3>
             <button
-              onClick={() => { onSave(branding); setDirty(false); }}
+              onClick={() => { void onSave(branding).then(saved => { if (saved) setDirty(false); }); }}
               disabled={saving || !dirty}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 disabled:opacity-50 transition-colors"
             >
@@ -1799,7 +1962,8 @@ function QuestionChart({ stat, chartType }: { stat: { question_id: string; quest
   );
 }
 
-function AnalyticsTab({ analytics, responses, responsesTotal, programAudience, loading, selectedResponse, setSelectedResponse, handleViewResponse, handleExportCSV, questions, responsePage, handleResponsePageChange }: {
+function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAudience, loading, selectedResponse, setSelectedResponse, handleViewResponse, handleExportCSV, questions, responsePage, handleResponsePageChange }: {
+  survey: Survey;
   analytics: SurveyAnalytics | null; responses: SurveyResponse[]; responsesTotal: number;
   programAudience: boolean;
   loading: boolean; selectedResponse: SurveyResponse | null; setSelectedResponse: (r: SurveyResponse | null) => void;
@@ -1807,6 +1971,39 @@ function AnalyticsTab({ analytics, responses, responsesTotal, programAudience, l
   responsePage: number; handleResponsePageChange: (page: number) => void;
 }) {
   const [chartTypes, setChartTypes] = useState<Record<string, ChartType>>({});
+  const [measurementSeries, setMeasurementSeries] = useState<SurveyMeasurementSeries | null>(null);
+  const [measurementSeriesLoading, setMeasurementSeriesLoading] = useState(false);
+  const [measurementSeriesError, setMeasurementSeriesError] = useState('');
+  const [baselineId, setBaselineId] = useState('');
+  const [followupId, setFollowupId] = useState('');
+
+  useEffect(() => {
+    setBaselineId('');
+    setFollowupId('');
+    setMeasurementSeries(null);
+    setMeasurementSeriesError('');
+  }, [survey.id]);
+
+  useEffect(() => {
+    if (!survey.program_id || !survey.template_id || !survey.measurement_signature) {
+      setMeasurementSeries(null); setMeasurementSeriesError(''); return;
+    }
+    const controller = new AbortController();
+    setMeasurementSeriesLoading(true); setMeasurementSeriesError('');
+    const query = new URLSearchParams({ template_id: survey.template_id, signature: survey.measurement_signature });
+    if (baselineId) query.set('baseline_id', baselineId);
+    if (followupId) query.set('followup_id', followupId);
+    void api<SurveyMeasurementSeries>(`/api/programs/${survey.program_id}/survey-measurements?${query.toString()}`, { signal: controller.signal }).then(response => {
+      if (controller.signal.aborted) return;
+      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo cargar la evolución.');
+      setMeasurementSeries(response.data);
+      if (!baselineId && response.data.applications.length > 0) setBaselineId(response.data.applications[0].survey_id);
+      if (!followupId && response.data.applications.length > 0) setFollowupId(response.data.applications[response.data.applications.length - 1].survey_id);
+    }).catch(failure => {
+      if (!controller.signal.aborted) setMeasurementSeriesError(failure instanceof Error ? failure.message : 'No se pudo cargar la evolución.');
+    }).finally(() => { if (!controller.signal.aborted) setMeasurementSeriesLoading(false); });
+    return () => controller.abort();
+  }, [baselineId, followupId, survey.id, survey.measurement_signature, survey.program_id, survey.template_id]);
 
   if (loading) {
     return <div className="h-full flex items-center justify-center"><Loader2 className="w-6 h-6 text-emerald-600 animate-spin" /></div>;
@@ -1821,36 +2018,46 @@ function AnalyticsTab({ analytics, responses, responsesTotal, programAudience, l
   return (
     <div className="h-full overflow-auto p-3 sm:p-8">
       <div className="max-w-4xl mx-auto space-y-6">
-        {/* Summary cards */}
+        {/* Reliable observed funnel */}
         {analytics && (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
+          <section className="space-y-3">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between"><div><h3 className="font-semibold text-slate-900">Embudo observado</h3><p className="text-xs text-slate-500">Disponible desde {format(new Date(analytics.funnel.tracking_started_at), "d MMM yyyy, HH:mm", { locale: es })}. Los históricos anteriores no se estiman.</p></div>{analytics.funnel.median_completion_seconds !== undefined && <p className="text-xs text-slate-500">Mediana de finalización: <span className="font-semibold text-slate-700">{formatSurveyDuration(analytics.funnel.median_completion_seconds)}</span></p>}</div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <div className="bg-white rounded-xl border border-slate-200 p-5">
               <div className="flex items-center gap-2 text-slate-500 mb-2">
                 <Users className="w-4 h-4" />
                 <span className="text-xs font-medium uppercase">Respuestas</span>
               </div>
               <p className="text-2xl font-bold text-slate-900">{analytics.total_responses}</p>
+              <p className="mt-1 text-xs text-slate-400">Incluye históricos válidos</p>
+            </div>
+            <div className="bg-white rounded-xl border border-slate-200 p-5">
+              <div className="flex items-center gap-2 text-slate-500 mb-2">
+                <Eye className="w-4 h-4" />
+                <span className="text-xs font-medium uppercase">Aperturas</span>
+              </div>
+              <p className="text-2xl font-bold text-slate-900">{analytics.funnel.opened_count}</p>
+              <p className="mt-1 text-xs text-slate-400">Sesiones únicas observadas</p>
             </div>
             <div className="bg-white rounded-xl border border-slate-200 p-5">
               <div className="flex items-center gap-2 text-slate-500 mb-2">
                 <TrendingUp className="w-4 h-4" />
-                <span className="text-xs font-medium uppercase">Tasa de completado</span>
+                <span className="text-xs font-medium uppercase">Inicios</span>
               </div>
-              <p className="text-2xl font-bold text-slate-900">{analytics.completion_rate.toFixed(1)}%</p>
+              <p className="text-2xl font-bold text-slate-900">{analytics.funnel.started_count}</p>
+              <p className="mt-1 text-xs text-slate-400">{analytics.funnel.open_to_start_rate === undefined ? 'Sin base suficiente' : `${analytics.funnel.open_to_start_rate.toFixed(1)}% de aperturas`}</p>
             </div>
-            <div className="bg-white rounded-xl border border-slate-200 p-5">
-              <div className="flex items-center gap-2 text-slate-500 mb-2">
-                <Clock className="w-4 h-4" />
-                <span className="text-xs font-medium uppercase">Tiempo promedio</span>
-              </div>
-              <p className="text-2xl font-bold text-slate-900">
-                {analytics.avg_completion_seconds < 60
-                  ? `${Math.round(analytics.avg_completion_seconds)}s`
-                  : `${Math.round(analytics.avg_completion_seconds / 60)}m ${Math.round(analytics.avg_completion_seconds % 60)}s`}
-              </p>
-            </div>
+            <div className="bg-white rounded-xl border border-slate-200 p-5"><div className="mb-2 flex items-center gap-2 text-slate-500"><CheckCircle2 className="h-4 w-4" /><span className="text-xs font-medium uppercase">Completados</span></div><p className="text-2xl font-bold text-slate-900">{analytics.funnel.completed_count}</p><p className="mt-1 text-xs text-slate-400">{analytics.funnel.start_to_complete_rate === undefined ? 'Sin base suficiente' : `${analytics.funnel.start_to_complete_rate.toFixed(1)}% de inicios`}</p></div>
           </div>
+          <div className="grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="text-xs font-semibold uppercase text-amber-700">Abandonos confirmados</p><p className="mt-1 text-xl font-bold text-amber-900">{analytics.funnel.abandoned_count}</p><p className="mt-1 text-xs text-amber-700">Inicios sin actividad durante al menos 24 horas.</p></div>{analytics.funnel.recipient_count !== undefined && <div className="rounded-xl border border-blue-200 bg-blue-50 p-4"><p className="text-xs font-semibold uppercase text-blue-700">Cobertura de destinatarios</p><p className="mt-1 text-xl font-bold text-blue-900">{analytics.funnel.recipient_completion_rate === undefined ? '—' : `${analytics.funnel.recipient_completion_rate.toFixed(1)}%`}</p><p className="mt-1 text-xs text-blue-700">{analytics.funnel.recipient_count} destinatarios congelados; no implica que el enlace haya sido enviado.</p></div>}</div>
+          </section>
         )}
+
+        {analytics?.funnel.question_dropoff.some(item => item.reached_count > 0) && <section className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"><h3 className="font-semibold text-slate-900">Recorrido y abandono</h3><div className="mt-3 space-y-2">{analytics.funnel.question_dropoff.map((item, index) => <div key={item.question_id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl bg-slate-50 px-3 py-2.5"><div className="min-w-0"><p className="truncate text-sm font-medium text-slate-700">{index + 1}. {item.title}</p><p className="text-xs text-slate-400">{item.reached_count} alcanzaron · {item.answered_count} respondieron</p></div><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${item.dropoff_count > 0 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{item.dropoff_count} abandonos</span></div>)}</div></section>}
+
+        {analytics?.measurement && <section className="space-y-3"><div><h3 className="font-semibold text-slate-900">Puntajes configurados</h3><p className="mt-1 text-xs text-slate-500">Escala normalizada 0–100. Se muestran como cambio observado, no como causalidad.</p></div><div className="grid gap-3 sm:grid-cols-2">{analytics.measurement.dimensions.map(dimension => <article key={dimension.key} className="rounded-xl border border-slate-200 bg-white p-4"><div className="flex items-start justify-between gap-3"><div><h4 className="font-medium text-slate-800">{dimension.name}</h4><p className="mt-0.5 text-xs text-slate-400">n={dimension.sample_size}</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-lg font-bold text-emerald-700">{dimension.average === undefined ? '—' : dimension.average.toFixed(1)}</span></div>{dimension.description && <p className="mt-2 text-xs leading-5 text-slate-500">{dimension.description}</p>}<p className="mt-3 text-xs text-slate-500">Mediana: {dimension.median === undefined ? 'No disponible' : dimension.median.toFixed(1)}</p><div className="mt-3 grid grid-cols-5 gap-1" aria-label={`Distribución de ${dimension.name}`}>{Object.entries(dimension.distribution).map(([range, count]) => <div key={range} className="rounded-lg bg-slate-50 px-1 py-2 text-center"><p className="text-[10px] text-slate-400">{range}</p><p className="mt-0.5 text-xs font-semibold text-slate-700">{count}</p></div>)}</div></article>)}</div></section>}
+
+        {survey.program_id && survey.measurement_signature && <section className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"><div className="flex flex-col gap-1"><h3 className="font-semibold text-slate-900">Evolución compatible del programa</h3><p className="text-xs text-slate-500">Solo compara aplicaciones con la misma firma de medición y la misma participación del programa.</p></div>{measurementSeriesLoading && !measurementSeries ? <div className="flex min-h-24 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-emerald-600" /></div> : measurementSeriesError ? <p className="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{measurementSeriesError}</p> : measurementSeries && measurementSeries.applications.length > 0 ? <><div className="mt-4 overflow-x-auto rounded-xl border border-slate-200"><table className="min-w-full text-left text-xs"><thead className="bg-slate-50 text-slate-500"><tr><th className="px-3 py-2">Aplicación</th>{analytics?.measurement?.dimensions.map(dimension => <th key={dimension.key} className="px-3 py-2 text-right">{dimension.name}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{measurementSeries.applications.map(application => <tr key={application.survey_id}><td className="px-3 py-2"><p className="font-medium text-slate-700">{application.name}</p><p className="text-[10px] text-slate-400">{format(new Date(application.created_at), 'd MMM yyyy', { locale: es })} · {application.response_count} respuestas</p></td>{analytics?.measurement?.dimensions.map(dimension => { const point = application.dimensions.find(item => item.key === dimension.key); return <td key={dimension.key} className="px-3 py-2 text-right font-semibold text-slate-700">{point?.average === undefined ? '—' : point.average.toFixed(1)}<span className="block text-[10px] font-normal text-slate-400">n={point?.sample_size || 0}</span></td>; })}</tr>)}</tbody></table></div><div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Aplicación inicial</span><select value={baselineId} onChange={event => setBaselineId(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm">{measurementSeries.applications.map(application => <option key={application.survey_id} value={application.survey_id}>{application.name}</option>)}</select></label><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Aplicación final</span><select value={followupId} onChange={event => setFollowupId(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm">{measurementSeries.applications.map(application => <option key={application.survey_id} value={application.survey_id}>{application.name}</option>)}</select></label></div>{measurementSeries.excluded_applications > 0 && <p className="mt-3 text-xs text-amber-700">Se excluyeron {measurementSeries.excluded_applications} aplicaciones con otra firma.</p>}<div className="mt-4 grid gap-3 sm:grid-cols-2">{measurementSeries.paired_changes.map(change => { const dimension = analytics?.measurement?.dimensions.find(item => item.key === change.dimension_key); return <article key={change.dimension_key} className="rounded-xl bg-slate-50 p-3"><p className="text-sm font-medium text-slate-700">{dimension?.name || change.dimension_key}</p><p className="mt-1 text-lg font-bold text-slate-900">{change.delta === undefined ? 'Sin pares' : `${change.delta >= 0 ? '+' : ''}${change.delta.toFixed(1)}`}</p><p className="text-xs text-slate-400">Cambio pareado · n={change.sample_size}</p></article>; })}</div><details className="mt-4"><summary className="min-h-11 cursor-pointer py-3 text-sm font-semibold text-emerald-700">Ver evolución individual ({new Set(measurementSeries.participants.map(point => point.program_participant_id)).size})</summary><div className="max-h-72 overflow-auto rounded-xl border border-slate-200"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-50 text-slate-500"><tr><th className="px-3 py-2">Participante</th><th className="px-3 py-2">Aplicación</th><th className="px-3 py-2">Puntajes</th></tr></thead><tbody className="divide-y divide-slate-100">{measurementSeries.participants.map((point, index) => <tr key={`${point.program_participant_id}-${point.survey_id}-${index}`}><td className="px-3 py-2 font-medium text-slate-700">{point.contact_name}</td><td className="px-3 py-2 text-slate-500">{point.survey_name}</td><td className="px-3 py-2 text-slate-600">{Object.entries(point.scores).map(([key, score]) => `${key}: ${score.toFixed(1)}`).join(' · ')}</td></tr>)}</tbody></table></div></details></> : <p className="mt-4 text-sm text-slate-500">Todavía no hay aplicaciones compatibles para comparar.</p>}</section>}
 
         {/* Per-question stats */}
         {analytics && analytics.question_stats.length > 0 && (

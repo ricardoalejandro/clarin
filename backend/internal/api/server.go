@@ -281,6 +281,7 @@ func (s *Server) setupRoutes() {
 
 	// Public survey routes (no auth required)
 	api.Get("/public/surveys/:slug", s.handleGetPublicSurvey)
+	api.Put("/public/surveys/:slug/session", s.handleTrackSurveySession)
 	api.Post("/public/surveys/:slug/submit", s.handleSubmitSurveyResponse)
 	api.Post("/public/surveys/:slug/upload", s.handleUploadSurveyFile)
 	api.Get("/public/survey-files/:accessToken", s.handleGetPublicSurveyFile)
@@ -530,6 +531,7 @@ func (s *Server) setupRoutes() {
 	programs.Get("/:id/surveys", s.handleListProgramSurveyInstances)
 	programs.Post("/:id/surveys", s.handleCreateProgramSurveyInstance)
 	programs.Get("/:id/surveys/:surveyId/recipients", s.handleListProgramSurveyRecipients)
+	programs.Get("/:id/survey-measurements", s.handleGetProgramSurveyMeasurements)
 
 	programs.Get("/:id/participants", s.handleListParticipants)
 	programs.Post("/:id/participants", s.handleAddParticipant)
@@ -862,6 +864,10 @@ func (s *Server) setupRoutes() {
 	surveyTemplates := protected.Group("/survey-templates", s.requirePermission(domain.PermSurveys))
 	surveyTemplates.Get("/", s.handleListSurveyTemplates)
 	surveyTemplates.Post("/", s.handleCreateSurveyTemplate)
+	surveyTemplates.Post("/:templateId/duplicate", s.handleDuplicateSurveyTemplate)
+	surveyTemplates.Get("/:templateId/instance-name", s.handleSuggestSurveyInstanceName)
+	surveyTemplates.Put("/:templateId/design", s.handleUpdateSurveyTemplateDesign)
+	surveyTemplates.Put("/:templateId/measurement", s.handleUpdateSurveyTemplateMeasurement)
 	surveyTemplates.Get("/:templateId", s.handleGetSurveyTemplate)
 	surveyTemplates.Patch("/:templateId", s.handleUpdateSurveyTemplate)
 	surveyTemplates.Get("/:templateId/questions", s.handleListSurveyTemplateQuestions)
@@ -4003,7 +4009,40 @@ func (s *Server) storageAssociatedURLs(ctx context.Context, accountID uuid.UUID)
 			result[mediaProxyURLFromObjectKey(objectKey)] = result[mediaURL]
 		}
 	}
-	return result, statusRows.Err()
+	if err := statusRows.Err(); err != nil {
+		return nil, err
+	}
+
+	surveyRows, err := s.repos.DB().Query(ctx, `
+		SELECT '/api/media/file/' || ma.object_key,
+		       'image', COALESCE(ma.filename,''), ma.size_bytes,
+		       MAX(ref.updated_at), COUNT(*), ma.id, ma.content_hash
+		FROM survey_branding_asset_refs ref
+		JOIN media_assets ma ON ma.account_id=ref.account_id AND ma.id=ref.media_asset_id
+		WHERE ref.account_id=$1
+		GROUP BY ma.id,ma.object_key,ma.filename,ma.size_bytes,ma.content_hash
+	`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer surveyRows.Close()
+	for surveyRows.Next() {
+		var mediaURL string
+		ref := storageMessageRef{}
+		if err := surveyRows.Scan(&mediaURL, &ref.mediaType, &ref.filename, &ref.dbSize, &ref.lastUsed, &ref.references, &ref.mediaAssetID, &ref.contentHash); err != nil {
+			return nil, err
+		}
+		if current, ok := result[mediaURL]; ok {
+			current.references += ref.references
+			if ref.lastUsed.After(current.lastUsed) {
+				current.lastUsed = ref.lastUsed
+			}
+			result[mediaURL] = current
+		} else {
+			result[mediaURL] = ref
+		}
+	}
+	return result, surveyRows.Err()
 }
 
 func (s *Server) handleListStorageFiles(c *fiber.Ctx) error {

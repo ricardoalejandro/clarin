@@ -1,4 +1,4 @@
-import type { SurveyBranding, SurveyQuestionConfig, SurveyLogicRule, QuestionType } from './survey';
+import type { SurveyBranding, SurveyQuestionConfig, SurveyLogicRule, QuestionType, SurveyMeasurementConfig, SurveyMeasurementDimensionStats } from './survey';
 
 export interface SurveyTemplate {
   id: string;
@@ -12,6 +12,7 @@ export interface SurveyTemplate {
   thank_you_message: string;
   thank_you_redirect_url: string;
   branding: SurveyBranding;
+  measurement_config: SurveyMeasurementConfig;
   revision: number;
   system_key?: string;
   created_by?: string;
@@ -53,11 +54,48 @@ export interface SurveyInstanceSummary {
   opens_at?: string;
   closes_at?: string;
   legacy_instance: boolean;
+  measurement_signature?: string;
+  analytics_tracking_started_at: string;
   question_count: number;
   recipient_count: number;
   response_count: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface SurveyMeasurementApplicationPoint {
+  survey_id: string;
+  name: string;
+  created_at: string;
+  response_count: number;
+  dimensions: SurveyMeasurementDimensionStats[];
+}
+
+export interface SurveyParticipantMeasurementPoint {
+  program_participant_id: string;
+  contact_name: string;
+  survey_id: string;
+  survey_name: string;
+  created_at: string;
+  scores: Record<string, number>;
+}
+
+export interface SurveyPairedMeasurementChange {
+  dimension_key: string;
+  sample_size: number;
+  baseline?: number;
+  followup?: number;
+  delta?: number;
+}
+
+export interface SurveyMeasurementSeries {
+  template_id: string;
+  program_id: string;
+  signature: string;
+  excluded_applications: number;
+  applications: SurveyMeasurementApplicationPoint[];
+  participants: SurveyParticipantMeasurementPoint[];
+  paired_changes: SurveyPairedMeasurementChange[];
 }
 
 export interface SurveyInstanceRecipient {
@@ -70,4 +108,3 @@ export interface SurveyInstanceRecipient {
   opened_at?: string;
   completed_at?: string;
 }
-

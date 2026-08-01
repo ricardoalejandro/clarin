@@ -14,6 +14,24 @@ func surveyQuestion(id uuid.UUID, questionType string, required bool, config dom
 	return &domain.SurveyQuestion{ID: id, Type: questionType, Title: "Pregunta", Required: required, Config: config}
 }
 
+func TestNormalizeSurveyBrandingRequiresCanonicalAccessibleInputs(t *testing.T) {
+	branding := domain.SurveyBranding{
+		AccentColor: "#0f766e", BgColor: "#ffffff", TextColor: "#0f172a",
+		FontFamily: "Inter", LogoSize: "md", BgPosition: "center", BgOverlay: "0.4",
+		LogoURL: "https://cdn.example.com/logo.png",
+	}
+	if err := NormalizeSurveyBranding(&branding); err != nil {
+		t.Fatalf("valid branding was rejected: %v", err)
+	}
+	if branding.AccentColor != "#0F766E" || branding.BgColor != "#FFFFFF" {
+		t.Fatalf("colors were not canonicalized: %#v", branding)
+	}
+	branding.BgImageURL = "javascript:alert(1)"
+	if err := NormalizeSurveyBranding(&branding); err == nil {
+		t.Fatal("unsafe branding URL must be rejected")
+	}
+}
+
 func TestValidateSurveyAnswersRejectsForeignAndMissingRequiredQuestions(t *testing.T) {
 	questionID := uuid.New()
 	questions := []*domain.SurveyQuestion{surveyQuestion(questionID, "short_text", true, domain.SurveyQuestionConfig{})}
@@ -130,6 +148,61 @@ func TestValidateTemplateQuestionsRequiresUsableOptionsAndScales(t *testing.T) {
 	}
 	if err := validateTemplateQuestions([]domain.SurveyTemplateQuestion{{Type: "rating", Title: "Califica", Config: domain.SurveyQuestionConfig{MaxRating: 11}}}); err == nil {
 		t.Fatal("rating greater than ten must be rejected")
+	}
+}
+
+func TestValidateMeasurementMutationRequiresExplicitCompatibleMappings(t *testing.T) {
+	questionID := uuid.New()
+	questions := []*domain.SurveyTemplateQuestion{{
+		ID: questionID, Type: "single_choice", Title: "Resultado",
+		Config: domain.SurveyQuestionConfig{Options: []string{"Bajo", "Alto"}},
+	}}
+	mutation := domain.SurveyMeasurementMutation{
+		Dimensions: []domain.SurveyMeasurementDimension{{Key: "impacto", Name: "Impacto", MinimumAnsweredRatio: 1}},
+		Questions: []domain.SurveyMeasurementQuestionInput{{QuestionID: questionID, Measurement: &domain.SurveyQuestionMeasurement{
+			DimensionKey: "impacto", Weight: 1, OptionScores: map[string]float64{"Bajo": 0},
+		}}},
+	}
+	if _, err := validateMeasurementMutation(questions, &mutation); err == nil {
+		t.Fatal("an incomplete single-choice score mapping must be rejected")
+	}
+	mutation.Questions[0].Measurement.OptionScores["Alto"] = 100
+	assignments, err := validateMeasurementMutation(questions, &mutation)
+	if err != nil {
+		t.Fatalf("valid explicit measurement was rejected: %v", err)
+	}
+	if assignments[questionID].Weight != 1 || mutation.Dimensions[0].MinimumAnsweredRatio != 1 {
+		t.Fatalf("validated measurement lost canonical defaults: %#v", assignments[questionID])
+	}
+}
+
+func TestSurveyMeasurementSignatureChangesWhenInstrumentMeaningChanges(t *testing.T) {
+	questionID := uuid.New()
+	config := domain.SurveyMeasurementConfig{Dimensions: []domain.SurveyMeasurementDimension{{Key: "bienestar", Name: "Bienestar", MinimumAnsweredRatio: 1}}}
+	question := &domain.SurveyTemplateQuestion{ID: questionID, Type: "rating", Title: "¿Cómo te sientes?", Config: domain.SurveyQuestionConfig{MaxRating: 5, Measurement: &domain.SurveyQuestionMeasurement{DimensionKey: "bienestar", Weight: 1}}}
+	first, err := surveyMeasurementSignature(config, []*domain.SurveyTemplateQuestion{question})
+	if err != nil || first == "" {
+		t.Fatalf("expected a measurement signature, got %q error=%v", first, err)
+	}
+	changed := *question
+	changed.Title = "¿Cómo te sentiste durante el programa?"
+	second, err := surveyMeasurementSignature(config, []*domain.SurveyTemplateQuestion{&changed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("a semantic question change must create an incompatible signature")
+	}
+}
+
+func TestTrackSurveySessionRejectsInvalidShapeBeforeRepositoryAccess(t *testing.T) {
+	svc := &SurveyService{}
+	if err := svc.TrackSession(context.Background(), domain.SurveySessionEvent{Phase: domain.SurveySessionReached}); err == nil {
+		t.Fatal("reached session event without a question must be rejected")
+	}
+	questionID := uuid.New()
+	if err := svc.TrackSession(context.Background(), domain.SurveySessionEvent{Phase: domain.SurveySessionOpened, QuestionID: &questionID}); err == nil {
+		t.Fatal("opened session event with a question must be rejected")
 	}
 }
 

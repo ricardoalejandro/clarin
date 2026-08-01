@@ -21,6 +21,7 @@ func surveyTemplateInstanceMigrations() []string {
 			thank_you_message TEXT NOT NULL DEFAULT '',
 			thank_you_redirect_url TEXT NOT NULL DEFAULT '',
 			branding JSONB NOT NULL DEFAULT '{}',
+			measurement_config JSONB NOT NULL DEFAULT '{"dimensions":[]}',
 			revision INTEGER NOT NULL DEFAULT 1,
 			system_key TEXT,
 			legacy_survey_id UUID,
@@ -31,6 +32,7 @@ func surveyTemplateInstanceMigrations() []string {
 			CONSTRAINT survey_templates_revision_check CHECK (revision > 0)
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_templates_account_id ON survey_templates(account_id, id)`,
+		`ALTER TABLE survey_templates ADD COLUMN IF NOT EXISTS measurement_config JSONB NOT NULL DEFAULT '{"dimensions":[]}'::jsonb`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_templates_legacy ON survey_templates(account_id, legacy_survey_id) WHERE legacy_survey_id IS NOT NULL`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_templates_system_key ON survey_templates(account_id, system_key) WHERE system_key IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_survey_templates_account_status ON survey_templates(account_id, status, updated_at DESC)`,
@@ -63,6 +65,9 @@ func surveyTemplateInstanceMigrations() []string {
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS opens_at TIMESTAMPTZ`,
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS closes_at TIMESTAMPTZ`,
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS legacy_instance BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS analytics_tracking_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS measurement_config JSONB NOT NULL DEFAULT '{"dimensions":[]}'::jsonb`,
+		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS measurement_signature TEXT NOT NULL DEFAULT ''`,
 		`DO $$ BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='surveys_account_template_fkey') THEN
 				ALTER TABLE surveys ADD CONSTRAINT surveys_account_template_fkey
@@ -85,6 +90,30 @@ func surveyTemplateInstanceMigrations() []string {
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_surveys_template_history ON surveys(account_id, template_id, created_at DESC) WHERE template_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_surveys_program_history ON surveys(account_id, program_id, created_at DESC) WHERE program_id IS NOT NULL`,
+		`CREATE TABLE IF NOT EXISTS survey_branding_asset_refs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			template_id UUID,
+			survey_id UUID,
+			slot TEXT NOT NULL,
+			media_asset_id UUID NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT survey_branding_asset_refs_owner_check CHECK (num_nonnulls(template_id,survey_id)=1),
+			CONSTRAINT survey_branding_asset_refs_slot_check CHECK (slot IN ('logo','background')),
+			CONSTRAINT survey_branding_asset_refs_account_template_fkey
+				FOREIGN KEY (account_id,template_id) REFERENCES survey_templates(account_id,id) ON DELETE CASCADE,
+			CONSTRAINT survey_branding_asset_refs_account_survey_fkey
+				FOREIGN KEY (account_id,survey_id) REFERENCES surveys(account_id,id) ON DELETE CASCADE,
+			CONSTRAINT survey_branding_asset_refs_account_media_fkey
+				FOREIGN KEY (account_id,media_asset_id) REFERENCES media_assets(account_id,id) ON DELETE RESTRICT
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_branding_asset_refs_template_slot
+			ON survey_branding_asset_refs(account_id,template_id,slot) WHERE template_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_branding_asset_refs_survey_slot
+			ON survey_branding_asset_refs(account_id,survey_id,slot) WHERE survey_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_survey_branding_asset_refs_media
+			ON survey_branding_asset_refs(account_id,media_asset_id)`,
 		`ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS source_template_question_id UUID`,
 		`ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS template_revision INTEGER NOT NULL DEFAULT 1`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_questions_survey_id ON survey_questions(survey_id, id)`,
@@ -223,6 +252,7 @@ func surveyTemplateInstanceMigrations() []string {
 		`UPDATE survey_responses sr SET account_id=s.account_id
 		 FROM surveys s WHERE sr.survey_id=s.id AND sr.account_id IS DISTINCT FROM s.account_id`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_responses_survey_id ON survey_responses(survey_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_responses_account_survey_id ON survey_responses(account_id,survey_id,id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_responses_recipient ON survey_responses(recipient_id) WHERE recipient_id IS NOT NULL`,
 		`DO $$ BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='survey_responses_account_survey_fkey') THEN
@@ -260,6 +290,53 @@ func surveyTemplateInstanceMigrations() []string {
 				FOREIGN KEY (program_id, program_participant_id) REFERENCES program_participants(program_id, id) ON DELETE SET NULL (program_participant_id);
 			END IF;
 		END $$`,
+		`CREATE TABLE IF NOT EXISTS survey_response_sessions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL,
+			survey_id UUID NOT NULL,
+			recipient_id UUID,
+			respondent_token UUID NOT NULL,
+			source TEXT NOT NULL DEFAULT 'direct',
+			opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			started_at TIMESTAMPTZ,
+			completed_at TIMESTAMPTZ,
+			last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			response_id UUID,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT survey_response_sessions_account_survey_fkey
+				FOREIGN KEY (account_id,survey_id) REFERENCES surveys(account_id,id) ON DELETE CASCADE,
+			CONSTRAINT survey_response_sessions_account_recipient_fkey
+				FOREIGN KEY (account_id,survey_id,recipient_id) REFERENCES survey_instance_recipients(account_id,survey_id,id) ON DELETE CASCADE,
+			CONSTRAINT survey_response_sessions_account_response_fkey
+				FOREIGN KEY (account_id,survey_id,response_id) REFERENCES survey_responses(account_id,survey_id,id) ON DELETE SET NULL (response_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_response_sessions_account_id
+			ON survey_response_sessions(account_id,id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_response_sessions_account_survey_id
+			ON survey_response_sessions(account_id,survey_id,id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_response_sessions_token
+			ON survey_response_sessions(account_id,survey_id,respondent_token)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_survey_response_sessions_recipient
+			ON survey_response_sessions(account_id,survey_id,recipient_id) WHERE recipient_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_survey_response_sessions_funnel
+			ON survey_response_sessions(account_id,survey_id,started_at,completed_at,last_activity_at)`,
+		`CREATE TABLE IF NOT EXISTS survey_response_session_questions (
+			account_id UUID NOT NULL,
+			survey_id UUID NOT NULL,
+			session_id UUID NOT NULL,
+			question_id UUID NOT NULL,
+			reached_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			answered_at TIMESTAMPTZ,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (session_id,question_id),
+			CONSTRAINT survey_response_session_questions_session_fkey
+				FOREIGN KEY (account_id,survey_id,session_id) REFERENCES survey_response_sessions(account_id,survey_id,id) ON DELETE CASCADE,
+			CONSTRAINT survey_response_session_questions_question_fkey
+				FOREIGN KEY (survey_id,question_id) REFERENCES survey_questions(survey_id,id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_survey_response_session_questions_funnel
+			ON survey_response_session_questions(account_id,survey_id,question_id,reached_at)`,
 		`ALTER TABLE survey_answers ADD COLUMN IF NOT EXISTS survey_id UUID`,
 		`UPDATE survey_answers sa SET survey_id=sr.survey_id FROM survey_responses sr WHERE sa.response_id=sr.id AND sa.survey_id IS NULL`,
 		`ALTER TABLE survey_answers ALTER COLUMN survey_id SET NOT NULL`,

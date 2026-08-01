@@ -1,8 +1,12 @@
 export interface SurveyBranding {
   logo_url?: string;
+  logo_media_asset_id?: string;
+  logo_size?: 'sm' | 'md' | 'lg';
   bg_color?: string;
   accent_color?: string;
   bg_image_url?: string;
+  bg_image_media_asset_id?: string;
+  bg_position?: 'top' | 'center' | 'bottom';
   font_family?: string;     // Inter, Poppins, Playfair Display, etc.
   title_size?: string;      // sm, md, lg, xl
   text_color?: string;      // custom text color
@@ -50,6 +54,9 @@ export interface Survey {
   thank_you_message: string;
   thank_you_redirect_url: string;
   branding: SurveyBranding;
+  measurement_config: SurveyMeasurementConfig;
+  measurement_signature?: string;
+  analytics_tracking_started_at?: string;
   is_template?: boolean;
   template_id?: string;
   template_revision?: number;
@@ -76,6 +83,25 @@ export interface SurveyQuestionConfig {
   allowed_types?: string[];
   max_size_mb?: number;
   placeholder?: string;
+  measurement?: SurveyQuestionMeasurement;
+}
+
+export interface SurveyMeasurementConfig {
+  dimensions: SurveyMeasurementDimension[];
+}
+
+export interface SurveyMeasurementDimension {
+  key: string;
+  name: string;
+  description?: string;
+  minimum_answered_ratio: number;
+}
+
+export interface SurveyQuestionMeasurement {
+  dimension_key: string;
+  weight: number;
+  reverse?: boolean;
+  option_scores?: Record<string, number>;
 }
 
 export interface SurveyLogicRule {
@@ -140,9 +166,48 @@ export interface SurveyResponse {
 
 export interface SurveyAnalytics {
   total_responses: number;
-  completion_rate: number;
-  avg_completion_seconds: number;
+  completion_rate: number | null;
+  avg_completion_seconds: number | null;
+  funnel: SurveyFunnelAnalytics;
+  measurement?: SurveyMeasurementAnalytics;
   question_stats: SurveyQuestionStats[];
+}
+
+export interface SurveyFunnelAnalytics {
+  tracking_started_at: string;
+  recipient_count?: number;
+  opened_count: number;
+  started_count: number;
+  completed_count: number;
+  abandoned_count: number;
+  open_to_start_rate?: number;
+  start_to_complete_rate?: number;
+  recipient_completion_rate?: number;
+  median_completion_seconds?: number;
+  question_dropoff: SurveyQuestionDropoffStats[];
+}
+
+export interface SurveyQuestionDropoffStats {
+  question_id: string;
+  title: string;
+  reached_count: number;
+  answered_count: number;
+  dropoff_count: number;
+}
+
+export interface SurveyMeasurementAnalytics {
+  signature: string;
+  dimensions: SurveyMeasurementDimensionStats[];
+}
+
+export interface SurveyMeasurementDimensionStats {
+  key: string;
+  name: string;
+  description?: string;
+  sample_size: number;
+  average?: number;
+  median?: number;
+  distribution: Record<string, number>;
 }
 
 export interface SurveyQuestionStats {

@@ -170,6 +170,42 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 	if _, err := repos.Survey.GetAnalytics(ctx, accountB, surveyA); err == nil {
 		t.Fatal("cross-account survey analytics was accepted")
 	}
+	trackedToken, abandonedToken := uuid.New(), uuid.New()
+	for _, event := range []domain.SurveySessionEvent{
+		{AccountID: accountA, SurveyID: surveyA, RespondentToken: trackedToken, Phase: domain.SurveySessionOpened, Source: "direct"},
+		{AccountID: accountA, SurveyID: surveyA, RespondentToken: trackedToken, Phase: domain.SurveySessionOpened, Source: "direct"},
+		{AccountID: accountA, SurveyID: surveyA, RespondentToken: trackedToken, Phase: domain.SurveySessionStarted, Source: "direct"},
+		{AccountID: accountA, SurveyID: surveyA, RespondentToken: trackedToken, Phase: domain.SurveySessionReached, QuestionID: &questionA, Source: "direct"},
+		{AccountID: accountA, SurveyID: surveyA, RespondentToken: trackedToken, Phase: domain.SurveySessionAnswered, QuestionID: &questionA, Source: "direct"},
+		{AccountID: accountA, SurveyID: surveyA, RespondentToken: abandonedToken, Phase: domain.SurveySessionOpened, Source: "direct"},
+		{AccountID: accountA, SurveyID: surveyA, RespondentToken: abandonedToken, Phase: domain.SurveySessionStarted, Source: "direct"},
+		{AccountID: accountA, SurveyID: surveyA, RespondentToken: abandonedToken, Phase: domain.SurveySessionReached, QuestionID: &questionA, Source: "direct"},
+	} {
+		if err := repos.Survey.TrackSession(ctx, event); err != nil {
+			t.Fatalf("track survey session event %#v: %v", event, err)
+		}
+	}
+	now := time.Now()
+	trackedResponse := &domain.SurveyResponse{SurveyID: surveyA, AccountID: accountA, RespondentToken: trackedToken.String(), Source: "direct", StartedAt: now.Add(-time.Minute), CompletedAt: &now}
+	if err := repos.Survey.CreateResponse(ctx, trackedResponse, []domain.SurveyAnswer{{QuestionID: questionA, Value: "Sí"}}); err != nil {
+		t.Fatalf("complete tracked response: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		UPDATE survey_response_sessions SET last_activity_at=NOW()-INTERVAL '25 hours'
+		WHERE account_id=$1 AND survey_id=$2 AND respondent_token=$3
+	`, accountA, surveyA, abandonedToken); err != nil {
+		t.Fatal(err)
+	}
+	analytics, err = repos.Survey.GetAnalytics(ctx, accountA, surveyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analytics.Funnel.OpenedCount != 2 || analytics.Funnel.StartedCount != 2 || analytics.Funnel.CompletedCount != 1 || analytics.Funnel.AbandonedCount != 1 {
+		t.Fatalf("tracked funnel is not idempotent or accurate: %#v", analytics.Funnel)
+	}
+	if analytics.Funnel.StartToCompleteRate == nil || *analytics.Funnel.StartToCompleteRate != 50 {
+		t.Fatalf("tracked completion rate=%v, want 50", analytics.Funnel.StartToCompleteRate)
+	}
 
 	// Reproduce a real restart after creating a canonical program application.
 	// The legacy backfill must never promote the application into a new template
@@ -217,6 +253,126 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 	if gotTemplateID != canonicalTemplateID || gotProgramID != programID || gotOrigin != "program" || gotLegacy {
 		t.Fatalf("canonical application changed after restart: template=%s program=%s origin=%q legacy=%t",
 			gotTemplateID, gotProgramID, gotOrigin, gotLegacy)
+	}
+
+	// A canonical template duplicate is an independent definition: it remaps
+	// conditional destinations and never inherits applications or responses.
+	duplicateSourceID, duplicateFirstID, duplicateSecondID := uuid.New(), uuid.New(), uuid.New()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_templates (id,account_id,name,status,measurement_config)
+		VALUES ($1,$2,'Plantilla para copiar','archived','{"dimensions":[{"key":"impacto","name":"Impacto","minimum_answered_ratio":1}]}'::jsonb)
+	`, duplicateSourceID, accountA); err != nil {
+		t.Fatalf("seed duplicate template fixture: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_template_questions (id,account_id,template_id,order_index,type,title,config,logic_rules)
+		VALUES ($3,$2,$1,0,'single_choice','Origen','{"options":["Sí","No"],"measurement":{"dimension_key":"impacto","weight":1,"option_scores":{"No":0,"Sí":100}}}'::jsonb,$5::jsonb),
+		       ($4,$2,$1,1,'rating','Destino','{"max_rating":5,"measurement":{"dimension_key":"impacto","weight":1}}'::jsonb,'[]'::jsonb)
+	`, duplicateSourceID, accountA, duplicateFirstID, duplicateSecondID,
+		`[{"value":"Sí","operator":"eq","jump_to":"`+duplicateSecondID.String()+`"}]`); err != nil {
+		t.Fatalf("seed duplicate template questions: %v", err)
+	}
+	copyTemplate, err := repos.SurveyTemplate.Duplicate(ctx, accountA, duplicateSourceID, "Copia independiente", nil)
+	if err != nil {
+		t.Fatalf("duplicate template: %v", err)
+	}
+	if copyTemplate.Status != "active" || copyTemplate.Revision != 1 || copyTemplate.QuestionCount != 2 || len(copyTemplate.MeasurementConfig.Dimensions) != 1 {
+		t.Fatalf("unexpected duplicate summary: %#v", copyTemplate)
+	}
+	copiedQuestions, err := repos.SurveyTemplate.ListQuestions(ctx, accountA, copyTemplate.ID)
+	if err != nil || len(copiedQuestions) != 2 {
+		t.Fatalf("load copied questions: count=%d error=%v", len(copiedQuestions), err)
+	}
+	if copiedQuestions[0].ID == duplicateFirstID || copiedQuestions[1].ID == duplicateSecondID || len(copiedQuestions[0].LogicRules) != 1 || copiedQuestions[0].LogicRules[0].JumpTo != copiedQuestions[1].ID {
+		t.Fatalf("duplicate did not remap question identity and logic: %#v", copiedQuestions)
+	}
+	var copiedApplications, copiedResponses int
+	if err := db.QueryRow(ctx, `
+		SELECT COUNT(*),COUNT(response.id)
+		FROM surveys survey LEFT JOIN survey_responses response ON response.survey_id=survey.id
+		WHERE survey.account_id=$1 AND survey.template_id=$2
+	`, accountA, copyTemplate.ID).Scan(&copiedApplications, &copiedResponses); err != nil {
+		t.Fatal(err)
+	}
+	if copiedApplications != 0 || copiedResponses != 0 {
+		t.Fatalf("duplicate inherited applications=%d responses=%d", copiedApplications, copiedResponses)
+	}
+	measurementSignature := "integration-compatible-signature"
+	createdApplication, err := repos.SurveyTemplate.CreateInstance(ctx, domain.CreateSurveyInstanceInput{
+		TemplateID: copyTemplate.ID, AccountID: accountA, Name: "Aplicación de copia",
+		Slug: "aplicacion-de-copia", Status: "active", AudienceMode: "public",
+		MeasurementConfig: copyTemplate.MeasurementConfig, MeasurementSignature: measurementSignature,
+	})
+	if err != nil {
+		t.Fatalf("create immutable application snapshot: %v", err)
+	}
+	if createdApplication.MeasurementSignature != measurementSignature || createdApplication.AnalyticsTrackingStartedAt.IsZero() {
+		t.Fatalf("application did not freeze measurement/tracking metadata: %#v", createdApplication)
+	}
+	applicationQuestions, err := repos.Survey.GetQuestionsScoped(ctx, accountA, createdApplication.ID)
+	if err != nil || len(applicationQuestions) != 2 || applicationQuestions[0].ID == copiedQuestions[0].ID {
+		t.Fatalf("application did not freeze independent question identities: count=%d error=%v", len(applicationQuestions), err)
+	}
+	measurementContactID, measurementParticipantID := uuid.New(), uuid.New()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO contacts (id,account_id,jid,phone,name) VALUES ($1,$2,$3,$4,'Participante de medición')
+	`, measurementContactID, accountA, measurementContactID.String()+"@test", "51999990001"); err != nil {
+		t.Fatalf("seed measurement contact: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO program_participants (id,program_id,contact_id,status) VALUES ($1,$2,$3,'active')
+	`, measurementParticipantID, programID, measurementContactID); err != nil {
+		t.Fatalf("seed measurement participant: %v", err)
+	}
+	programApplications := make([]*domain.SurveyInstanceSummary, 0, 2)
+	for index, name := range []string{"Medición inicial", "Medición final"} {
+		application, createErr := repos.SurveyTemplate.CreateInstance(ctx, domain.CreateSurveyInstanceInput{
+			TemplateID: copyTemplate.ID, AccountID: accountA, ProgramID: &programID,
+			Name: name, Slug: "medicion-programa-" + string(rune('a'+index)), Status: "active",
+			AudienceMode: "program_participants", MeasurementConfig: copyTemplate.MeasurementConfig,
+			MeasurementSignature: measurementSignature,
+		})
+		if createErr != nil {
+			t.Fatalf("create program measurement application %d: %v", index, createErr)
+		}
+		programApplications = append(programApplications, application)
+		questions, loadErr := repos.Survey.GetQuestionsScoped(ctx, accountA, application.ID)
+		if loadErr != nil || len(questions) != 2 {
+			t.Fatalf("load program measurement questions: count=%d error=%v", len(questions), loadErr)
+		}
+		var recipientID uuid.UUID
+		if err := db.QueryRow(ctx, `
+			SELECT id FROM survey_instance_recipients
+			WHERE account_id=$1 AND survey_id=$2 AND program_participant_id=$3
+		`, accountA, application.ID, measurementParticipantID).Scan(&recipientID); err != nil {
+			t.Fatalf("load frozen measurement recipient: %v", err)
+		}
+		completedAt := time.Now().Add(time.Duration(index) * time.Minute)
+		response := &domain.SurveyResponse{
+			SurveyID: application.ID, AccountID: accountA, RespondentToken: uuid.NewString(),
+			RecipientID: &recipientID, ContactID: &measurementContactID, ProgramID: &programID,
+			ProgramParticipantID: &measurementParticipantID, Source: "direct",
+			StartedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt,
+		}
+		if err := repos.Survey.CreateResponse(ctx, response, []domain.SurveyAnswer{
+			{QuestionID: questions[0].ID, Value: "No"},
+			{QuestionID: questions[1].ID, Value: []string{"5", "4"}[index]},
+		}); err != nil {
+			t.Fatalf("save program measurement response: %v", err)
+		}
+	}
+	series, err := repos.SurveyTemplate.GetProgramMeasurementSeries(
+		ctx, accountA, programID, copyTemplate.ID, measurementSignature,
+		&programApplications[0].ID, &programApplications[1].ID,
+	)
+	if err != nil {
+		t.Fatalf("load compatible measurement series: %v", err)
+	}
+	if len(series.Applications) != 2 || len(series.Participants) != 2 || len(series.PairedChanges) != 1 || series.PairedChanges[0].SampleSize != 1 {
+		t.Fatalf("unexpected compatible measurement series: %#v", series)
+	}
+	if _, err := repos.SurveyTemplate.Duplicate(ctx, accountB, duplicateSourceID, "Cruce", nil); !errors.Is(err, repository.ErrSurveyTemplateNotFound) {
+		t.Fatalf("cross-account duplicate error=%v", err)
 	}
 	var accidentalTemplateCount int
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM survey_templates WHERE account_id=$1 AND legacy_survey_id=$2`, accountA, canonicalSurveyID).Scan(&accidentalTemplateCount); err != nil {

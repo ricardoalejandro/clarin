@@ -246,9 +246,9 @@ export async function api<T>(
     }
   }
 
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-    ...fetchOptions.headers,
+  const headers = new Headers(fetchOptions.headers)
+  if (!(fetchOptions.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
   }
 
   try {

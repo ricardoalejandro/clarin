@@ -163,8 +163,17 @@ func validateSurveyStatusTransition(current, next string) error {
 }
 
 func validateSurveyPresentationMutation(current, next *domain.Survey) error {
+	nextBranding := next.Branding
+	if err := NormalizeSurveyBranding(&nextBranding); err != nil {
+		return err
+	}
 	if current.Status == "draft" && (current.LegacyInstance || current.TemplateID == nil) {
+		next.Branding = nextBranding
 		return nil
+	}
+	currentBranding := current.Branding
+	if err := NormalizeSurveyBranding(&currentBranding); err != nil {
+		currentBranding = current.Branding
 	}
 	if current.Name != next.Name ||
 		current.Description != next.Description ||
@@ -174,7 +183,7 @@ func validateSurveyPresentationMutation(current, next *domain.Survey) error {
 		current.ThankYouTitle != next.ThankYouTitle ||
 		current.ThankYouMessage != next.ThankYouMessage ||
 		current.ThankYouRedirectURL != next.ThankYouRedirectURL ||
-		current.Branding != next.Branding {
+		currentBranding != nextBranding {
 		return repository.ErrSurveyPublishedImmutable
 	}
 	return nil
@@ -326,6 +335,29 @@ func (svc *SurveyService) SubmitResponse(ctx context.Context, resp *domain.Surve
 		return errors.New("no se pudo guardar la respuesta")
 	}
 	return nil
+}
+
+func (svc *SurveyService) TrackSession(ctx context.Context, event domain.SurveySessionEvent) error {
+	switch event.Phase {
+	case domain.SurveySessionOpened, domain.SurveySessionStarted:
+		if event.QuestionID != nil {
+			return errors.New("la fase de sesión no admite una pregunta")
+		}
+	case domain.SurveySessionReached, domain.SurveySessionAnswered:
+		if event.QuestionID == nil {
+			return errors.New("la fase de sesión necesita una pregunta")
+		}
+	default:
+		return errors.New("fase de sesión inválida")
+	}
+	event.Source = strings.TrimSpace(event.Source)
+	if event.Source == "" {
+		event.Source = "direct"
+	}
+	if len(event.Source) > 40 {
+		return errors.New("origen de sesión inválido")
+	}
+	return svc.repo.Survey.TrackSession(ctx, event)
 }
 
 func (svc *SurveyService) GetExportData(ctx context.Context, accountID, surveyID uuid.UUID) (*domain.SurveyExportData, error) {

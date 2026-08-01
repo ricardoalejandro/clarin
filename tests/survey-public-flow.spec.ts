@@ -7,6 +7,12 @@ test('la lógica condicional omite una requerida y Atrás conserva el recorrido 
   const skippedID = '10000000-0000-4000-8000-000000000002'
   const finalID = '10000000-0000-4000-8000-000000000003'
   let submittedPayload: { answers?: Array<{ question_id: string; value: string }> } | null = null
+  const trackedPhases: Array<{ phase: string; question_id?: string }> = []
+
+  await page.route('**/api/public/surveys/flujo-condicional/session', async route => {
+    trackedPhases.push(route.request().postDataJSON())
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true }) })
+  })
 
   await page.route('**/api/public/surveys/flujo-condicional?recipient=destinatario-1', async route => {
     await route.fulfill({
@@ -77,6 +83,52 @@ test('la lógica condicional omite una requerida y Atrás conserva el recorrido 
   await page.getByRole('button', { name: 'Enviar' }).click()
 
   await expect(page.getByRole('heading', { name: 'Respuesta registrada' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Cerrar' })).toBeVisible()
   expect(submittedPayload).not.toBeNull()
   expect(submittedPayload!.answers?.map(answer => answer.question_id)).toEqual([firstID, finalID])
+  await expect.poll(() => trackedPhases.map(event => event.phase)).toContain('opened')
+  expect(trackedPhases.some(event => event.phase === 'started')).toBe(true)
+  expect(trackedPhases.some(event => event.phase === 'reached' && event.question_id === finalID)).toBe(true)
+  expect(trackedPhases.some(event => event.phase === 'answered' && event.question_id === firstID)).toBe(true)
+  expect(trackedPhases.some(event => event.question_id === skippedID)).toBe(false)
+})
+
+test('el formulario público respeta reducción de movimiento y no desborda los anchos objetivo', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.route('**/api/public/surveys/responsive/session', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }))
+  await page.route('**/api/public/surveys/responsive', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      survey: {
+        id: 'survey-responsive', name: 'Encuesta responsive', slug: 'responsive', status: 'active',
+        welcome_title: 'Una encuesta clara en cualquier pantalla', welcome_description: 'El contenido conserva sus proporciones y áreas seguras.',
+        thank_you_title: 'Gracias', thank_you_message: 'Respuesta enviada', thank_you_redirect_url: '',
+        branding: { accent_color: '#047857', bg_color: '#FFFFFF', text_color: '#0F172A', button_style: 'rounded' },
+      },
+      questions: [{ id: 'question-responsive', type: 'long_text', title: 'Cuéntanos tu experiencia', description: '', required: false, config: {}, logic_rules: [] }],
+    }),
+  }))
+
+  for (const viewport of [
+    { width: 320, height: 568 }, { width: 375, height: 667 }, { width: 768, height: 720 },
+    { width: 1046, height: 622 }, { width: 1280, height: 720 }, { width: 1440, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport)
+    await page.goto(`${baseURL}/f/responsive`, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('button', { name: /Comenzar/ })).toBeVisible()
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    expect(overflow, `desborde horizontal en ${viewport.width}×${viewport.height}`).toBeLessThanOrEqual(0)
+    await expect(page.locator('.survey-step-enter')).toHaveCSS('animation-name', 'none')
+  }
+
+  await page.setViewportSize({ width: 375, height: 667 })
+  await page.goto(`${baseURL}/f/responsive`, { waitUntil: 'domcontentloaded' })
+  await page.getByRole('button', { name: /Comenzar/ }).click()
+  const longText = page.getByPlaceholder('Escribe tu respuesta...')
+  await longText.fill('Primera línea')
+  await longText.press('Enter')
+  await longText.type('Segunda línea')
+  await expect(page.getByRole('heading', { name: 'Cuéntanos tu experiencia' })).toBeVisible()
+  await expect(longText).toHaveValue('Primera línea\nSegunda línea')
 })

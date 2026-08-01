@@ -9,6 +9,7 @@ import {
 import { api } from '@/lib/api';
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue';
 import type { SurveyInstanceRecipient, SurveyInstanceSummary, SurveyTemplate } from '@/types/survey-template';
+import SurveyInstanceNameField from '@/components/surveys/SurveyInstanceNameField';
 
 interface ProgramSurveyPanelProps {
   programId: string;
@@ -29,6 +30,8 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
   const [instanceName, setInstanceName] = useState('');
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
+  const [nameAvailable, setNameAvailable] = useState<boolean | null>(null);
+  const [conflictSuggestion, setConflictSuggestion] = useState('');
   const [recipientInstance, setRecipientInstance] = useState<SurveyInstanceSummary | null>(null);
 
   const loadInstances = useCallback(async () => {
@@ -49,7 +52,7 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
 
   const openCreate = async () => {
     setCreateOpen(true);
-    setCreateError('');
+    setCreateError(''); setConflictSuggestion('');
     if (templates.length > 0) return;
     setTemplatesLoading(true);
     try {
@@ -75,7 +78,7 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
     setCreating(true);
     setCreateError('');
     try {
-      const response = await api<SurveyInstanceSummary>(`/api/programs/${programId}/surveys`, {
+      const response = await api<SurveyInstanceSummary & { suggested_name?: string }>(`/api/programs/${programId}/surveys`, {
         method: 'POST',
         body: JSON.stringify({
           template_id: selectedTemplate.id,
@@ -84,7 +87,10 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
           audience_mode: 'program_participants',
         }),
       });
-      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo crear la encuesta.');
+      if (!response.success || !response.data) {
+        if (response.status === 409 && response.data?.suggested_name) setConflictSuggestion(response.data.suggested_name);
+        throw new Error(response.error || 'No se pudo crear la encuesta.');
+      }
       setInstances(current => [response.data!, ...current]);
       setCreateOpen(false);
       setInstanceName('');
@@ -167,7 +173,7 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
         )}
       </div>
 
-      {createOpen && <CreateSurveyDialog templates={templates} loading={templatesLoading} selectedId={selectedTemplateId} setSelectedId={setSelectedTemplateId} name={instanceName} setName={setInstanceName} error={createError} creating={creating} onClose={() => setCreateOpen(false)} onCreate={() => void createInstance()} />}
+      {createOpen && <CreateSurveyDialog programId={programId} templates={templates} loading={templatesLoading} selectedId={selectedTemplateId} setSelectedId={setSelectedTemplateId} name={instanceName} setName={setInstanceName} nameAvailable={nameAvailable} setNameAvailable={setNameAvailable} conflictSuggestion={conflictSuggestion} error={createError} creating={creating} onClose={() => setCreateOpen(false)} onCreate={() => void createInstance()} />}
       {recipientInstance && <RecipientLinksDialog programId={programId} instance={recipientInstance} onClose={() => setRecipientInstance(null)} />}
     </section>
   );
@@ -186,9 +192,10 @@ function CopyPublicLink({ slug }: { slug: string }) {
   return <button type="button" onClick={() => void copy()} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-slate-100 px-3 text-sm font-semibold text-slate-700">{copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}{copied ? 'Copiado' : 'Copiar enlace'}</button>;
 }
 
-function CreateSurveyDialog({ templates, loading, selectedId, setSelectedId, name, setName, error, creating, onClose, onCreate }: {
+function CreateSurveyDialog({ programId, templates, loading, selectedId, setSelectedId, name, setName, nameAvailable, setNameAvailable, conflictSuggestion, error, creating, onClose, onCreate }: {
+  programId: string;
   templates: SurveyTemplate[]; loading: boolean; selectedId: string; setSelectedId: (id: string) => void;
-  name: string; setName: (value: string) => void; error: string; creating: boolean; onClose: () => void; onCreate: () => void;
+  name: string; setName: (value: string) => void; nameAvailable: boolean | null; setNameAvailable: (value: boolean | null) => void; conflictSuggestion: string; error: string; creating: boolean; onClose: () => void; onCreate: () => void;
 }) {
   return (
     <div className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="create-program-survey-title">
@@ -201,10 +208,10 @@ function CreateSurveyDialog({ templates, loading, selectedId, setSelectedId, nam
           {loading ? <div className="flex min-h-48 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : templates.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-slate-200 p-6 text-center"><p className="font-medium text-slate-700">No hay plantillas listas</p><p className="mt-1 text-sm text-slate-500">Crea una plantilla con al menos una pregunta en Encuestas.</p></div>
           ) : <div className="space-y-2">{templates.map(template => <button key={template.id} type="button" onClick={() => setSelectedId(template.id)} className={`flex min-h-16 w-full items-center gap-3 rounded-xl border p-3 text-left transition ${selectedId === template.id ? 'border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500' : 'border-slate-200 hover:border-slate-300'}`}><span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${selectedId === template.id ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}><ClipboardList className="h-4 w-4" /></span><span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-slate-800">{template.name}</span><span className="block text-xs text-slate-500">{template.question_count} preguntas · {template.instance_count} aplicaciones</span></span>{selectedId === template.id && <Check className="h-5 w-5 text-emerald-600" />}</button>)}</div>}
-          {templates.length > 0 && <label className="mt-5 block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre de esta aplicación <span className="font-normal text-slate-400">(opcional)</span></span><input value={name} onChange={event => setName(event.target.value)} maxLength={180} placeholder="Se completará con plantilla y programa" className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20" /></label>}
-          {error && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
+          {templates.length > 0 && selectedId && <div className="mt-5"><SurveyInstanceNameField templateId={selectedId} programId={programId} value={name} onChange={setName} onAvailabilityChange={setNameAvailable} /></div>}
+          {error && <div className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700"><p>{error}</p>{conflictSuggestion && <button type="button" onClick={() => setName(conflictSuggestion)} className="mt-2 min-h-9 rounded-lg bg-white px-3 text-xs font-semibold shadow-sm">Usar “{conflictSuggestion}”</button>}</div>}
         </div>
-        <footer className="flex shrink-0 gap-3 border-t border-slate-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:rounded-b-2xl"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={onCreate} disabled={!selectedId || creating} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-50">{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Crear y obtener enlaces</button></footer>
+        <footer className="flex shrink-0 gap-3 border-t border-slate-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:rounded-b-2xl"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={onCreate} disabled={!selectedId || !name.trim() || nameAvailable === false || creating} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-50">{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Crear y obtener enlaces</button></footer>
       </div>
     </div>
   );
